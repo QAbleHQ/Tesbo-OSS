@@ -35,8 +35,16 @@ export class OtpService {
 
   async verifyOtp(rawEmail: string, code: string, ipAddress?: string | null, userAgent?: string | null): Promise<string | null> {
     const email = rawEmail.trim().toLowerCase();
+    if (!(await this.verifyOtpCode(email, code, ipAddress))) return null;
+    const userId = await this.findOrCreateUser(email);
+    if (!userId) return null;
+    return this.createSession(userId, ipAddress, userAgent);
+  }
+
+  async verifyOtpCode(rawEmail: string, code: string, ipAddress?: string | null): Promise<boolean> {
+    const email = rawEmail.trim().toLowerCase();
     const ipKey = this.rateLimitKeyForIp(ipAddress);
-    if ((await this.isRateLimited(email)) || (await this.isRateLimited(ipKey))) return null;
+    if ((await this.isRateLimited(email)) || (await this.isRateLimited(ipKey))) return false;
 
     const result = await this.db.query<{ id: string }>(
       "SELECT id FROM otp_codes WHERE email = $1 AND code_hash = $2 AND expires_at > now() AND used_at IS NULL ORDER BY created_at DESC LIMIT 1",
@@ -46,16 +54,13 @@ export class OtpService {
     if (!otpId) {
       await this.recordOtpAttempt(email);
       await this.recordOtpAttempt(ipKey);
-      return null;
+      return false;
     }
 
     await this.markOtpUsed(otpId);
-    const userId = await this.findOrCreateUser(email);
-    if (!userId) return null;
-    const token = await this.createSession(userId, ipAddress, userAgent);
     await this.clearRateLimit(email);
     await this.clearRateLimit(ipKey);
-    return token;
+    return true;
   }
 
   async createSession(userId: string, ipAddress?: string | null, userAgent?: string | null): Promise<string> {

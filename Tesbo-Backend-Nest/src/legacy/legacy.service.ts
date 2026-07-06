@@ -10,6 +10,16 @@ import { StorageService } from "../storage/storage.service";
 
 type Body = Record<string, any>;
 
+export interface InvitationRow {
+  id: string;
+  organization_id: string;
+  email: string;
+  role: string;
+  status: string;
+  expires_at: string;
+  project_ids: string[];
+}
+
 function normalizeTestcaseIdPrefix(value: unknown): string {
   return String(value || "")
     .trim()
@@ -488,8 +498,25 @@ export class LegacyService {
 
   // ─── Role helpers ────────────────────────────────────────────────────────────
 
-  private hashToken(raw: string): string {
+  hashToken(raw: string): string {
     return createHash("sha256").update(raw).digest("hex");
+  }
+
+  async getInvitationRowOrThrow(rawToken: string): Promise<InvitationRow> {
+    const tokenHash = this.hashToken(rawToken);
+    const invite = await this.db.query<InvitationRow>(
+      "SELECT id, organization_id, email, role, status, expires_at, project_ids FROM invitations WHERE token = $1",
+      [tokenHash]
+    );
+    if (!invite.rows[0]) throw new NotFoundException({ error: "Invitation not found or token is invalid" });
+    const inv = invite.rows[0];
+
+    if (inv.status !== "pending") throw new BadRequestException({ error: `Invitation is ${inv.status} and can no longer be used` });
+    if (new Date(inv.expires_at) < new Date()) {
+      await this.db.query("UPDATE invitations SET status = 'expired', updated_at = now() WHERE id = $1", [inv.id]);
+      throw new BadRequestException({ error: "This invitation has expired. Ask the sender to resend it." });
+    }
+    return inv;
   }
 
   normalizeRole(role: string): "owner" | "manager" | "qa_engineer" {
@@ -773,19 +800,7 @@ export class LegacyService {
   }
 
   async registerFromInvitation(rawToken: string, body: Body) {
-    const tokenHash = this.hashToken(rawToken);
-    const invite = await this.db.query<{ id: string; organization_id: string; email: string; role: string; status: string; expires_at: string; project_ids: string[] }>(
-      "SELECT id, organization_id, email, role, status, expires_at, project_ids FROM invitations WHERE token = $1",
-      [tokenHash]
-    );
-    if (!invite.rows[0]) throw new NotFoundException({ error: "Invitation not found or token is invalid" });
-    const inv = invite.rows[0];
-
-    if (inv.status !== "pending") throw new BadRequestException({ error: `Invitation is ${inv.status} and can no longer be used` });
-    if (new Date(inv.expires_at) < new Date()) {
-      await this.db.query("UPDATE invitations SET status = 'expired', updated_at = now() WHERE id = $1", [inv.id]);
-      throw new BadRequestException({ error: "This invitation has expired. Ask the sender to resend it." });
-    }
+    const inv = await this.getInvitationRowOrThrow(rawToken);
 
     const name = String(body.name || "").trim();
     const pw = String(body.password || "").trim();

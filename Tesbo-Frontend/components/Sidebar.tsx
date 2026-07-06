@@ -354,6 +354,14 @@ function SidebarContent() {
 
       {/* Footer */}
       <div className="space-y-1 border-t border-[var(--glass-border)] p-2.5">
+        {!isInSettings && (
+          <NavLink
+            href="/settings/members"
+            label="Workspace settings"
+            icon="settings"
+            collapsed={isCollapsed}
+          />
+        )}
         {isPlatformAdmin && !isInSettings && (
           <NavLink
             href="/admin"
