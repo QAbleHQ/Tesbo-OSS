@@ -137,6 +137,14 @@ function LoginForm() {
         <p className="text-center text-sm text-[var(--muted)]">
           {otpMode ? "We will send a one-time code to your email." : "Use the password created during initial setup."}
         </p>
+        {!isInviteEmailLocked && (
+          <p className="text-center text-sm text-[var(--muted)]">
+            Don&apos;t have an account?{" "}
+            <Link href="/signup" className="text-[var(--brand-primary)] hover:underline">
+              Sign up
+            </Link>
+          </p>
+        )}
         <p className="text-center text-xs text-[var(--muted-soft)]">
           <Link href="/privacy-policy" className="hover:underline">
             Privacy Policy

@@ -3,10 +3,12 @@ import { AuthModule } from "../auth/auth.module";
 import { StorageModule } from "../storage/storage.module";
 import { LegacyController } from "./legacy.controller";
 import { LegacyService } from "./legacy.service";
+import { SignupController } from "./signup.controller";
+import { SignupService } from "./signup.service";
 
 @Module({
   imports: [AuthModule, StorageModule],
-  controllers: [LegacyController],
-  providers: [LegacyService]
+  controllers: [LegacyController, SignupController],
+  providers: [LegacyService, SignupService]
 })
 export class LegacyModule {}

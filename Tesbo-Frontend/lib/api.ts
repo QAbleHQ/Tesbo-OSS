@@ -155,6 +155,36 @@ export async function verifyOtp(email: string, code: string): Promise<{ ok: bool
   return api("/api/auth/otp/verify", { method: "POST", body: { email, code } });
 }
 
+export async function startSignup(data: { name: string; email: string; password: string }): Promise<void> {
+  await api("/api/auth/signup/start", { method: "POST", body: data });
+}
+
+export async function verifySignup(email: string, code: string): Promise<{ ok: boolean; userId: string }> {
+  return api("/api/auth/signup/verify", { method: "POST", body: { email, code } });
+}
+
+export async function startInviteRegistration(token: string, data: { name: string; password: string }): Promise<void> {
+  await api(`/api/invitations/${token}/register/start`, { method: "POST", body: data });
+}
+
+export async function verifyInviteRegistration(
+  token: string,
+  code: string
+): Promise<{ ok: boolean; userId: string; organizationId: string }> {
+  return api(`/api/invitations/${token}/register/verify`, { method: "POST", body: { code } });
+}
+
+export async function startInviteOtpRegistration(token: string, data: { name: string }): Promise<void> {
+  await api(`/api/invitations/${token}/register/otp/start`, { method: "POST", body: data });
+}
+
+export async function verifyInviteOtpRegistration(
+  token: string,
+  code: string
+): Promise<{ ok: boolean; userId: string; organizationId: string }> {
+  return api(`/api/invitations/${token}/register/otp/verify`, { method: "POST", body: { code } });
+}
+
 export async function logout(): Promise<void> {
   await api("/api/auth/logout", { method: "POST" });
 }
