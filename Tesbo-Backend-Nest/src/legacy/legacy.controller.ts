@@ -10,8 +10,11 @@ import {
   Put,
   Query,
   Req,
-  Res
+  Res,
+  UploadedFiles,
+  UseInterceptors
 } from "@nestjs/common";
+import { FilesInterceptor } from "@nestjs/platform-express";
 import type { Response } from "express";
 import * as XLSX from "xlsx";
 import { AuthenticatedRequest } from "../common/request.types";
@@ -58,9 +61,25 @@ export class LegacyController {
     return this.legacy.workspace(req.userId);
   }
 
+  @Get("/api/workspaces")
+  listWorkspaces(@Req() req: AuthenticatedRequest) {
+    return this.legacy.listWorkspaces(req.userId);
+  }
+
+  @Post("/api/workspaces")
+  createAdditionalWorkspace(@Req() req: AuthenticatedRequest, @Body() body: Record<string, any>) {
+    return this.legacy.createWorkspace(req.userId, body);
+  }
+
+  @Post("/api/workspaces/:id/switch")
+  switchWorkspace(@Req() req: AuthenticatedRequest, @Param("id") id: string) {
+    return this.legacy.switchWorkspace(req.userId, id);
+  }
+
   @Get("/api/workspace/analytics")
-  workspaceAnalytics() {
-    return this.legacy.analytics();
+  async workspaceAnalytics(@Req() req: AuthenticatedRequest) {
+    const workspace = await this.legacy.workspace(req.userId);
+    return this.legacy.analytics(undefined, workspace.id);
   }
 
   @Get("/api/workspace/members")
@@ -166,18 +185,18 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:id")
-  getProject(@Param("id") id: string) {
-    return this.legacy.getProject(id);
+  getProject(@Req() req: AuthenticatedRequest, @Param("id") id: string) {
+    return this.legacy.getProjectForUser(req.userId, id);
   }
 
   @Patch("/api/projects/:id")
-  updateProject(@Param("id") id: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateProject(id, body);
+  updateProject(@Req() req: AuthenticatedRequest, @Param("id") id: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateProjectForUser(req.userId, id, body);
   }
 
   @Delete("/api/projects/:id")
-  deleteProject(@Param("id") id: string) {
-    return this.legacy.deleteProject(id);
+  deleteProject(@Req() req: AuthenticatedRequest, @Param("id") id: string) {
+    return this.legacy.deleteProjectForUser(req.userId, id);
   }
 
   @Get("/api/projects/:id/members")
@@ -614,6 +633,222 @@ export class LegacyController {
   saveZyraTask(@Param("projectId") projectId: string, @Param("taskId") taskId: string, @Body() body: Record<string, any>) {
     return this.legacy.zyraSave(projectId, taskId, body);
   }
+
+  // ─── Knowledge Base v2 (folders / documents / files) ────────────────────────
+  // NOTE: these routes must stay ABOVE the legacy /knowledge-base/:itemId routes
+  // below, since literal segments like "folders"/"search" would otherwise be
+  // captured by that older single-param route.
+
+  @Post("/api/projects/:projectId/knowledge-base/folders")
+  createKnowledgeFolder(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createKnowledgeFolder(projectId, req.userId, body);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/folders/tree")
+  getKnowledgeFolderTree(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.getKnowledgeFolderTree(projectId, req.userId);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/folders/:folderId")
+  getKnowledgeFolder(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("folderId") folderId: string) {
+    return this.legacy.getKnowledgeFolder(projectId, req.userId, folderId);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/folders/:folderId/items")
+  listKnowledgeFolderItems(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("folderId") folderId: string,
+    @Query() query: Record<string, any>
+  ) {
+    return this.legacy.listKnowledgeFolderItems(projectId, req.userId, folderId, query);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/folders/:folderId/move")
+  moveKnowledgeFolder(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("folderId") folderId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.moveKnowledgeFolder(projectId, req.userId, folderId, body);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/folders/:folderId/restore")
+  restoreKnowledgeFolder(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("folderId") folderId: string) {
+    return this.legacy.restoreKnowledgeFolder(projectId, req.userId, folderId);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/folders/:folderId")
+  updateKnowledgeFolder(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("folderId") folderId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.updateKnowledgeFolder(projectId, req.userId, folderId, body);
+  }
+
+  @Delete("/api/projects/:projectId/knowledge-base/folders/:folderId")
+  deleteKnowledgeFolder(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("folderId") folderId: string) {
+    return this.legacy.deleteKnowledgeFolder(projectId, req.userId, folderId);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/search")
+  searchKnowledgeBase(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.searchKnowledgeBase(projectId, req.userId, query);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/documents")
+  listKnowledgeDocuments(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.listKnowledgeDocuments(projectId, req.userId, query);
+  }
+
+  @Post("/api/projects/:projectId/knowledge-base/documents")
+  createKnowledgeDocument(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createKnowledgeDocument(projectId, req.userId, body);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/documents/:documentId/versions")
+  listKnowledgeDocumentVersions(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.listKnowledgeDocumentVersions(projectId, req.userId, documentId);
+  }
+
+  @Post("/api/projects/:projectId/knowledge-base/documents/:documentId/restore-version")
+  restoreKnowledgeDocumentVersion(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("documentId") documentId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.restoreKnowledgeDocumentVersion(projectId, req.userId, documentId, body);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/documents/:documentId/approve-ai-memory")
+  approveAiMemory(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.approveAiMemory(projectId, req.userId, documentId);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/documents/:documentId/reject-ai-memory")
+  rejectAiMemory(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.rejectAiMemory(projectId, req.userId, documentId);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/documents/:documentId")
+  getKnowledgeDocument(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.getKnowledgeDocument(projectId, req.userId, documentId);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/documents/:documentId/move")
+  moveKnowledgeDocument(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("documentId") documentId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.moveKnowledgeDocument(projectId, req.userId, documentId, body);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/documents/:documentId/restore")
+  restoreKnowledgeDocument(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.restoreKnowledgeDocument(projectId, req.userId, documentId);
+  }
+
+  @Post("/api/projects/:projectId/knowledge-base/documents/:documentId/duplicate")
+  duplicateKnowledgeDocument(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.duplicateKnowledgeDocument(projectId, req.userId, documentId);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/documents/:documentId")
+  updateKnowledgeDocument(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("documentId") documentId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.updateKnowledgeDocument(projectId, req.userId, documentId, body);
+  }
+
+  @Delete("/api/projects/:projectId/knowledge-base/documents/:documentId")
+  deleteKnowledgeDocument(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.deleteKnowledgeDocument(projectId, req.userId, documentId);
+  }
+
+  @Post("/api/projects/:projectId/knowledge-base/files/upload")
+  @UseInterceptors(FilesInterceptor("files", 10, { limits: { fileSize: LegacyService.KB_MAX_UPLOAD_SIZE } }))
+  uploadKnowledgeFiles(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Body() body: Record<string, any>,
+    @UploadedFiles() files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    return this.legacy.uploadKnowledgeFiles(projectId, req.userId, body.folderId, files);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/files/:fileId/download")
+  async downloadKnowledgeFile(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+    @Param("projectId") projectId: string,
+    @Param("fileId") fileId: string
+  ) {
+    const access = await this.legacy.getKnowledgeFileAccess(projectId, req.userId, fileId, false);
+    if ("redirectUrl" in access) return res.redirect(302, access.redirectUrl);
+    res.setHeader("Content-Type", access.mimeType);
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(access.originalFileName)}"`);
+    res.sendFile(access.localPath);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/files/:fileId/preview")
+  async previewKnowledgeFile(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+    @Param("projectId") projectId: string,
+    @Param("fileId") fileId: string
+  ) {
+    const access = await this.legacy.getKnowledgeFileAccess(projectId, req.userId, fileId, true);
+    if ("redirectUrl" in access) return res.redirect(302, access.redirectUrl);
+    res.setHeader("Content-Type", access.mimeType);
+    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(access.originalFileName)}"`);
+    res.sendFile(access.localPath);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/files/:fileId")
+  getKnowledgeFile(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("fileId") fileId: string) {
+    return this.legacy.getKnowledgeFile(projectId, req.userId, fileId);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/files/:fileId/move")
+  moveKnowledgeFile(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("fileId") fileId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.moveKnowledgeFile(projectId, req.userId, fileId, body);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/files/:fileId/restore")
+  restoreKnowledgeFile(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("fileId") fileId: string) {
+    return this.legacy.restoreKnowledgeFile(projectId, req.userId, fileId);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/files/:fileId")
+  updateKnowledgeFile(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("fileId") fileId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.updateKnowledgeFile(projectId, req.userId, fileId, body);
+  }
+
+  @Delete("/api/projects/:projectId/knowledge-base/files/:fileId")
+  deleteKnowledgeFile(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("fileId") fileId: string) {
+    return this.legacy.deleteKnowledgeFile(projectId, req.userId, fileId);
+  }
+
+  // ─── Knowledge Base v1 (legacy flat notes/files — superseded by v2 above) ────
 
   @Get("/api/projects/:projectId/knowledge-base")
   knowledge(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {

@@ -791,3 +791,26 @@ textarea:focus-visible {
 }
 .zyra-md-table tbody tr:last-child td { border-bottom: none; }
 .zyra-md-table tbody tr:hover { background: var(--surface-secondary); }
+
+/* Knowledge Base rich text editor (TipTap) */
+.tiptap-editor { outline: none; }
+.tiptap-editor h1 { font-size: 1.5rem; font-weight: 600; margin: 1rem 0 0.5rem; line-height: 1.3; }
+.tiptap-editor h2 { font-size: 1.25rem; font-weight: 600; margin: 0.9rem 0 0.45rem; line-height: 1.3; }
+.tiptap-editor h3 { font-size: 1.1rem; font-weight: 600; margin: 0.8rem 0 0.4rem; line-height: 1.3; }
+.tiptap-editor p { margin: 0.5rem 0; }
+.tiptap-editor ul, .tiptap-editor ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+.tiptap-editor ul { list-style: disc; }
+.tiptap-editor ol { list-style: decimal; }
+.tiptap-editor ul[data-type="taskList"] { list-style: none; padding-left: 0.25rem; }
+.tiptap-editor ul[data-type="taskList"] li { display: flex; align-items: flex-start; gap: 0.5rem; margin: 0.25rem 0; }
+.tiptap-editor ul[data-type="taskList"] li > label { margin-top: 0.2rem; }
+.tiptap-editor blockquote { border-left: 3px solid var(--border-strong); padding-left: 0.85rem; margin: 0.6rem 0; color: var(--muted); }
+.tiptap-editor hr { border: none; border-top: 1px solid var(--border); margin: 1rem 0; }
+.tiptap-editor code { font-size: 0.8125em; background: var(--surface-tertiary); border: 1px solid var(--border); border-radius: 3px; padding: 0.1em 0.35em; }
+.tiptap-editor pre { background: var(--surface-tertiary); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1rem; overflow-x: auto; margin: 0.6rem 0; }
+.tiptap-editor pre code { background: none; border: none; padding: 0; }
+.tiptap-editor a { color: var(--brand-primary); text-decoration: underline; }
+.tiptap-editor img { max-width: 100%; border-radius: 6px; }
+.tiptap-editor table { width: 100%; border-collapse: collapse; margin: 0.6rem 0; }
+.tiptap-editor th, .tiptap-editor td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+.tiptap-editor th { background: var(--surface-secondary); font-weight: 600; }

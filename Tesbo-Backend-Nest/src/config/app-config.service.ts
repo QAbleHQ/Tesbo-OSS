@@ -22,6 +22,16 @@ export class AppConfigService {
   readonly frontendUrl = this.string("FRONTEND_URL", "http://localhost:1010");
   readonly uploadDir = this.string("UPLOAD_DIR", "./uploads");
   readonly maxUploadSize = this.integer("MAX_UPLOAD_SIZE", 10485760);
+  // Object storage: defaults to local disk (uploadDir above). Set STORAGE_DRIVER=s3 to use
+  // any S3-compatible service (AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces, etc).
+  readonly storageDriver = this.string("STORAGE_DRIVER", "local").toLowerCase() === "s3" ? "s3" : "local";
+  readonly s3Bucket = this.optionalString("S3_BUCKET");
+  readonly s3Region = this.string("S3_REGION", "us-east-1");
+  readonly s3Endpoint = this.optionalString("S3_ENDPOINT") || undefined;
+  readonly s3AccessKeyId = this.optionalString("S3_ACCESS_KEY_ID") || undefined;
+  readonly s3SecretAccessKey = this.optionalString("S3_SECRET_ACCESS_KEY") || undefined;
+  readonly s3ForcePathStyle = this.string("S3_FORCE_PATH_STYLE", "false").toLowerCase() === "true";
+  readonly s3PresignedUrlTtlSeconds = this.integer("S3_PRESIGNED_URL_TTL_SECONDS", 300);
 
   private loadEnv(): Record<string, string | undefined> {
     const dotenvPath = this.findDotEnvPath();

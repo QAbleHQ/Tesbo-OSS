@@ -18,7 +18,7 @@ RUN npm ci --omit=dev
 COPY --from=builder /build/dist ./dist
 COPY migrations ./migrations
 
-RUN groupadd -r app && useradd -r -g app app && chown -R app:app /app
+RUN mkdir -p /app/uploads && groupadd -r app && useradd -r -g app app && chown -R app:app /app
 USER app
 
 EXPOSE 7000

@@ -1,10 +1,12 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
-import { createHash, randomBytes } from "crypto";
-import type { QueryResultRow } from "pg";
+import { createHash, randomBytes, randomUUID } from "crypto";
+import * as path from "path";
+import type { PoolClient, QueryResultRow } from "pg";
 import { EmailService } from "../auth/email.service";
 import { PasswordService } from "../auth/password.service";
 import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
+import { StorageService } from "../storage/storage.service";
 
 type Body = Record<string, any>;
 
@@ -143,6 +145,10 @@ function normalizeJsonArray(value: unknown): any[] {
   return Array.isArray(value) ? value : [];
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function jiraDescriptionToText(value: unknown): string {
   if (!value) return "";
   if (typeof value === "string") return value;
@@ -210,7 +216,8 @@ export class LegacyService {
     private readonly db: DatabaseService,
     private readonly email: EmailService,
     private readonly password: PasswordService,
-    private readonly config: AppConfigService
+    private readonly config: AppConfigService,
+    private readonly storage: StorageService
   ) {}
 
   private requireUser(userId?: string | null): string {
@@ -330,6 +337,10 @@ export class LegacyService {
         "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING",
         [org.rows[0].id, uid]
       );
+      await client.query("UPDATE users SET active_organization_id = $1, updated_at = now() WHERE id = $2", [
+        org.rows[0].id,
+        uid
+      ]);
       return org.rows[0].id;
     });
     return { organizationId: res };
@@ -366,6 +377,19 @@ export class LegacyService {
 
   async workspace(userId: string | null | undefined) {
     const uid = this.requireUser(userId);
+
+    const active = await this.db.query(
+      `SELECT o.id, o.name, o.slug, om.role, o.created_at
+       FROM users u
+       JOIN organizations o ON o.id = u.active_organization_id
+       JOIN organization_members om ON om.organization_id = o.id AND om.user_id = u.id
+       WHERE u.id = $1`,
+      [uid]
+    );
+    if (active.rows[0]) return toCamel(active.rows[0]);
+
+    // active_organization_id is unset or stale (e.g. user was removed from
+    // that org) — fall back to the earliest membership and self-heal.
     const res = await this.db.query(
       `SELECT o.id, o.name, o.slug, om.role, o.created_at
        FROM organizations o
@@ -375,7 +399,43 @@ export class LegacyService {
       [uid]
     );
     if (!res.rows[0]) throw new NotFoundException({ error: "Workspace not found" });
+    try {
+      await this.db.query("UPDATE users SET active_organization_id = $1, updated_at = now() WHERE id = $2", [
+        res.rows[0].id,
+        uid
+      ]);
+    } catch {
+      // Non-fatal: still return the resolved workspace even if the self-heal write fails.
+    }
     return toCamel(res.rows[0]);
+  }
+
+  async listWorkspaces(userId: string | null | undefined) {
+    const uid = this.requireUser(userId);
+    const res = await this.db.query(
+      `SELECT o.id, o.name, o.slug, om.role, (o.id = u.active_organization_id) AS is_active
+       FROM organizations o
+       JOIN organization_members om ON om.organization_id = o.id
+       JOIN users u ON u.id = om.user_id
+       WHERE om.user_id = $1
+       ORDER BY o.created_at ASC`,
+      [uid]
+    );
+    return res.rows.map(toCamel);
+  }
+
+  async switchWorkspace(userId: string | null | undefined, organizationId: string) {
+    const uid = this.requireUser(userId);
+    const member = await this.db.query(
+      "SELECT organization_id FROM organization_members WHERE organization_id = $1 AND user_id = $2",
+      [organizationId, uid]
+    );
+    if (!member.rows[0]) throw new ForbiddenException({ error: "You are not a member of this workspace" });
+    await this.db.query("UPDATE users SET active_organization_id = $1, updated_at = now() WHERE id = $2", [
+      organizationId,
+      uid
+    ]);
+    return this.workspace(uid);
   }
 
   async workspaceMembers(userId: string | null | undefined) {
@@ -703,6 +763,10 @@ export class LegacyService {
         "UPDATE invitations SET status = 'accepted', accepted_at = now(), updated_at = now() WHERE id = $1",
         [inv.id]
       );
+      await client.query("UPDATE users SET active_organization_id = $1, updated_at = now() WHERE id = $2", [
+        inv.organization_id,
+        uid
+      ]);
     });
 
     return { accepted: true, organizationId: inv.organization_id };
@@ -744,6 +808,10 @@ export class LegacyService {
         "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3)",
         [inv.organization_id, uid, inv.role]
       );
+      await client.query("UPDATE users SET active_organization_id = $1, updated_at = now() WHERE id = $2", [
+        inv.organization_id,
+        uid
+      ]);
       if (inv.project_ids?.length > 0) {
         for (const projectId of inv.project_ids) {
           await client.query(
@@ -876,15 +944,16 @@ export class LegacyService {
 
   async listProjects(userId: string | null | undefined) {
     const uid = this.requireUser(userId);
+    const workspace = await this.workspace(uid);
     const res = await this.db.query(
       `SELECT p.id, p.key, p.name, COALESCE(p.description, '') AS description,
               COALESCE(p.project_type, 'tesbox') AS project_type,
               COALESCE(pm.role, 'member') AS role, p.created_at
        FROM projects p
        JOIN project_members pm ON pm.project_id = p.id
-       WHERE pm.user_id = $1 AND p.archived_at IS NULL
+       WHERE pm.user_id = $1 AND p.organization_id = $2 AND p.archived_at IS NULL
        ORDER BY p.created_at DESC`,
-      [uid]
+      [uid, workspace.id]
     );
     return res.rows.map(toCamel);
   }
@@ -905,15 +974,60 @@ export class LegacyService {
         project.rows[0].id,
         uid
       ]);
+      await this.seedKnowledgeBaseDefaults(client, workspace.id, project.rows[0].id);
       return project.rows[0];
     });
     return toCamel(res);
+  }
+
+  private async seedKnowledgeBaseDefaults(client: PoolClient, organizationId: string, projectId: string) {
+    const root = await client.query<{ id: string }>(
+      `INSERT INTO knowledge_folders (organization_id, project_id, parent_folder_id, name, is_root)
+       VALUES ($1, $2, NULL, 'Knowledge base', true) RETURNING id`,
+      [organizationId, projectId]
+    );
+    const rootId = root.rows[0].id;
+    const defaults: Array<[string, string]> = [
+      ["Requirements", "Product requirements, user stories, acceptance notes, and business rules."],
+      ["Test Data", "Sample users, input data, CSVs, data conditions, and boundary values."],
+      ["Screenshots & Evidence", "Screenshots, recordings, execution proof, and UI references."],
+      ["API Notes", "Endpoints, payloads, Postman exports, and API behavior notes."],
+      ["Release Notes", "Build notes, release changes, and release risk notes."],
+      ["AI Memory", "AI-generated project understanding and memory files."]
+    ];
+    for (const [name, description] of defaults) {
+      await client.query(
+        `INSERT INTO knowledge_folders (organization_id, project_id, parent_folder_id, name, description)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [organizationId, projectId, rootId, name, description]
+      );
+    }
   }
 
   async getProject(id: string) {
     const res = await this.db.query("SELECT * FROM projects WHERE id = $1 AND archived_at IS NULL", [id]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Project not found" });
     return toCamel(res.rows[0]);
+  }
+
+  // Confirms the caller is a member of this project AND that the project belongs to
+  // their currently active workspace, so switching workspaces fully isolates data —
+  // a project from another org is invisible/inaccessible until you switch into it.
+  private async requireProjectAccess(userId: string | null | undefined, projectId: string) {
+    const uid = this.requireUser(userId);
+    const workspace = await this.workspace(uid);
+    const res = await this.db.query(
+      `SELECT p.* FROM projects p
+       JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $2
+       WHERE p.id = $1 AND p.archived_at IS NULL AND p.organization_id = $3`,
+      [projectId, uid, workspace.id]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Project not found" });
+    return res.rows[0];
+  }
+
+  async getProjectForUser(userId: string | null | undefined, id: string) {
+    return toCamel(await this.requireProjectAccess(userId, id));
   }
 
   async updateProject(id: string, body: Body) {
@@ -928,8 +1042,18 @@ export class LegacyService {
     );
   }
 
+  async updateProjectForUser(userId: string | null | undefined, id: string, body: Body) {
+    await this.requireProjectAccess(userId, id);
+    await this.updateProject(id, body);
+  }
+
   async deleteProject(id: string) {
     await this.db.query("UPDATE projects SET archived_at = now(), updated_at = now() WHERE id = $1", [id]);
+  }
+
+  async deleteProjectForUser(userId: string | null | undefined, id: string) {
+    await this.requireProjectAccess(userId, id);
+    await this.deleteProject(id);
   }
 
   async projectMembers(projectId: string) {
@@ -1576,18 +1700,28 @@ export class LegacyService {
     return { rows: res.rows.map(toCamel) };
   }
 
-  async analytics(projectId?: string) {
-    const suffix = projectId ? " WHERE project_id = $1" : "";
-    const values = projectId ? [projectId] : [];
+  async analytics(projectId?: string, organizationId?: string) {
+    const scopeValue = projectId ?? organizationId;
+    const projectsWhere = projectId ? " WHERE id = $1" : organizationId ? " WHERE organization_id = $1" : "";
+    const childWhere = projectId
+      ? " WHERE project_id = $1"
+      : organizationId
+        ? " WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1)"
+        : "";
+    const values = scopeValue ? [scopeValue] : [];
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
-      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM projects${projectId ? " WHERE id = $1" : ""}`, values),
-      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases${suffix}`, values),
-      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM suites${suffix}`, values),
-      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM plans${suffix}`, values),
-      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM cycles${suffix}`, values),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM projects${projectsWhere}`, values),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases${childWhere}`, values),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM suites${childWhere}`, values),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM plans${childWhere}`, values),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM cycles${childWhere}`, values),
       this.db.query<{ status: string; count: string }>(
         `SELECT e.status, COUNT(*) AS count FROM executions e JOIN cycle_items ci ON ci.id = e.cycle_item_id JOIN cycles c ON c.id = ci.cycle_id${
-          projectId ? " WHERE c.project_id = $1" : ""
+          projectId
+            ? " WHERE c.project_id = $1"
+            : organizationId
+              ? " WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1)"
+              : ""
         } GROUP BY e.status`,
         values
       )
@@ -1785,6 +1919,759 @@ export class LegacyService {
 
   async deleteKnowledge(itemId: string) {
     await this.db.query("DELETE FROM knowledge_base_items WHERE id = $1", [itemId]);
+  }
+
+  // ─── Knowledge Base v2 (folders / documents / files) ──────────────────────────
+
+  private static readonly KB_VERSION_SNAPSHOT_MINUTES = 15;
+  private static readonly KB_DOCUMENT_COLUMNS = `id, organization_id, project_id, folder_id, title, content_json, content_html, content_text,
+    document_type, status, is_ai_generated, source_provider, source_external_id, source_url,
+    created_by, updated_by, reviewed_by, reviewed_at, is_deleted, created_at, updated_at, deleted_at`;
+
+  private async kbProjectRole(userId: string, projectId: string): Promise<"owner" | "manager" | "qa_engineer"> {
+    const res = await this.db.query<{ role: string }>(
+      "SELECT role FROM project_members WHERE project_id = $1 AND user_id = $2",
+      [projectId, userId]
+    );
+    return this.normalizeRole(res.rows[0]?.role || "");
+  }
+
+  private kbRequireOwnerOrManager(role: string) {
+    if (role !== "owner" && role !== "manager")
+      throw new ForbiddenException({ error: "Only owners and managers can perform this action" });
+  }
+
+  private kbRequireMutateAccess(role: string, ownerId: string | null, userId: string) {
+    if (role === "owner" || role === "manager") return;
+    if (ownerId && ownerId === userId) return;
+    throw new ForbiddenException({ error: "You can only modify items you created" });
+  }
+
+  private async kbFolder(projectId: string, folderId: string): Promise<Body> {
+    const res = await this.db.query(
+      "SELECT * FROM knowledge_folders WHERE id = $1 AND project_id = $2 AND is_deleted = false",
+      [folderId, projectId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Folder not found" });
+    return res.rows[0];
+  }
+
+  private async kbBreadcrumb(folderId: string): Promise<Array<{ id: string; name: string }>> {
+    const res = await this.db.query<{ id: string; name: string }>(
+      `WITH RECURSIVE path AS (
+         SELECT id, name, parent_folder_id, 0 AS depth FROM knowledge_folders WHERE id = $1
+         UNION ALL
+         SELECT kf.id, kf.name, kf.parent_folder_id, path.depth + 1
+         FROM knowledge_folders kf JOIN path ON kf.id = path.parent_folder_id
+       )
+       SELECT id, name FROM path ORDER BY depth DESC`,
+      [folderId]
+    );
+    return res.rows;
+  }
+
+  async createKnowledgeFolder(projectId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
+    const name = String(body.name || "").trim();
+    if (!name) throw new BadRequestException({ error: "Folder name is required" });
+
+    let parentFolderId = body.parentFolderId ? String(body.parentFolderId) : null;
+    if (parentFolderId) {
+      await this.kbFolder(projectId, parentFolderId);
+    } else {
+      const root = await this.db.query<{ id: string }>(
+        "SELECT id FROM knowledge_folders WHERE project_id = $1 AND is_root = true",
+        [projectId]
+      );
+      parentFolderId = root.rows[0]?.id || null;
+    }
+
+    try {
+      const res = await this.db.query(
+        `INSERT INTO knowledge_folders (organization_id, project_id, parent_folder_id, name, description, created_by, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING *`,
+        [project.organization_id, projectId, parentFolderId, name, body.description || null, uid]
+      );
+      await this.logProjectActivity(projectId, uid, "created", "knowledge_folder", res.rows[0].id, name, {});
+      return toCamel(res.rows[0]);
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505")
+        throw new BadRequestException({ error: "A folder with this name already exists here" });
+      throw error;
+    }
+  }
+
+  async getKnowledgeFolderTree(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const res = await this.db.query(
+      "SELECT id, parent_folder_id, name, description, is_root FROM knowledge_folders WHERE project_id = $1 AND is_deleted = false ORDER BY name",
+      [projectId]
+    );
+    const rows = res.rows.map(toCamel);
+    const byParent = new Map<string, Body[]>();
+    for (const row of rows) {
+      const key = row.parentFolderId || "root";
+      if (!byParent.has(key)) byParent.set(key, []);
+      byParent.get(key)!.push(row);
+    }
+    const build = (node: Body): Body => ({ ...node, children: (byParent.get(node.id) || []).map(build) });
+    const root = rows.find((row) => row.isRoot);
+    if (!root) throw new NotFoundException({ error: "Knowledge base root folder not found" });
+    return build(root);
+  }
+
+  async getKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const folder = await this.kbFolder(projectId, folderId);
+    const breadcrumb = await this.kbBreadcrumb(folderId);
+    return { ...toCamel(folder), breadcrumb };
+  }
+
+  async updateKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const folder = await this.kbFolder(projectId, folderId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, folder.created_by, uid);
+
+    try {
+      const res = await this.db.query(
+        `UPDATE knowledge_folders SET name = COALESCE($3, name), description = COALESCE($4, description),
+         updated_by = $2, updated_at = now() WHERE id = $1 RETURNING *`,
+        [folderId, uid, body.name ? String(body.name).trim() : null, body.description ?? null]
+      );
+      await this.logProjectActivity(projectId, uid, "updated", "knowledge_folder", folderId, res.rows[0].name, {});
+      return toCamel(res.rows[0]);
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505")
+        throw new BadRequestException({ error: "A folder with this name already exists here" });
+      throw error;
+    }
+  }
+
+  async moveKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const folder = await this.kbFolder(projectId, folderId);
+    if (folder.is_root) throw new BadRequestException({ error: "The root folder cannot be moved" });
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, folder.created_by, uid);
+
+    const targetParentId = String(body.parentFolderId || "");
+    if (!targetParentId) throw new BadRequestException({ error: "parentFolderId is required" });
+    await this.kbFolder(projectId, targetParentId);
+
+    const invalid = await this.db.query(
+      `WITH RECURSIVE descendants AS (
+         SELECT id FROM knowledge_folders WHERE id = $1
+         UNION ALL
+         SELECT kf.id FROM knowledge_folders kf JOIN descendants d ON kf.parent_folder_id = d.id
+       )
+       SELECT 1 FROM descendants WHERE id = $2`,
+      [folderId, targetParentId]
+    );
+    if (invalid.rows[0])
+      throw new BadRequestException({ error: "A folder cannot be moved into itself or one of its subfolders" });
+
+    try {
+      const res = await this.db.query(
+        "UPDATE knowledge_folders SET parent_folder_id = $2, updated_by = $3, updated_at = now() WHERE id = $1 RETURNING *",
+        [folderId, targetParentId, uid]
+      );
+      await this.logProjectActivity(projectId, uid, "moved", "knowledge_folder", folderId, res.rows[0].name, {});
+      return toCamel(res.rows[0]);
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505")
+        throw new BadRequestException({ error: "A folder with this name already exists in the destination" });
+      throw error;
+    }
+  }
+
+  async deleteKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const folder = await this.kbFolder(projectId, folderId);
+    if (folder.is_root) throw new BadRequestException({ error: "The root folder cannot be deleted" });
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, folder.created_by, uid);
+
+    await this.db.transaction(async (client) => {
+      const descendantsCte = `WITH RECURSIVE descendants AS (
+        SELECT id FROM knowledge_folders WHERE id = $1
+        UNION ALL
+        SELECT kf.id FROM knowledge_folders kf JOIN descendants d ON kf.parent_folder_id = d.id
+      )`;
+      await client.query(
+        `${descendantsCte} UPDATE knowledge_folders SET is_deleted = true, deleted_at = now(), updated_at = now(), updated_by = $2
+         WHERE id IN (SELECT id FROM descendants)`,
+        [folderId, uid]
+      );
+      await client.query(
+        `${descendantsCte} UPDATE knowledge_documents SET is_deleted = true, deleted_at = now(), updated_at = now(), updated_by = $2
+         WHERE folder_id IN (SELECT id FROM descendants) AND is_deleted = false`,
+        [folderId, uid]
+      );
+      await client.query(
+        `${descendantsCte} UPDATE knowledge_files SET is_deleted = true, deleted_at = now()
+         WHERE folder_id IN (SELECT id FROM descendants) AND is_deleted = false`,
+        [folderId]
+      );
+    });
+    await this.logProjectActivity(projectId, uid, "deleted", "knowledge_folder", folderId, folder.name, {});
+    return { success: true };
+  }
+
+  async restoreKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireOwnerOrManager(role);
+    const res = await this.db.query(
+      "UPDATE knowledge_folders SET is_deleted = false, deleted_at = NULL, updated_by = $2, updated_at = now() WHERE id = $1 AND project_id = $3 RETURNING *",
+      [folderId, uid, projectId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Folder not found" });
+    await this.logProjectActivity(projectId, uid, "restored", "knowledge_folder", folderId, res.rows[0].name, {});
+    return toCamel(res.rows[0]);
+  }
+
+  async listKnowledgeFolderItems(projectId: string, userId: string | null | undefined, folderId: string, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const folder = await this.kbFolder(projectId, folderId);
+    const breadcrumb = await this.kbBreadcrumb(folderId);
+
+    const [folders, documents, files] = await Promise.all([
+      this.db.query(
+        `SELECT kf.*, u.name AS updated_by_name, u.email AS updated_by_email
+         FROM knowledge_folders kf LEFT JOIN users u ON u.id = kf.updated_by
+         WHERE kf.parent_folder_id = $1 AND kf.is_deleted = false ORDER BY kf.name`,
+        [folderId]
+      ),
+      this.db.query(
+        `SELECT kd.*, u.name AS updated_by_name, u.email AS updated_by_email
+         FROM knowledge_documents kd LEFT JOIN users u ON u.id = kd.updated_by
+         WHERE kd.folder_id = $1 AND kd.is_deleted = false ORDER BY kd.updated_at DESC`,
+        [folderId]
+      ),
+      this.db.query(
+        `SELECT kfl.*, u.name AS updated_by_name, u.email AS updated_by_email
+         FROM knowledge_files kfl LEFT JOIN users u ON u.id = kfl.uploaded_by
+         WHERE kfl.folder_id = $1 AND kfl.is_deleted = false ORDER BY kfl.updated_at DESC`,
+        [folderId]
+      )
+    ]);
+
+    const items: Body[] = [
+      ...folders.rows.map((row) => Object.assign(toCamel(row), { type: "folder" })),
+      ...documents.rows.map((row) => {
+        const camelled = toCamel(row);
+        delete camelled.searchVector;
+        return Object.assign(camelled, { type: "document" });
+      }),
+      ...files.rows.map((row) => Object.assign(toCamel(row), { type: "file" }))
+    ];
+
+    const search = String(query.search || "").trim().toLowerCase();
+    const filtered = search ? items.filter((item) => String(item.name || item.title || "").toLowerCase().includes(search)) : items;
+
+    return {
+      folder: { ...toCamel(folder), breadcrumb },
+      items: filtered,
+      total: filtered.length
+    };
+  }
+
+  async listKnowledgeDocuments(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const values: any[] = [projectId];
+    const filters = ["project_id = $1", "is_deleted = false"];
+    if (query.documentType) {
+      values.push(String(query.documentType));
+      filters.push(`document_type = $${values.length}`);
+    }
+    const res = await this.db.query(
+      `SELECT ${LegacyService.KB_DOCUMENT_COLUMNS} FROM knowledge_documents WHERE ${filters.join(" AND ")} ORDER BY updated_at DESC LIMIT 200`,
+      values
+    );
+    return { list: res.rows.map(toCamel), total: res.rowCount };
+  }
+
+  async createKnowledgeDocument(projectId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
+    const title = String(body.title || "").trim();
+    if (!title) throw new BadRequestException({ error: "Document title is required" });
+    const folderId = String(body.folderId || "");
+    if (!folderId) throw new BadRequestException({ error: "folderId is required" });
+    await this.kbFolder(projectId, folderId);
+
+    const documentType = body.documentType || "general";
+    const res = await this.db.query(
+      `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_json, content_html, content_text, document_type, status, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, 'draft', $9, $9) RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [
+        project.organization_id,
+        projectId,
+        folderId,
+        title,
+        body.contentJson ? JSON.stringify(body.contentJson) : null,
+        body.contentHtml || null,
+        body.contentText || null,
+        documentType,
+        uid
+      ]
+    );
+    await this.logProjectActivity(projectId, uid, "created", "knowledge_document", res.rows[0].id, title, {});
+    return toCamel(res.rows[0]);
+  }
+
+  private async kbDocument(projectId: string, documentId: string): Promise<Body> {
+    const res = await this.db.query(
+      `SELECT ${LegacyService.KB_DOCUMENT_COLUMNS} FROM knowledge_documents WHERE id = $1 AND project_id = $2 AND is_deleted = false`,
+      [documentId, projectId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Document not found" });
+    return res.rows[0];
+  }
+
+  async getKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const doc = await this.kbDocument(projectId, documentId);
+    const breadcrumb = await this.kbBreadcrumb(doc.folder_id);
+    return { ...toCamel(doc), breadcrumb };
+  }
+
+  async updateKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const doc = await this.kbDocument(projectId, documentId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, doc.created_by, uid);
+
+    const nextTitle = body.title !== undefined ? String(body.title).trim() : doc.title;
+    const nextJson = body.contentJson !== undefined ? JSON.stringify(body.contentJson) : doc.content_json ? JSON.stringify(doc.content_json) : null;
+    const nextHtml = body.contentHtml !== undefined ? body.contentHtml : doc.content_html;
+    const nextText = body.contentText !== undefined ? body.contentText : doc.content_text;
+
+    const contentChanged =
+      nextTitle !== doc.title || nextHtml !== doc.content_html || nextText !== doc.content_text;
+
+    if (contentChanged) {
+      const latest = await this.db.query<{ created_at: string }>(
+        "SELECT created_at FROM knowledge_document_versions WHERE document_id = $1 ORDER BY version_number DESC LIMIT 1",
+        [documentId]
+      );
+      const staleMinutes = LegacyService.KB_VERSION_SNAPSHOT_MINUTES;
+      const isStale =
+        !latest.rows[0] ||
+        Date.now() - new Date(latest.rows[0].created_at).getTime() > staleMinutes * 60 * 1000;
+      if (isStale) {
+        const nextVersion = await this.db.query<{ max: number }>(
+          "SELECT COALESCE(MAX(version_number), 0) + 1 AS max FROM knowledge_document_versions WHERE document_id = $1",
+          [documentId]
+        );
+        await this.db.query(
+          `INSERT INTO knowledge_document_versions (document_id, version_number, title, content_json, content_html, content_text, created_by)
+           VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)`,
+          [documentId, nextVersion.rows[0].max, doc.title, doc.content_json ? JSON.stringify(doc.content_json) : null, doc.content_html, doc.content_text, uid]
+        );
+      }
+    }
+
+    let nextStatus = doc.status;
+    let reviewedBy = doc.reviewed_by;
+    let reviewedAt = doc.reviewed_at;
+    if (doc.document_type === "ai_memory") {
+      if (doc.status === "approved" && contentChanged) {
+        nextStatus = "draft";
+        reviewedBy = null;
+        reviewedAt = null;
+      }
+      // status transitions for ai_memory only happen via approve/reject endpoints
+    } else if (body.status !== undefined) {
+      nextStatus = String(body.status);
+    }
+
+    const res = await this.db.query(
+      `UPDATE knowledge_documents SET title = $2, content_json = $3::jsonb, content_html = $4, content_text = $5,
+       document_type = COALESCE($6, document_type), status = $7, reviewed_by = $8, reviewed_at = $9,
+       updated_by = $10, updated_at = now()
+       WHERE id = $1 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [documentId, nextTitle, nextJson, nextHtml, nextText, body.documentType || null, nextStatus, reviewedBy, reviewedAt, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "updated", "knowledge_document", documentId, nextTitle, {});
+    return toCamel(res.rows[0]);
+  }
+
+  async moveKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const doc = await this.kbDocument(projectId, documentId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, doc.created_by, uid);
+    const folderId = String(body.folderId || "");
+    if (!folderId) throw new BadRequestException({ error: "folderId is required" });
+    await this.kbFolder(projectId, folderId);
+
+    const res = await this.db.query(
+      `UPDATE knowledge_documents SET folder_id = $2, updated_by = $3, updated_at = now()
+       WHERE id = $1 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [documentId, folderId, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "moved", "knowledge_document", documentId, res.rows[0].title, {});
+    return toCamel(res.rows[0]);
+  }
+
+  async duplicateKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string) {
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
+    const doc = await this.kbDocument(projectId, documentId);
+    const res = await this.db.query(
+      `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_json, content_html, content_text, document_type, status, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, 'draft', $9, $9) RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [
+        project.organization_id,
+        projectId,
+        doc.folder_id,
+        `${doc.title} (copy)`,
+        doc.content_json ? JSON.stringify(doc.content_json) : null,
+        doc.content_html,
+        doc.content_text,
+        doc.document_type,
+        uid
+      ]
+    );
+    await this.logProjectActivity(projectId, uid, "duplicated", "knowledge_document", res.rows[0].id, res.rows[0].title, {});
+    return toCamel(res.rows[0]);
+  }
+
+  async deleteKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const doc = await this.kbDocument(projectId, documentId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, doc.created_by, uid);
+    await this.db.query(
+      "UPDATE knowledge_documents SET is_deleted = true, deleted_at = now(), updated_by = $2, updated_at = now() WHERE id = $1",
+      [documentId, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "deleted", "knowledge_document", documentId, doc.title, {});
+    return { success: true };
+  }
+
+  async restoreKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireOwnerOrManager(role);
+    const res = await this.db.query(
+      `UPDATE knowledge_documents SET is_deleted = false, deleted_at = NULL, updated_by = $2, updated_at = now()
+       WHERE id = $1 AND project_id = $3 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [documentId, uid, projectId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Document not found" });
+    await this.logProjectActivity(projectId, uid, "restored", "knowledge_document", documentId, res.rows[0].title, {});
+    return toCamel(res.rows[0]);
+  }
+
+  // ─── Knowledge Base v2: files ──────────────────────────────────────────────
+
+  static readonly KB_MAX_UPLOAD_SIZE = Number(process.env.MAX_UPLOAD_SIZE) || 50 * 1024 * 1024;
+  static readonly KB_ALLOWED_EXTENSIONS = new Set([
+    "png", "jpg", "jpeg", "webp", "svg",
+    "pdf", "doc", "docx", "txt", "md",
+    "xls", "xlsx", "csv",
+    "ppt", "pptx",
+    "js", "ts", "java", "py", "json", "xml", "yaml", "yml", "sql", "html", "css",
+    "mp3", "wav", "m4a",
+    "mp4", "mov", "webm",
+    "zip"
+  ]);
+
+  private async kbFile(projectId: string, fileId: string): Promise<Body> {
+    const res = await this.db.query(
+      "SELECT * FROM knowledge_files WHERE id = $1 AND project_id = $2 AND is_deleted = false",
+      [fileId, projectId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "File not found" });
+    return res.rows[0];
+  }
+
+  private async kbUniqueFileName(folderId: string, desiredName: string): Promise<string> {
+    const ext = path.extname(desiredName);
+    const base = path.basename(desiredName, ext);
+    const existing = await this.db.query<{ original_file_name: string }>(
+      "SELECT original_file_name FROM knowledge_files WHERE folder_id = $1 AND is_deleted = false",
+      [folderId]
+    );
+    const taken = new Set(existing.rows.map((row) => row.original_file_name));
+    if (!taken.has(desiredName)) return desiredName;
+    let i = 1;
+    while (taken.has(`${base} (${i})${ext}`)) i += 1;
+    return `${base} (${i})${ext}`;
+  }
+
+  async uploadKnowledgeFiles(
+    projectId: string,
+    userId: string | null | undefined,
+    folderId: string,
+    files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
+    if (!folderId) throw new BadRequestException({ error: "folderId is required" });
+    await this.kbFolder(projectId, folderId);
+    if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
+
+    // Files are held in memory (never touch disk) until the whole batch passes validation,
+    // so a single unsupported file rejects the batch atomically with nothing left behind —
+    // this holds regardless of storage backend (local disk or S3-compatible).
+    const invalid = files.find((file) => !LegacyService.KB_ALLOWED_EXTENSIONS.has(path.extname(file.originalname).replace(/^\./, "").toLowerCase()));
+    if (invalid) {
+      throw new BadRequestException({ error: `This file type is not supported: ${invalid.originalname}` });
+    }
+
+    const created: Body[] = [];
+    for (const file of files) {
+      const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase();
+      const originalFileName = await this.kbUniqueFileName(folderId, file.originalname);
+      const storageKey = `knowledge-base/${projectId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
+      await this.storage.put(storageKey, file.buffer, file.mimetype);
+      const res = await this.db.query(
+        `INSERT INTO knowledge_files (organization_id, project_id, folder_id, file_name, original_file_name, mime_type, file_extension, file_size, storage_key, uploaded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [project.organization_id, projectId, folderId, path.basename(storageKey), originalFileName, file.mimetype, ext, file.size, storageKey, uid]
+      );
+      created.push(toCamel(res.rows[0]));
+      await this.logProjectActivity(projectId, uid, "uploaded", "knowledge_file", res.rows[0].id, originalFileName, {});
+    }
+    return { list: created, total: created.length };
+  }
+
+  async getKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const file = await this.kbFile(projectId, fileId);
+    const breadcrumb = await this.kbBreadcrumb(file.folder_id);
+    return { ...toCamel(file), breadcrumb };
+  }
+
+  async updateKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const file = await this.kbFile(projectId, fileId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, file.uploaded_by, uid);
+
+    const nextName = body.originalFileName ? String(body.originalFileName).trim() : file.original_file_name;
+    const res = await this.db.query(
+      "UPDATE knowledge_files SET original_file_name = $2, updated_at = now() WHERE id = $1 RETURNING *",
+      [fileId, nextName]
+    );
+    await this.logProjectActivity(projectId, uid, "renamed", "knowledge_file", fileId, nextName, {});
+    return toCamel(res.rows[0]);
+  }
+
+  async moveKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const file = await this.kbFile(projectId, fileId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, file.uploaded_by, uid);
+    const folderId = String(body.folderId || "");
+    if (!folderId) throw new BadRequestException({ error: "folderId is required" });
+    await this.kbFolder(projectId, folderId);
+
+    const res = await this.db.query(
+      "UPDATE knowledge_files SET folder_id = $2, updated_at = now() WHERE id = $1 RETURNING *",
+      [fileId, folderId]
+    );
+    await this.logProjectActivity(projectId, uid, "moved", "knowledge_file", fileId, res.rows[0].original_file_name, {});
+    return toCamel(res.rows[0]);
+  }
+
+  async deleteKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const file = await this.kbFile(projectId, fileId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, file.uploaded_by, uid);
+    await this.db.query("UPDATE knowledge_files SET is_deleted = true, deleted_at = now(), updated_at = now() WHERE id = $1", [fileId]);
+    await this.logProjectActivity(projectId, uid, "deleted", "knowledge_file", fileId, file.original_file_name, {});
+    return { success: true };
+  }
+
+  async restoreKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireOwnerOrManager(role);
+    const res = await this.db.query(
+      "UPDATE knowledge_files SET is_deleted = false, deleted_at = NULL, updated_at = now() WHERE id = $1 AND project_id = $2 RETURNING *",
+      [fileId, projectId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "File not found" });
+    await this.logProjectActivity(projectId, uid, "restored", "knowledge_file", fileId, res.rows[0].original_file_name, {});
+    return toCamel(res.rows[0]);
+  }
+
+  // Resolves how to serve a file's bytes after the caller's own access check has passed:
+  // a short-lived presigned redirect URL when storage is S3-compatible, or a local path to
+  // stream when storage is local disk. Never expose storage_key/paths to the client directly.
+  async getKnowledgeFileAccess(projectId: string, userId: string | null | undefined, fileId: string, inline: boolean) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const file = await this.kbFile(projectId, fileId);
+    if (!file.storage_key || !(await this.storage.exists(file.storage_key))) {
+      throw new NotFoundException({ error: "File content is not available" });
+    }
+    const mimeType = file.mime_type || "application/octet-stream";
+    const access = await this.storage.getAccessUrl(file.storage_key, { filename: file.original_file_name, inline, contentType: mimeType });
+    return { ...access, mimeType, originalFileName: file.original_file_name };
+  }
+
+  // ─── Knowledge Base v2: search ─────────────────────────────────────────────
+
+  async searchKnowledgeBase(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const q = String(query.q || "").trim();
+    if (!q) return { list: [], total: 0 };
+    const type = String(query.type || "all").toLowerCase();
+
+    let dateClause = "";
+    const dateFilter = String(query.date || "").toLowerCase();
+    if (dateFilter === "today") dateClause = "AND updated_at >= date_trunc('day', now())";
+    else if (dateFilter === "week") dateClause = "AND updated_at >= now() - interval '7 days'";
+    else if (dateFilter === "month") dateClause = "AND updated_at >= now() - interval '30 days'";
+
+    const results: Body[] = [];
+
+    if (type === "all" || type === "folder") {
+      const res = await this.db.query(
+        `SELECT * FROM knowledge_folders WHERE project_id = $1 AND is_deleted = false AND name ILIKE $2 ${dateClause} LIMIT 50`,
+        [projectId, `%${q}%`]
+      );
+      results.push(...res.rows.map((row) => Object.assign(toCamel(row), { type: "folder" })));
+    }
+    if (type === "all" || type === "document") {
+      const res = await this.db.query(
+        `SELECT * FROM knowledge_documents
+         WHERE project_id = $1 AND is_deleted = false
+         AND (search_vector @@ plainto_tsquery('english', $2) OR title ILIKE $3) ${dateClause}
+         ORDER BY ts_rank(search_vector, plainto_tsquery('english', $2)) DESC LIMIT 50`,
+        [projectId, q, `%${q}%`]
+      );
+      results.push(
+        ...res.rows.map((row) => {
+          const camelled = toCamel(row);
+          delete camelled.searchVector;
+          return Object.assign(camelled, { type: "document" });
+        })
+      );
+    }
+    if (type === "all" || type === "file") {
+      const res = await this.db.query(
+        `SELECT * FROM knowledge_files
+         WHERE project_id = $1 AND is_deleted = false AND (original_file_name ILIKE $2 OR file_extension ILIKE $2) ${dateClause}
+         LIMIT 50`,
+        [projectId, `%${q}%`]
+      );
+      results.push(...res.rows.map((row) => Object.assign(toCamel(row), { type: "file" })));
+    }
+
+    const withBreadcrumb = await Promise.all(
+      results.map(async (item) => {
+        const folderId = item.type === "folder" ? item.parentFolderId : item.folderId;
+        const breadcrumb = folderId ? await this.kbBreadcrumb(folderId) : [];
+        return { ...item, breadcrumb };
+      })
+    );
+
+    return { list: withBreadcrumb, total: withBreadcrumb.length };
+  }
+
+  // ─── Knowledge Base v2: versioning ─────────────────────────────────────────
+
+  async listKnowledgeDocumentVersions(projectId: string, userId: string | null | undefined, documentId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.kbDocument(projectId, documentId);
+    const res = await this.db.query(
+      "SELECT id, version_number, title, created_by, created_at FROM knowledge_document_versions WHERE document_id = $1 ORDER BY version_number DESC",
+      [documentId]
+    );
+    return { list: res.rows.map(toCamel), total: res.rowCount };
+  }
+
+  async restoreKnowledgeDocumentVersion(projectId: string, userId: string | null | undefined, documentId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const doc = await this.kbDocument(projectId, documentId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, doc.created_by, uid);
+
+    const versionId = String(body.versionId || "");
+    const version = await this.db.query(
+      "SELECT * FROM knowledge_document_versions WHERE id = $1 AND document_id = $2",
+      [versionId, documentId]
+    );
+    if (!version.rows[0]) throw new NotFoundException({ error: "Version not found" });
+    const v = version.rows[0];
+
+    // Snapshot the current state before overwriting, so restoring a version is itself reversible.
+    const nextVersion = await this.db.query<{ max: number }>(
+      "SELECT COALESCE(MAX(version_number), 0) + 1 AS max FROM knowledge_document_versions WHERE document_id = $1",
+      [documentId]
+    );
+    await this.db.query(
+      `INSERT INTO knowledge_document_versions (document_id, version_number, title, content_json, content_html, content_text, created_by)
+       VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7)`,
+      [documentId, nextVersion.rows[0].max, doc.title, doc.content_json ? JSON.stringify(doc.content_json) : null, doc.content_html, doc.content_text, uid]
+    );
+
+    const res = await this.db.query(
+      `UPDATE knowledge_documents SET title = $2, content_json = $3::jsonb, content_html = $4, content_text = $5, updated_by = $6, updated_at = now()
+       WHERE id = $1 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [documentId, v.title, v.content_json ? JSON.stringify(v.content_json) : null, v.content_html, v.content_text, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "restored_version", "knowledge_document", documentId, res.rows[0].title, { versionNumber: v.version_number });
+    return toCamel(res.rows[0]);
+  }
+
+  // ─── Knowledge Base v2: AI memory approval ─────────────────────────────────
+
+  async approveAiMemory(projectId: string, userId: string | null | undefined, documentId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireOwnerOrManager(role);
+    const doc = await this.kbDocument(projectId, documentId);
+    if (doc.document_type !== "ai_memory")
+      throw new BadRequestException({ error: "Only AI memory documents can be approved" });
+
+    const res = await this.db.query(
+      `UPDATE knowledge_documents SET status = 'approved', reviewed_by = $2, reviewed_at = now(), updated_at = now()
+       WHERE id = $1 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [documentId, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "approved", "knowledge_document", documentId, res.rows[0].title, {});
+    return toCamel(res.rows[0]);
+  }
+
+  async rejectAiMemory(projectId: string, userId: string | null | undefined, documentId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireOwnerOrManager(role);
+    const doc = await this.kbDocument(projectId, documentId);
+    if (doc.document_type !== "ai_memory")
+      throw new BadRequestException({ error: "Only AI memory documents can be rejected" });
+
+    const res = await this.db.query(
+      `UPDATE knowledge_documents SET status = 'rejected', reviewed_by = $2, reviewed_at = now(), updated_at = now()
+       WHERE id = $1 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
+      [documentId, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "rejected", "knowledge_document", documentId, res.rows[0].title, {});
+    return toCamel(res.rows[0]);
   }
 
   async adminCustomers() {
@@ -2110,6 +2997,26 @@ export class LegacyService {
     const keys = mappings.rows.map((row) => String(row.jira_project_key)).filter(Boolean);
     if (!keys.length) return { synced: 0 };
 
+    // Mirror each synced ticket into the Knowledge Base's Requirements folder as a document
+    // (source_provider = 'jira'), so tickets are searchable and usable as Zyra context
+    // alongside manually-written docs. A future Linear/etc. integration follows the same pattern.
+    const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
+    const requirementsFolder = await this.db.query<{ id: string }>(
+      `SELECT kf.id FROM knowledge_folders kf
+       JOIN knowledge_folders root ON kf.parent_folder_id = root.id AND root.is_root = true AND root.project_id = $1
+       WHERE kf.project_id = $1 AND kf.name = 'Requirements' AND kf.is_deleted = false
+       LIMIT 1`,
+      [projectId]
+    );
+    let mirrorFolderId = requirementsFolder.rows[0]?.id || null;
+    if (!mirrorFolderId) {
+      const root = await this.db.query<{ id: string }>(
+        "SELECT id FROM knowledge_folders WHERE project_id = $1 AND is_root = true LIMIT 1",
+        [projectId]
+      );
+      mirrorFolderId = root.rows[0]?.id || null;
+    }
+
     let synced = 0;
     for (const key of keys) {
       const jql = `project = "${key}" ORDER BY updated DESC`;
@@ -2166,6 +3073,29 @@ export class LegacyService {
           ]
         );
         synced += 1;
+
+        if (mirrorFolderId) {
+          const summary = String(fields.summary || "");
+          const description = jiraDescriptionToText(fields.description);
+          const url = `${connection.site_url}/browse/${issue.key}`;
+          await this.db.query(
+            `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
+             VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'jira', $7, $8)
+             ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
+               title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
+               source_url = EXCLUDED.source_url, updated_at = now()`,
+            [
+              project.rows[0]?.organization_id,
+              projectId,
+              mirrorFolderId,
+              `${issue.key}: ${summary}`,
+              description,
+              description ? `<pre>${escapeHtml(description)}</pre>` : null,
+              String(issue.id || ""),
+              url
+            ]
+          );
+        }
       }
     }
     return { synced };
@@ -2800,12 +3730,19 @@ export class LegacyService {
         requestedCount: params.requestedCount
       }
     });
-    await this.rememberZyraMemory(params.projectId, params.userId, [
-      `Chat request: ${params.message}`,
-      `AI generated ${aiResult.drafts.length} testcase draft(s).`,
-      params.jiraIssueKeys.length ? `Jira keys: ${params.jiraIssueKeys.join(", ")}` : "",
-      `Sources considered: ${params.knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${params.existingTestcases.length} existing testcase(s).`
-    ].filter(Boolean).join("\n"));
+    await this.rememberZyraTurn({
+      projectId: params.projectId,
+      userId: params.userId,
+      provider: params.provider,
+      model: params.model,
+      key: params.key,
+      userMessage: params.message,
+      outcome: [
+        `Generated ${aiResult.drafts.length} testcase draft(s).`,
+        params.jiraIssueKeys.length ? `Jira keys: ${params.jiraIssueKeys.join(", ")}` : "",
+        `Sources considered: ${params.knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${params.existingTestcases.length} existing testcase(s).`
+      ].filter(Boolean).join(" ")
+    });
     return {
       reply: `I used the AI provider to generate ${aiResult.drafts.length} testcase candidate(s) after reading ${jira.length} Jira ticket(s), ${params.knowledge.length} knowledge-base item(s), and ${params.existingTestcases.length} nearby testcase(s).`,
       reasoningSummary: `AI generation used ${params.provider}/${params.model}. It considered Jira keys ${params.jiraIssueKeys.length ? params.jiraIssueKeys.join(", ") : "none explicitly mentioned"}, knowledge-base context, existing coverage for duplicate avoidance, and Zyra memory. Tokens: input ${aiResult.usage.input}, output ${aiResult.usage.output}.`,
@@ -3010,12 +3947,15 @@ export class LegacyService {
          WHERE id = $1 AND project_id = $2`,
         [taskId, projectId, drafts.length, JSON.stringify(drafts), tokenInput, tokenOutput, tokenInput + tokenOutput, JSON.stringify(sourceSummary), JSON.stringify(activity)]
       );
-      await this.rememberZyraMemory(projectId, options.userId, [
-        `Task: ${story}`,
-        `Generated ${drafts.length} testcase draft(s).`,
-        `Sources considered: ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s).`,
-        `Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length })}`
-      ].join("\n"));
+      await this.rememberZyraTurn({
+        projectId,
+        userId: options.userId,
+        provider,
+        model,
+        key: allocation.rows[0],
+        userMessage: story,
+        outcome: `Generated ${drafts.length} testcase draft(s) using ${knowledge.length} knowledge-base item(s) and ${jira.length} Jira ticket(s). Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length })}`
+      });
     } catch (error) {
       const failedAt = new Date().toISOString();
       const detail = error instanceof Error ? error.message : "Zyra failed to generate testcase drafts.";
@@ -3146,13 +4086,19 @@ export class LegacyService {
         JSON.stringify(jiraIssueKeys)
       ]
     );
-    await this.rememberZyraMemory(projectId, uid, [
-      `Task: ${story}`,
-      `Feedback applied: ${feedbackText}`,
-      referenceNote ? `Reviewer references: ${referenceNote}` : "",
-      additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
-      `Regenerated ${aiResult.drafts.length} testcase draft(s).`
-    ].filter(Boolean).join("\n"));
+    await this.rememberZyraTurn({
+      projectId,
+      userId: uid,
+      provider,
+      model,
+      key: allocation.rows[0],
+      userMessage: `${story}\nReviewer feedback: ${feedbackText}`,
+      outcome: [
+        `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
+        referenceNote ? `Reviewer references: ${referenceNote}` : "",
+        additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : ""
+      ].filter(Boolean).join(" ")
+    });
     return {
       generationRequestId: taskId,
       task: this.formatAiTask(res.rows[0]),
@@ -3282,42 +4228,148 @@ export class LegacyService {
     }
   }
 
+  private async zyraMemoryText(projectId: string): Promise<string> {
+    const res = await this.db.query<{ content_text: string }>(
+      "SELECT content_text FROM knowledge_documents WHERE project_id = $1 AND title = 'Zyra AI Memory' AND is_deleted = false ORDER BY updated_at DESC LIMIT 1",
+      [projectId]
+    );
+    return String(res.rows[0]?.content_text || "").slice(0, 1500);
+  }
+
+  // Plain-text completion for internal note-taking (memory summarization) — unlike
+  // zyraChatWithOpenAi/zyraChatWithAnthropic this does not force a JSON response shape,
+  // since the caller wants a short prose/bullet answer, not a structured chat decision.
+  private async summarizeForZyraMemory(provider: string, model: string, key: Body, prompt: string): Promise<string> {
+    try {
+      if (provider === "anthropic") {
+        const chatUrl = normalizeAnthropicMessagesUrl(key.base_url);
+        const chatHeaders = this.buildAnthropicAuthHeaders(key.api_key, key.auth_header_name, key.auth_scheme);
+        for (const candidate of anthropicModelCandidates(model)) {
+          const res = await fetch(chatUrl, {
+            method: "POST",
+            headers: chatHeaders,
+            body: JSON.stringify({ model: candidate, max_tokens: 220, messages: [{ role: "user", content: prompt }] })
+          });
+          if (!res.ok) continue;
+          const data = await res.json() as Body;
+          const text = normalizeJsonArray(data.content).map((item) => item?.text || "").join("\n").trim();
+          if (text) return text;
+        }
+        return "";
+      }
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      const authHeader = String(key.auth_header_name || "Authorization");
+      const scheme = String(key.auth_scheme || "Bearer").trim();
+      headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
+      const res = await fetch(normalizeChatCompletionsUrl(key.base_url), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ model, max_tokens: 220, messages: [{ role: "user", content: prompt }] })
+      });
+      if (!res.ok) return "";
+      const data = await res.json() as Body;
+      return String(data.choices?.[0]?.message?.content || "").trim();
+    } catch {
+      return "";
+    }
+  }
+
+  // Turns one Zyra turn (user request + what Zyra did) into a short, meaningful memory
+  // note via an actual LLM summarization pass, instead of dumping a hardcoded template.
+  // Falls back to a trimmed request/outcome pair only if the summarization call fails,
+  // so memory-writing never blocks or fails the underlying chat/task response.
+  private async rememberZyraTurn(params: {
+    projectId: string;
+    userId: string | null;
+    provider: string;
+    model: string;
+    key: Body;
+    userMessage: string;
+    outcome: string;
+  }) {
+    const priorMemory = await this.zyraMemoryText(params.projectId);
+    const prompt = [
+      "You maintain a running memory file for an AI test-engineering assistant named Zyra so it can recall context across future sessions.",
+      "Read the latest turn below and write 1-3 short bullet points capturing only durable, reusable facts: what the user actually wants, any constraints/preferences/decisions they stated, and what was produced or changed as a result.",
+      "Do not restate token counts, provider/model names, or generic boilerplate. Do not repeat facts already present in the existing memory below.",
+      "Plain text bullets starting with \"- \", no headings, no JSON, no code fences.",
+      "",
+      "Existing memory (older notes, for context only):",
+      priorMemory || "None yet.",
+      "",
+      "Latest turn:",
+      `User: ${params.userMessage}`,
+      `Result: ${params.outcome}`
+    ].join("\n");
+    const summary = (await this.summarizeForZyraMemory(params.provider, params.model, params.key, prompt))
+      .split("\n").map((line) => line.trim()).filter(Boolean).slice(0, 6).join("\n");
+    const entry = summary || `- ${params.userMessage.slice(0, 200)}\n- ${params.outcome.slice(0, 200)}`;
+    await this.rememberZyraMemory(params.projectId, params.userId, entry);
+  }
+
+  // Zyra's own rolling scratchpad memory — distinct from the human-curated "AI Memory"
+  // document type (which requires approval before being trusted). This note is always
+  // read/written directly since Zyra is both its author and its only reader; it's stored
+  // as a plain 'general' document (not 'ai_memory') so it never needs approval, just filed
+  // under the project's AI Memory folder for visibility.
+  private async kbAiMemoryFolderId(projectId: string): Promise<string | null> {
+    const folder = await this.db.query<{ id: string }>(
+      `SELECT kf.id FROM knowledge_folders kf
+       JOIN knowledge_folders root ON kf.parent_folder_id = root.id AND root.is_root = true AND root.project_id = $1
+       WHERE kf.project_id = $1 AND kf.name = 'AI Memory' AND kf.is_deleted = false LIMIT 1`,
+      [projectId]
+    );
+    if (folder.rows[0]?.id) return folder.rows[0].id;
+    const root = await this.db.query<{ id: string }>("SELECT id FROM knowledge_folders WHERE project_id = $1 AND is_root = true LIMIT 1", [projectId]);
+    return root.rows[0]?.id || null;
+  }
+
   private async rememberZyraMemory(projectId: string, userId: string | null, entry: string) {
     const title = "Zyra AI Memory";
-    const existing = await this.db.query<{ id: string; content: string }>(
-      "SELECT id, content FROM knowledge_base_items WHERE project_id = $1 AND item_type = 'note' AND title = $2 ORDER BY updated_at DESC LIMIT 1",
+    const folderId = await this.kbAiMemoryFolderId(projectId);
+    if (!folderId) return;
+
+    const existing = await this.db.query<{ id: string; content_text: string }>(
+      "SELECT id, content_text FROM knowledge_documents WHERE project_id = $1 AND title = $2 AND is_deleted = false ORDER BY updated_at DESC LIMIT 1",
       [projectId, title]
     );
     const stampedEntry = `## ${new Date().toISOString()}\n${entry.trim()}`.slice(0, 2500);
     if (existing.rows[0]) {
-      const content = [stampedEntry, String(existing.rows[0].content || "")].filter(Boolean).join("\n\n").slice(0, 20000);
-      await this.db.query("UPDATE knowledge_base_items SET content = $2, updated_at = now() WHERE id = $1", [existing.rows[0].id, content]);
+      const content = [stampedEntry, String(existing.rows[0].content_text || "")].filter(Boolean).join("\n\n").slice(0, 20000);
+      await this.db.query(
+        "UPDATE knowledge_documents SET content_text = $2, content_html = $3, updated_at = now() WHERE id = $1",
+        [existing.rows[0].id, content, `<pre>${escapeHtml(content)}</pre>`]
+      );
       return;
     }
+    const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
     await this.db.query(
-      "INSERT INTO knowledge_base_items (project_id, item_type, title, content, created_by) VALUES ($1, 'note', $2, $3, $4)",
-      [projectId, title, stampedEntry, userId]
+      `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, is_ai_generated, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'general', 'published', true, $7, $7)`,
+      [project.rows[0]?.organization_id, projectId, folderId, title, stampedEntry, `<pre>${escapeHtml(stampedEntry)}</pre>`, userId]
     );
   }
 
   private async knowledgeSnapshot(projectId: string, selectedItemIds: string[] = []): Promise<Array<{ title: string; content: string }>> {
     const selected = Array.from(new Set(selectedItemIds.filter(Boolean)));
     const values: any[] = [projectId];
-    let filter = "project_id = $1";
+    // Only approved AI-memory documents are trusted context; every other document type
+    // (general notes, requirement mirrors, etc.) is trusted unconditionally, same as before.
+    let filter = "project_id = $1 AND is_deleted = false AND (document_type != 'ai_memory' OR status = 'approved')";
     if (selected.length) {
       values.push(selected);
       filter += ` AND (id = ANY($${values.length}::uuid[]) OR title = 'Zyra AI Memory')`;
     }
     const res = await this.db.query(
-      `SELECT title, item_type, content, file_name FROM knowledge_base_items
+      `SELECT title, content_text FROM knowledge_documents
        WHERE ${filter}
        ORDER BY CASE WHEN title = 'Zyra AI Memory' THEN 0 ELSE 1 END, updated_at DESC
        LIMIT 12`,
       values
     );
     return res.rows.map((row) => ({
-      title: row.title || row.file_name || "Knowledge base item",
-      content: String(row.content || row.file_name || `${row.item_type || "knowledge"} item`).slice(0, 1500)
+      title: row.title || "Knowledge base item",
+      content: String(row.content_text || "").slice(0, 1500)
     }));
   }
 
@@ -4061,8 +5113,8 @@ export class LegacyService {
     const [knowledge, suites, testcases, jira, pending, status] = await Promise.all([
       this.db.query(
         `SELECT title
-         FROM knowledge_base_items
-         WHERE project_id = $1
+         FROM knowledge_documents
+         WHERE project_id = $1 AND is_deleted = false AND (document_type != 'ai_memory' OR status = 'approved')
          ORDER BY updated_at DESC
          LIMIT 12`,
         [projectId]

@@ -97,6 +97,15 @@ This first release focuses on the core workflows needed to start managing QA wor
 - Project-level access management.
 - Platform admin role support.
 
+### Multi-Workspace Support
+
+- Create a workspace during registration and become its Owner automatically.
+- Belong to multiple workspaces on a single account, with a different role (Owner, Manager, or QA Engineer) in each one independently.
+- Switch the active workspace from a sidebar switcher; the switch updates immediately without signing out.
+- Create additional workspaces at any time from the switcher, becoming Owner of each new one.
+- Full data isolation between workspaces: projects, test cases, workspace settings, members, invitations, and AI keys are all scoped to the active workspace only.
+- Accepting a team invite to another workspace automatically switches the active workspace to it.
+
 ### Deployment
 
 - Docker Compose based local deployment.
