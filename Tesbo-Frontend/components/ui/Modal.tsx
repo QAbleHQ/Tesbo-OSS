@@ -1,4 +1,7 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { cx } from "@/components/ui/cx";
 
 type ModalProps = {
@@ -10,9 +13,9 @@ type ModalProps = {
 };
 
 export default function Modal({ open, onClose, title, children, className }: ModalProps) {
-  if (!open) return null;
+  if (!open || typeof document === "undefined") return null;
 
-  return (
+  return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay-backdrop)] p-4 backdrop-blur-sm"
       onClick={onClose}
@@ -29,6 +32,7 @@ export default function Modal({ open, onClose, title, children, className }: Mod
         ) : null}
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

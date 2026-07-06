@@ -11,6 +11,7 @@ import {
   IconChartBar,
   IconBug,
   IconArrowRight,
+  IconBook,
 } from "@tabler/icons-react";
 import {
   authMe,
@@ -145,6 +146,12 @@ export default function ProjectDashboardPage() {
       desc: "Pass rates, trends and coverage",
       Icon: IconChartBar,
       href: `/projects/${projectId}/reports`,
+    },
+    {
+      label: "Knowledge base",
+      desc: "Store project documents, files, notes, and AI memory",
+      Icon: IconBook,
+      href: `/projects/${projectId}/knowledge-base`,
     },
   ];
 

@@ -26,6 +26,7 @@ import {
 import { authMe, logout } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
 import ThemeToggle from "@/components/ThemeToggle";
+import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
 
 type NavItemConfig = {
   href: string;
@@ -49,6 +50,7 @@ const projectNavSections: Array<{ section: string; items: NavItemConfig[] }> = [
   {
     section: "Test management",
     items: [
+      { href: "requirements", label: "Requirements", icon: "list" },
       { href: "testcases", label: "Test cases", icon: "fileText" },
       { href: "plans", label: "Test plans", icon: "clipboard" },
     ],
@@ -250,6 +252,8 @@ function SidebarContent() {
           <MenuIcon name={isCollapsed ? "chevronRight" : "chevronLeft"} className="h-[16px] w-[16px]" />
         </button>
       </div>
+
+      <WorkspaceSwitcher isCollapsed={isCollapsed} />
 
       {/* Navigation */}
       <nav className="flex-1 space-y-3 overflow-y-auto px-2.5 pb-3 pt-3">

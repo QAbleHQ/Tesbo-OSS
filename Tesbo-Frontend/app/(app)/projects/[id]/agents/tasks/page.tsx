@@ -8,10 +8,10 @@ import {
   createZyraTask,
   getJiraStatus,
   getZyraAgent,
-  listKnowledgeBaseItems,
+  listKnowledgeDocuments,
   listJiraTickets,
   type JiraTicket,
-  type KnowledgeBaseItem,
+  type KnowledgeDocument,
   type ZyraAgentState,
   type ZyraTask,
 } from "@/lib/api";
@@ -47,7 +47,7 @@ export default function ZyraTasksPage() {
   const projectId = params.id as string;
   const [state, setState] = useState<ZyraAgentState | null>(null);
   const [jiraTickets, setJiraTickets] = useState<JiraTicket[]>([]);
-  const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeBaseItem[]>([]);
+  const [knowledgeItems, setKnowledgeItems] = useState<KnowledgeDocument[]>([]);
   const [jiraEnabled, setJiraEnabled] = useState(false);
   const [story, setStory] = useState("");
   const [context, setContext] = useState("");
@@ -67,7 +67,7 @@ export default function ZyraTasksPage() {
         getJiraStatus(projectId).catch(() => ({ connected: false })),
       ]);
       setState(agentState);
-      const kb = await listKnowledgeBaseItems(projectId).catch(() => ({ list: [], total: 0 }));
+      const kb = await listKnowledgeDocuments(projectId).catch(() => ({ list: [], total: 0 }));
       setKnowledgeItems(kb.list || []);
       setJiraEnabled(jiraStatus.connected === true);
       if (jiraStatus.connected) {
@@ -326,7 +326,7 @@ export default function ZyraTasksPage() {
               >
                 <option value="">Select knowledge...</option>
                 {knowledgeItems.map((item) => (
-                  <option key={item.id} value={item.id}>{item.title} - {item.itemType}</option>
+                  <option key={item.id} value={item.id}>{item.title} - {item.documentType}</option>
                 ))}
               </Select>
               {selectedKnowledgeItemIds.length > 0 && (

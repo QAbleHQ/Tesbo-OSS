@@ -213,6 +213,29 @@ export async function getWorkspace(): Promise<WorkspaceInfo> {
   return api<WorkspaceInfo>("/api/workspace");
 }
 
+export interface WorkspaceListItem extends WorkspaceInfo {
+  isActive: boolean;
+}
+
+export async function listWorkspaces(): Promise<WorkspaceListItem[]> {
+  return api<WorkspaceListItem[]>("/api/workspaces");
+}
+
+export async function createAdditionalWorkspace(data: {
+  orgName: string;
+}): Promise<CreateWorkspaceResponse> {
+  return api<CreateWorkspaceResponse>("/api/workspaces", {
+    method: "POST",
+    body: data,
+  });
+}
+
+export async function switchWorkspace(id: string): Promise<WorkspaceInfo> {
+  return api<WorkspaceInfo>(`/api/workspaces/${id}/switch`, {
+    method: "POST",
+  });
+}
+
 export interface WorkspaceAiKey {
   id: string;
   name: string;
@@ -1853,82 +1876,287 @@ export async function listJiraTickets(
 
 // ── Knowledge Base ──
 
-export interface KnowledgeBaseItem {
+export interface KnowledgeFolder {
   id: string;
-  itemType: "note" | "file";
-  title: string;
-  content: string;
-  fileName: string | null;
-  fileContentType: string | null;
-  fileSize: number | null;
+  organizationId: string;
+  projectId: string;
+  parentFolderId: string | null;
+  name: string;
+  description: string | null;
+  isRoot: boolean;
   createdBy: string | null;
-  creatorName: string;
-  creatorEmail: string;
+  updatedBy: string | null;
+  isDeleted: boolean;
   createdAt: string;
   updatedAt: string;
+  deletedAt: string | null;
 }
 
-export async function listKnowledgeBaseItems(
+export interface KnowledgeFolderTreeNode extends KnowledgeFolder {
+  children: KnowledgeFolderTreeNode[];
+}
+
+export type KnowledgeDocumentType =
+  | "general"
+  | "requirement_note"
+  | "test_data_note"
+  | "api_note"
+  | "release_note"
+  | "ai_memory";
+export type KnowledgeDocumentStatus = "draft" | "published" | "approved" | "rejected";
+
+export interface KnowledgeDocument {
+  id: string;
+  organizationId: string;
+  projectId: string;
+  folderId: string;
+  title: string;
+  contentJson: unknown;
+  contentHtml: string | null;
+  contentText: string | null;
+  documentType: KnowledgeDocumentType;
+  status: KnowledgeDocumentStatus;
+  isAiGenerated: boolean;
+  sourceProvider: string | null;
+  sourceExternalId: string | null;
+  sourceUrl: string | null;
+  createdBy: string | null;
+  updatedBy: string | null;
+  reviewedBy: string | null;
+  reviewedAt: string | null;
+  isDeleted: boolean;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
+export interface KnowledgeFile {
+  id: string;
+  organizationId: string;
+  projectId: string;
+  folderId: string;
+  fileName: string;
+  originalFileName: string;
+  mimeType: string | null;
+  fileExtension: string | null;
+  fileSize: number | null;
+  storageKey: string | null;
+  uploadedBy: string | null;
+  isDeleted: boolean;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+}
+
+export type KnowledgeBreadcrumbEntry = { id: string; name: string };
+
+export type KnowledgeItem = (KnowledgeFolder | KnowledgeDocument | KnowledgeFile) & {
+  type: "folder" | "document" | "file";
+  updatedByName?: string | null;
+  updatedByEmail?: string | null;
+};
+
+export interface KnowledgeDocumentVersion {
+  id: string;
+  versionNumber: number;
+  title: string;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+// Folders
+
+export function getKnowledgeFolderTree(projectId: string): Promise<KnowledgeFolderTreeNode> {
+  return api<KnowledgeFolderTreeNode>(`/api/projects/${projectId}/knowledge-base/folders/tree`);
+}
+
+export function getKnowledgeFolder(
   projectId: string,
-  params?: { search?: string; type?: string }
-): Promise<{ list: KnowledgeBaseItem[]; total: number }> {
+  folderId: string
+): Promise<KnowledgeFolder & { breadcrumb: KnowledgeBreadcrumbEntry[] }> {
+  return api(`/api/projects/${projectId}/knowledge-base/folders/${folderId}`);
+}
+
+export function listKnowledgeFolderItems(
+  projectId: string,
+  folderId: string,
+  params?: { search?: string }
+): Promise<{ folder: KnowledgeFolder & { breadcrumb: KnowledgeBreadcrumbEntry[] }; items: KnowledgeItem[]; total: number }> {
   const sp = new URLSearchParams();
   if (params?.search) sp.set("search", params.search);
-  if (params?.type) sp.set("type", params.type);
   const query = sp.toString();
-  return api<{ list: KnowledgeBaseItem[]; total: number }>(
-    `/api/projects/${projectId}/knowledge-base${query ? `?${query}` : ""}`
-  );
+  return api(`/api/projects/${projectId}/knowledge-base/folders/${folderId}/items${query ? `?${query}` : ""}`);
 }
 
-export async function createKnowledgeBaseNote(
+export function createKnowledgeFolder(
   projectId: string,
-  title: string,
-  content: string
-): Promise<KnowledgeBaseItem> {
-  return api<KnowledgeBaseItem>(`/api/projects/${projectId}/knowledge-base`, {
-    method: "POST",
-    body: { title, content },
+  data: { name: string; description?: string; parentFolderId?: string }
+): Promise<KnowledgeFolder> {
+  return api(`/api/projects/${projectId}/knowledge-base/folders`, { method: "POST", body: data });
+}
+
+export function updateKnowledgeFolder(
+  projectId: string,
+  folderId: string,
+  data: { name?: string; description?: string }
+): Promise<KnowledgeFolder> {
+  return api(`/api/projects/${projectId}/knowledge-base/folders/${folderId}`, { method: "PATCH", body: data });
+}
+
+export function moveKnowledgeFolder(projectId: string, folderId: string, parentFolderId: string): Promise<KnowledgeFolder> {
+  return api(`/api/projects/${projectId}/knowledge-base/folders/${folderId}/move`, {
+    method: "PATCH",
+    body: { parentFolderId },
   });
 }
 
-export async function uploadKnowledgeBaseFile(
+export function deleteKnowledgeFolder(projectId: string, folderId: string): Promise<{ success: boolean }> {
+  return api(`/api/projects/${projectId}/knowledge-base/folders/${folderId}`, { method: "DELETE" });
+}
+
+export function restoreKnowledgeFolder(projectId: string, folderId: string): Promise<KnowledgeFolder> {
+  return api(`/api/projects/${projectId}/knowledge-base/folders/${folderId}/restore`, { method: "PATCH" });
+}
+
+// Documents
+
+export function listKnowledgeDocuments(
   projectId: string,
-  file: File
-): Promise<KnowledgeBaseItem> {
+  params?: { documentType?: string }
+): Promise<{ list: KnowledgeDocument[]; total: number }> {
+  const sp = new URLSearchParams();
+  if (params?.documentType) sp.set("documentType", params.documentType);
+  const query = sp.toString();
+  return api(`/api/projects/${projectId}/knowledge-base/documents${query ? `?${query}` : ""}`);
+}
+
+export function createKnowledgeDocument(
+  projectId: string,
+  data: { folderId: string; title: string; documentType?: string; contentJson?: unknown; contentHtml?: string; contentText?: string }
+): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents`, { method: "POST", body: data });
+}
+
+export function getKnowledgeDocument(
+  projectId: string,
+  documentId: string
+): Promise<KnowledgeDocument & { breadcrumb: KnowledgeBreadcrumbEntry[] }> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}`);
+}
+
+export function updateKnowledgeDocument(
+  projectId: string,
+  documentId: string,
+  data: Partial<{ title: string; contentJson: unknown; contentHtml: string; contentText: string; documentType: string; status: string }>
+): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}`, { method: "PATCH", body: data });
+}
+
+export function moveKnowledgeDocument(projectId: string, documentId: string, folderId: string): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/move`, { method: "PATCH", body: { folderId } });
+}
+
+export function duplicateKnowledgeDocument(projectId: string, documentId: string): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/duplicate`, { method: "POST" });
+}
+
+export function deleteKnowledgeDocument(projectId: string, documentId: string): Promise<{ success: boolean }> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}`, { method: "DELETE" });
+}
+
+export function restoreKnowledgeDocument(projectId: string, documentId: string): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/restore`, { method: "PATCH" });
+}
+
+export function listKnowledgeDocumentVersions(
+  projectId: string,
+  documentId: string
+): Promise<{ list: KnowledgeDocumentVersion[]; total: number }> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/versions`);
+}
+
+export function restoreKnowledgeDocumentVersion(projectId: string, documentId: string, versionId: string): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/restore-version`, {
+    method: "POST",
+    body: { versionId },
+  });
+}
+
+export function approveAiMemory(projectId: string, documentId: string): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/approve-ai-memory`, { method: "PATCH" });
+}
+
+export function rejectAiMemory(projectId: string, documentId: string): Promise<KnowledgeDocument> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/reject-ai-memory`, { method: "PATCH" });
+}
+
+// Files
+
+export async function uploadKnowledgeFiles(
+  projectId: string,
+  folderId: string,
+  files: File[]
+): Promise<{ list: KnowledgeFile[]; total: number }> {
   const formData = new FormData();
-  formData.append("file", file);
-  const res = await fetch(
-    `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000"}/api/projects/${projectId}/knowledge-base/upload`,
-    { method: "POST", credentials: "include", body: formData }
-  );
+  formData.append("folderId", folderId);
+  for (const file of files) formData.append("files", file);
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/knowledge-base/files/upload`, {
+    method: "POST",
+    credentials: "include",
+    body: formData,
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((err as { error?: string }).error || String(res.status));
   }
-  return res.json() as Promise<KnowledgeBaseItem>;
+  return res.json();
 }
 
-export async function updateKnowledgeBaseItem(
+export function getKnowledgeFile(
   projectId: string,
-  itemId: string,
-  data: { title?: string; content?: string }
-): Promise<void> {
-  await api(`/api/projects/${projectId}/knowledge-base/${itemId}`, {
+  fileId: string
+): Promise<KnowledgeFile & { breadcrumb: KnowledgeBreadcrumbEntry[] }> {
+  return api(`/api/projects/${projectId}/knowledge-base/files/${fileId}`);
+}
+
+export function updateKnowledgeFile(projectId: string, fileId: string, originalFileName: string): Promise<KnowledgeFile> {
+  return api(`/api/projects/${projectId}/knowledge-base/files/${fileId}`, {
     method: "PATCH",
-    body: data,
+    body: { originalFileName },
   });
 }
 
-export async function deleteKnowledgeBaseItem(
-  projectId: string,
-  itemId: string
-): Promise<void> {
-  await api(`/api/projects/${projectId}/knowledge-base/${itemId}`, { method: "DELETE" });
+export function moveKnowledgeFile(projectId: string, fileId: string, folderId: string): Promise<KnowledgeFile> {
+  return api(`/api/projects/${projectId}/knowledge-base/files/${fileId}/move`, { method: "PATCH", body: { folderId } });
 }
 
-export function getKnowledgeBaseFileUrl(projectId: string, itemId: string): string {
-  return `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000"}/api/projects/${projectId}/knowledge-base/${itemId}/file`;
+export function deleteKnowledgeFile(projectId: string, fileId: string): Promise<{ success: boolean }> {
+  return api(`/api/projects/${projectId}/knowledge-base/files/${fileId}`, { method: "DELETE" });
+}
+
+export function restoreKnowledgeFile(projectId: string, fileId: string): Promise<KnowledgeFile> {
+  return api(`/api/projects/${projectId}/knowledge-base/files/${fileId}/restore`, { method: "PATCH" });
+}
+
+export function getKnowledgeFileDownloadUrl(projectId: string, fileId: string): string {
+  return `${API_BASE}/api/projects/${projectId}/knowledge-base/files/${fileId}/download`;
+}
+
+export function getKnowledgeFilePreviewUrl(projectId: string, fileId: string): string {
+  return `${API_BASE}/api/projects/${projectId}/knowledge-base/files/${fileId}/preview`;
+}
+
+// Search
+
+export function searchKnowledgeBase(
+  projectId: string,
+  params: { q: string; type?: string; date?: string }
+): Promise<{ list: KnowledgeItem[]; total: number }> {
+  const sp = new URLSearchParams();
+  sp.set("q", params.q);
+  if (params.type) sp.set("type", params.type);
+  if (params.date) sp.set("date", params.date);
+  return api(`/api/projects/${projectId}/knowledge-base/search?${sp.toString()}`);
 }
 
 // ── Activity Feed ──
