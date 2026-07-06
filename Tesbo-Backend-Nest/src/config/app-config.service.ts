@@ -31,6 +31,7 @@ export class AppConfigService {
   readonly s3AccessKeyId = this.optionalString("S3_ACCESS_KEY_ID") || undefined;
   readonly s3SecretAccessKey = this.optionalString("S3_SECRET_ACCESS_KEY") || undefined;
   readonly s3ForcePathStyle = this.string("S3_FORCE_PATH_STYLE", "false").toLowerCase() === "true";
+  readonly s3PresignedUrlTtlSeconds = this.integer("S3_PRESIGNED_URL_TTL_SECONDS", 300);
 
   private loadEnv(): Record<string, string | undefined> {
     const dotenvPath = this.findDotEnvPath();

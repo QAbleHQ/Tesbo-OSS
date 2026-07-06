@@ -5,8 +5,6 @@ import * as fs from "fs";
 import * as path from "path";
 import { AppConfigService } from "../config/app-config.service";
 
-const PRESIGNED_URL_TTL_SECONDS = 300;
-
 // Object storage abstraction: local disk by default (self-hosted, no setup required), or any
 // S3-compatible service (AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces, ...) when
 // STORAGE_DRIVER=s3. Keys are always prefixed per-feature and per-project (e.g.
@@ -75,7 +73,7 @@ export class StorageService {
           ResponseContentDisposition: disposition,
           ResponseContentType: options.contentType
         }),
-        { expiresIn: PRESIGNED_URL_TTL_SECONDS }
+        { expiresIn: this.config.s3PresignedUrlTtlSeconds }
       );
       return { redirectUrl: url };
     }
