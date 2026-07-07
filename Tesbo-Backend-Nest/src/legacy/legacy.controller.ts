@@ -3,7 +3,6 @@ import {
   Controller,
   Delete,
   Get,
-  Header,
   Param,
   Patch,
   Post,
@@ -432,8 +431,8 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/bugs")
-  listBugs(@Param("projectId") projectId: string) {
-    return this.legacy.listBugs(projectId);
+  listBugs(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.listBugs(projectId, query);
   }
 
   @Post("/api/projects/:projectId/bugs")
@@ -454,6 +453,41 @@ export class LegacyController {
   @Delete("/api/bugs/:bugId")
   deleteBug(@Param("bugId") bugId: string) {
     return this.legacy.deleteBug(bugId);
+  }
+
+  @Post("/api/bugs/:bugId/links")
+  addBugLink(@Param("bugId") bugId: string, @Body() body: Record<string, any>) {
+    return this.legacy.addBugLink(bugId, body);
+  }
+
+  @Delete("/api/bugs/:bugId/links/:linkId")
+  removeBugLink(@Param("bugId") bugId: string, @Param("linkId") linkId: string) {
+    return this.legacy.removeBugLink(bugId, linkId);
+  }
+
+  @Post("/api/projects/:projectId/bugs/:bugId/attachments")
+  @UseInterceptors(FilesInterceptor("files", 10, { limits: { fileSize: LegacyService.KB_MAX_UPLOAD_SIZE } }))
+  uploadBugAttachments(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("bugId") bugId: string,
+    @UploadedFiles() files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    return this.legacy.uploadBugAttachments(projectId, req.userId, bugId, files);
+  }
+
+  @Get("/api/projects/:projectId/bugs/attachments/:attachmentId/download")
+  async downloadBugAttachment(@Res() res: Response, @Param("attachmentId") attachmentId: string) {
+    const access = await this.legacy.getBugAttachmentAccess(attachmentId, false);
+    if ("redirectUrl" in access) return res.redirect(302, access.redirectUrl);
+    res.setHeader("Content-Type", access.mimeType);
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(access.originalFileName)}"`);
+    res.sendFile(access.localPath);
+  }
+
+  @Delete("/api/bugs/attachments/:attachmentId")
+  deleteBugAttachment(@Param("attachmentId") attachmentId: string) {
+    return this.legacy.deleteBugAttachment(attachmentId);
   }
 
   @Get("/api/projects/:projectId/testcases/export/csv")
@@ -509,9 +543,12 @@ export class LegacyController {
   }
 
   @Get("/api/cycles/:cycleId/export/csv")
-  @Header("Content-Type", "text/csv")
-  exportCycle() {
-    return "externalId,title,status\n";
+  async exportCycle(@Param("cycleId") cycleId: string, @Res() res: Response) {
+    const rows = await this.legacy.executions(cycleId);
+    const headers = ["externalId", "title", "status", "priority", "type", "actualResult", "executedAt", "defectKey", "defectUrl"];
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="test-run.csv"');
+    res.send(this.rowsToCsv(headers, rows));
   }
 
   @Get("/api/projects/:projectId/analytics")
@@ -951,6 +988,11 @@ export class LegacyController {
     return this.legacy.jiraComment(projectId, body);
   }
 
+  @Get("/api/projects/:projectId/jira/search-issues")
+  jiraSearchIssues(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.jiraSearchIssues(projectId, query);
+  }
+
   // ── Project-scoped Linear mapping/sync/tickets ──
 
   @Get("/api/projects/:projectId/linear/status")
@@ -981,6 +1023,11 @@ export class LegacyController {
   @Post("/api/projects/:projectId/linear/comment")
   linearComment(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.linearComment(projectId, body);
+  }
+
+  @Get("/api/projects/:projectId/linear/search-issues")
+  linearSearchIssues(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.linearSearchIssues(projectId, query);
   }
 
   @Get("/api/projects/:projectId/activity")

@@ -9,7 +9,14 @@ import {
   createBug,
   updateBug,
   deleteBug,
+  getJiraStatus,
+  getLinearStatus,
+  uploadBugAttachments,
+  deleteBugAttachment,
+  getBugAttachmentDownloadUrl,
+  listTestRuns,
   type BugItem,
+  type BugAttachment,
 } from "@/lib/api";
 import {
   Button,
@@ -23,6 +30,10 @@ import {
   StatusChip,
 } from "@/components/ui";
 import { PageHeader, ListWorkspaceLayout } from "@/components/workflows";
+import TestCaseRunPicker, { type LinkRow } from "@/components/TestCaseRunPicker";
+import TrackingDestinationField, { type TrackingDestination } from "@/components/TrackingDestinationField";
+import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
+import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
 
 type ViewMode = "kanban" | "list";
 
@@ -143,10 +154,16 @@ function KanbanCard({
       )}
 
       <div className="flex items-center gap-2 flex-wrap">
-        {bug.tcExternalId && (
-          <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--surface-raised)] text-[var(--muted-soft)]">
-            {bug.tcExternalId}
+        {bug.links.slice(0, 2).map((link) => (
+          <span
+            key={link.id}
+            className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--surface-raised)] text-[var(--muted-soft)]"
+          >
+            {link.testcaseExternalId || link.testcaseTitle}
           </span>
+        ))}
+        {bug.links.length > 2 && (
+          <span className="text-[10px] text-[var(--muted-soft)]">+{bug.links.length - 2} more</span>
         )}
         {bug.externalUrl && (
           <a
@@ -313,18 +330,40 @@ export default function BugsPage() {
   const [viewMode, setViewMode] = useState<ViewMode>("kanban");
   const [page, setPage] = useState(1);
 
+  /* issue tracker connection status (gates the Tesbo-vs-self choice) */
+  const [jiraConnected, setJiraConnected] = useState(false);
+  const [linearConnected, setLinearConnected] = useState(false);
+
+  /* whether the project has any test runs to link a bug to — the link picker is only
+     mandatory when there's actually something to pick, so reporting a bug is never blocked
+     in a project that has no test runs yet */
+  const [hasTestRuns, setHasTestRuns] = useState(false);
+
   /* create modal */
   const [showCreate, setShowCreate] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
   const [createDesc, setCreateDesc] = useState("");
+  const [createLinks, setCreateLinks] = useState<LinkRow[]>([]);
+  const [createDestination, setCreateDestination] = useState<TrackingDestination>("TESBO");
+  const [createSelfSystem, setCreateSelfSystem] = useState<SelfLoggedSystem>("OTHER");
   const [createUrl, setCreateUrl] = useState("");
+  const [createEvidenceMode, setCreateEvidenceMode] = useState<EvidenceMode>("FILES");
+  const [createStagedFiles, setCreateStagedFiles] = useState<File[]>([]);
+  const [createBetterbugsUrl, setCreateBetterbugsUrl] = useState("");
   const [creating, setCreating] = useState(false);
 
   /* edit modal */
   const [editBug, setEditBug] = useState<BugItem | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editDesc, setEditDesc] = useState("");
+  const [editLinks, setEditLinks] = useState<LinkRow[]>([]);
+  const [editDestination, setEditDestination] = useState<TrackingDestination>("TESBO");
+  const [editSelfSystem, setEditSelfSystem] = useState<SelfLoggedSystem>("OTHER");
   const [editUrl, setEditUrl] = useState("");
+  const [editEvidenceMode, setEditEvidenceMode] = useState<EvidenceMode>("FILES");
+  const [editStagedFiles, setEditStagedFiles] = useState<File[]>([]);
+  const [editAttachments, setEditAttachments] = useState<BugAttachment[]>([]);
+  const [editBetterbugsUrl, setEditBetterbugsUrl] = useState("");
   const [editStatus, setEditStatus] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -350,15 +389,25 @@ export default function BugsPage() {
     });
   }, [router, load]);
 
+  useEffect(() => {
+    getJiraStatus(projectId).then((s) => setJiraConnected(s.connected)).catch(() => setJiraConnected(false));
+    getLinearStatus(projectId).then((s) => setLinearConnected(s.connected)).catch(() => setLinearConnected(false));
+    listTestRuns(projectId).then((runs) => setHasTestRuns(runs.length > 0)).catch(() => setHasTestRuns(false));
+  }, [projectId]);
+
   /* filtered list */
   const filtered = useMemo(() => {
+    const term = search.toLowerCase();
     return bugs.filter((b) => {
       if (filterStatus && b.status !== filterStatus) return false;
       if (
-        search &&
-        !b.title.toLowerCase().includes(search.toLowerCase()) &&
-        !b.tcTitle.toLowerCase().includes(search.toLowerCase()) &&
-        !b.tcExternalId.toLowerCase().includes(search.toLowerCase())
+        term &&
+        !b.title.toLowerCase().includes(term) &&
+        !b.links.some(
+          (link) =>
+            link.testcaseTitle?.toLowerCase().includes(term) ||
+            link.testcaseExternalId?.toLowerCase().includes(term)
+        )
       )
         return false;
       return true;
@@ -391,20 +440,43 @@ export default function BugsPage() {
   ).length;
   const closedCount = bugs.filter((b) => b.status === "Closed").length;
 
+  /* reset create modal state */
+  function resetCreate() {
+    setShowCreate(false);
+    setCreateTitle("");
+    setCreateDesc("");
+    setCreateLinks([]);
+    setCreateDestination("TESBO");
+    setCreateSelfSystem(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "OTHER");
+    setCreateUrl("");
+    setCreateEvidenceMode("FILES");
+    setCreateStagedFiles([]);
+    setCreateBetterbugsUrl("");
+  }
+
   /* create */
   async function handleCreate() {
-    if (!createTitle.trim()) return;
+    if (!createTitle.trim() || (hasTestRuns && !createLinks.length)) return;
+    const selfLogged = (jiraConnected || linearConnected) && createDestination === "SELF";
     setCreating(true);
     try {
-      await createBug(projectId, {
+      const bug = await createBug(projectId, {
         title: createTitle.trim(),
         description: createDesc.trim(),
-        externalUrl: createUrl.trim(),
+        externalUrl: selfLogged ? createUrl.trim() : undefined,
+        integrationProvider: selfLogged && createSelfSystem !== "OTHER" ? createSelfSystem : null,
+        integrationIssueKey: null,
+        betterbugsUrl: createEvidenceMode === "BETTERBUGS" ? createBetterbugsUrl.trim() : undefined,
+        links: createLinks.map((link) => ({
+          testcaseId: link.testcaseId,
+          cycleId: link.cycleId,
+          executionId: link.executionId,
+        })),
       });
-      setShowCreate(false);
-      setCreateTitle("");
-      setCreateDesc("");
-      setCreateUrl("");
+      if (createEvidenceMode === "FILES" && createStagedFiles.length) {
+        await uploadBugAttachments(projectId, bug.id, createStagedFiles);
+      }
+      resetCreate();
       load();
     } finally {
       setCreating(false);
@@ -416,21 +488,54 @@ export default function BugsPage() {
     setEditBug(bug);
     setEditTitle(bug.title);
     setEditDesc(bug.description);
-    setEditUrl(bug.externalUrl);
+    setEditLinks(
+      bug.links.map((link) => ({
+        cycleId: link.cycleId || "",
+        cycleName: link.cycleName || "",
+        testcaseId: link.testcaseId || "",
+        testcaseTitle: link.testcaseTitle || "",
+        executionId: link.executionId || undefined,
+      }))
+    );
+    setEditDestination(bug.externalUrl ? "SELF" : "TESBO");
+    setEditSelfSystem(bug.integrationProvider === "JIRA" || bug.integrationProvider === "LINEAR" ? bug.integrationProvider : "OTHER");
+    setEditUrl(bug.externalUrl || "");
+    setEditEvidenceMode(bug.betterbugsUrl ? "BETTERBUGS" : "FILES");
+    setEditStagedFiles([]);
+    setEditAttachments(bug.attachments);
+    setEditBetterbugsUrl(bug.betterbugsUrl || "");
     setEditStatus(bug.status);
+  }
+
+  /* remove an already-uploaded attachment from the bug being edited */
+  async function handleRemoveEditAttachment(attachmentId: string) {
+    await deleteBugAttachment(attachmentId);
+    setEditAttachments((prev) => prev.filter((a) => a.id !== attachmentId));
   }
 
   /* save edit */
   async function handleEditSave() {
-    if (!editBug || !editTitle.trim()) return;
+    if (!editBug || !editTitle.trim() || (hasTestRuns && !editLinks.length)) return;
+    const selfLogged = (jiraConnected || linearConnected) && editDestination === "SELF";
     setSaving(true);
     try {
       await updateBug(editBug.id, {
         title: editTitle.trim(),
         description: editDesc.trim(),
-        externalUrl: editUrl.trim(),
         status: editStatus,
+        externalUrl: selfLogged ? editUrl.trim() : undefined,
+        integrationProvider: selfLogged && editSelfSystem !== "OTHER" ? editSelfSystem : null,
+        integrationIssueKey: null,
+        betterbugsUrl: editEvidenceMode === "BETTERBUGS" ? editBetterbugsUrl.trim() : undefined,
+        links: editLinks.map((link) => ({
+          testcaseId: link.testcaseId,
+          cycleId: link.cycleId,
+          executionId: link.executionId,
+        })),
       });
+      if (editEvidenceMode === "FILES" && editStagedFiles.length) {
+        await uploadBugAttachments(projectId, editBug.id, editStagedFiles);
+      }
       setEditBug(null);
       load();
     } finally {
@@ -606,14 +711,17 @@ export default function BugsPage() {
                               <BugStatusBadge status={b.status} />
                             </td>
                             <td>
-                              {b.tcTitle ? (
+                              {b.links.length ? (
                                 <div className="flex flex-col gap-0.5">
-                                  <span className="text-xs font-mono text-[var(--muted-soft)]">
-                                    {b.tcExternalId}
-                                  </span>
-                                  <span className="text-xs text-[var(--muted)] truncate max-w-[180px]">
-                                    {b.tcTitle}
-                                  </span>
+                                  {b.links.slice(0, 2).map((link) => (
+                                    <span key={link.id} className="text-xs text-[var(--muted)] truncate max-w-[180px]">
+                                      <span className="font-mono text-[var(--muted-soft)]">{link.testcaseExternalId}</span>{" "}
+                                      {link.testcaseTitle}
+                                    </span>
+                                  ))}
+                                  {b.links.length > 2 && (
+                                    <span className="text-xs text-[var(--muted-soft)]">+{b.links.length - 2} more</span>
+                                  )}
                                 </div>
                               ) : (
                                 <span className="text-xs text-[var(--muted-soft)]">
@@ -623,7 +731,7 @@ export default function BugsPage() {
                             </td>
                             <td>
                               <span className="text-xs text-[var(--muted)]">
-                                {b.cycleName || "—"}
+                                {b.links.map((link) => link.cycleName).filter(Boolean).join(", ") || "—"}
                               </span>
                             </td>
                             <td>
@@ -738,7 +846,7 @@ export default function BugsPage() {
             {viewBug.externalUrl && (
               <div>
                 <p className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-1">
-                  Bug Link
+                  {viewBug.integrationProvider ? `${viewBug.integrationProvider === "JIRA" ? "Jira" : "Linear"} Ticket` : "Bug Link"}
                 </p>
                 <a
                   href={viewBug.externalUrl}
@@ -759,39 +867,63 @@ export default function BugsPage() {
                       d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"
                     />
                   </svg>
-                  {viewBug.externalUrl}
+                  {viewBug.integrationIssueKey || viewBug.externalUrl}
                 </a>
               </div>
             )}
 
+            {/* Evidence */}
+            {viewBug.betterbugsUrl ? (
+              <div>
+                <p className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-1">BetterBugs Session</p>
+                <a
+                  href={viewBug.betterbugsUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm text-[var(--brand-primary)] hover:underline break-all"
+                >
+                  {viewBug.betterbugsUrl}
+                </a>
+              </div>
+            ) : viewBug.attachments.length > 0 ? (
+              <div>
+                <p className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-1">Attachments</p>
+                <ul className="space-y-1">
+                  {viewBug.attachments.map((att) => (
+                    <li key={att.id}>
+                      <a
+                        href={getBugAttachmentDownloadUrl(projectId, att.id)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm text-[var(--brand-primary)] hover:underline break-all"
+                      >
+                        {att.fileName}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             {/* Metadata grid */}
             <div className="grid grid-cols-2 gap-4">
-              <div>
+              <div className="col-span-2">
                 <p className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-1">
-                  Test Case
+                  Linked Test Cases &amp; Runs
                 </p>
-                {viewBug.tcTitle ? (
-                  <div className="flex flex-col">
-                    <span className="text-xs font-mono text-[var(--muted-soft)]">
-                      {viewBug.tcExternalId}
-                    </span>
-                    <span className="text-sm text-[var(--foreground)]">
-                      {viewBug.tcTitle}
-                    </span>
-                  </div>
+                {viewBug.links.length ? (
+                  <ul className="space-y-1">
+                    {viewBug.links.map((link) => (
+                      <li key={link.id} className="text-sm text-[var(--foreground)]">
+                        <span className="font-mono text-xs text-[var(--muted-soft)]">{link.testcaseExternalId}</span>{" "}
+                        {link.testcaseTitle}
+                        <span className="text-[var(--muted)]"> — {link.cycleName}</span>
+                      </li>
+                    ))}
+                  </ul>
                 ) : (
-                  <span className="text-sm text-[var(--muted-soft)]">
-                    Not linked
-                  </span>
+                  <span className="text-sm text-[var(--muted-soft)]">Not linked</span>
                 )}
-              </div>
-              <div>
-                <p className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-1">
-                  Test Run
-                </p>
-                <span className="text-sm text-[var(--foreground)]">
-                  {viewBug.cycleName || "Not linked"}
-                </span>
               </div>
               <div>
                 <p className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-1">
@@ -865,7 +997,7 @@ export default function BugsPage() {
       {/* ───── Create Bug Modal ───── */}
       <Modal
         open={showCreate}
-        onClose={() => setShowCreate(false)}
+        onClose={resetCreate}
         title="Report a Bug"
       >
         <div className="space-y-4">
@@ -889,23 +1021,49 @@ export default function BugsPage() {
               placeholder="Steps to reproduce, expected vs actual behavior…"
             />
           </Field>
+          <BugEvidenceField
+            mode={createEvidenceMode}
+            onModeChange={setCreateEvidenceMode}
+            stagedFiles={createStagedFiles}
+            onStagedFilesChange={setCreateStagedFiles}
+            betterbugsUrl={createBetterbugsUrl}
+            onBetterbugsUrlChange={setCreateBetterbugsUrl}
+          />
           <Field>
-            <FieldLabel>Bug Link (external tracker URL)</FieldLabel>
-            <Input
-              type="url"
-              value={createUrl}
-              onChange={(e) => setCreateUrl(e.target.value)}
-              placeholder="https://jira.example.com/browse/BUG-123"
-            />
+            <FieldLabel>
+              Linked Test Case(s) &amp; Run(s) {hasTestRuns && <span className="text-[var(--error)]">*</span>}
+            </FieldLabel>
+            <TestCaseRunPicker projectId={projectId} value={createLinks} onChange={setCreateLinks} />
+            {!hasTestRuns && (
+              <p className="text-[13px] text-[var(--muted)]">
+                This project has no test runs yet, so this bug will be reported unlinked. You can link it once a run exists.
+              </p>
+            )}
           </Field>
+          {(jiraConnected || linearConnected) && (
+            <Field>
+              <FieldLabel>Where should this be tracked?</FieldLabel>
+              <TrackingDestinationField destination={createDestination} onChange={setCreateDestination} />
+            </Field>
+          )}
+          {(jiraConnected || linearConnected) && createDestination === "SELF" && (
+            <SelfLoggedTrackerField
+              jiraConnected={jiraConnected}
+              linearConnected={linearConnected}
+              system={createSelfSystem}
+              onSystemChange={setCreateSelfSystem}
+              url={createUrl}
+              onUrlChange={setCreateUrl}
+            />
+          )}
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="secondary" onClick={() => setShowCreate(false)}>
+            <Button variant="secondary" onClick={resetCreate}>
               Cancel
             </Button>
             <Button
               variant="primary"
               onClick={handleCreate}
-              disabled={creating || !createTitle.trim()}
+              disabled={creating || !createTitle.trim() || (hasTestRuns && !createLinks.length)}
             >
               {creating ? "Creating…" : "Report Bug"}
             </Button>
@@ -938,15 +1096,44 @@ export default function BugsPage() {
               rows={3}
             />
           </Field>
+          <BugEvidenceField
+            mode={editEvidenceMode}
+            onModeChange={setEditEvidenceMode}
+            stagedFiles={editStagedFiles}
+            onStagedFilesChange={setEditStagedFiles}
+            existingAttachments={editAttachments}
+            onRemoveExisting={handleRemoveEditAttachment}
+            downloadUrl={(attachmentId) => getBugAttachmentDownloadUrl(projectId, attachmentId)}
+            betterbugsUrl={editBetterbugsUrl}
+            onBetterbugsUrlChange={setEditBetterbugsUrl}
+          />
           <Field>
-            <FieldLabel>Bug Link</FieldLabel>
-            <Input
-              type="url"
-              value={editUrl}
-              onChange={(e) => setEditUrl(e.target.value)}
-              placeholder="https://jira.example.com/browse/BUG-123"
-            />
+            <FieldLabel>
+              Linked Test Case(s) &amp; Run(s) {hasTestRuns && <span className="text-[var(--error)]">*</span>}
+            </FieldLabel>
+            <TestCaseRunPicker projectId={projectId} value={editLinks} onChange={setEditLinks} />
+            {!hasTestRuns && (
+              <p className="text-[13px] text-[var(--muted)]">
+                This project has no test runs yet, so this bug will stay unlinked. You can link it once a run exists.
+              </p>
+            )}
           </Field>
+          {(jiraConnected || linearConnected) && (
+            <Field>
+              <FieldLabel>Where should this be tracked?</FieldLabel>
+              <TrackingDestinationField destination={editDestination} onChange={setEditDestination} />
+            </Field>
+          )}
+          {(jiraConnected || linearConnected) && editDestination === "SELF" && (
+            <SelfLoggedTrackerField
+              jiraConnected={jiraConnected}
+              linearConnected={linearConnected}
+              system={editSelfSystem}
+              onSystemChange={setEditSelfSystem}
+              url={editUrl}
+              onUrlChange={setEditUrl}
+            />
+          )}
           <Field>
             <FieldLabel>Status</FieldLabel>
             <Select
@@ -966,7 +1153,7 @@ export default function BugsPage() {
             <Button
               variant="primary"
               onClick={handleEditSave}
-              disabled={saving || !editTitle.trim()}
+              disabled={saving || !editTitle.trim() || (hasTestRuns && !editLinks.length)}
             >
               {saving ? "Saving…" : "Save Changes"}
             </Button>

@@ -15,13 +15,24 @@ import {
   listSuites,
   toggleTestRunShare,
   createBug,
+  addBugLink,
+  listBugs,
+  getJiraStatus,
+  getLinearStatus,
+  uploadBugAttachments,
   type TestRunDetail,
   type ExecutionItem,
   type TestCaseListItem,
   type SuiteNode,
+  type BugItem,
+  type IssueSearchResult,
 } from "@/lib/api";
 import { Button, StatusChip, Input, Select, Textarea } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
+import IssuePickerModal from "@/components/IssuePickerModal";
+import TrackingDestinationField, { type TrackingDestination } from "@/components/TrackingDestinationField";
+import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
+import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 
@@ -48,6 +59,70 @@ function runStatusToTone(status: string) {
     Planning: "warning",
   };
   return map[status] ?? "neutral";
+}
+
+/* ───── Existing bug picker (for "link this failure to an already-existing Tesbo bug") ───── */
+function ExistingBugPickerModal({
+  projectId,
+  open,
+  onClose,
+  onSelect,
+}: {
+  projectId: string;
+  open: boolean;
+  onClose: () => void;
+  onSelect: (bug: BugItem) => void;
+}) {
+  const [bugs, setBugs] = useState<BugItem[]>([]);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setSearch("");
+    setLoading(true);
+    listBugs(projectId)
+      .then(setBugs)
+      .finally(() => setLoading(false));
+  }, [open, projectId]);
+
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return bugs;
+    return bugs.filter((bug) => bug.title.toLowerCase().includes(term));
+  }, [bugs, search]);
+
+  if (!open) return null;
+
+  return (
+    <Modal open={open} onClose={onClose} title="Link an existing bug" className="max-w-[520px]">
+      <div className="space-y-3">
+        <Input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search bugs by title…" />
+        <div className="max-h-[320px] overflow-y-auto rounded-[var(--radius-control)] border border-[var(--border)]">
+          {loading ? (
+            <p className="p-3 text-[13px] text-[var(--muted)]">Loading…</p>
+          ) : filtered.length === 0 ? (
+            <p className="p-3 text-[13px] text-[var(--muted)]">No bugs found.</p>
+          ) : (
+            filtered.map((bug) => (
+              <button
+                key={bug.id}
+                type="button"
+                onClick={() => onSelect(bug)}
+                className="flex w-full flex-col items-start gap-0.5 border-b border-[var(--border)] px-3 py-2 text-left last:border-b-0 hover:bg-[var(--surface-secondary)]"
+              >
+                <span className="text-[13px] font-medium text-[var(--foreground)]">{bug.title}</span>
+                <span className="text-[12px] text-[var(--muted)]">{bug.status}</span>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="flex justify-end">
+          <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 /* ───── Donut chart (pure SVG) ───── */
@@ -79,7 +154,7 @@ function DonutChart({
         const cumulative = data
           .slice(0, index)
           .reduce((sum, segment) => sum + segment.value / total, 0);
-        const dashArray = `${pct * circumference} ${circumference}`;
+        const dashArray = `${pct * circumference} ${circumference - pct * circumference}`;
         const dashOffset = circumference - cumulative * circumference;
         return (
           <circle
@@ -167,12 +242,27 @@ export default function TestRunDetailPage() {
   const [shareError, setShareError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  /* issue tracker connection status (gates the ticket-related dialog choices) */
+  const [jiraConnected, setJiraConnected] = useState(false);
+  const [linearConnected, setLinearConnected] = useState(false);
+
   /* bug report dialog state (triggered on "Failed") */
   const [showBugDialog, setShowBugDialog] = useState(false);
   const [bugExecution, setBugExecution] = useState<ExecutionItem | null>(null);
   const [bugTitle, setBugTitle] = useState("");
   const [bugDesc, setBugDesc] = useState("");
+  const [bugAlreadyLogged, setBugAlreadyLogged] = useState(false);
+  const [bugExistingChoice, setBugExistingChoice] = useState<"JIRA" | "LINEAR" | "TESBO">("TESBO");
+  const [bugDestination, setBugDestination] = useState<TrackingDestination>("TESBO");
+  const [bugSelfSystem, setBugSelfSystem] = useState<SelfLoggedSystem>("OTHER");
   const [bugUrl, setBugUrl] = useState("");
+  const [bugIssue, setBugIssue] = useState<IssueSearchResult | null>(null);
+  const [showBugIssuePicker, setShowBugIssuePicker] = useState(false);
+  const [selectedExistingBug, setSelectedExistingBug] = useState<BugItem | null>(null);
+  const [showExistingBugPicker, setShowExistingBugPicker] = useState(false);
+  const [bugEvidenceMode, setBugEvidenceMode] = useState<EvidenceMode>("FILES");
+  const [bugStagedFiles, setBugStagedFiles] = useState<File[]>([]);
+  const [bugBetterbugsUrl, setBugBetterbugsUrl] = useState("");
   const [bugSaving, setBugSaving] = useState(false);
   const load = useCallback(() => {
     Promise.all([getTestRun(cycleId), listCycleExecutions(cycleId)])
@@ -185,6 +275,11 @@ export default function TestRunDetailPage() {
       .catch(() => router.replace(`/projects/${projectId}/cycles`))
       .finally(() => setLoading(false));
   }, [cycleId, projectId, router]);
+
+  useEffect(() => {
+    getJiraStatus(projectId).then((s) => setJiraConnected(s.connected)).catch(() => setJiraConnected(false));
+    getLinearStatus(projectId).then((s) => setLinearConnected(s.connected)).catch(() => setLinearConnected(false));
+  }, [projectId]);
 
 
   useEffect(() => {
@@ -290,7 +385,16 @@ export default function TestRunDetailPage() {
           setBugExecution({ ...exec, status: newStatus });
           setBugTitle(`Failed: ${exec.title || exec.snapshotTitle || "Untitled test case"}`);
           setBugDesc("");
+          setBugAlreadyLogged(false);
+          setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
+          setBugDestination("TESBO");
+          setBugSelfSystem(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "OTHER");
           setBugUrl("");
+          setBugIssue(null);
+          setSelectedExistingBug(null);
+          setBugEvidenceMode("FILES");
+          setBugStagedFiles([]);
+          setBugBetterbugsUrl("");
           setShowBugDialog(true);
         }
       }
@@ -299,29 +403,64 @@ export default function TestRunDetailPage() {
     }
   }
 
-  /* ───── Submit bug from dialog ───── */
+  /* ───── Reset & close the bug dialog ───── */
+  function resetBugDialog() {
+    setShowBugDialog(false);
+    setBugExecution(null);
+    setBugTitle("");
+    setBugDesc("");
+    setBugAlreadyLogged(false);
+    setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
+    setBugDestination("TESBO");
+    setBugSelfSystem(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "OTHER");
+    setBugUrl("");
+    setBugIssue(null);
+    setSelectedExistingBug(null);
+    setBugEvidenceMode("FILES");
+    setBugStagedFiles([]);
+    setBugBetterbugsUrl("");
+  }
+
+  /* ───── Submit bug from dialog (new bug, optionally noting where it's tracked elsewhere) ───── */
   async function handleBugSubmit() {
     if (!bugExecution || !bugTitle.trim()) return;
+    const selfLogged = (jiraConnected || linearConnected) && bugDestination === "SELF";
     setBugSaving(true);
     try {
-      await createBug(projectId, {
+      const bug = await createBug(projectId, {
         title: bugTitle.trim(),
         description: bugDesc.trim(),
-        externalUrl: bugUrl.trim(),
-        executionId: bugExecution.id,
-        testcaseId: bugExecution.testcaseId,
-        cycleId: cycleId,
+        externalUrl: selfLogged ? bugUrl.trim() : undefined,
+        integrationProvider: selfLogged && bugSelfSystem !== "OTHER" ? bugSelfSystem : null,
+        integrationIssueKey: null,
+        betterbugsUrl: bugEvidenceMode === "BETTERBUGS" ? bugBetterbugsUrl.trim() : undefined,
+        links: [{ testcaseId: bugExecution.testcaseId, cycleId, executionId: bugExecution.id }],
       });
-      setShowBugDialog(false);
-      setBugExecution(null);
+      if (bugEvidenceMode === "FILES" && bugStagedFiles.length) {
+        await uploadBugAttachments(projectId, bug.id, bugStagedFiles);
+      }
+      resetBugDialog();
+      load();
+    } finally {
+      setBugSaving(false);
+    }
+  }
+
+  /* ───── Link this failing execution to an already-existing Tesbo bug (backtrace) ───── */
+  async function handleLinkExistingBug() {
+    if (!bugExecution || !selectedExistingBug) return;
+    setBugSaving(true);
+    try {
+      await addBugLink(selectedExistingBug.id, { testcaseId: bugExecution.testcaseId, cycleId, executionId: bugExecution.id });
+      resetBugDialog();
+      load();
     } finally {
       setBugSaving(false);
     }
   }
 
   function handleBugSkip() {
-    setShowBugDialog(false);
-    setBugExecution(null);
+    resetBugDialog();
   }
 
   /* ───── Remove test case ───── */
@@ -860,65 +999,205 @@ export default function TestRunDetailPage() {
               </p>
             </div>
           </div>
-          <p className="text-sm text-[var(--muted)]">
-            Would you like to file a bug report? You can add details now or skip and report later from the Bugs section.
-          </p>
           <div>
             <label className="block text-sm font-medium text-[var(--muted)] mb-1">
-              Bug Title <span className="text-[var(--error)]">*</span>
+              Is this defect already logged?
             </label>
-            <Input
-              type="text"
-              value={bugTitle}
-              onChange={(e) => setBugTitle(e.target.value)}
-              placeholder="Brief summary of the bug…"
-            />
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant={!bugAlreadyLogged ? "primary" : "secondary"}
+                onClick={() => setBugAlreadyLogged(false)}
+              >
+                No, log a new one
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={bugAlreadyLogged ? "primary" : "secondary"}
+                onClick={() => setBugAlreadyLogged(true)}
+              >
+                Yes, link existing
+              </Button>
+            </div>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-[var(--muted)] mb-1">
-              Description
-            </label>
-            <Textarea
-              value={bugDesc}
-              onChange={(e) => setBugDesc(e.target.value)}
-              rows={3}
-              placeholder="Steps to reproduce, expected vs actual behavior…"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-[var(--muted)] mb-1">
-              Bug Link (external tracker URL)
-            </label>
-            <Input
-              type="url"
-              value={bugUrl}
-              onChange={(e) => setBugUrl(e.target.value)}
-              placeholder="https://jira.example.com/browse/BUG-123"
-            />
-          </div>
+
+          {bugAlreadyLogged && (
+            <div className="flex flex-wrap gap-2">
+              {jiraConnected && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={bugExistingChoice === "JIRA" ? "primary" : "secondary"}
+                  onClick={() => { setBugExistingChoice("JIRA"); setBugIssue(null); }}
+                >
+                  Jira ticket
+                </Button>
+              )}
+              {linearConnected && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={bugExistingChoice === "LINEAR" ? "primary" : "secondary"}
+                  onClick={() => { setBugExistingChoice("LINEAR"); setBugIssue(null); }}
+                >
+                  Linear ticket
+                </Button>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant={bugExistingChoice === "TESBO" ? "primary" : "secondary"}
+                onClick={() => setBugExistingChoice("TESBO")}
+              >
+                Existing Tesbo bug
+              </Button>
+            </div>
+          )}
+
+          {bugAlreadyLogged && bugExistingChoice === "TESBO" ? (
+            <div>
+              <label className="block text-sm font-medium text-[var(--muted)] mb-1">Bug</label>
+              {selectedExistingBug ? (
+                <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-[13px]">
+                  <span className="font-medium text-[var(--foreground)]">{selectedExistingBug.title}</span>
+                  <button type="button" onClick={() => setSelectedExistingBug(null)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <Button type="button" variant="secondary" size="sm" onClick={() => setShowExistingBugPicker(true)}>
+                  Choose an existing bug…
+                </Button>
+              )}
+            </div>
+          ) : (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-[var(--muted)] mb-1">
+                  Bug Title <span className="text-[var(--error)]">*</span>
+                </label>
+                <Input
+                  type="text"
+                  value={bugTitle}
+                  onChange={(e) => setBugTitle(e.target.value)}
+                  placeholder="Brief summary of the bug…"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[var(--muted)] mb-1">
+                  Description
+                </label>
+                <Textarea
+                  value={bugDesc}
+                  onChange={(e) => setBugDesc(e.target.value)}
+                  rows={3}
+                  placeholder="Steps to reproduce, expected vs actual behavior…"
+                />
+              </div>
+              <BugEvidenceField
+                mode={bugEvidenceMode}
+                onModeChange={setBugEvidenceMode}
+                stagedFiles={bugStagedFiles}
+                onStagedFilesChange={setBugStagedFiles}
+                betterbugsUrl={bugBetterbugsUrl}
+                onBetterbugsUrlChange={setBugBetterbugsUrl}
+              />
+              {bugAlreadyLogged ? (
+                <div>
+                  <label className="block text-sm font-medium text-[var(--muted)] mb-1">Ticket</label>
+                  {bugIssue ? (
+                    <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-[13px]">
+                      <span className="font-medium text-[var(--foreground)]">{bugIssue.key} — {bugIssue.summary}</span>
+                      <button type="button" onClick={() => setBugIssue(null)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <Button type="button" variant="secondary" size="sm" onClick={() => setShowBugIssuePicker(true)}>
+                      Search {bugExistingChoice === "JIRA" ? "Jira" : "Linear"} tickets…
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                (jiraConnected || linearConnected) && (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-[var(--muted)] mb-1">
+                        Where should this be tracked?
+                      </label>
+                      <TrackingDestinationField destination={bugDestination} onChange={setBugDestination} />
+                    </div>
+                    {bugDestination === "SELF" && (
+                      <SelfLoggedTrackerField
+                        jiraConnected={jiraConnected}
+                        linearConnected={linearConnected}
+                        system={bugSelfSystem}
+                        onSystemChange={setBugSelfSystem}
+                        url={bugUrl}
+                        onUrlChange={setBugUrl}
+                      />
+                    )}
+                  </>
+                )
+              )}
+            </>
+          )}
+
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="secondary" onClick={handleBugSkip}>
               Skip
             </Button>
-            <Button
-              variant="destructive"
-              onClick={handleBugSubmit}
-              disabled={bugSaving || !bugTitle.trim()}
-            >
-              {bugSaving ? (
-                "Filing…"
-              ) : (
-                <>
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
-                  </svg>
-                  File Bug
-                </>
-              )}
-            </Button>
+            {bugAlreadyLogged && bugExistingChoice === "TESBO" ? (
+              <Button
+                variant="destructive"
+                onClick={handleLinkExistingBug}
+                disabled={bugSaving || !selectedExistingBug}
+              >
+                {bugSaving ? "Linking…" : "Link Bug"}
+              </Button>
+            ) : (
+              <Button
+                variant="destructive"
+                onClick={handleBugSubmit}
+                disabled={bugSaving || !bugTitle.trim()}
+              >
+                {bugSaving ? (
+                  "Filing…"
+                ) : (
+                  <>
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                    File Bug
+                  </>
+                )}
+              </Button>
+            )}
           </div>
         </div>
       </Modal>
+
+      <IssuePickerModal
+        projectId={projectId}
+        open={showBugIssuePicker}
+        onClose={() => setShowBugIssuePicker(false)}
+        onSelect={(issue) => {
+          setBugIssue(issue);
+          setShowBugIssuePicker(false);
+        }}
+      />
+
+      <ExistingBugPickerModal
+        projectId={projectId}
+        open={showExistingBugPicker}
+        onClose={() => setShowExistingBugPicker(false)}
+        onSelect={(bug) => {
+          setSelectedExistingBug(bug);
+          setShowExistingBugPicker(false);
+        }}
+      />
 
       {/* ───── Share Modal ───── */}
       <Modal
