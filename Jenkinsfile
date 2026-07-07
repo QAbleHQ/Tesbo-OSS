@@ -1,9 +1,13 @@
 pipeline {
     agent any
 
+    tools {
+        sonarScanner 'SonarScanner'
+    }
+
     options {
         disableConcurrentBuilds()
-        timeout(time: 30, unit: 'MINUTES')
+        timeout(time: 45, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
@@ -12,69 +16,108 @@ pipeline {
     }
 
     environment {
-        REMOTE_HOST    = 'tesbo-prod-deploy'
-        REMOTE_APP_DIR = '/opt/tesbo-test-manager/Tesbo-Test-Manager'
-        SSH_CONFIG     = '/var/lib/jenkins/.ssh/config_tesbo_prod'
+        REMOTE_HOST        = 'tesbo-prod-deploy'
+        REMOTE_APP_DIR     = '/opt/tesbo-test-manager/Tesbo-Test-Manager'
+        SSH_CONFIG         = '/var/lib/jenkins/.ssh/config_tesbo_prod'
+        SONAR_PROJECT_KEY  = 'tesbo-test-manager'
+        SONAR_PROJECT_NAME = 'Tesbo Test Manager'
+        SONAR_SOURCES      = 'Tesbo-Backend-Nest/src,Tesbo-Frontend'
+        SONAR_EXCLUSIONS   = '**/node_modules/**,**/.next/**,**/dist/**,**/coverage/**,**/*.spec.ts,**/*.test.ts,**/migrations/**'
+        TESBO_ENV_FILE_ID  = 'tesbo-test-manager-env'
     }
 
     stages {
-        stage('Deploy master branch') {
-            when {
-                anyOf {
-                    branch 'master'
-                    expression { env.GIT_BRANCH == 'origin/master' }
-                    expression { env.BRANCH_NAME == 'master' }
-                }
-            }
+        stage('Checkout') {
             steps {
-                echo 'Deploying Tesbo master over dedicated SSH config...'
                 checkout scm
-                sh '''
-                    set -e
-                    test -f "${SSH_CONFIG}"
-
-                    tar \
-                      --exclude=.git \
-                      --exclude=node_modules \
-                      --exclude=.next \
-                      --exclude=.env \
-                      --exclude=docker-compose.yml \
-                      --exclude=infra/docker/postgres/pg_hba.conf \
-                      --exclude=Jenkinsfile \
-                      -czf - . | \
-                    ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "cd '${REMOTE_APP_DIR}' && tar -xzf -"
-
-                    ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "
-                      set -e
-                      cd '${REMOTE_APP_DIR}'
-                      docker compose up --build -d --wait --wait-timeout 300
-                      docker compose ps
-                      curl -fsS http://127.0.0.1:1011/health
-                      curl -fsS -o /dev/null http://127.0.0.1:1010/
-                    "
-                '''
             }
         }
 
-        stage('Skip non-master branch') {
-            when {
-                not {
-                    anyOf {
-                        branch 'master'
-                        expression { env.GIT_BRANCH == 'origin/master' }
-                        expression { env.BRANCH_NAME == 'master' }
+        stage('Parallel CI') {
+            parallel {
+                stage('SonarQube Scan') {
+                    steps {
+                        configFileProvider([configFile(fileId: "${TESBO_ENV_FILE_ID}", variable: 'TESBO_ENV')]) {
+                            sh '''
+                                set -e
+                                set -a
+                                . "${TESBO_ENV}"
+                                set +a
+
+                                test -n "${SONAR_HOST_URL}" || { echo "SONAR_HOST_URL missing in managed file"; exit 1; }
+                                test -n "${SONAR_TOKEN}" || { echo "SONAR_TOKEN missing in managed file"; exit 1; }
+
+                                sonar-scanner \
+                                  -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+                                  -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
+                                  -Dsonar.sources="${SONAR_SOURCES}" \
+                                  -Dsonar.sourceEncoding=UTF-8 \
+                                  -Dsonar.exclusions="${SONAR_EXCLUSIONS}" \
+                                  -Dsonar.host.url="${SONAR_HOST_URL}" \
+                                  -Dsonar.token="${SONAR_TOKEN}"
+                            '''
+                        }
                     }
                 }
-            }
-            steps {
-                echo 'Skipping deploy - this job only deploys the master branch.'
+
+                stage('Deploy master branch') {
+                    when {
+                        anyOf {
+                            branch 'master'
+                            expression { env.GIT_BRANCH == 'origin/master' }
+                            expression { env.BRANCH_NAME == 'master' }
+                        }
+                    }
+                    steps {
+                        echo 'Deploying Tesbo master over dedicated SSH config...'
+                        sh '''
+                            set -e
+                            test -f "${SSH_CONFIG}"
+
+                            tar \
+                              --exclude=.git \
+                              --exclude=node_modules \
+                              --exclude=.next \
+                              --exclude=.env \
+                              --exclude=docker-compose.yml \
+                              --exclude=infra/docker/postgres/pg_hba.conf \
+                              --exclude=Jenkinsfile \
+                              -czf - . | \
+                            ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "cd '${REMOTE_APP_DIR}' && tar -xzf -"
+
+                            ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "
+                              set -e
+                              cd '${REMOTE_APP_DIR}'
+                              docker compose up --build -d --wait --wait-timeout 300
+                              docker compose ps
+                              curl -fsS http://127.0.0.1:1011/health
+                              curl -fsS -o /dev/null http://127.0.0.1:1010/
+                            "
+                        '''
+                    }
+                }
+
+                stage('Skip non-master branch') {
+                    when {
+                        not {
+                            anyOf {
+                                branch 'master'
+                                expression { env.GIT_BRANCH == 'origin/master' }
+                                expression { env.BRANCH_NAME == 'master' }
+                            }
+                        }
+                    }
+                    steps {
+                        echo 'Non-master branch: deploy skipped. SonarQube scan ran in parallel.'
+                    }
+                }
             }
         }
     }
 
     post {
         success {
-            echo 'Master deploy completed successfully.'
+            echo 'Pipeline completed successfully.'
         }
         failure {
             sh '''
