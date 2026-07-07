@@ -7,17 +7,38 @@ import React from "react";
 import {
   authMe,
   getJiraStatus,
+  getLinearStatus,
   createZyraTask,
   listJiraTickets,
+  listLinearTickets,
   listLinkedJiraKeys,
   syncJiraTickets,
-  type JiraTicket,
+  syncLinearTickets,
   type JiraConnection,
+  type LinearConnection,
 } from "@/lib/api";
 import { Button, Input, StatusChip } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
 const PAGE_SIZE = 25;
+
+type TicketProvider = "jira" | "linear";
+
+interface Requirement {
+  id: string;
+  key: string;
+  summary: string;
+  description: string;
+  issueType: string;
+  status: string;
+  priority: string;
+  assignee: string;
+  reporter: string;
+  labels: string;
+  url: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
 
 function jiraStatusTone(status: string): "neutral" | "success" | "warning" | "info" {
   const s = status.toLowerCase();
@@ -106,8 +127,10 @@ export default function RequirementsPage() {
   const projectId = params.id as string;
 
   const [loading, setLoading] = useState(true);
+  const [provider, setProvider] = useState<TicketProvider>("jira");
   const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
-  const [tickets, setTickets] = useState<JiraTicket[]>([]);
+  const [linearStatus, setLinearStatus] = useState<LinearConnection | null>(null);
+  const [tickets, setTickets] = useState<Requirement[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
@@ -119,16 +142,32 @@ export default function RequirementsPage() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [generatingKey, setGeneratingKey] = useState<string | null>(null);
 
+  const connectionStatus = provider === "jira" ? jiraStatus : linearStatus;
+
   const loadTickets = useCallback(
-    async (pageNum: number, query: string) => {
+    async (activeProvider: TicketProvider, pageNum: number, query: string) => {
       try {
-        const data = await listJiraTickets(projectId, {
-          limit: PAGE_SIZE,
-          offset: pageNum * PAGE_SIZE,
-          search: query || undefined,
-        });
-        setTickets(data.list);
-        setTotal(data.total);
+        if (activeProvider === "jira") {
+          const data = await listJiraTickets(projectId, { limit: PAGE_SIZE, offset: pageNum * PAGE_SIZE, search: query || undefined });
+          setTickets(
+            data.list.map((t) => ({
+              id: t.id, key: t.jiraIssueKey, summary: t.summary, description: t.description,
+              issueType: t.issueType, status: t.status, priority: t.priority, assignee: t.assignee,
+              reporter: t.reporter, labels: t.labels, url: t.jiraUrl, createdAt: t.jiraCreatedAt, updatedAt: t.jiraUpdatedAt,
+            }))
+          );
+          setTotal(data.total);
+        } else {
+          const data = await listLinearTickets(projectId, { limit: PAGE_SIZE, offset: pageNum * PAGE_SIZE, search: query || undefined });
+          setTickets(
+            data.list.map((t) => ({
+              id: t.id, key: t.linearIssueKey, summary: t.summary, description: t.description,
+              issueType: t.issueType, status: t.status, priority: t.priority, assignee: t.assignee,
+              reporter: t.reporter, labels: t.labels, url: t.linearUrl, createdAt: t.linearCreatedAt, updatedAt: t.linearUpdatedAt,
+            }))
+          );
+          setTotal(data.total);
+        }
       } catch {
         /* ignore */
       }
@@ -143,9 +182,13 @@ export default function RequirementsPage() {
         router.replace("/login");
         return;
       }
-      const status = await getJiraStatus(projectId).catch(() => ({ connected: false }) as JiraConnection);
-      setJiraStatus(status);
-      await loadTickets(0, "");
+      const [jStatus, lStatus] = await Promise.all([
+        getJiraStatus(projectId).catch(() => ({ connected: false }) as JiraConnection),
+        getLinearStatus(projectId).catch(() => ({ connected: false }) as LinearConnection),
+      ]);
+      setJiraStatus(jStatus);
+      setLinearStatus(lStatus);
+      await loadTickets("jira", 0, "");
       const jiraKeysRes = await listLinkedJiraKeys(projectId).catch(() => ({ keys: [], counts: {} }));
       setLinkedJiraKeys(new Set(jiraKeysRes.keys));
       setJiraKeyCounts(jiraKeysRes.counts ?? {});
@@ -154,44 +197,53 @@ export default function RequirementsPage() {
   }, [projectId, loadTickets, router]);
 
   useEffect(() => {
-    if (!loading) loadTickets(page, search);
-  }, [page, search, loadTickets, loading]);
+    if (!loading) loadTickets(provider, page, search);
+  }, [provider, page, search, loadTickets, loading]);
+
+  function handleProviderChange(next: TicketProvider) {
+    setProvider(next);
+    setPage(0);
+    setSearch("");
+    setSearchInput("");
+    setExpandedId(null);
+  }
 
   async function handleSync() {
     setSyncing(true);
     setSyncError(null);
     try {
-      await syncJiraTickets(projectId);
-      await loadTickets(page, search);
+      if (provider === "jira") await syncJiraTickets(projectId);
+      else await syncLinearTickets(projectId);
+      await loadTickets(provider, page, search);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : "Failed to sync Jira tickets.");
+      setSyncError(err instanceof Error ? err.message : `Failed to sync ${provider === "jira" ? "Jira" : "Linear"} tickets.`);
     } finally {
       setSyncing(false);
     }
   }
 
-  async function handleGenerateFromTicket(ticket: JiraTicket, mode: "generate" | "regenerate") {
-    setGeneratingKey(ticket.jiraIssueKey);
+  async function handleGenerateFromTicket(ticket: Requirement, mode: "generate" | "regenerate") {
+    setGeneratingKey(ticket.key);
     setSyncError(null);
     try {
-      const existingCount = jiraKeyCounts[ticket.jiraIssueKey] || 0;
-      const story = `${ticket.jiraIssueKey}: ${ticket.summary}`;
+      const existingCount = jiraKeyCounts[ticket.key] || 0;
+      const story = `${ticket.key}: ${ticket.summary}`;
       const context = [
         ticket.description,
         ticket.status ? `Status: ${ticket.status}` : "",
         ticket.priority ? `Priority: ${ticket.priority}` : "",
         mode === "regenerate"
-          ? `Regenerate testcase coverage for ${ticket.jiraIssueKey}. Update existing linked testcases where coverage overlaps, and add new testcases for new or changed Jira requirements. Mark regenerated cases clearly with Zyra/Jira tags. Existing linked testcase count: ${existingCount}.`
-          : `Generate testcase coverage for ${ticket.jiraIssueKey}. Mark generated cases clearly with Zyra/Jira tags.`
+          ? `Regenerate testcase coverage for ${ticket.key}. Update existing linked testcases where coverage overlaps, and add new testcases for new or changed Jira requirements. Mark regenerated cases clearly with Zyra/Jira tags. Existing linked testcase count: ${existingCount}.`
+          : `Generate testcase coverage for ${ticket.key}. Mark generated cases clearly with Zyra/Jira tags.`
       ].filter(Boolean).join("\n\n");
       await createZyraTask(projectId, {
         story,
         context,
-        jiraIssueKeys: [ticket.jiraIssueKey],
+        jiraIssueKeys: [ticket.key],
       });
       router.push(`/projects/${projectId}/agents/tasks`);
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : "Failed to create Zyra task from Jira ticket.");
+      setSyncError(err instanceof Error ? err.message : "Failed to create Zyra task from ticket.");
     } finally {
       setGeneratingKey(null);
     }
@@ -216,7 +268,24 @@ export default function RequirementsPage() {
         />
       }
     >
-      {jiraStatus?.connected && (
+      <div className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1">
+        {(["jira", "linear"] as TicketProvider[]).map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => handleProviderChange(p)}
+            className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+              provider === p
+                ? "bg-[var(--brand-primary)] text-white"
+                : "text-[var(--muted)] hover:bg-[var(--surface-secondary)]"
+            }`}
+          >
+            {p === "jira" ? "Jira" : "Linear"}
+          </button>
+        ))}
+      </div>
+
+      {connectionStatus?.connected && (
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button
@@ -227,10 +296,10 @@ export default function RequirementsPage() {
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
               </svg>
-              {syncing ? "Syncing…" : "Sync Jira"}
+              {syncing ? "Syncing…" : `Sync ${provider === "jira" ? "Jira" : "Linear"}`}
             </button>
             <Link
-              href={`/projects/${projectId}/settings/integrations/jira`}
+              href={`/projects/${projectId}/settings/integrations/${provider}`}
               className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
             >
               Manage
@@ -257,7 +326,7 @@ export default function RequirementsPage() {
         </div>
       )}
 
-      {!jiraStatus?.connected && tickets.length === 0 && (
+      {!connectionStatus?.connected && tickets.length === 0 && (
         <div className="rounded-xl border border-dashed border-[var(--border)] p-12 text-center">
           <div className="mx-auto w-14 h-14 rounded-full bg-[var(--brand-soft)] flex items-center justify-center">
             <svg viewBox="0 0 24 24" className="w-7 h-7 text-[var(--brand-primary)]" fill="currentColor">
@@ -265,10 +334,10 @@ export default function RequirementsPage() {
             </svg>
           </div>
           <h2 className="mt-4 text-lg font-semibold text-[var(--foreground)]">
-            Connect Jira to Get Started
+            Connect {provider === "jira" ? "Jira" : "Linear"} to Get Started
           </h2>
           <p className="mt-2 text-sm text-[var(--muted)] max-w-sm mx-auto">
-            Link your Jira account to automatically import tickets as requirements and use them as context for generating test cases.
+            Link your {provider === "jira" ? "Jira" : "Linear"} account to automatically import tickets as requirements and use them as context for generating test cases.
           </p>
           <Link
             href={`/projects/${projectId}/settings?tab=integrations`}
@@ -280,11 +349,11 @@ export default function RequirementsPage() {
         </div>
       )}
 
-      {jiraStatus?.connected && tickets.length === 0 && !search && (
+      {connectionStatus?.connected && tickets.length === 0 && !search && (
         <div className="rounded-xl border border-dashed border-[var(--border)] p-12 text-center">
           <h2 className="text-lg font-semibold text-[var(--foreground)]">No Requirements Synced Yet</h2>
           <p className="mt-2 text-sm text-[var(--muted)] max-w-sm mx-auto">
-            Click &quot;Sync Jira&quot; to pull tickets from your connected projects.
+            Click &quot;Sync {provider === "jira" ? "Jira" : "Linear"}&quot; to pull tickets from your connected projects.
           </p>
           <div className="mt-4 flex items-center justify-center gap-3">
             <button
@@ -292,13 +361,13 @@ export default function RequirementsPage() {
               disabled={syncing}
               className="rounded-lg bg-[var(--brand-primary)] text-white px-5 py-2 text-sm font-medium hover:bg-[var(--brand-hover)] disabled:opacity-50 transition-colors"
             >
-              {syncing ? "Syncing…" : "Sync Jira Tickets"}
+              {syncing ? "Syncing…" : `Sync ${provider === "jira" ? "Jira" : "Linear"} Tickets`}
             </button>
             <Link
-              href={`/projects/${projectId}/settings/integrations/jira`}
+              href={`/projects/${projectId}/settings/integrations/${provider}`}
               className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
             >
-              Manage Jira Projects
+              Manage {provider === "jira" ? "Jira Projects" : "Linear Teams"}
             </Link>
           </div>
         </div>
@@ -364,13 +433,13 @@ export default function RequirementsPage() {
                     >
                       <td className="px-4 py-2.5">
                         <a
-                          href={ticket.jiraUrl}
+                          href={ticket.url}
                           target="_blank"
                           rel="noopener noreferrer"
                           onClick={(e) => e.stopPropagation()}
                           className="font-mono text-xs text-[var(--brand-primary)] hover:underline"
                         >
-                          {ticket.jiraIssueKey}
+                          {ticket.key}
                         </a>
                       </td>
                       <td className="px-4 py-2.5 text-[var(--foreground)] truncate max-w-xs">
@@ -390,18 +459,18 @@ export default function RequirementsPage() {
                       </td>
                       <td className="px-4 py-2.5 text-right">
                         <div className="inline-flex items-center gap-2">
-                          {linkedJiraKeys.has(ticket.jiraIssueKey) && (
+                          {linkedJiraKeys.has(ticket.key) && (
                             <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
                               <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                               </svg>
-                              {jiraKeyCounts[ticket.jiraIssueKey] || 0} saved
+                              {jiraKeyCounts[ticket.key] || 0} saved
                             </span>
                           )}
-                          {linkedJiraKeys.has(ticket.jiraIssueKey) ? (
+                          {linkedJiraKeys.has(ticket.key) ? (
                             <>
                               <Link
-                                href={`/projects/${projectId}/testcases?jiraIssueKey=${encodeURIComponent(ticket.jiraIssueKey)}`}
+                                href={`/projects/${projectId}/testcases?jiraIssueKey=${encodeURIComponent(ticket.key)}`}
                                 onClick={(e) => e.stopPropagation()}
                                 className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-xs font-semibold text-[var(--foreground)] shadow-sm hover:bg-[var(--surface-secondary)]"
                               >
@@ -413,10 +482,10 @@ export default function RequirementsPage() {
                                   e.stopPropagation();
                                   void handleGenerateFromTicket(ticket, "regenerate");
                                 }}
-                                disabled={generatingKey === ticket.jiraIssueKey}
+                                disabled={generatingKey === ticket.key}
                                 className="rounded-lg bg-[var(--brand-primary)] px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[var(--brand-hover)] disabled:opacity-50"
                               >
-                                {generatingKey === ticket.jiraIssueKey ? "Assigning..." : "Regenerate with Zyra"}
+                                {generatingKey === ticket.key ? "Assigning..." : "Regenerate with Zyra"}
                               </button>
                             </>
                           ) : (
@@ -426,10 +495,10 @@ export default function RequirementsPage() {
                                 e.stopPropagation();
                                 void handleGenerateFromTicket(ticket, "generate");
                               }}
-                              disabled={generatingKey === ticket.jiraIssueKey}
+                              disabled={generatingKey === ticket.key}
                               className="rounded-lg bg-[var(--brand-primary)] px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[var(--brand-hover)] disabled:opacity-50"
                             >
-                              {generatingKey === ticket.jiraIssueKey ? "Assigning..." : "Assign to Zyra"}
+                              {generatingKey === ticket.key ? "Assigning..." : "Assign to Zyra"}
                             </button>
                           )}
                         </div>
@@ -456,20 +525,20 @@ export default function RequirementsPage() {
                               {ticket.labels && (
                                 <span>Labels: <span className="text-[var(--muted)]">{ticket.labels}</span></span>
                               )}
-                              {ticket.jiraCreatedAt && (
-                                <span>Created: <span className="text-[var(--muted)]">{new Date(ticket.jiraCreatedAt).toLocaleDateString()}</span></span>
+                              {ticket.createdAt && (
+                                <span>Created: <span className="text-[var(--muted)]">{new Date(ticket.createdAt).toLocaleDateString()}</span></span>
                               )}
-                              {ticket.jiraUpdatedAt && (
-                                <span>Updated: <span className="text-[var(--muted)]">{new Date(ticket.jiraUpdatedAt).toLocaleDateString()}</span></span>
+                              {ticket.updatedAt && (
+                                <span>Updated: <span className="text-[var(--muted)]">{new Date(ticket.updatedAt).toLocaleDateString()}</span></span>
                               )}
                             </div>
                             <a
-                              href={ticket.jiraUrl}
+                              href={ticket.url}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="inline-block text-xs text-[var(--brand-primary)] hover:underline"
                             >
-                              Open in Jira →
+                              Open in {provider === "jira" ? "Jira" : "Linear"} →
                             </a>
                           </div>
                         </td>

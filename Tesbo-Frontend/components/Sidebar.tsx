@@ -272,6 +272,7 @@ function SidebarContent() {
               <div className="space-y-0.5">
                 <NavLink href="/settings/members" label="Members" icon="users" active={isPathActive("/settings/members")} collapsed={isCollapsed} />
                 <NavLink href="/settings/integrations" label="Integrations" icon="plug" active={isPathActive("/settings/integrations")} collapsed={isCollapsed} />
+                <NavLink href="/settings/ai-providers" label="AI Providers" icon="sparkles" active={isPathActive("/settings/ai-providers")} collapsed={isCollapsed} />
               </div>
             </div>
 

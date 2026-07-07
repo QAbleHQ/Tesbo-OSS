@@ -9,12 +9,13 @@ import {
   updateProject,
   deleteProject as deleteProjectRequest,
   getJiraStatus,
-  disconnectJira,
+  getLinearStatus,
   listProjectMembers,
   listWorkspaceMembers,
   addProjectMember,
   removeProjectMember,
   type JiraConnection,
+  type LinearConnection,
   type TestEnvironmentSetting,
 } from "@/lib/api";
 import ThemeToggle from "@/components/ThemeToggle";
@@ -85,7 +86,7 @@ export default function ProjectSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
-  const [jiraLoading, setJiraLoading] = useState(false);
+  const [linearStatus, setLinearStatus] = useState<LinearConnection | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
@@ -196,6 +197,7 @@ export default function ProjectSettingsPage() {
         setTestRunEnvironments(normalizeTestRunEnvironments(parsedSettings.testRunEnvironments));
       }).catch(() => router.replace("/projects"));
       getJiraStatus(projectId).then(setJiraStatus).catch(() => {});
+      getLinearStatus(projectId).then(setLinearStatus).catch(() => {});
       loadMembers().catch(() => {});
     });
   }, [loadMembers, projectId, router]);
@@ -251,19 +253,6 @@ export default function ProjectSettingsPage() {
       setMessage(text);
     } finally {
       setSaving(false);
-    }
-  }
-
-  async function handleDisconnectJira() {
-    if (!confirm("Disconnect Jira? This will remove all synced tickets.")) return;
-    setJiraLoading(true);
-    try {
-      await disconnectJira(projectId);
-      setJiraStatus({ connected: false });
-    } catch {
-      setMessage("Failed to disconnect Jira.");
-    } finally {
-      setJiraLoading(false);
     }
   }
 
@@ -756,7 +745,8 @@ export default function ProjectSettingsPage() {
           <div>
             <h2 className="text-base font-semibold text-[var(--foreground)]">App Integrations</h2>
             <p className="mt-1 text-sm text-[var(--muted)]">
-              Connect external tools and services to enrich your project.
+              Jira and Linear connect once for the whole workspace (Workspace Settings → Integrations).
+              Here you pick which remote project/team feeds <em>this</em> project and sync tickets.
             </p>
           </div>
 
@@ -772,58 +762,81 @@ export default function ProjectSettingsPage() {
               <p className="text-xs text-[var(--muted)] mt-0.5">
                 Import tickets from Jira to use as knowledge base for test generation.
               </p>
-              {jiraStatus?.connected && (
+              {jiraStatus?.connected ? (
                 <div className="mt-2 space-y-1">
                   <div className="flex items-center gap-2">
                     <span className="inline-block w-2 h-2 rounded-full bg-[var(--success)]" />
-                    <span className="text-xs text-[var(--success)] font-medium">Connected</span>
-                    <span className="text-xs text-[var(--muted-soft)]">·</span>
-                    <a
-                      href={jiraStatus.siteUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-[var(--brand-primary)] hover:underline truncate"
-                    >
-                      {jiraStatus.siteUrl}
-                    </a>
+                    <span className="text-xs text-[var(--success)] font-medium">Workspace connected</span>
                   </div>
-                  {jiraStatus.connectedProjects && jiraStatus.connectedProjects.length > 0 && (
+                  {jiraStatus.connectedProjects && jiraStatus.connectedProjects.length > 0 ? (
                     <p className="text-xs text-[var(--muted)]">
-                      {jiraStatus.connectedProjects.length} project{jiraStatus.connectedProjects.length > 1 ? "s" : ""} linked:{" "}
+                      {jiraStatus.connectedProjects.length} Jira project{jiraStatus.connectedProjects.length > 1 ? "s" : ""} linked to this project:{" "}
                       {jiraStatus.connectedProjects.map((p) => p.jiraProjectKey).join(", ")}
                     </p>
+                  ) : (
+                    <p className="text-xs text-[var(--muted-soft)]">No Jira project linked to this project yet.</p>
                   )}
                 </div>
+              ) : (
+                <p className="mt-2 text-xs text-[var(--muted-soft)]">Not connected for this workspace yet.</p>
               )}
             </div>
-            <div className="shrink-0 flex flex-col gap-2">
-              {jiraStatus?.connected ? (
-                <>
-                  <Link
-                    href={`/projects/${projectId}/settings/integrations/jira`}
-                    className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)] transition-colors"
-                  >
-                    Manage
-                  </Link>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleDisconnectJira}
-                    disabled={jiraLoading}
-                    className="border-[var(--error)]/50 text-[var(--error)] hover:bg-[color-mix(in_oklab,var(--error)_8%,white)]"
-                  >
-                    Disconnect
-                  </Button>
-                </>
+            <div className="shrink-0">
+              <Link
+                href={jiraStatus?.connected ? `/projects/${projectId}/settings/integrations/jira` : "/settings/integrations/jira"}
+                className={
+                  jiraStatus?.connected
+                    ? "rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)] transition-colors"
+                    : "inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+                }
+              >
+                {jiraStatus?.connected ? "Manage mapping" : "Connect in Workspace Settings"}
+              </Link>
+            </div>
+          </div>
+
+          {/* Linear Card */}
+          <div className="rounded-lg border border-[var(--border)] p-4 flex items-start gap-4">
+            <div className="shrink-0 w-10 h-10 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center">
+              <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
+                <path d="M2.28 15.36 8.64 21.7c-3.14-.55-5.79-3.2-6.36-6.34Zm-.27-2.06L14.7 22c.34.02.68.02 1.02 0L1.99 8.98c-.02.34-.02.68.02 1.02Zm.5-3.14L15.84 21.5a10.9 10.9 0 0 0 1.87-1.1L3.6 6.29a10.9 10.9 0 0 0-1.09 1.87Zm1.9-2.98L18.82 18.5a11 11 0 0 0 1.28-1.55L5.06 5.9a11 11 0 0 0-1.55 1.28Zm2.71-2.2L21.02 15.87A11 11 0 0 0 22 1.98L8.12 1a11 11 0 0 0-1.9 1.98Z" />
+              </svg>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-[var(--foreground)]">Linear</h3>
+              <p className="text-xs text-[var(--muted)] mt-0.5">
+                Import issues from Linear to use as knowledge base for test generation.
+              </p>
+              {linearStatus?.connected ? (
+                <div className="mt-2 space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block w-2 h-2 rounded-full bg-[var(--success)]" />
+                    <span className="text-xs text-[var(--success)] font-medium">Workspace connected</span>
+                  </div>
+                  {linearStatus.connectedProjects && linearStatus.connectedProjects.length > 0 ? (
+                    <p className="text-xs text-[var(--muted)]">
+                      {linearStatus.connectedProjects.length} Linear team{linearStatus.connectedProjects.length > 1 ? "s" : ""} linked to this project:{" "}
+                      {linearStatus.connectedProjects.map((p) => p.linearTeamKey).join(", ")}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-[var(--muted-soft)]">No Linear team linked to this project yet.</p>
+                  )}
+                </div>
               ) : (
-                <Link
-                  href={`/projects/${projectId}/settings/integrations/jira`}
-                  className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
-                >
-                  Configure
-                </Link>
+                <p className="mt-2 text-xs text-[var(--muted-soft)]">Not connected for this workspace yet.</p>
               )}
+            </div>
+            <div className="shrink-0">
+              <Link
+                href={linearStatus?.connected ? `/projects/${projectId}/settings/integrations/linear` : "/settings/integrations/linear"}
+                className={
+                  linearStatus?.connected
+                    ? "rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)] transition-colors"
+                    : "inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+                }
+              >
+                {linearStatus?.connected ? "Manage mapping" : "Connect in Workspace Settings"}
+              </Link>
             </div>
           </div>
 

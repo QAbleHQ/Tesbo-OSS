@@ -2,40 +2,44 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState, Suspense } from "react";
-import { jiraCallback } from "@/lib/api";
+import { integrationCallback, type IntegrationProvider } from "@/lib/api";
+
+const PROVIDER_LABELS: Record<IntegrationProvider, string> = { jira: "Jira", linear: "Linear" };
 
 function CallbackHandler() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
   const [errorMsg, setErrorMsg] = useState("");
+  const [providerLabel, setProviderLabel] = useState("the app");
 
   useEffect(() => {
     const code = searchParams.get("code");
-    const state = searchParams.get("state"); // projectId
+    const state = searchParams.get("state"); // provider ("jira" | "linear")
     const error = searchParams.get("error");
+    const provider = state === "jira" || state === "linear" ? state : null;
+    if (provider) setProviderLabel(PROVIDER_LABELS[provider]);
 
     if (error) {
       setStatus("error");
-      setErrorMsg("Jira authorization was denied or failed.");
+      setErrorMsg("Authorization was denied or failed.");
       return;
     }
 
-    if (!code || !state) {
+    if (!code || !provider) {
       setStatus("error");
-      setErrorMsg("Missing authorization code or project context.");
+      setErrorMsg("Missing authorization code or integration context.");
       return;
     }
 
-    jiraCallback(state, code)
+    integrationCallback(provider, code)
       .then(() => {
         setStatus("success");
-        // Redirect to Jira project selection page
-        router.replace(`/projects/${state}/settings/integrations/jira`);
+        router.replace(`/settings/integrations/${provider}`);
       })
       .catch((err) => {
         setStatus("error");
-        setErrorMsg(err?.message || "Failed to complete Jira authentication.");
+        setErrorMsg(err?.message || "Failed to complete authentication.");
       });
   }, [searchParams, router]);
 
@@ -46,7 +50,7 @@ function CallbackHandler() {
           <>
             <div className="mx-auto w-10 h-10 rounded-full border-2 border-[var(--brand-primary)] border-t-transparent animate-spin" />
             <h1 className="mt-4 text-lg font-semibold text-[var(--foreground)]">
-              Connecting to Jira…
+              Connecting to {providerLabel}…
             </h1>
             <p className="mt-2 text-sm text-[var(--muted)]">
               Please wait while we complete the authentication.
@@ -61,10 +65,10 @@ function CallbackHandler() {
               </svg>
             </div>
             <h1 className="mt-4 text-lg font-semibold text-[var(--foreground)]">
-              Jira Connected!
+              {providerLabel} Connected!
             </h1>
             <p className="mt-2 text-sm text-[var(--muted)]">
-              Redirecting to project selection…
+              Redirecting…
             </p>
           </>
         )}
@@ -92,7 +96,7 @@ function CallbackHandler() {
   );
 }
 
-export default function JiraCallbackPage() {
+export default function IntegrationsCallbackPage() {
   return (
     <Suspense
       fallback={

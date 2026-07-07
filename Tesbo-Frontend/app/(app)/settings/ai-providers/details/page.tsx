@@ -48,7 +48,7 @@ export default function AiProviderDetailsPage() {
         <PageHeader
           title="AI provider details"
           subtitle="Review workspace provider configuration, custom API endpoints, authentication headers, and model names."
-          actions={<Link href="/settings/integrations" className="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">Back to integrations</Link>}
+          actions={<Link href="/settings/ai-providers" className="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">Back to AI providers</Link>}
         />
       }
     >
