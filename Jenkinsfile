@@ -20,6 +20,7 @@ pipeline {
         SONAR_SOURCES      = 'Tesbo-Backend-Nest/src,Tesbo-Frontend'
         SONAR_EXCLUSIONS   = '**/node_modules/**,**/.next/**,**/dist/**,**/coverage/**,**/*.spec.ts,**/*.test.ts,**/migrations/**'
         TESBO_ENV_FILE_ID  = 'tesbo-test-manager-env'
+        SONAR_SCANNER_VERSION = '5.0.1.3006'
     }
 
     stages {
@@ -33,28 +34,37 @@ pipeline {
             parallel {
                 stage('SonarQube Scan') {
                     steps {
-                        script {
-                            env.SCANNER_HOME = tool 'SonarScanner'
-                        }
-                        configFileProvider([configFile(fileId: "${TESBO_ENV_FILE_ID}", variable: 'TESBO_ENV')]) {
-                            sh '''
-                                set -e
-                                set -a
-                                . "${TESBO_ENV}"
-                                set +a
+                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                            configFileProvider([configFile(fileId: "${TESBO_ENV_FILE_ID}", variable: 'TESBO_ENV')]) {
+                                sh '''
+                                    set -e
+                                    set -a
+                                    . "${TESBO_ENV}"
+                                    set +a
 
-                                test -n "${SONAR_HOST_URL}" || { echo "SONAR_HOST_URL missing in managed file"; exit 1; }
-                                test -n "${SONAR_TOKEN}" || { echo "SONAR_TOKEN missing in managed file"; exit 1; }
+                                    test -n "${SONAR_HOST_URL}" || { echo "SONAR_HOST_URL missing in managed file"; exit 1; }
+                                    test -n "${SONAR_TOKEN}" || { echo "SONAR_TOKEN missing in managed file"; exit 1; }
 
-                                "${SCANNER_HOME}/bin/sonar-scanner" \
-                                  -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
-                                  -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
-                                  -Dsonar.sources="${SONAR_SOURCES}" \
-                                  -Dsonar.sourceEncoding=UTF-8 \
-                                  -Dsonar.exclusions="${SONAR_EXCLUSIONS}" \
-                                  -Dsonar.host.url="${SONAR_HOST_URL}" \
-                                  -Dsonar.token="${SONAR_TOKEN}"
-                            '''
+                                    SCANNER_DIR="${WORKSPACE}/.sonar-scanner"
+                                    if [ ! -x "${SCANNER_DIR}/bin/sonar-scanner" ]; then
+                                      echo "Downloading sonar-scanner ${SONAR_SCANNER_VERSION}..."
+                                      curl -fsSL -o /tmp/sonar-scanner.zip \
+                                        "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux.zip"
+                                      rm -rf /tmp/sonar-scanner-unpack "${SCANNER_DIR}"
+                                      unzip -q /tmp/sonar-scanner.zip -d /tmp/sonar-scanner-unpack
+                                      mv /tmp/sonar-scanner-unpack/sonar-scanner-* "${SCANNER_DIR}"
+                                    fi
+
+                                    "${SCANNER_DIR}/bin/sonar-scanner" \
+                                      -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+                                      -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
+                                      -Dsonar.sources="${SONAR_SOURCES}" \
+                                      -Dsonar.sourceEncoding=UTF-8 \
+                                      -Dsonar.exclusions="${SONAR_EXCLUSIONS}" \
+                                      -Dsonar.host.url="${SONAR_HOST_URL}" \
+                                      -Dsonar.token="${SONAR_TOKEN}"
+                                '''
+                            }
                         }
                     }
                 }
