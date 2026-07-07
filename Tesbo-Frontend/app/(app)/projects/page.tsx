@@ -15,7 +15,6 @@ import {
   FieldLabel,
   Input,
   Modal,
-  StatusChip,
   Textarea,
 } from "@/components/ui";
 import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
@@ -325,22 +324,13 @@ function ProjectsPageContent() {
                     data={p.passRateTrend.length >= 2 ? p.passRateTrend : placeholderPassTrend(p.id)}
                     currentPassRate={p.currentPassRate}
                   />
-                  <div className="relative flex items-start justify-between gap-3">
-                    <h2 className="line-clamp-2 text-xl font-semibold leading-7 text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">
+                  <div className="relative min-w-0">
+                    <h2 className="line-clamp-2 break-words text-xl font-semibold leading-7 text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">
                       {p.name}
                     </h2>
-                    <div className="flex shrink-0 items-center gap-2">
-                      <span className="rounded bg-[var(--surface-secondary)] px-2 py-0.5 font-mono text-xs text-[var(--muted)]">
-                        {p.key}
-                      </span>
-                      <StatusChip
-                        tone={p.status === "active" ? "brand" : p.status === "configured" ? "neutral" : "warning"}
-                        live={p.status === "active"}
-                        className="px-2.5 py-0.5 text-xs"
-                      >
-                        {p.status === "active" ? "Active" : p.status === "configured" ? "Configured" : "Setup required"}
-                      </StatusChip>
-                    </div>
+                    <span className="mt-1.5 inline-block rounded bg-[var(--surface-secondary)] px-2 py-0.5 font-mono text-xs text-[var(--muted)]">
+                      {p.key}
+                    </span>
                   </div>
                   {p.description ? (
                     <p className="mt-2 line-clamp-2 text-sm text-[var(--muted)]">{p.description}</p>

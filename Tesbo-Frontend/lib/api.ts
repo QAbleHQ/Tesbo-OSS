@@ -1777,7 +1777,66 @@ export async function getRepositorySummary(projectId: string): Promise<Repositor
   return api<RepositorySummary>(`/api/projects/${projectId}/reports/repository-summary`);
 }
 
-// ── Jira Integration ──
+// ── App integrations (Jira, Linear) ──
+// Connecting/configuring an app is workspace-scoped (one connection per organization per
+// provider) — see settings/integrations. Mapping which remote project/team feeds a given Tesbo
+// project, syncing, and browsing tickets stays project-scoped, mirrored per provider below.
+
+export type IntegrationProvider = "jira" | "linear";
+
+export interface IntegrationOAuthConfig {
+  configured: boolean;
+  source: "workspace" | "environment" | "none";
+  clientId: string;
+  redirectUri: string;
+  hasClientSecret: boolean;
+  updatedAt: string | null;
+}
+
+export async function getIntegrationAuthUrl(provider: IntegrationProvider): Promise<{ url: string }> {
+  return api<{ url: string }>(`/api/workspace/integrations/${provider}/auth-url`);
+}
+
+export async function getIntegrationConfig(provider: IntegrationProvider): Promise<IntegrationOAuthConfig> {
+  return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`);
+}
+
+export async function updateIntegrationConfig(
+  provider: IntegrationProvider,
+  data: { clientId: string; clientSecret: string; redirectUri: string }
+): Promise<IntegrationOAuthConfig> {
+  return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`, {
+    method: "PATCH",
+    body: data,
+  });
+}
+
+export async function integrationCallback(
+  provider: IntegrationProvider,
+  code: string
+): Promise<{ connectionId: string; siteUrl: string }> {
+  return api(`/api/workspace/integrations/${provider}/callback`, { method: "POST", body: { code } });
+}
+
+export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {
+  await api(`/api/workspace/integrations/${provider}/disconnect`, { method: "DELETE" });
+}
+
+export interface IntegrationConnectionStatus {
+  connected: boolean;
+  id?: string;
+  siteUrl?: string;
+  tokenExpiresAt?: string;
+  connectedBy?: string;
+  createdAt?: string;
+  connectedProjects?: { projectId: string; projectName: string; projectKey: string }[];
+}
+
+export async function getIntegrationStatus(provider: IntegrationProvider): Promise<IntegrationConnectionStatus> {
+  return api<IntegrationConnectionStatus>(`/api/workspace/integrations/${provider}/status`);
+}
+
+// ── Jira (project-scoped mapping/sync/tickets) ──
 
 export interface JiraConnection {
   connected: boolean;
@@ -1788,15 +1847,6 @@ export interface JiraConnection {
   connectedBy?: string;
   createdAt?: string;
   connectedProjects?: JiraConnectedProject[];
-}
-
-export interface JiraOAuthConfig {
-  configured: boolean;
-  source: "project" | "environment" | "none";
-  clientId: string;
-  redirectUri: string;
-  hasClientSecret: boolean;
-  updatedAt: string | null;
 }
 
 export interface JiraConnectedProject {
@@ -1833,34 +1883,8 @@ export interface JiraTicket {
   syncedAt: string | null;
 }
 
-export async function getJiraAuthUrl(projectId: string): Promise<{ url: string }> {
-  return api<{ url: string }>(`/api/projects/${projectId}/jira/auth-url`);
-}
-
-export async function getJiraConfig(projectId: string): Promise<JiraOAuthConfig> {
-  return api<JiraOAuthConfig>(`/api/projects/${projectId}/jira/config`);
-}
-
-export async function updateJiraConfig(
-  projectId: string,
-  data: { clientId: string; clientSecret: string; redirectUri: string }
-): Promise<JiraOAuthConfig> {
-  return api<JiraOAuthConfig>(`/api/projects/${projectId}/jira/config`, {
-    method: "PATCH",
-    body: data,
-  });
-}
-
-export async function jiraCallback(projectId: string, code: string): Promise<{ connectionId: string; cloudId: string; siteUrl: string }> {
-  return api(`/api/projects/${projectId}/jira/callback`, { method: "POST", body: { code } });
-}
-
 export async function getJiraStatus(projectId: string): Promise<JiraConnection> {
   return api<JiraConnection>(`/api/projects/${projectId}/jira/status`);
-}
-
-export async function disconnectJira(projectId: string): Promise<void> {
-  await api(`/api/projects/${projectId}/jira/disconnect`, { method: "DELETE" });
 }
 
 export async function listJiraProjects(projectId: string): Promise<JiraProject[]> {
@@ -1901,6 +1925,91 @@ export async function listJiraTickets(
   const query = sp.toString();
   return api<{ list: JiraTicket[]; total: number }>(
     `/api/projects/${projectId}/jira/tickets${query ? `?${query}` : ""}`
+  );
+}
+
+// ── Linear (project-scoped mapping/sync/tickets) ──
+// Linear's unit of work is a "team" rather than a "project" — the shape below mirrors Jira's
+// so the two providers can share UI, but the field names stay Linear-accurate.
+
+export interface LinearConnection {
+  connected: boolean;
+  id?: string;
+  siteUrl?: string;
+  tokenExpiresAt?: string;
+  connectedBy?: string;
+  createdAt?: string;
+  connectedProjects?: LinearConnectedTeam[];
+}
+
+export interface LinearConnectedTeam {
+  id: string;
+  linearTeamId: string;
+  linearTeamKey: string;
+  linearTeamName: string;
+  createdAt: string;
+}
+
+export interface LinearTeam {
+  id: string;
+  key: string;
+  name: string;
+  style: string;
+  connected: boolean;
+}
+
+export interface LinearTicket {
+  id: string;
+  linearIssueId: string;
+  linearIssueKey: string;
+  summary: string;
+  description: string;
+  issueType: string;
+  status: string;
+  priority: string;
+  assignee: string;
+  reporter: string;
+  labels: string;
+  linearUrl: string;
+  linearCreatedAt: string | null;
+  linearUpdatedAt: string | null;
+  syncedAt: string | null;
+}
+
+export async function getLinearStatus(projectId: string): Promise<LinearConnection> {
+  return api<LinearConnection>(`/api/projects/${projectId}/linear/status`);
+}
+
+export async function listLinearTeams(projectId: string): Promise<LinearTeam[]> {
+  return api<LinearTeam[]>(`/api/projects/${projectId}/linear/teams`);
+}
+
+export async function connectLinearTeams(
+  projectId: string,
+  projects: { id: string; key: string; name: string }[]
+): Promise<void> {
+  await api(`/api/projects/${projectId}/linear/teams`, { method: "POST", body: { projects } });
+}
+
+export async function syncLinearTickets(projectId: string): Promise<{ synced: number }> {
+  return api<{ synced: number }>(`/api/projects/${projectId}/linear/sync`, { method: "POST" });
+}
+
+export async function addLinearComment(projectId: string, issueKey: string, comment: string): Promise<void> {
+  await api(`/api/projects/${projectId}/linear/comment`, { method: "POST", body: { issueKey, comment } });
+}
+
+export async function listLinearTickets(
+  projectId: string,
+  params?: { limit?: number; offset?: number; search?: string }
+): Promise<{ list: LinearTicket[]; total: number }> {
+  const sp = new URLSearchParams();
+  if (params?.limit != null) sp.set("limit", String(params.limit));
+  if (params?.offset != null) sp.set("offset", String(params.offset));
+  if (params?.search) sp.set("search", params.search);
+  const query = sp.toString();
+  return api<{ list: LinearTicket[]; total: number }>(
+    `/api/projects/${projectId}/linear/tickets${query ? `?${query}` : ""}`
   );
 }
 

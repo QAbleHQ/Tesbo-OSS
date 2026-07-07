@@ -885,34 +885,45 @@ export class LegacyController {
     return {};
   }
 
-  @Get("/api/projects/:projectId/jira/auth-url")
-  jiraAuth(@Param("projectId") projectId: string) {
-    return this.legacy.jiraAuthUrl(projectId);
+  // ── Workspace-scoped app integrations (Jira, Linear) ──
+  // Connecting/configuring an app is workspace-wide; see the project-scoped mapping/sync/ticket
+  // routes further below for picking which remote project/team feeds a given Tesbo project.
+
+  @Get("/api/workspace/integrations/:provider/auth-url")
+  integrationAuthUrl(@Req() req: AuthenticatedRequest, @Param("provider") provider: string) {
+    return this.legacy.integrationAuthUrl(req.userId, provider);
   }
 
-  @Get("/api/projects/:projectId/jira/config")
-  jiraConfig(@Param("projectId") projectId: string) {
-    return this.legacy.jiraConfigStatus(projectId);
+  @Get("/api/workspace/integrations/:provider/config")
+  integrationConfig(@Req() req: AuthenticatedRequest, @Param("provider") provider: string) {
+    return this.legacy.integrationConfigStatus(req.userId, provider);
   }
 
-  @Patch("/api/projects/:projectId/jira/config")
-  updateJiraConfig(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateJiraConfig(projectId, req.userId, body);
+  @Patch("/api/workspace/integrations/:provider/config")
+  updateIntegrationConfig(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateIntegrationConfig(req.userId, provider, body);
   }
 
-  @Post("/api/projects/:projectId/jira/callback")
-  jiraCallback(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.jiraCallback(projectId, req.userId, body);
+  @Post("/api/workspace/integrations/:provider/callback")
+  integrationCallback(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
+    return this.legacy.integrationCallback(req.userId, provider, body);
   }
+
+  @Delete("/api/workspace/integrations/:provider/disconnect")
+  integrationDisconnect(@Req() req: AuthenticatedRequest, @Param("provider") provider: string) {
+    return this.legacy.integrationDisconnect(req.userId, provider);
+  }
+
+  @Get("/api/workspace/integrations/:provider/status")
+  integrationStatus(@Req() req: AuthenticatedRequest, @Param("provider") provider: string) {
+    return this.legacy.integrationStatus(req.userId, provider);
+  }
+
+  // ── Project-scoped Jira mapping/sync/tickets ──
 
   @Get("/api/projects/:projectId/jira/status")
   jiraStatus(@Param("projectId") projectId: string) {
     return this.legacy.jiraStatus(projectId);
-  }
-
-  @Delete("/api/projects/:projectId/jira/disconnect")
-  jiraDisconnect(@Param("projectId") projectId: string) {
-    return this.legacy.jiraDisconnect(projectId);
   }
 
   @Get("/api/projects/:projectId/jira/projects")
@@ -938,6 +949,38 @@ export class LegacyController {
   @Post("/api/projects/:projectId/jira/comment")
   jiraComment(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.jiraComment(projectId, body);
+  }
+
+  // ── Project-scoped Linear mapping/sync/tickets ──
+
+  @Get("/api/projects/:projectId/linear/status")
+  linearStatus(@Param("projectId") projectId: string) {
+    return this.legacy.linearStatus(projectId);
+  }
+
+  @Get("/api/projects/:projectId/linear/teams")
+  linearTeams(@Param("projectId") projectId: string) {
+    return this.legacy.linearTeams(projectId);
+  }
+
+  @Post("/api/projects/:projectId/linear/teams")
+  connectLinearTeams(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.connectLinearTeams(projectId, body);
+  }
+
+  @Post("/api/projects/:projectId/linear/sync")
+  syncLinear(@Param("projectId") projectId: string) {
+    return this.legacy.syncLinear(projectId);
+  }
+
+  @Get("/api/projects/:projectId/linear/tickets")
+  linearTickets(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.linearTickets(projectId, query);
+  }
+
+  @Post("/api/projects/:projectId/linear/comment")
+  linearComment(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.linearComment(projectId, body);
   }
 
   @Get("/api/projects/:projectId/activity")

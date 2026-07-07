@@ -8,7 +8,7 @@ import { AppConfigService } from "../config/app-config.service";
 // Object storage abstraction: local disk by default (self-hosted, no setup required), or any
 // S3-compatible service (AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces, ...) when
 // STORAGE_DRIVER=s3. Keys are always prefixed per-feature and per-project (e.g.
-// "knowledge-base/<projectId>/<uuid>.<ext>") so objects are organized and can be scoped by
+// "knowledge-base/<organizationId>/<projectId>/<uuid>.<ext>") so objects are organized and can be scoped by
 // bucket policy / lifecycle rules per project regardless of backend.
 @Injectable()
 export class StorageService {
@@ -39,10 +39,21 @@ export class StorageService {
     return path.resolve(this.config.uploadDir, key);
   }
 
+  // Applies the optional S3_BUCKET_FOLDER prefix (e.g. "local", "staging") so multiple
+  // environments can share one bucket without colliding.
+  private prefixedKey(key: string): string {
+    return this.config.s3BucketFolder ? `${this.config.s3BucketFolder}/${key}` : key;
+  }
+
   async put(key: string, body: Buffer, contentType: string): Promise<void> {
     if (this.s3) {
       await this.s3.send(
-        new PutObjectCommand({ Bucket: this.config.s3Bucket, Key: key, Body: body, ContentType: contentType })
+        new PutObjectCommand({
+          Bucket: this.config.s3Bucket,
+          Key: this.prefixedKey(key),
+          Body: body,
+          ContentType: contentType
+        })
       );
       return;
     }
@@ -69,7 +80,7 @@ export class StorageService {
         this.s3,
         new GetObjectCommand({
           Bucket: this.config.s3Bucket,
-          Key: key,
+          Key: this.prefixedKey(key),
           ResponseContentDisposition: disposition,
           ResponseContentType: options.contentType
         }),
@@ -82,7 +93,7 @@ export class StorageService {
 
   async delete(key: string): Promise<void> {
     if (this.s3) {
-      await this.s3.send(new DeleteObjectCommand({ Bucket: this.config.s3Bucket, Key: key }));
+      await this.s3.send(new DeleteObjectCommand({ Bucket: this.config.s3Bucket, Key: this.prefixedKey(key) }));
       return;
     }
     await fs.promises.unlink(this.localPath(key)).catch(() => undefined);

@@ -172,6 +172,18 @@ function jiraDescriptionToText(value: unknown): string {
   return parts.filter(Boolean).join(node.type === "paragraph" ? "\n" : " ");
 }
 
+type IntegrationProvider = "jira" | "linear";
+
+function assertIntegrationProvider(provider: string): IntegrationProvider {
+  if (provider !== "jira" && provider !== "linear") {
+    throw new BadRequestException({ error: "Unsupported integration provider." });
+  }
+  return provider;
+}
+
+const JIRA_OAUTH_SCOPE = "read:jira-work read:jira-user write:jira-work offline_access";
+const LINEAR_OAUTH_SCOPE = "read,write,issues:create,comments:create";
+
 function normalizeProviderModel(provider: string, model?: string | null): string {
   const value = String(model || "").trim();
   if (provider === "anthropic") {
@@ -996,27 +1008,11 @@ export class LegacyService {
   }
 
   private async seedKnowledgeBaseDefaults(client: PoolClient, organizationId: string, projectId: string) {
-    const root = await client.query<{ id: string }>(
+    await client.query(
       `INSERT INTO knowledge_folders (organization_id, project_id, parent_folder_id, name, is_root)
-       VALUES ($1, $2, NULL, 'Knowledge base', true) RETURNING id`,
+       VALUES ($1, $2, NULL, 'Knowledge base', true)`,
       [organizationId, projectId]
     );
-    const rootId = root.rows[0].id;
-    const defaults: Array<[string, string]> = [
-      ["Requirements", "Product requirements, user stories, acceptance notes, and business rules."],
-      ["Test Data", "Sample users, input data, CSVs, data conditions, and boundary values."],
-      ["Screenshots & Evidence", "Screenshots, recordings, execution proof, and UI references."],
-      ["API Notes", "Endpoints, payloads, Postman exports, and API behavior notes."],
-      ["Release Notes", "Build notes, release changes, and release risk notes."],
-      ["AI Memory", "AI-generated project understanding and memory files."]
-    ];
-    for (const [name, description] of defaults) {
-      await client.query(
-        `INSERT INTO knowledge_folders (organization_id, project_id, parent_folder_id, name, description)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [organizationId, projectId, rootId, name, description]
-      );
-    }
   }
 
   async getProject(id: string) {
@@ -2451,7 +2447,7 @@ export class LegacyService {
     for (const file of files) {
       const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase();
       const originalFileName = await this.kbUniqueFileName(folderId, file.originalname);
-      const storageKey = `knowledge-base/${projectId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
+      const storageKey = `knowledge-base/${project.organization_id}/${projectId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
       await this.storage.put(storageKey, file.buffer, file.mimetype);
       const res = await this.db.query(
         `INSERT INTO knowledge_files (organization_id, project_id, folder_id, file_name, original_file_name, mime_type, file_extension, file_size, storage_key, uploaded_by)
@@ -2786,18 +2782,30 @@ export class LegacyService {
     return [];
   }
 
-  private envJiraConfig() {
-    const clientId = process.env.JIRA_CLIENT_ID || "";
-    const clientSecret = process.env.JIRA_CLIENT_SECRET || "";
-    const redirectUri = process.env.JIRA_REDIRECT_URI || "";
+  // ── App integrations (Jira, Linear) ──
+  // The OAuth connection (and its client id/secret) is workspace-scoped — one per organization
+  // per provider — so a customer connects Jira/Linear once instead of re-authenticating every
+  // project. Which remote project/team feeds which Tesbo project is a separate per-project mapping
+  // on top of that shared connection (jira_project_mappings / linear_project_mappings).
+
+  private envIntegrationConfig(provider: IntegrationProvider) {
+    const prefix = provider.toUpperCase();
+    const clientId = process.env[`${prefix}_CLIENT_ID`] || "";
+    const clientSecret = process.env[`${prefix}_CLIENT_SECRET`] || "";
+    const redirectUri = process.env[`${prefix}_REDIRECT_URI`] || "";
     if (!clientId || !clientSecret || !redirectUri) return null;
     return { clientId, clientSecret, redirectUri };
   }
 
-  private async jiraConfig(projectId: string) {
+  private defaultIntegrationRedirectUri() {
+    const frontend = process.env.FRONTEND_URL || process.env.APP_URL || "http://localhost:1010";
+    return `${frontend.replace(/\/$/, "")}/integrations/callback`;
+  }
+
+  private async integrationOAuthConfig(organizationId: string, provider: IntegrationProvider) {
     const saved = await this.db.query(
-      "SELECT client_id, client_secret, redirect_uri FROM jira_oauth_config WHERE project_id = $1",
-      [projectId]
+      "SELECT client_id, client_secret, redirect_uri FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
+      [organizationId, provider]
     ).catch(() => ({ rows: [] as Body[] }));
     const row = saved.rows[0];
     if (row?.client_id && row?.client_secret && row?.redirect_uri) {
@@ -2807,22 +2815,31 @@ export class LegacyService {
         redirectUri: String(row.redirect_uri)
       };
     }
-    const env = this.envJiraConfig();
+    const env = this.envIntegrationConfig(provider);
     if (env) return env;
-    throw new BadRequestException({ error: "Jira OAuth is not configured. Add Client ID, Client Secret, and Redirect URI in Jira Integration settings." });
+    throw new BadRequestException({ error: `${provider} OAuth is not configured. Add Client ID, Client Secret, and Redirect URI in Workspace Settings → Integrations.` });
   }
 
-  async jiraConfigStatus(projectId: string) {
+  private async projectOrganizationId(projectId: string): Promise<string> {
+    const res = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
+    const organizationId = res.rows[0]?.organization_id;
+    if (!organizationId) throw new NotFoundException({ error: "Project not found." });
+    return organizationId;
+  }
+
+  async integrationConfigStatus(userId: string | null | undefined, provider: string) {
+    const p = assertIntegrationProvider(provider);
+    const workspace = await this.workspace(userId);
     const saved = await this.db.query(
-      "SELECT client_id, redirect_uri, updated_at FROM jira_oauth_config WHERE project_id = $1",
-      [projectId]
+      "SELECT client_id, redirect_uri, updated_at FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
+      [workspace.id, p]
     ).catch(() => ({ rows: [] as Body[] }));
     const row = saved.rows[0];
-    const env = this.envJiraConfig();
+    const env = this.envIntegrationConfig(p);
     if (row) {
       return {
         configured: true,
-        source: "project",
+        source: "workspace",
         clientId: row.client_id,
         redirectUri: row.redirect_uri,
         hasClientSecret: true,
@@ -2833,18 +2850,22 @@ export class LegacyService {
       configured: !!env,
       source: env ? "environment" : "none",
       clientId: env?.clientId ?? "",
-      redirectUri: env?.redirectUri ?? this.defaultJiraRedirectUri(),
+      redirectUri: env?.redirectUri ?? this.defaultIntegrationRedirectUri(),
       hasClientSecret: !!env?.clientSecret,
       updatedAt: null
     };
   }
 
-  async updateJiraConfig(projectId: string, userId: string | null | undefined, body: Body) {
+  async updateIntegrationConfig(userId: string | null | undefined, provider: string, body: Body) {
+    const p = assertIntegrationProvider(provider);
+    const workspace = await this.workspace(userId);
     const clientId = String(body.clientId || "").trim();
     const requestedClientSecret = String(body.clientSecret || "").trim();
     const redirectUri = String(body.redirectUri || "").trim();
-    const existing = await this.db.query("SELECT client_secret FROM jira_oauth_config WHERE project_id = $1", [projectId])
-      .catch(() => ({ rows: [] as Body[] }));
+    const existing = await this.db.query(
+      "SELECT client_secret FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
+      [workspace.id, p]
+    ).catch(() => ({ rows: [] as Body[] }));
     const clientSecret = requestedClientSecret || String(existing.rows[0]?.client_secret || "");
     if (!clientId || !clientSecret || !redirectUri) {
       throw new BadRequestException({ error: "Client ID, Client Secret, and Redirect URI are required." });
@@ -2853,80 +2874,160 @@ export class LegacyService {
       throw new BadRequestException({ error: "Redirect URI must start with http:// or https://." });
     }
     await this.db.query(
-      `INSERT INTO jira_oauth_config (project_id, client_id, client_secret, redirect_uri, updated_by)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (project_id) DO UPDATE SET
+      `INSERT INTO integration_oauth_configs (organization_id, provider, client_id, client_secret, redirect_uri, updated_by)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (organization_id, provider) DO UPDATE SET
          client_id = EXCLUDED.client_id,
          client_secret = EXCLUDED.client_secret,
          redirect_uri = EXCLUDED.redirect_uri,
          updated_by = EXCLUDED.updated_by,
          updated_at = now()`,
-      [projectId, clientId, clientSecret, redirectUri, userId || null]
+      [workspace.id, p, clientId, clientSecret, redirectUri, userId || null]
     );
-    return this.jiraConfigStatus(projectId);
+    return this.integrationConfigStatus(userId, p);
   }
 
-  private defaultJiraRedirectUri() {
-    const frontend = process.env.FRONTEND_URL || process.env.APP_URL || "http://localhost:1010";
-    return `${frontend.replace(/\/$/, "")}/jira/callback`;
-  }
-
-  async jiraAuthUrl(projectId: string) {
-    const { clientId, redirectUri } = await this.jiraConfig(projectId);
+  async integrationAuthUrl(userId: string | null | undefined, provider: string) {
+    const p = assertIntegrationProvider(provider);
+    const workspace = await this.workspace(userId);
+    const { clientId, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
+    if (p === "jira") {
+      const params = new URLSearchParams({
+        audience: "api.atlassian.com",
+        client_id: clientId,
+        scope: JIRA_OAUTH_SCOPE,
+        redirect_uri: redirectUri,
+        state: p,
+        response_type: "code",
+        prompt: "consent"
+      });
+      return { url: `https://auth.atlassian.com/authorize?${params.toString()}` };
+    }
     const params = new URLSearchParams({
-      audience: "api.atlassian.com",
       client_id: clientId,
-      scope: "read:jira-work read:jira-user write:jira-work offline_access",
       redirect_uri: redirectUri,
-      state: projectId,
+      scope: LINEAR_OAUTH_SCOPE,
+      state: p,
       response_type: "code",
       prompt: "consent"
     });
-    return { url: `https://auth.atlassian.com/authorize?${params.toString()}` };
+    return { url: `https://linear.app/oauth/authorize?${params.toString()}` };
   }
 
-  async jiraCallback(projectId: string, userId: string | null | undefined, body: Body) {
+  async integrationCallback(userId: string | null | undefined, provider: string, body: Body) {
+    const p = assertIntegrationProvider(provider);
+    const workspace = await this.workspace(userId);
     const code = String(body.code || "");
-    if (!code) throw new BadRequestException({ error: "Jira authorization code is required." });
-    const { clientId, clientSecret, redirectUri } = await this.jiraConfig(projectId);
+    if (!code) throw new BadRequestException({ error: "Authorization code is required." });
+    const { clientId, clientSecret, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
 
-    const token = await this.jiraFetch<Body>("https://auth.atlassian.com/oauth/token", {
+    if (p === "jira") {
+      const token = await this.jiraFetch<Body>("https://auth.atlassian.com/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "authorization_code",
+          client_id: clientId,
+          client_secret: clientSecret,
+          code,
+          redirect_uri: redirectUri
+        })
+      });
+      const accessToken = String(token.access_token || "");
+      const refreshToken = String(token.refresh_token || "");
+      if (!accessToken || !refreshToken) throw new BadRequestException({ error: "Jira did not return OAuth tokens." });
+
+      const resources = await this.jiraFetch<Body[]>("https://api.atlassian.com/oauth/token/accessible-resources", {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      const resource = resources[0];
+      if (!resource?.id || !resource?.url) throw new BadRequestException({ error: "No accessible Jira site was found." });
+
+      const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
+      const res = await this.db.query(
+        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by)
+         VALUES ($1, 'jira', $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (organization_id, provider) DO UPDATE SET
+           external_id = EXCLUDED.external_id,
+           site_url = EXCLUDED.site_url,
+           access_token = EXCLUDED.access_token,
+           refresh_token = EXCLUDED.refresh_token,
+           token_expires_at = EXCLUDED.token_expires_at,
+           connected_by = EXCLUDED.connected_by,
+           updated_at = now()
+         RETURNING id, external_id, site_url`,
+        [workspace.id, String(resource.id), String(resource.url), accessToken, refreshToken, expiresAt, userId || null]
+      );
+      return { connectionId: res.rows[0].id, cloudId: res.rows[0].external_id, siteUrl: res.rows[0].site_url };
+    }
+
+    // Linear
+    const token = await this.jiraFetch<Body>("https://api.linear.app/oauth/token", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
         grant_type: "authorization_code",
         client_id: clientId,
         client_secret: clientSecret,
         code,
         redirect_uri: redirectUri
-      })
+      }).toString()
     });
     const accessToken = String(token.access_token || "");
-    const refreshToken = String(token.refresh_token || "");
-    if (!accessToken || !refreshToken) throw new BadRequestException({ error: "Jira did not return OAuth tokens." });
-
-    const resources = await this.jiraFetch<Body[]>("https://api.atlassian.com/oauth/token/accessible-resources", {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    });
-    const resource = resources[0];
-    if (!resource?.id || !resource?.url) throw new BadRequestException({ error: "No accessible Jira site was found." });
-
-    const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
+    if (!accessToken) throw new BadRequestException({ error: "Linear did not return an OAuth token." });
+    const viewer = await this.linearGraphQL<Body>(accessToken, "query { organization { id urlKey } }");
+    const org = viewer?.organization;
+    if (!org?.urlKey) throw new BadRequestException({ error: "Could not read the connected Linear workspace." });
+    const expiresAt = new Date(Date.now() + Number(token.expires_in || 315360000) * 1000).toISOString();
     const res = await this.db.query(
-      `INSERT INTO jira_connections (project_id, cloud_id, site_url, access_token, refresh_token, token_expires_at, connected_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (project_id) DO UPDATE SET
-         cloud_id = EXCLUDED.cloud_id,
+      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by)
+       VALUES ($1, 'linear', $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (organization_id, provider) DO UPDATE SET
+         external_id = EXCLUDED.external_id,
          site_url = EXCLUDED.site_url,
          access_token = EXCLUDED.access_token,
          refresh_token = EXCLUDED.refresh_token,
          token_expires_at = EXCLUDED.token_expires_at,
          connected_by = EXCLUDED.connected_by,
          updated_at = now()
-       RETURNING id, cloud_id, site_url`,
-      [projectId, String(resource.id), String(resource.url), accessToken, refreshToken, expiresAt, userId || null]
+       RETURNING id, site_url`,
+      [workspace.id, String(org.id || ""), `https://linear.app/${org.urlKey}`, accessToken, String(token.refresh_token || ""), expiresAt, userId || null]
     );
-    return { connectionId: res.rows[0].id, cloudId: res.rows[0].cloud_id, siteUrl: res.rows[0].site_url };
+    return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url };
+  }
+
+  async integrationDisconnect(userId: string | null | undefined, provider: string) {
+    const p = assertIntegrationProvider(provider);
+    const workspace = await this.workspace(userId);
+    await this.db.query("DELETE FROM integration_connections WHERE organization_id = $1 AND provider = $2", [workspace.id, p]);
+    return { disconnected: true };
+  }
+
+  async integrationStatus(userId: string | null | undefined, provider: string) {
+    const p = assertIntegrationProvider(provider);
+    const workspace = await this.workspace(userId);
+    const connection = await this.getIntegrationConnection(workspace.id, p, false);
+    if (!connection) return { connected: false, connectedProjects: [] };
+    const mappingsTable = p === "jira" ? "jira_project_mappings" : "linear_project_mappings";
+    const connectionColumn = p === "jira" ? "jira_connection_id" : "integration_connection_id";
+    const projects = await this.db.query(
+      `SELECT m.project_id, p.name AS project_name, p.key AS project_key
+       FROM ${mappingsTable} m
+       JOIN projects p ON p.id = m.project_id
+       WHERE m.${connectionColumn} = $1 AND m.enabled = true
+       GROUP BY m.project_id, p.name, p.key
+       ORDER BY p.name`,
+      [connection.id]
+    );
+    return {
+      connected: true,
+      id: connection.id,
+      siteUrl: connection.site_url,
+      tokenExpiresAt: connection.token_expires_at,
+      connectedBy: connection.connected_by,
+      createdAt: connection.created_at,
+      connectedProjects: projects.rows.map(toCamel)
+    };
   }
 
   async jiraStatus(projectId: string) {
@@ -2949,11 +3050,6 @@ export class LegacyService {
       createdAt: connection.created_at,
       connectedProjects: projects.rows.map(toCamel)
     };
-  }
-
-  async jiraDisconnect(projectId: string) {
-    await this.db.query("DELETE FROM jira_connections WHERE project_id = $1", [projectId]);
-    return { disconnected: true };
   }
 
   async jiraProjects(projectId: string) {
@@ -2987,12 +3083,12 @@ export class LegacyService {
         name: String(project.name || project.key || "").trim()
       }))
       .filter((project) => project.id && project.key);
-    await this.db.query("DELETE FROM jira_project_mappings WHERE project_id = $1", [projectId]);
+    await this.db.query("DELETE FROM jira_project_mappings WHERE project_id = $1 AND jira_connection_id = $2", [projectId, connection.id]);
     for (const project of projects) {
       await this.db.query(
         `INSERT INTO jira_project_mappings (jira_connection_id, project_id, jira_project_id, jira_project_key, jira_project_name)
          VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (jira_connection_id, jira_project_id) DO UPDATE SET
+         ON CONFLICT (jira_connection_id, jira_project_id, project_id) DO UPDATE SET
            jira_project_key = EXCLUDED.jira_project_key,
            jira_project_name = EXCLUDED.jira_project_name,
            enabled = true`,
@@ -3162,12 +3258,20 @@ export class LegacyService {
   }
 
   private async getJiraConnection(projectId: string, refresh: boolean): Promise<Body | null> {
-    const res = await this.db.query("SELECT * FROM jira_connections WHERE project_id = $1", [projectId]);
+    const organizationId = await this.projectOrganizationId(projectId);
+    const connection = await this.getIntegrationConnection(organizationId, "jira", refresh);
+    if (!connection) return null;
+    return { ...connection, cloud_id: connection.external_id };
+  }
+
+  private async getIntegrationConnection(organizationId: string, provider: IntegrationProvider, refresh: boolean): Promise<Body | null> {
+    const res = await this.db.query("SELECT * FROM integration_connections WHERE organization_id = $1 AND provider = $2", [organizationId, provider]);
     const connection = res.rows[0] as Body | undefined;
     if (!connection) return null;
     if (!refresh || new Date(connection.token_expires_at).getTime() > Date.now() + 60_000) return connection;
+    if (provider === "linear" || !connection.refresh_token) return connection; // Linear OAuth tokens are long-lived; no refresh flow needed today.
 
-    const { clientId, clientSecret } = await this.jiraConfig(projectId);
+    const { clientId, clientSecret } = await this.integrationOAuthConfig(organizationId, provider);
     const token = await this.jiraFetch<Body>("https://auth.atlassian.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3182,7 +3286,7 @@ export class LegacyService {
     const refreshToken = String(token.refresh_token || connection.refresh_token);
     const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
     await this.db.query(
-      "UPDATE jira_connections SET access_token = $2, refresh_token = $3, token_expires_at = $4, updated_at = now() WHERE id = $1",
+      "UPDATE integration_connections SET access_token = $2, refresh_token = $3, token_expires_at = $4, updated_at = now() WHERE id = $1",
       [connection.id, accessToken, refreshToken, expiresAt]
     );
     return { ...connection, access_token: accessToken, refresh_token: refreshToken, token_expires_at: expiresAt };
@@ -3195,6 +3299,248 @@ export class LegacyService {
       throw new BadRequestException({ error: `Jira request failed (${res.status}).`, detail: text.slice(0, 500) });
     }
     return (await res.json()) as T;
+  }
+
+  private async linearGraphQL<T = unknown>(accessToken: string, query: string, variables?: Body): Promise<T> {
+    const res = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ query, variables })
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new BadRequestException({ error: `Linear request failed (${res.status}).`, detail: text.slice(0, 500) });
+    }
+    const data = (await res.json()) as Body;
+    if (data.errors) throw new BadRequestException({ error: "Linear request failed.", detail: JSON.stringify(data.errors).slice(0, 500) });
+    return data.data as T;
+  }
+
+  // ── Linear-specific mirrors of the Jira project-scoped methods above ──
+  // Linear's API is GraphQL (not REST like Jira's) and its unit of work is a "team" rather than a
+  // "project" — kept as separate methods/tables rather than forcing a shared shape onto both APIs.
+
+  async linearStatus(projectId: string) {
+    const organizationId = await this.projectOrganizationId(projectId);
+    const connection = await this.getIntegrationConnection(organizationId, "linear", false);
+    if (!connection) return { connected: false, connectedProjects: [] };
+    const teams = await this.db.query(
+      `SELECT id, linear_team_id, linear_team_key, linear_team_name, created_at
+       FROM linear_project_mappings
+       WHERE project_id = $1 AND enabled = true
+       ORDER BY linear_team_key`,
+      [projectId]
+    );
+    return {
+      connected: true,
+      id: connection.id,
+      siteUrl: connection.site_url,
+      tokenExpiresAt: connection.token_expires_at,
+      connectedBy: connection.connected_by,
+      createdAt: connection.created_at,
+      connectedProjects: teams.rows.map(toCamel)
+    };
+  }
+
+  async linearTeams(projectId: string) {
+    const organizationId = await this.projectOrganizationId(projectId);
+    const connection = await this.getIntegrationConnection(organizationId, "linear", true);
+    if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
+    const data = await this.linearGraphQL<Body>(connection.access_token, "query { teams { nodes { id key name } } }");
+    const connected = await this.db.query(
+      "SELECT linear_team_id FROM linear_project_mappings WHERE project_id = $1 AND enabled = true",
+      [projectId]
+    );
+    const connectedIds = new Set(connected.rows.map((row) => String(row.linear_team_id)));
+    return normalizeJsonArray(data?.teams?.nodes).map((team) => ({
+      id: String(team.id || ""),
+      key: String(team.key || ""),
+      name: String(team.name || team.key || "Linear team"),
+      style: "",
+      connected: connectedIds.has(String(team.id || ""))
+    })).filter((team) => team.id && team.key);
+  }
+
+  async connectLinearTeams(projectId: string, body: Body) {
+    const organizationId = await this.projectOrganizationId(projectId);
+    const connection = await this.getIntegrationConnection(organizationId, "linear", false);
+    if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
+    const teams = normalizeJsonArray(body.projects)
+      .map((team) => ({
+        id: String(team.id || "").trim(),
+        key: String(team.key || "").trim(),
+        name: String(team.name || team.key || "").trim()
+      }))
+      .filter((team) => team.id && team.key);
+    await this.db.query("DELETE FROM linear_project_mappings WHERE project_id = $1 AND integration_connection_id = $2", [projectId, connection.id]);
+    for (const team of teams) {
+      await this.db.query(
+        `INSERT INTO linear_project_mappings (integration_connection_id, project_id, linear_team_id, linear_team_key, linear_team_name)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (integration_connection_id, linear_team_id, project_id) DO UPDATE SET
+           linear_team_key = EXCLUDED.linear_team_key,
+           linear_team_name = EXCLUDED.linear_team_name,
+           enabled = true`,
+        [connection.id, projectId, team.id, team.key, team.name]
+      );
+    }
+    return { linked: teams.length };
+  }
+
+  async syncLinear(projectId: string) {
+    const organizationId = await this.projectOrganizationId(projectId);
+    const connection = await this.getIntegrationConnection(organizationId, "linear", true);
+    if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
+    const mappings = await this.db.query(
+      "SELECT linear_team_id FROM linear_project_mappings WHERE project_id = $1 AND integration_connection_id = $2 AND enabled = true",
+      [projectId, connection.id]
+    );
+    const teamIds = mappings.rows.map((row) => String(row.linear_team_id)).filter(Boolean);
+    if (!teamIds.length) return { synced: 0 };
+
+    // Mirror each synced ticket into the Knowledge Base's Requirements folder, same as Jira sync
+    // (source_provider = 'linear'), so tickets are searchable and usable as Zyra context.
+    const requirementsFolder = await this.db.query<{ id: string }>(
+      `SELECT kf.id FROM knowledge_folders kf
+       JOIN knowledge_folders root ON kf.parent_folder_id = root.id AND root.is_root = true AND root.project_id = $1
+       WHERE kf.project_id = $1 AND kf.name = 'Requirements' AND kf.is_deleted = false
+       LIMIT 1`,
+      [projectId]
+    );
+    let mirrorFolderId = requirementsFolder.rows[0]?.id || null;
+    if (!mirrorFolderId) {
+      const root = await this.db.query<{ id: string }>(
+        "SELECT id FROM knowledge_folders WHERE project_id = $1 AND is_root = true LIMIT 1",
+        [projectId]
+      );
+      mirrorFolderId = root.rows[0]?.id || null;
+    }
+
+    let synced = 0;
+    for (const teamId of teamIds) {
+      const data = await this.linearGraphQL<Body>(
+        connection.access_token,
+        `query TeamIssues($teamId: String!) {
+           team(id: $teamId) {
+             issues(first: 100, orderBy: updatedAt) {
+               nodes {
+                 id identifier title description url createdAt updatedAt
+                 state { name }
+                 priorityLabel
+                 assignee { name }
+                 creator { name }
+                 labels { nodes { name } }
+               }
+             }
+           }
+         }`,
+        { teamId }
+      );
+      for (const issue of normalizeJsonArray(data?.team?.issues?.nodes)) {
+        const summary = String(issue.title || "");
+        const description = String(issue.description || "");
+        const labels = normalizeJsonArray(issue.labels?.nodes).map((label) => label.name).join(", ");
+        await this.db.query(
+          `INSERT INTO linear_tickets (
+             project_id, integration_connection_id, linear_issue_id, linear_issue_key, summary, description,
+             issue_type, status, priority, assignee, reporter, labels, linear_created_at, linear_updated_at, linear_url, synced_at
+           )
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
+           ON CONFLICT (integration_connection_id, linear_issue_id) DO UPDATE SET
+             linear_issue_key = EXCLUDED.linear_issue_key,
+             summary = EXCLUDED.summary,
+             description = EXCLUDED.description,
+             issue_type = EXCLUDED.issue_type,
+             status = EXCLUDED.status,
+             priority = EXCLUDED.priority,
+             assignee = EXCLUDED.assignee,
+             reporter = EXCLUDED.reporter,
+             labels = EXCLUDED.labels,
+             linear_created_at = EXCLUDED.linear_created_at,
+             linear_updated_at = EXCLUDED.linear_updated_at,
+             linear_url = EXCLUDED.linear_url,
+             synced_at = now()`,
+          [
+            projectId,
+            connection.id,
+            String(issue.id || ""),
+            String(issue.identifier || ""),
+            summary,
+            description,
+            "Issue",
+            String(issue.state?.name || ""),
+            String(issue.priorityLabel || ""),
+            String(issue.assignee?.name || ""),
+            String(issue.creator?.name || ""),
+            labels,
+            issue.createdAt || null,
+            issue.updatedAt || null,
+            String(issue.url || "")
+          ]
+        );
+        synced += 1;
+
+        if (mirrorFolderId) {
+          await this.db.query(
+            `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
+             VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'linear', $7, $8)
+             ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
+               title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
+               source_url = EXCLUDED.source_url, updated_at = now()`,
+            [
+              organizationId,
+              projectId,
+              mirrorFolderId,
+              `${issue.identifier}: ${summary}`,
+              description,
+              description ? `<pre>${escapeHtml(description)}</pre>` : null,
+              String(issue.id || ""),
+              String(issue.url || "")
+            ]
+          );
+        }
+      }
+    }
+    return { synced };
+  }
+
+  async linearTickets(projectId: string, query: Body) {
+    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
+    const offset = Math.max(0, Number(query.offset || 0));
+    const search = String(query.search || "").trim();
+    const filters = ["project_id = $1"];
+    const values: any[] = [projectId];
+    if (search) {
+      values.push(`%${search}%`);
+      filters.push(`(linear_issue_key ILIKE $${values.length} OR summary ILIKE $${values.length})`);
+    }
+    const count = await this.db.query(`SELECT COUNT(*)::int AS count FROM linear_tickets WHERE ${filters.join(" AND ")}`, values);
+    values.push(limit, offset);
+    const res = await this.db.query(
+      `SELECT * FROM linear_tickets
+       WHERE ${filters.join(" AND ")}
+       ORDER BY linear_updated_at DESC NULLS LAST, synced_at DESC
+       LIMIT $${values.length - 1} OFFSET $${values.length}`,
+      values
+    );
+    return { list: res.rows.map(toCamel), total: count.rows[0]?.count ?? 0 };
+  }
+
+  async linearComment(projectId: string, body: Body) {
+    const organizationId = await this.projectOrganizationId(projectId);
+    const connection = await this.getIntegrationConnection(organizationId, "linear", true);
+    if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
+    const issueKey = String(body.issueKey || body.linearIssueKey || "").trim();
+    const comment = String(body.comment || body.body || "").trim();
+    if (!issueKey || !comment) throw new BadRequestException({ error: "Linear issue key and comment are required." });
+    const lookup = await this.linearGraphQL<Body>(connection.access_token, "query Issue($id: String!) { issue(id: $id) { id } }", { id: issueKey });
+    const issueId = lookup?.issue?.id || issueKey;
+    await this.linearGraphQL(
+      connection.access_token,
+      "mutation CreateComment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success } }",
+      { issueId, body: comment }
+    );
+    return { ok: true };
   }
 
   async zyraAgent(projectId: string) {

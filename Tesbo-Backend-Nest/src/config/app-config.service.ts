@@ -26,6 +26,9 @@ export class AppConfigService {
   // any S3-compatible service (AWS S3, MinIO, Cloudflare R2, DigitalOcean Spaces, etc).
   readonly storageDriver = this.string("STORAGE_DRIVER", "local").toLowerCase() === "s3" ? "s3" : "local";
   readonly s3Bucket = this.optionalString("S3_BUCKET");
+  // Optional key prefix so multiple environments (local/staging/prod) can share one bucket
+  // without colliding, e.g. "local/knowledge-base/<organizationId>/<projectId>/<uuid>.<ext>".
+  readonly s3BucketFolder = this.optionalString("S3_BUCKET_FOLDER");
   readonly s3Region = this.string("S3_REGION", "us-east-1");
   readonly s3Endpoint = this.optionalString("S3_ENDPOINT") || undefined;
   readonly s3AccessKeyId = this.optionalString("S3_ACCESS_KEY_ID") || undefined;

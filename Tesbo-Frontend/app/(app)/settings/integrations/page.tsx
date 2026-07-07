@@ -6,55 +6,66 @@ import { useCallback, useEffect, useState } from "react";
 import {
   authMe,
   getWorkspace,
-  listWorkspaceAiKeys,
-  createWorkspaceAiKey,
-  deleteWorkspaceAiKey,
-  allocateWorkspaceAiKeyToProject,
-  type WorkspaceAiKey,
-  type WorkspaceAiProjectAllocation,
+  getIntegrationStatus,
+  disconnectIntegration,
+  type IntegrationConnectionStatus,
+  type IntegrationProvider,
 } from "@/lib/api";
-import { Button, Card, Field, FieldLabel, Input, Select } from "@/components/ui";
+import { Button, Card } from "@/components/ui";
 import { StandardPageLayout, PageHeader } from "@/components/workflows";
+
+const PROVIDERS: {
+  id: IntegrationProvider;
+  name: string;
+  description: string;
+  icon: React.ReactNode;
+}[] = [
+  {
+    id: "jira",
+    name: "Jira",
+    description: "Import tickets from Jira to use as knowledge base for test generation.",
+    icon: (
+      <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
+        <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53ZM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77ZM2 11.6c0 2.4 1.95 4.34 4.35 4.35h1.78v1.71c0 2.4 1.95 4.35 4.35 4.35V12.44a.84.84 0 0 0-.84-.84H2Z" />
+      </svg>
+    ),
+  },
+  {
+    id: "linear",
+    name: "Linear",
+    description: "Import issues from Linear to use as knowledge base for test generation.",
+    icon: (
+      <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
+        <path d="M2.28 15.36 8.64 21.7c-3.14-.55-5.79-3.2-6.36-6.34Zm-.27-2.06L14.7 22c.34.02.68.02 1.02 0L1.99 8.98c-.02.34-.02.68.02 1.02Zm.5-3.14L15.84 21.5a10.9 10.9 0 0 0 1.87-1.1L3.6 6.29a10.9 10.9 0 0 0-1.09 1.87Zm1.9-2.98L18.82 18.5a11 11 0 0 0 1.28-1.55L5.06 5.9a11 11 0 0 0-1.55 1.28Zm2.71-2.2L21.02 15.87A11 11 0 0 0 22 1.98L8.12 1a11 11 0 0 0-1.9 1.98Z" />
+      </svg>
+    ),
+  },
+];
 
 export default function WorkspaceIntegrationsPage() {
   const router = useRouter();
   const [auth, setAuth] = useState<{ userId: string } | null>(null);
   const [workspaceRole, setWorkspaceRole] = useState<string>("member");
-  const [keys, setKeys] = useState<WorkspaceAiKey[]>([]);
-  const [projects, setProjects] = useState<WorkspaceAiProjectAllocation[]>([]);
+  const [statuses, setStatuses] = useState<Record<string, IntegrationConnectionStatus>>({});
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [newName, setNewName] = useState("");
-  const [newProvider, setNewProvider] = useState("openai");
-  const [newCustomProvider, setNewCustomProvider] = useState("");
-  const [newApiKey, setNewApiKey] = useState("");
-  const [newDefaultModel, setNewDefaultModel] = useState("gpt-4o");
-  const [newBaseUrl, setNewBaseUrl] = useState("");
-  const [newAuthHeaderName, setNewAuthHeaderName] = useState("Authorization");
-  const [newAuthScheme, setNewAuthScheme] = useState("Bearer");
-  const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
-  const [allocatingProjectId, setAllocatingProjectId] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [disconnectingProvider, setDisconnectingProvider] = useState<IntegrationProvider | null>(null);
 
-  const canManageKeys = workspaceRole === "owner";
-  const providerValue = newProvider === "custom" ? newCustomProvider.trim().toLowerCase() : newProvider;
-  const modelOptions =
-    newProvider === "anthropic"
-      ? ["claude-sonnet-4-6", "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022"]
-      : newProvider === "openai"
-        ? ["gpt-4o", "gpt-4.1", "gpt-4.1-mini"]
-        : [];
+  const canManage = workspaceRole === "owner";
 
   const loadData = useCallback(async () => {
     try {
-      const [workspace, aiData] = await Promise.all([getWorkspace(), listWorkspaceAiKeys()]);
+      const [workspace, jira, linear] = await Promise.all([
+        getWorkspace(),
+        getIntegrationStatus("jira").catch(() => ({ connected: false }) as IntegrationConnectionStatus),
+        getIntegrationStatus("linear").catch(() => ({ connected: false }) as IntegrationConnectionStatus),
+      ]);
       setWorkspaceRole((workspace.role || "member").toLowerCase());
-      setKeys(aiData.keys || []);
-      setProjects(aiData.projects || []);
+      setStatuses({ jira, linear });
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load workspace integrations.");
+      setError(e instanceof Error ? e.message : "Failed to load integrations.");
     } finally {
       setLoading(false);
     }
@@ -68,97 +79,27 @@ export default function WorkspaceIntegrationsPage() {
     });
   }, [loadData, router]);
 
-  async function handleCreateKey(e: React.FormEvent) {
-    e.preventDefault();
-    if (!canManageKeys) return;
-    setSaving(true);
+  async function handleDisconnect(provider: IntegrationProvider) {
+    if (!canManage) return;
+    setDisconnectingProvider(provider);
     setMessage(null);
     setError(null);
     try {
-      const isKnownProvider = ["openai", "anthropic"].includes(providerValue);
-      await createWorkspaceAiKey({
-        name: newName.trim(),
-        provider: providerValue,
-        apiKey: newApiKey.trim(),
-        defaultModel: newDefaultModel.trim() === "custom" ? undefined : newDefaultModel.trim() || undefined,
-        baseUrl: newBaseUrl.trim() || undefined,
-        // Only send auth overrides for custom providers — known providers use well-defined SDK defaults
-        authHeaderName: isKnownProvider ? undefined : (newAuthHeaderName.trim() || undefined),
-        authScheme: isKnownProvider ? undefined : (newAuthScheme.trim() || undefined),
-      });
-      setNewName("");
-      setNewCustomProvider("");
-      setNewApiKey("");
-      setNewDefaultModel(newProvider === "anthropic" ? "claude-sonnet-4-6" : "gpt-4o");
-      setNewBaseUrl("");
-      setNewAuthHeaderName("Authorization");
-      setNewAuthScheme("Bearer");
-      setMessage("Workspace AI key added.");
+      await disconnectIntegration(provider);
+      setMessage(`${provider === "jira" ? "Jira" : "Linear"} disconnected.`);
       await loadData();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create workspace AI key.");
+      setError(e instanceof Error ? e.message : "Failed to disconnect.");
     } finally {
-      setSaving(false);
+      setDisconnectingProvider(null);
     }
   }
 
-  async function handleDeleteKey(keyId: string) {
-    if (!canManageKeys) return;
-    setDeletingKeyId(keyId);
-    setMessage(null);
-    setError(null);
-    try {
-      await deleteWorkspaceAiKey(keyId);
-      setMessage("Workspace AI key removed.");
-      await loadData();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to delete workspace AI key.");
-    } finally {
-      setDeletingKeyId(null);
-    }
-  }
-
-  async function handleAllocate(projectId: string, workspaceAiKeyId: string) {
-    if (!canManageKeys) return;
-    setAllocatingProjectId(projectId);
-    setMessage(null);
-    setError(null);
-    try {
-      await allocateWorkspaceAiKeyToProject({
-        projectId,
-        workspaceAiKeyId: workspaceAiKeyId || undefined,
-      });
-      setMessage("Project AI key allocation updated.");
-      await loadData();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update project allocation.");
-    } finally {
-      setAllocatingProjectId(null);
-    }
-  }
-
-  if (!auth) {
+  if (!auth || loading) {
     return (
       <StandardPageLayout header={<PageHeader title="Integrations" />}>
         <div className="flex min-h-[200px] items-center justify-center">
           <p className="text-[var(--muted)]">Loading…</p>
-        </div>
-      </StandardPageLayout>
-    );
-  }
-
-  if (loading) {
-    return (
-      <StandardPageLayout
-        header={
-          <PageHeader
-            title="Integrations"
-            subtitle="Manage workspace AI keys and per-project allocations."
-          />
-        }
-      >
-        <div className="flex min-h-[200px] items-center justify-center">
-          <p className="text-[var(--muted)]">Loading workspace integrations...</p>
         </div>
       </StandardPageLayout>
     );
@@ -169,23 +110,10 @@ export default function WorkspaceIntegrationsPage() {
       header={
         <PageHeader
           title="Integrations"
-          subtitle="Configure workspace AI keys and assign one key per project."
-          actions={
-            <Link href="/settings/integrations/ai-providers" className="rounded-xl border border-[var(--border)] px-4 py-2 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
-              AI provider details
-            </Link>
-          }
+          subtitle="Connect Jira, Linear, and more once for the whole workspace, then pick which projects use them."
         />
       }
     >
-      {!canManageKeys && (
-        <Card className="p-4">
-          <p className="text-sm text-[var(--muted)]">
-            Only workspace owner can manage AI keys and project allocations.
-          </p>
-        </Card>
-      )}
-
       {message && (
         <p className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--foreground)]">
           {message}
@@ -199,187 +127,100 @@ export default function WorkspaceIntegrationsPage() {
 
       <Card className="p-4 space-y-4">
         <div>
-          <h2 className="text-base font-semibold text-[var(--foreground)]">Workspace AI keys</h2>
+          <h2 className="text-base font-semibold text-[var(--foreground)]">App integrations</h2>
           <p className="mt-1 text-sm text-[var(--muted)]">
-            Add multiple OpenAI/Anthropic keys once at workspace level, then allocate them to projects.
+            Once connected, go to a project&apos;s Settings → Integrations tab to pick which remote project/team feeds it.
           </p>
         </div>
 
-        {canManageKeys && (
-          <form onSubmit={handleCreateKey} className="grid gap-3 sm:grid-cols-2">
-            <Field>
-              <FieldLabel>Key name</FieldLabel>
-              <Input
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="Primary OpenAI key"
-                disabled={saving}
-              />
-            </Field>
-            <Field>
-              <FieldLabel>Provider</FieldLabel>
-              <Select
-                value={newProvider}
-                onChange={(e) => {
-                  const next = e.target.value;
-                  setNewProvider(next);
-                  setNewDefaultModel(next === "anthropic" ? "claude-sonnet-4-6" : next === "openai" ? "gpt-4o" : "");
-                }}
-                disabled={saving}
-              >
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="custom">Custom provider</option>
-              </Select>
-            </Field>
-            {newProvider === "custom" && (
-              <>
-                <Field>
-                  <FieldLabel>Provider name</FieldLabel>
-                  <Input value={newCustomProvider} onChange={(e) => setNewCustomProvider(e.target.value)} placeholder="groq, together, ollama" disabled={saving} />
-                </Field>
-                <Field>
-                  <FieldLabel>API base URL</FieldLabel>
-                  <Input value={newBaseUrl} onChange={(e) => setNewBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" disabled={saving} />
-                </Field>
-              </>
-            )}
-            <Field className="sm:col-span-2">
-              <FieldLabel>API key</FieldLabel>
-              <Input
-                type="password"
-                value={newApiKey}
-                onChange={(e) => setNewApiKey(e.target.value)}
-                placeholder={newProvider === "anthropic" ? "sk-ant-..." : "sk-..."}
-                disabled={saving}
-              />
-            </Field>
-            <Field className="sm:col-span-2">
-              <FieldLabel>Default model</FieldLabel>
-              <Input
-                list="workspace-ai-model-options"
-                value={newDefaultModel}
-                onChange={(e) => setNewDefaultModel(e.target.value)}
-                placeholder={newProvider === "custom" ? "Custom model name" : "Select or type a model name"}
-                disabled={saving}
-              />
-              <datalist id="workspace-ai-model-options">
-                {modelOptions.map((model) => <option key={model} value={model} />)}
-              </datalist>
-            </Field>
-            {newProvider === "custom" && (
-              <>
-                <Field>
-                  <FieldLabel>Auth header</FieldLabel>
-                  <Input value={newAuthHeaderName} onChange={(e) => setNewAuthHeaderName(e.target.value)} placeholder="Authorization" disabled={saving} />
-                </Field>
-                <Field>
-                  <FieldLabel>Auth scheme</FieldLabel>
-                  <Input value={newAuthScheme} onChange={(e) => setNewAuthScheme(e.target.value)} placeholder="Bearer" disabled={saving} />
-                </Field>
-              </>
-            )}
-            <div className="sm:col-span-2">
-              <Button type="submit" disabled={saving || !providerValue || (newProvider === "custom" && !newBaseUrl.trim())}>
-                {saving ? "Adding key..." : "Add workspace AI key"}
-              </Button>
+        {PROVIDERS.map((provider) => {
+          const status = statuses[provider.id];
+          return (
+            <div key={provider.id} className="rounded-lg border border-[var(--border)] p-4 flex items-start gap-4">
+              <div className="shrink-0 w-10 h-10 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center">
+                {provider.icon}
+              </div>
+              <div className="flex-1 min-w-0">
+                <h3 className="text-sm font-semibold text-[var(--foreground)]">{provider.name}</h3>
+                <p className="text-xs text-[var(--muted)] mt-0.5">{provider.description}</p>
+                {status?.connected && (
+                  <div className="mt-2 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block w-2 h-2 rounded-full bg-[var(--success)]" />
+                      <span className="text-xs text-[var(--success)] font-medium">Connected</span>
+                      {status.siteUrl && (
+                        <>
+                          <span className="text-xs text-[var(--muted-soft)]">·</span>
+                          <a
+                            href={status.siteUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-[var(--brand-primary)] hover:underline truncate"
+                          >
+                            {status.siteUrl}
+                          </a>
+                        </>
+                      )}
+                    </div>
+                    {status.connectedProjects && status.connectedProjects.length > 0 && (
+                      <p className="text-xs text-[var(--muted)]">
+                        Used by {status.connectedProjects.length} project{status.connectedProjects.length > 1 ? "s" : ""}:{" "}
+                        {status.connectedProjects.map((p) => p.projectKey).join(", ")}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="shrink-0 flex flex-col gap-2">
+                {status?.connected ? (
+                  <>
+                    <Link
+                      href={`/settings/integrations/${provider.id}`}
+                      className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)] transition-colors text-center"
+                    >
+                      Manage
+                    </Link>
+                    {canManage && (
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => void handleDisconnect(provider.id)}
+                        disabled={disconnectingProvider === provider.id}
+                        className="border-[var(--error)]/50 text-[var(--error)] hover:bg-[color-mix(in_oklab,var(--error)_8%,white)]"
+                      >
+                        Disconnect
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  <Link
+                    href={`/settings/integrations/${provider.id}`}
+                    className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+                  >
+                    Configure
+                  </Link>
+                )}
+              </div>
             </div>
-          </form>
+          );
+        })}
+
+        {!canManage && (
+          <p className="text-xs text-[var(--muted)]">Only the workspace owner can connect or disconnect integrations.</p>
         )}
 
-        <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
-          <table className="tesbo-table min-w-full text-sm">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Provider</th>
-                <th>Masked key</th>
-                <th>Default model</th>
-                <th className="text-right">Action</th>
-              </tr>
-            </thead>
-            <tbody>
-              {keys.map((key) => (
-                <tr key={key.id}>
-                  <td className="text-[var(--foreground)]">{key.name}</td>
-                  <td className="text-[var(--muted)]">{key.provider.toUpperCase()}</td>
-                  <td className="font-mono text-[var(--muted)]">{key.maskedKey}</td>
-                  <td className="text-[var(--muted)]">{key.defaultModel || "—"}</td>
-                  <td className="text-right">
-                    {canManageKeys ? (
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        disabled={deletingKeyId === key.id}
-                        onClick={() => void handleDeleteKey(key.id)}
-                      >
-                        {deletingKeyId === key.id ? "Removing..." : "Remove"}
-                      </Button>
-                    ) : (
-                      <span className="text-xs text-[var(--muted)]">Owner only</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-              {keys.length === 0 && (
-                <tr>
-                  <td colSpan={5} className="py-6 text-center text-[var(--muted)]">
-                    No workspace AI keys added yet.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <Card className="p-4 space-y-4">
-        <div>
-          <h2 className="text-base font-semibold text-[var(--foreground)]">Project key allocation</h2>
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            Select which workspace AI key each project should use. Agents are blocked when no key is allocated.
-          </p>
-        </div>
-        <div className="overflow-x-auto rounded-lg border border-[var(--border)]">
-          <table className="tesbo-table min-w-full text-sm">
-            <thead>
-              <tr>
-                <th>Project</th>
-                <th>Allocated AI key</th>
-              </tr>
-            </thead>
-            <tbody>
-              {projects.map((project) => (
-                <tr key={project.projectId}>
-                  <td>
-                    <div className="text-[var(--foreground)]">{project.projectName}</div>
-                    <div className="text-xs text-[var(--muted)]">{project.projectKey}</div>
-                  </td>
-                  <td>
-                    <Select
-                      value={project.workspaceAiKeyId || ""}
-                      onChange={(e) => void handleAllocate(project.projectId, e.target.value)}
-                      disabled={!canManageKeys || allocatingProjectId === project.projectId}
-                    >
-                      <option value="">No key allocated</option>
-                      {keys.map((key) => (
-                        <option key={key.id} value={key.id}>
-                          {key.name} ({key.provider})
-                        </option>
-                      ))}
-                    </Select>
-                  </td>
-                </tr>
-              ))}
-              {projects.length === 0 && (
-                <tr>
-                  <td colSpan={2} className="py-6 text-center text-[var(--muted)]">
-                    No projects found in this workspace.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        {/* Placeholder for future integrations */}
+        <div className="rounded-lg border border-dashed border-[var(--border)] p-4 flex items-center gap-4 opacity-60">
+          <div className="shrink-0 w-10 h-10 rounded-lg bg-[var(--surface-tertiary)] flex items-center justify-center">
+            <svg className="w-5 h-5 text-[var(--muted-soft)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-[var(--muted)]">More integrations coming soon</h3>
+            <p className="text-xs text-[var(--muted-soft)] mt-0.5">Slack, GitHub, Azure DevOps and more.</p>
+          </div>
         </div>
       </Card>
     </StandardPageLayout>
