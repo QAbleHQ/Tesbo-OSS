@@ -79,16 +79,18 @@ pipeline {
                     set -e
                     test -f "${SSH_CONFIG}"
 
-                    tar \
-                      --exclude=.git \
-                      --exclude=node_modules \
-                      --exclude=.next \
-                      --exclude=.env \
-                      --exclude=docker-compose.yml \
-                      --exclude=infra/docker/postgres/pg_hba.conf \
-                      --exclude=Jenkinsfile \
-                      -czf - . | \
-                    ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "cd '${REMOTE_APP_DIR}' && tar -xzf -"
+                    # rsync --delete mirrors the workspace to the server and removes files
+                    # deleted from git (tar extract only overwrites and leaves stale files behind).
+                    rsync -az --delete \
+                      --exclude='.git/' \
+                      --exclude='node_modules/' \
+                      --exclude='.next/' \
+                      --exclude='.env' \
+                      --exclude='docker-compose.yml' \
+                      --exclude='infra/docker/postgres/pg_hba.conf' \
+                      --exclude='Jenkinsfile' \
+                      -e "ssh -F ${SSH_CONFIG}" \
+                      ./ ${REMOTE_HOST}:${REMOTE_APP_DIR}/
 
                     ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "
                       set -e
