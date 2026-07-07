@@ -1621,6 +1621,30 @@ export const listCycles = listTestRuns;
 export const getCycle = getTestRun;
 
 // Bugs
+export interface BugLink {
+  id: string;
+  testcaseId: string | null;
+  testcaseTitle: string | null;
+  testcaseExternalId: string | null;
+  cycleId: string | null;
+  cycleName: string | null;
+  executionId: string | null;
+}
+
+export interface BugLinkInput {
+  testcaseId?: string | null;
+  cycleId?: string | null;
+  executionId?: string | null;
+}
+
+export interface BugAttachment {
+  id: string;
+  fileName: string;
+  contentType: string;
+  fileSize: number;
+  createdAt: string;
+}
+
 export interface BugItem {
   id: string;
   title: string;
@@ -1633,9 +1657,11 @@ export interface BugItem {
   reportedBy: string | null;
   reporterName: string;
   reporterEmail: string;
-  tcExternalId: string;
-  tcTitle: string;
-  cycleName: string;
+  integrationProvider: "JIRA" | "LINEAR" | null;
+  integrationIssueKey: string | null;
+  betterbugsUrl: string | null;
+  links: BugLink[];
+  attachments: BugAttachment[];
   createdAt: string;
   updatedAt: string;
 }
@@ -1656,10 +1682,11 @@ export async function createBug(projectId: string, data: {
   title: string;
   description?: string;
   externalUrl?: string;
-  executionId?: string;
-  testcaseId?: string;
-  cycleId?: string;
-}): Promise<{ id: string; title: string; status: string; createdAt: string }> {
+  integrationProvider?: "JIRA" | "LINEAR" | null;
+  integrationIssueKey?: string | null;
+  betterbugsUrl?: string | null;
+  links: BugLinkInput[];
+}): Promise<BugItem> {
   return api(`/api/projects/${projectId}/bugs`, { method: "POST", body: data });
 }
 
@@ -1668,12 +1695,47 @@ export async function updateBug(bugId: string, data: {
   description?: string;
   externalUrl?: string;
   status?: string;
-}): Promise<void> {
-  await api(`/api/bugs/${bugId}`, { method: "PATCH", body: data });
+  integrationProvider?: "JIRA" | "LINEAR" | null;
+  integrationIssueKey?: string | null;
+  betterbugsUrl?: string | null;
+  links?: BugLinkInput[];
+}): Promise<BugItem> {
+  return api(`/api/bugs/${bugId}`, { method: "PATCH", body: data });
 }
 
 export async function deleteBug(bugId: string): Promise<void> {
   await api(`/api/bugs/${bugId}`, { method: "DELETE" });
+}
+
+export async function addBugLink(bugId: string, link: BugLinkInput): Promise<BugItem> {
+  return api(`/api/bugs/${bugId}/links`, { method: "POST", body: link });
+}
+
+export async function removeBugLink(bugId: string, linkId: string): Promise<BugItem> {
+  return api(`/api/bugs/${bugId}/links/${linkId}`, { method: "DELETE" });
+}
+
+export async function uploadBugAttachments(projectId: string, bugId: string, files: File[]): Promise<{ list: BugAttachment[]; total: number }> {
+  const formData = new FormData();
+  for (const file of files) formData.append("files", file);
+  const res = await fetch(`${API_BASE}/api/projects/${projectId}/bugs/${bugId}/attachments`, {
+    method: "POST",
+    credentials: "include",
+    body: formData,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error?: string }).error || String(res.status));
+  }
+  return res.json();
+}
+
+export async function deleteBugAttachment(attachmentId: string): Promise<void> {
+  await api(`/api/bugs/attachments/${attachmentId}`, { method: "DELETE" });
+}
+
+export function getBugAttachmentDownloadUrl(projectId: string, attachmentId: string): string {
+  return `${API_BASE}/api/projects/${projectId}/bugs/attachments/${attachmentId}/download`;
 }
 
 // Workspace analytics (dashboard – all projects in workspace)
@@ -1928,6 +1990,20 @@ export async function listJiraTickets(
   );
 }
 
+export interface IssueSearchResult {
+  provider: "JIRA" | "LINEAR";
+  key: string;
+  summary: string;
+  status: string;
+  url: string;
+}
+
+export async function searchJiraIssuesLive(projectId: string, search: string): Promise<{ list: IssueSearchResult[] }> {
+  const sp = new URLSearchParams();
+  if (search) sp.set("search", search);
+  return api(`/api/projects/${projectId}/jira/search-issues?${sp.toString()}`);
+}
+
 // ── Linear (project-scoped mapping/sync/tickets) ──
 // Linear's unit of work is a "team" rather than a "project" — the shape below mirrors Jira's
 // so the two providers can share UI, but the field names stay Linear-accurate.
@@ -2011,6 +2087,12 @@ export async function listLinearTickets(
   return api<{ list: LinearTicket[]; total: number }>(
     `/api/projects/${projectId}/linear/tickets${query ? `?${query}` : ""}`
   );
+}
+
+export async function searchLinearIssuesLive(projectId: string, search: string): Promise<{ list: IssueSearchResult[] }> {
+  const sp = new URLSearchParams();
+  if (search) sp.set("search", search);
+  return api(`/api/projects/${projectId}/linear/search-issues?${sp.toString()}`);
 }
 
 // ── Knowledge Base ──

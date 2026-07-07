@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import * as path from "path";
 import type { PoolClient, QueryResultRow } from "pg";
@@ -159,6 +159,10 @@ function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function escapeJql(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
 function jiraDescriptionToText(value: unknown): string {
   if (!value) return "";
   if (typeof value === "string") return value;
@@ -234,6 +238,8 @@ function normalizeAnthropicMessagesUrl(baseUrl?: string | null): string {
 
 @Injectable()
 export class LegacyService {
+  private readonly logger = new Logger(LegacyService.name);
+
   constructor(
     private readonly db: DatabaseService,
     private readonly email: EmailService,
@@ -1554,45 +1560,200 @@ export class LegacyService {
     );
   }
 
-  async listBugs(projectId: string) {
-    const res = await this.db.query("SELECT * FROM bugs WHERE project_id = $1 ORDER BY created_at DESC", [projectId]);
-    return res.rows.map(toCamel);
+  private bugSelect(where: string): string {
+    return `
+      SELECT b.*, COALESCE(u.name, u.email) AS reporter_name, u.email AS reporter_email, links.items AS links,
+             COALESCE(atts.items, '[]') AS attachments
+      FROM bugs b
+      LEFT JOIN users u ON u.id = b.reported_by
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object(
+          'id', bl.id,
+          'testcaseId', bl.testcase_id,
+          'testcaseTitle', t.title,
+          'testcaseExternalId', t.external_id,
+          'cycleId', bl.cycle_id,
+          'cycleName', c.name,
+          'executionId', bl.execution_id
+        ) ORDER BY bl.created_at) AS items
+        FROM bug_links bl
+        LEFT JOIN testcases t ON t.id = bl.testcase_id
+        LEFT JOIN cycles c ON c.id = bl.cycle_id
+        WHERE bl.bug_id = b.id
+      ) links ON true
+      LEFT JOIN LATERAL (
+        SELECT json_agg(json_build_object(
+          'id', a.id,
+          'fileName', a.file_name,
+          'contentType', a.content_type,
+          'fileSize', a.file_size,
+          'createdAt', a.created_at
+        ) ORDER BY a.created_at) AS items
+        FROM attachments a
+        WHERE a.entity_type = 'bug' AND a.entity_id = b.id
+      ) atts ON true
+      WHERE ${where}`;
+  }
+
+  async listBugs(projectId: string, query: Body = {}) {
+    const filters = ["b.project_id = $1"];
+    const values: any[] = [projectId];
+    if (query.status) {
+      values.push(query.status);
+      filters.push(`b.status = $${values.length}`);
+    }
+    if (query.cycleId) {
+      values.push(query.cycleId);
+      filters.push(`b.cycle_id = $${values.length}`);
+    }
+    const res = await this.db.query(`${this.bugSelect(filters.join(" AND "))} ORDER BY b.created_at DESC`, values);
+    return res.rows.map((row) => ({
+      ...toCamel(row),
+      links: normalizeJsonArray(row.links).map(toCamel),
+      attachments: normalizeJsonArray(row.attachments).map(toCamel)
+    }));
+  }
+
+  private async replaceBugLinks(client: PoolClient, bugId: string, links: Body[]) {
+    await client.query("DELETE FROM bug_links WHERE bug_id = $1", [bugId]);
+    for (const link of links) {
+      await client.query(
+        `INSERT INTO bug_links (bug_id, testcase_id, cycle_id, execution_id) VALUES ($1,$2,$3,$4)
+         ON CONFLICT (bug_id, testcase_id, cycle_id) DO NOTHING`,
+        [bugId, link.testcaseId || null, link.cycleId || null, link.executionId || null]
+      );
+    }
   }
 
   async createBug(projectId: string, userId: string | null | undefined, body: Body) {
-    const res = await this.db.query(
-      `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, reported_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [
-        projectId,
-        body.executionId || null,
-        body.testcaseId || null,
-        body.cycleId || null,
-        body.title || "Untitled bug",
-        body.description || "",
-        body.externalUrl || null,
-        body.status || "Open",
-        userId || null
-      ]
-    );
-    return toCamel(res.rows[0]);
+    // A link is required whenever the project actually has test cases/runs to link to — enforced
+    // client-side (the UI only lets the field be empty when there's nothing to pick). An empty
+    // array is accepted here so reporting a bug is never blocked in a project with no test runs yet.
+    const links = normalizeJsonArray(body.links);
+
+    const bugId = await this.db.transaction(async (client) => {
+      const res = await client.query(
+        `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, reported_by, integration_provider, integration_issue_key, betterbugs_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        [
+          projectId,
+          links[0]?.executionId || null,
+          links[0]?.testcaseId || null,
+          links[0]?.cycleId || null,
+          body.title || "Untitled bug",
+          body.description || "",
+          body.externalUrl || null,
+          body.status || "Open",
+          userId || null,
+          body.integrationProvider || null,
+          body.integrationIssueKey || null,
+          body.betterbugsUrl || null
+        ]
+      );
+      const id = res.rows[0].id;
+      await this.replaceBugLinks(client, id, links);
+      return id;
+    });
+    return this.getBug(bugId);
   }
 
   async getBug(bugId: string) {
-    const res = await this.db.query("SELECT * FROM bugs WHERE id = $1", [bugId]);
+    const res = await this.db.query(this.bugSelect("b.id = $1"), [bugId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Bug not found" });
-    return toCamel(res.rows[0]);
+    const row = res.rows[0];
+    return { ...toCamel(row), links: normalizeJsonArray(row.links).map(toCamel), attachments: normalizeJsonArray(row.attachments).map(toCamel) };
   }
 
   async updateBug(bugId: string, body: Body) {
     await this.db.query(
-      "UPDATE bugs SET title=COALESCE($2,title), description=COALESCE($3,description), external_url=COALESCE($4,external_url), status=COALESCE($5,status), updated_at=now() WHERE id=$1",
-      [bugId, body.title || null, body.description || null, body.externalUrl || null, body.status || null]
+      `UPDATE bugs SET title=COALESCE($2,title), description=COALESCE($3,description), external_url=COALESCE($4,external_url),
+       status=COALESCE($5,status), integration_provider=COALESCE($6,integration_provider), integration_issue_key=COALESCE($7,integration_issue_key),
+       betterbugs_url=COALESCE($8,betterbugs_url), updated_at=now() WHERE id=$1`,
+      [
+        bugId,
+        body.title || null,
+        body.description || null,
+        body.externalUrl || null,
+        body.status || null,
+        body.integrationProvider || null,
+        body.integrationIssueKey || null,
+        body.betterbugsUrl || null
+      ]
     );
+    if (Array.isArray(body.links)) {
+      await this.db.transaction((client) => this.replaceBugLinks(client, bugId, normalizeJsonArray(body.links)));
+    }
+    return this.getBug(bugId);
+  }
+
+  async addBugLink(bugId: string, body: Body) {
+    if (!body.testcaseId && !body.cycleId) throw new BadRequestException({ error: "testcaseId or cycleId is required." });
+    await this.db.query(
+      `INSERT INTO bug_links (bug_id, testcase_id, cycle_id, execution_id) VALUES ($1,$2,$3,$4)
+       ON CONFLICT (bug_id, testcase_id, cycle_id) DO NOTHING`,
+      [bugId, body.testcaseId || null, body.cycleId || null, body.executionId || null]
+    );
+    return this.getBug(bugId);
+  }
+
+  async removeBugLink(bugId: string, linkId: string) {
+    await this.db.query("DELETE FROM bug_links WHERE id = $1 AND bug_id = $2", [linkId, bugId]);
+    return this.getBug(bugId);
   }
 
   async deleteBug(bugId: string) {
     await this.db.query("DELETE FROM bugs WHERE id = $1", [bugId]);
+  }
+
+  // Bug evidence uploads — reuses the generic `attachments` table (entity_type='bug') rather
+  // than a dedicated table, since it already models exactly this (project-scoped file metadata
+  // pointing at a storage key), and nothing else in the app used it yet.
+  async uploadBugAttachments(
+    projectId: string,
+    userId: string | null | undefined,
+    bugId: string,
+    files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
+    const bug = await this.db.query("SELECT id FROM bugs WHERE id = $1 AND project_id = $2", [bugId, projectId]);
+    if (!bug.rows[0]) throw new NotFoundException({ error: "Bug not found" });
+
+    const created: Body[] = [];
+    for (const file of files) {
+      const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase();
+      const storageKey = `bugs/${projectId}/${bugId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
+      await this.storage.put(storageKey, file.buffer, file.mimetype);
+      const res = await this.db.query(
+        `INSERT INTO attachments (project_id, entity_type, entity_id, file_name, content_type, file_size, storage_path, uploaded_by)
+         VALUES ($1, 'bug', $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [projectId, bugId, file.originalname, file.mimetype, file.size, storageKey, userId || null]
+      );
+      created.push(toCamel(res.rows[0]));
+    }
+    return { list: created, total: created.length };
+  }
+
+  private async bugAttachment(attachmentId: string): Promise<Body> {
+    const res = await this.db.query("SELECT * FROM attachments WHERE id = $1 AND entity_type = 'bug'", [attachmentId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Attachment not found" });
+    return res.rows[0];
+  }
+
+  async getBugAttachmentAccess(attachmentId: string, inline: boolean) {
+    const file = await this.bugAttachment(attachmentId);
+    if (!file.storage_path || !(await this.storage.exists(file.storage_path))) {
+      throw new NotFoundException({ error: "File content is not available" });
+    }
+    const mimeType = file.content_type || "application/octet-stream";
+    const access = await this.storage.getAccessUrl(file.storage_path, { filename: file.file_name, inline, contentType: mimeType });
+    return { ...access, mimeType, originalFileName: file.file_name };
+  }
+
+  async deleteBugAttachment(attachmentId: string) {
+    const file = await this.bugAttachment(attachmentId);
+    await this.storage.delete(file.storage_path);
+    await this.db.query("DELETE FROM attachments WHERE id = $1", [attachmentId]);
+    return { ok: true };
   }
 
   async executionReport(projectId: string, query: Body) {
@@ -2107,12 +2268,18 @@ export class LegacyService {
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, folder.created_by, uid);
 
+    const descendantsCte = `WITH RECURSIVE descendants AS (
+      SELECT id FROM knowledge_folders WHERE id = $1
+      UNION ALL
+      SELECT kf.id FROM knowledge_folders kf JOIN descendants d ON kf.parent_folder_id = d.id
+    )`;
+
+    const filesToPurge = await this.db.query<{ storage_key: string }>(
+      `${descendantsCte} SELECT storage_key FROM knowledge_files WHERE folder_id IN (SELECT id FROM descendants) AND is_deleted = false`,
+      [folderId]
+    );
+
     await this.db.transaction(async (client) => {
-      const descendantsCte = `WITH RECURSIVE descendants AS (
-        SELECT id FROM knowledge_folders WHERE id = $1
-        UNION ALL
-        SELECT kf.id FROM knowledge_folders kf JOIN descendants d ON kf.parent_folder_id = d.id
-      )`;
       await client.query(
         `${descendantsCte} UPDATE knowledge_folders SET is_deleted = true, deleted_at = now(), updated_at = now(), updated_by = $2
          WHERE id IN (SELECT id FROM descendants)`,
@@ -2129,6 +2296,17 @@ export class LegacyService {
         [folderId]
       );
     });
+
+    // Storage cleanup runs after the DB commit and is best-effort: the soft-delete is the
+    // source of truth, so a transient S3 failure here shouldn't surface as a failed delete.
+    await Promise.all(
+      filesToPurge.rows.map((row) =>
+        this.storage
+          .delete(row.storage_key)
+          .catch((error) => this.logger.warn(`Failed to delete storage object ${row.storage_key}: ${error}`))
+      )
+    );
+
     await this.logProjectActivity(projectId, uid, "deleted", "knowledge_folder", folderId, folder.name, {});
     return { success: true };
   }
@@ -2508,6 +2686,11 @@ export class LegacyService {
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, file.uploaded_by, uid);
     await this.db.query("UPDATE knowledge_files SET is_deleted = true, deleted_at = now(), updated_at = now() WHERE id = $1", [fileId]);
+    // Best-effort: the soft-delete is the source of truth, so a transient S3 failure here
+    // shouldn't surface as a failed delete.
+    await this.storage
+      .delete(file.storage_key)
+      .catch((error) => this.logger.warn(`Failed to delete storage object ${file.storage_key}: ${error}`));
     await this.logProjectActivity(projectId, uid, "deleted", "knowledge_file", fileId, file.original_file_name, {});
     return { success: true };
   }
@@ -3257,6 +3440,42 @@ export class LegacyService {
     return { ok: true };
   }
 
+  // Live search against Jira (not the jira_tickets sync cache) — used by the bug-linking picker,
+  // where a ticket filed moments ago may not have synced yet.
+  async jiraSearchIssues(projectId: string, query: Body) {
+    const connection = await this.getJiraConnection(projectId, true);
+    if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
+    const mappings = await this.db.query(
+      "SELECT jira_project_key FROM jira_project_mappings WHERE project_id = $1 AND enabled = true",
+      [projectId]
+    );
+    const keys = mappings.rows.map((row) => String(row.jira_project_key)).filter(Boolean);
+    if (!keys.length) return { list: [] };
+
+    const projectClause = `project in (${keys.map((key) => `"${escapeJql(key)}"`).join(", ")})`;
+    const search = String(query.search || query.q || "").trim();
+    const jql = search
+      ? `${projectClause} AND (summary ~ "${escapeJql(search)}*" OR key = "${escapeJql(search.toUpperCase())}") ORDER BY updated DESC`
+      : `${projectClause} ORDER BY updated DESC`;
+    const data = await this.jiraFetch<Body>(
+      `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/search/jql`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${connection.access_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ jql, maxResults: 20, fields: ["summary", "status"] })
+      }
+    );
+    return {
+      list: normalizeJsonArray(data.issues).map((issue) => ({
+        provider: "JIRA",
+        key: String(issue.key || ""),
+        summary: String((issue.fields as Body)?.summary || ""),
+        status: String((issue.fields as Body)?.status?.name || ""),
+        url: `${connection.site_url}/browse/${issue.key}`
+      }))
+    };
+  }
+
   private async getJiraConnection(projectId: string, refresh: boolean): Promise<Body | null> {
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "jira", refresh);
@@ -3541,6 +3760,45 @@ export class LegacyService {
       { issueId, body: comment }
     );
     return { ok: true };
+  }
+
+  // Live search against Linear (not the linear_tickets sync cache) — same rationale as jiraSearchIssues.
+  async linearSearchIssues(projectId: string, query: Body) {
+    const organizationId = await this.projectOrganizationId(projectId);
+    const connection = await this.getIntegrationConnection(organizationId, "linear", true);
+    if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
+    const mappings = await this.db.query(
+      "SELECT linear_team_id FROM linear_project_mappings WHERE project_id = $1 AND integration_connection_id = $2 AND enabled = true",
+      [projectId, connection.id]
+    );
+    const teamIds = mappings.rows.map((row) => String(row.linear_team_id)).filter(Boolean);
+    if (!teamIds.length) return { list: [] };
+
+    const search = String(query.search || query.q || "").trim();
+    const results: Body[] = [];
+    for (const teamId of teamIds) {
+      const data = await this.linearGraphQL<Body>(
+        connection.access_token,
+        `query TeamIssues($teamId: String!, $filter: IssueFilter) {
+           team(id: $teamId) {
+             issues(first: 20, orderBy: updatedAt, filter: $filter) {
+               nodes { id identifier title url state { name } }
+             }
+           }
+         }`,
+        { teamId, filter: search ? { title: { containsIgnoreCase: search } } : null }
+      );
+      for (const issue of normalizeJsonArray(data?.team?.issues?.nodes)) {
+        results.push({
+          provider: "LINEAR",
+          key: String(issue.identifier || ""),
+          summary: String(issue.title || ""),
+          status: String(issue.state?.name || ""),
+          url: String(issue.url || "")
+        });
+      }
+    }
+    return { list: results.slice(0, 20) };
   }
 
   async zyraAgent(projectId: string) {
