@@ -30,96 +30,75 @@ pipeline {
             }
         }
 
-        stage('Parallel CI') {
-            parallel {
-                stage('SonarQube Scan') {
-                    steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
-                            configFileProvider([configFile(fileId: "${TESBO_ENV_FILE_ID}", variable: 'TESBO_ENV')]) {
-                                sh '''
-                                    set -e
-                                    set -a
-                                    . "${TESBO_ENV}"
-                                    set +a
+        stage('SonarQube Scan') {
+            steps {
+                configFileProvider([configFile(fileId: "${TESBO_ENV_FILE_ID}", variable: 'TESBO_ENV')]) {
+                    sh '''
+                        set -e
+                        set -a
+                        . "${TESBO_ENV}"
+                        set +a
 
-                                    test -n "${SONAR_HOST_URL}" || { echo "SONAR_HOST_URL missing in managed file"; exit 1; }
-                                    test -n "${SONAR_TOKEN}" || { echo "SONAR_TOKEN missing in managed file"; exit 1; }
+                        test -n "${SONAR_HOST_URL}" || { echo "SONAR_HOST_URL missing in managed file"; exit 1; }
+                        test -n "${SONAR_TOKEN}" || { echo "SONAR_TOKEN missing in managed file"; exit 1; }
 
-                                    SCANNER_DIR="${WORKSPACE}/.sonar-scanner"
-                                    if [ ! -x "${SCANNER_DIR}/bin/sonar-scanner" ]; then
-                                      echo "Downloading sonar-scanner ${SONAR_SCANNER_VERSION}..."
-                                      curl -fsSL -o /tmp/sonar-scanner.zip \
-                                        "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux.zip"
-                                      rm -rf /tmp/sonar-scanner-unpack "${SCANNER_DIR}"
-                                      unzip -q /tmp/sonar-scanner.zip -d /tmp/sonar-scanner-unpack
-                                      mv /tmp/sonar-scanner-unpack/sonar-scanner-* "${SCANNER_DIR}"
-                                    fi
+                        SCANNER_DIR="${WORKSPACE}/.sonar-scanner"
+                        if [ ! -x "${SCANNER_DIR}/bin/sonar-scanner" ]; then
+                          echo "Downloading sonar-scanner ${SONAR_SCANNER_VERSION}..."
+                          curl -fsSL -o /tmp/sonar-scanner.zip \
+                            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux.zip"
+                          rm -rf /tmp/sonar-scanner-unpack "${SCANNER_DIR}"
+                          unzip -q /tmp/sonar-scanner.zip -d /tmp/sonar-scanner-unpack
+                          mv /tmp/sonar-scanner-unpack/sonar-scanner-* "${SCANNER_DIR}"
+                        fi
 
-                                    "${SCANNER_DIR}/bin/sonar-scanner" \
-                                      -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
-                                      -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
-                                      -Dsonar.sources="${SONAR_SOURCES}" \
-                                      -Dsonar.sourceEncoding=UTF-8 \
-                                      -Dsonar.exclusions="${SONAR_EXCLUSIONS}" \
-                                      -Dsonar.host.url="${SONAR_HOST_URL}" \
-                                      -Dsonar.token="${SONAR_TOKEN}"
-                                '''
-                            }
-                        }
-                    }
+                        "${SCANNER_DIR}/bin/sonar-scanner" \
+                          -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+                          -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
+                          -Dsonar.sources="${SONAR_SOURCES}" \
+                          -Dsonar.sourceEncoding=UTF-8 \
+                          -Dsonar.exclusions="${SONAR_EXCLUSIONS}" \
+                          -Dsonar.host.url="${SONAR_HOST_URL}" \
+                          -Dsonar.token="${SONAR_TOKEN}"
+                    '''
                 }
+            }
+        }
 
-                stage('Deploy master branch') {
-                    when {
-                        anyOf {
-                            branch 'master'
-                            expression { env.GIT_BRANCH == 'origin/master' }
-                            expression { env.BRANCH_NAME == 'master' }
-                        }
-                    }
-                    steps {
-                        echo 'Deploying Tesbo master over dedicated SSH config...'
-                        sh '''
-                            set -e
-                            test -f "${SSH_CONFIG}"
-
-                            tar \
-                              --exclude=.git \
-                              --exclude=node_modules \
-                              --exclude=.next \
-                              --exclude=.env \
-                              --exclude=docker-compose.yml \
-                              --exclude=infra/docker/postgres/pg_hba.conf \
-                              --exclude=Jenkinsfile \
-                              -czf - . | \
-                            ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "cd '${REMOTE_APP_DIR}' && tar -xzf -"
-
-                            ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "
-                              set -e
-                              cd '${REMOTE_APP_DIR}'
-                              docker compose up --build -d --wait --wait-timeout 300
-                              docker compose ps
-                              curl -fsS http://127.0.0.1:1011/health
-                              curl -fsS -o /dev/null http://127.0.0.1:1010/
-                            "
-                        '''
-                    }
+        stage('Deploy master branch') {
+            when {
+                anyOf {
+                    branch 'master'
+                    expression { env.GIT_BRANCH == 'origin/master' }
+                    expression { env.BRANCH_NAME == 'master' }
                 }
+            }
+            steps {
+                echo 'SonarQube passed — deploying Tesbo master over dedicated SSH config...'
+                sh '''
+                    set -e
+                    test -f "${SSH_CONFIG}"
 
-                stage('Skip non-master branch') {
-                    when {
-                        not {
-                            anyOf {
-                                branch 'master'
-                                expression { env.GIT_BRANCH == 'origin/master' }
-                                expression { env.BRANCH_NAME == 'master' }
-                            }
-                        }
-                    }
-                    steps {
-                        echo 'Non-master branch: deploy skipped. SonarQube scan ran in parallel.'
-                    }
-                }
+                    tar \
+                      --exclude=.git \
+                      --exclude=node_modules \
+                      --exclude=.next \
+                      --exclude=.env \
+                      --exclude=docker-compose.yml \
+                      --exclude=infra/docker/postgres/pg_hba.conf \
+                      --exclude=Jenkinsfile \
+                      -czf - . | \
+                    ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "cd '${REMOTE_APP_DIR}' && tar -xzf -"
+
+                    ssh -F "${SSH_CONFIG}" ${REMOTE_HOST} "
+                      set -e
+                      cd '${REMOTE_APP_DIR}'
+                      docker compose up --build -d --wait --wait-timeout 300
+                      docker compose ps
+                      curl -fsS http://127.0.0.1:1011/health
+                      curl -fsS -o /dev/null http://127.0.0.1:1010/
+                    "
+                '''
             }
         }
     }
