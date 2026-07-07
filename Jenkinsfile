@@ -1,10 +1,6 @@
 pipeline {
     agent any
 
-    tools {
-        sonarScanner 'SonarScanner'
-    }
-
     options {
         disableConcurrentBuilds()
         timeout(time: 45, unit: 'MINUTES')
@@ -37,6 +33,9 @@ pipeline {
             parallel {
                 stage('SonarQube Scan') {
                     steps {
+                        script {
+                            env.SCANNER_HOME = tool 'SonarScanner'
+                        }
                         configFileProvider([configFile(fileId: "${TESBO_ENV_FILE_ID}", variable: 'TESBO_ENV')]) {
                             sh '''
                                 set -e
@@ -47,7 +46,7 @@ pipeline {
                                 test -n "${SONAR_HOST_URL}" || { echo "SONAR_HOST_URL missing in managed file"; exit 1; }
                                 test -n "${SONAR_TOKEN}" || { echo "SONAR_TOKEN missing in managed file"; exit 1; }
 
-                                sonar-scanner \
+                                "${SCANNER_HOME}/bin/sonar-scanner" \
                                   -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
                                   -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
                                   -Dsonar.sources="${SONAR_SOURCES}" \
