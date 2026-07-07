@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import { randomBytes, createHash } from "crypto";
+import { isPrivateOrInternalIp } from "../common/client-ip";
 import { DatabaseService } from "../database/database.service";
 import { AppConfigService } from "../config/app-config.service";
 import { EmailService } from "./email.service";
@@ -15,8 +16,7 @@ export class OtpService {
   async requestOtp(rawEmail: string, ipAddress?: string | null, _userAgent?: string | null): Promise<boolean> {
     const email = rawEmail.trim().toLowerCase();
     if (!email) return false;
-    const ipKey = this.rateLimitKeyForIp(ipAddress);
-    if ((await this.isRateLimited(email)) || (await this.isRateLimited(ipKey))) return false;
+    if ((await this.isRateLimited(email)) || (await this.isSendRateLimited(email))) return false;
 
     const plainCode = this.generateOtp();
     const codeHash = this.hash(plainCode);
@@ -27,8 +27,6 @@ export class OtpService {
       codeHash,
       expiresAt
     ]);
-    await this.recordOtpAttempt(email);
-    await this.recordOtpAttempt(ipKey);
     await this.email.sendOtp(email, plainCode);
     return true;
   }
@@ -44,7 +42,7 @@ export class OtpService {
   async verifyOtpCode(rawEmail: string, code: string, ipAddress?: string | null): Promise<boolean> {
     const email = rawEmail.trim().toLowerCase();
     const ipKey = this.rateLimitKeyForIp(ipAddress);
-    if ((await this.isRateLimited(email)) || (await this.isRateLimited(ipKey))) return false;
+    if ((await this.isRateLimited(email)) || (ipKey ? await this.isRateLimited(ipKey) : false)) return false;
 
     const result = await this.db.query<{ id: string }>(
       "SELECT id FROM otp_codes WHERE email = $1 AND code_hash = $2 AND expires_at > now() AND used_at IS NULL ORDER BY created_at DESC LIMIT 1",
@@ -53,13 +51,13 @@ export class OtpService {
     const otpId = result.rows[0]?.id;
     if (!otpId) {
       await this.recordOtpAttempt(email);
-      await this.recordOtpAttempt(ipKey);
+      if (ipKey) await this.recordOtpAttempt(ipKey);
       return false;
     }
 
     await this.markOtpUsed(otpId);
     await this.clearRateLimit(email);
-    await this.clearRateLimit(ipKey);
+    if (ipKey) await this.clearRateLimit(ipKey);
     return true;
   }
 
@@ -92,6 +90,17 @@ export class OtpService {
     const result = await this.db.query<{ locked_until: Date | null }>("SELECT locked_until FROM otp_rate_limit WHERE email = $1", [key]);
     const lockedUntil = result.rows[0]?.locked_until;
     return !!lockedUntil && lockedUntil.getTime() > Date.now();
+  }
+
+  private async isSendRateLimited(email: string): Promise<boolean> {
+    const result = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count
+       FROM otp_codes
+       WHERE email = $1
+         AND created_at > now() - ($2 || ' minutes')::interval`,
+      [email, this.config.otpRateLimitWindowMinutes]
+    );
+    return Number(result.rows[0]?.count ?? 0) >= this.config.otpMaxAttempts;
   }
 
   private async recordOtpAttempt(key: string): Promise<void> {
@@ -127,8 +136,10 @@ export class OtpService {
     return inserted.rows[0]?.id ?? (await this.findOrCreateUser(email));
   }
 
-  private rateLimitKeyForIp(ipAddress?: string | null): string {
-    return `ip:${ipAddress?.trim() ?? ""}`;
+  private rateLimitKeyForIp(ipAddress?: string | null): string | null {
+    const ip = ipAddress?.trim() ?? "";
+    if (!ip || isPrivateOrInternalIp(ip)) return null;
+    return `ip:${ip}`;
   }
 
   private generateOtp(): string {

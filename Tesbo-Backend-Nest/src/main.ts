@@ -11,6 +11,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, { cors: false });
   const config = app.get(AppConfigService);
 
+  app.getHttpAdapter().getInstance().set("trust proxy", true);
   app.use(cookieParser());
   app.use((req: Request, res: Response, next: NextFunction) => {
     res.setHeader("X-Request-Id", randomUUID());

@@ -5,6 +5,7 @@ import { AuthenticatedRequest } from "../common/request.types";
 import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
 import { SuperAdminService } from "../admin/super-admin.service";
+import { resolveClientIp } from "../common/client-ip";
 import { OtpService } from "./otp.service";
 import { PasswordService } from "./password.service";
 
@@ -109,6 +110,6 @@ export class AuthService {
   }
 
   private ip(req: AuthenticatedRequest): string {
-    return req.ip ?? "";
+    return resolveClientIp(req);
   }
 }

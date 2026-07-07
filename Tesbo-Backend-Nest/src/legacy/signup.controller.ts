@@ -1,5 +1,6 @@
 import { Body, Controller, HttpCode, Param, Post, Req, Res } from "@nestjs/common";
 import type { Response } from "express";
+import { resolveClientIp } from "../common/client-ip";
 import { AuthenticatedRequest } from "../common/request.types";
 import { SignupService } from "./signup.service";
 
@@ -47,6 +48,6 @@ export class SignupController {
   }
 
   private ip(req: AuthenticatedRequest): string {
-    return req.ip ?? "";
+    return resolveClientIp(req);
   }
 }
