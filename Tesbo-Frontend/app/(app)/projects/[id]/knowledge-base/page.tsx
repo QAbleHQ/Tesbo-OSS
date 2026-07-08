@@ -42,9 +42,11 @@ import {
   type KnowledgeFolderTreeNode,
   type KnowledgeItem,
   type KnowledgeBreadcrumbEntry,
+  type KnowledgeFile,
 } from "@/lib/api";
 import { Button, Input, Modal, Field, FieldLabel, StatusChip, EmptyStateBlock } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
+import FileViewerModal from "@/components/knowledge-base/FileViewerModal";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DocNode = any;
@@ -651,6 +653,7 @@ function KnowledgeBasePageInner() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<KnowledgeFolderTreeNode | null>(null);
   const [moveTarget, setMoveTarget] = useState<{ kind: "folder" | "document" | "file"; id: string; excludeId?: string } | null>(null);
+  const [viewerFile, setViewerFile] = useState<KnowledgeItem | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -883,7 +886,7 @@ function KnowledgeBasePageInner() {
   function openItem(item: KnowledgeItem) {
     if (item.type === "folder") selectFolder(item.id);
     else if (item.type === "document") router.push(`/projects/${projectId}/knowledge-base/documents/${item.id}`);
-    else window.open(getKnowledgeFileDownloadUrl(projectId, item.id), "_blank");
+    else setViewerFile(item);
   }
 
   if (loading) {
@@ -952,6 +955,11 @@ function KnowledgeBasePageInner() {
         onClose={() => setMoveTarget(null)}
         onMove={handleMove}
         saving={saving}
+      />
+      <FileViewerModal
+        projectId={projectId}
+        file={viewerFile && viewerFile.type === "file" ? (viewerFile as unknown as KnowledgeFile) : null}
+        onClose={() => setViewerFile(null)}
       />
 
       {error && (
