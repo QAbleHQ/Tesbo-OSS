@@ -70,6 +70,9 @@ services:
       POSTMARK_FROM_EMAIL: ${POSTMARK_FROM_EMAIL:-noreply@example.com}
       JIRA_CLIENT_ID: ${JIRA_CLIENT_ID:-}
       JIRA_CLIENT_SECRET: ${JIRA_CLIENT_SECRET:-}
+      # AES-256-GCM key for encrypting integration secrets at rest. Override with your own
+      # (openssl rand -base64 32) for any shared/non-local environment.
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-QtqFfNpvzyRZvBpFeXYIFmQMTwQHVXHQYbH85YvhlvE=}
       OTP_EXPIRY_MINUTES: ${OTP_EXPIRY_MINUTES:-10}
       OTP_MAX_ATTEMPTS: ${OTP_MAX_ATTEMPTS:-5}
       OTP_RATE_LIMIT_WINDOW_MINUTES: ${OTP_RATE_LIMIT_WINDOW_MINUTES:-15}

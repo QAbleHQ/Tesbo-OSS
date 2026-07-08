@@ -73,7 +73,7 @@ interface InviteModalProps {
 
 function InviteModal({ open, onClose, onInvited, callerRole, projects }: InviteModalProps) {
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<string>(callerRole === "manager" ? "qa_engineer" : "qa_engineer");
+  const [role, setRole] = useState<string>("qa_engineer");
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");

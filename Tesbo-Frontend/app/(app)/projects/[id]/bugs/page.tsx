@@ -115,7 +115,15 @@ function KanbanCard({
 }) {
   return (
     <div
+      role="button"
+      tabIndex={0}
       onClick={onView}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onView();
+        }
+      }}
       className="group bg-[var(--surface)] border border-[var(--border-subtle)] rounded-lg p-3 cursor-pointer hover:border-[var(--brand-primary)]/40 hover:shadow-sm transition-all"
     >
       <div className="flex items-start justify-between gap-2 mb-2">
@@ -123,6 +131,7 @@ function KanbanCard({
           {bug.title}
         </h4>
         <div
+          role="presentation"
           className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
           onClick={(e) => e.stopPropagation()}
         >
@@ -687,7 +696,15 @@ export default function BugsPage() {
                           <tr
                             key={b.id}
                             className="cursor-pointer"
+                            role="button"
+                            tabIndex={0}
                             onClick={() => setViewBug(b)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                setViewBug(b);
+                              }
+                            }}
                           >
                             <td>
                               <div className="flex flex-col gap-0.5 max-w-sm">
@@ -744,6 +761,7 @@ export default function BugsPage() {
                             </td>
                             <td>
                               <div
+                                role="presentation"
                                 className="flex items-center gap-1"
                                 onClick={(e) => e.stopPropagation()}
                               >

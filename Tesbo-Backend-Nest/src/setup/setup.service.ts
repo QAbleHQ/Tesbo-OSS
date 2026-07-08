@@ -865,7 +865,7 @@ Error messages must be clear, actionable, and written in plain language. The use
       .trim()
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
+      .replace(/(?:^-)|(?:-$)/g, "");
     return (slug || "org").slice(0, 64);
   }
 

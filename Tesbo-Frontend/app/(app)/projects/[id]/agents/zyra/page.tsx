@@ -40,7 +40,7 @@ function mdInline(s: string): string {
 
 function mdTable(lines: string[]): string {
   const isSep = (l: string) => /^\|[\s\-:|]+\|$/.test(l.trim());
-  const cells = (l: string) => l.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim());
+  const cells = (l: string) => l.trim().replace(/(?:^\|)|(?:\|$)/g, "").split("|").map(c => c.trim());
   const data = lines.filter(l => !isSep(l));
   if (!data.length) return "";
   const [hdr, ...rows] = data;

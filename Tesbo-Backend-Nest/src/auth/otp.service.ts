@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { randomBytes, createHash } from "crypto";
+import { randomBytes, randomInt, createHash } from "crypto";
 import { DatabaseService } from "../database/database.service";
 import { AppConfigService } from "../config/app-config.service";
 import { EmailService } from "./email.service";
@@ -132,9 +132,7 @@ export class OtpService {
   }
 
   private generateOtp(): string {
-    let code = "";
-    for (let i = 0; i < 6; i += 1) code += Math.floor(Math.random() * 10).toString();
-    return code;
+    return randomInt(0, 1_000_000).toString().padStart(6, "0");
   }
 
   private hash(value: string): string {

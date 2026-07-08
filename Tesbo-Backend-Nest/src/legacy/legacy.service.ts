@@ -1,12 +1,18 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { createHash, randomBytes, randomUUID } from "crypto";
+import * as fs from "fs";
 import * as path from "path";
+import * as XLSX from "xlsx";
+import pdfParse from "pdf-parse";
+import * as mammoth from "mammoth";
+import { createWorker } from "tesseract.js";
 import type { PoolClient, QueryResultRow } from "pg";
 import { EmailService } from "../auth/email.service";
 import { PasswordService } from "../auth/password.service";
 import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
 import { StorageService } from "../storage/storage.service";
+import { encryptSecret, decryptSecret } from "../common/crypto.util";
 
 type Body = Record<string, any>;
 
@@ -129,7 +135,7 @@ function slugify(value: string): string {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
+    .replace(/(?:^-)|(?:-$)/g, "")
     .slice(0, 64) || "workspace";
 }
 
@@ -185,6 +191,19 @@ function assertIntegrationProvider(provider: string): IntegrationProvider {
   return provider;
 }
 
+// Which providers support connecting via a Personal Access Token instead of OAuth. A future
+// provider that only supports OAuth simply omits itself (or sets `false`) here — the frontend's
+// per-provider PAT field map mirrors this and hides the tab accordingly.
+const INTEGRATION_PAT_SUPPORTED: Record<IntegrationProvider, boolean> = { jira: true, linear: true };
+
+function normalizeJiraSiteUrl(raw: string): string {
+  const value = raw.trim().replace(/\/+$/, "");
+  if (!/^https:\/\/[^/]+$/i.test(value)) {
+    throw new BadRequestException({ error: "Jira site URL must look like https://yourcompany.atlassian.net" });
+  }
+  return value;
+}
+
 const JIRA_OAUTH_SCOPE = "read:jira-work read:jira-user write:jira-work offline_access";
 const LINEAR_OAUTH_SCOPE = "read,write,issues:create,comments:create";
 
@@ -218,19 +237,34 @@ function anthropicModelCandidates(model?: string | null): string[] {
   ].filter(Boolean)));
 }
 
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
+}
+
 function normalizeChatCompletionsUrl(baseUrl?: string | null): string {
   const value = String(baseUrl || "").trim();
   if (!value) return "https://api.openai.com/v1/chat/completions";
-  const trimmed = value.replace(/\/+$/, "");
+  const trimmed = trimTrailingSlashes(value);
   if (trimmed.endsWith("/chat/completions")) return trimmed;
   if (trimmed.endsWith("/v1")) return `${trimmed}/chat/completions`;
   return `${trimmed}/v1/chat/completions`;
 }
 
+function normalizeAudioTranscriptionsUrl(baseUrl?: string | null): string {
+  const value = String(baseUrl || "").trim();
+  if (!value) return "https://api.openai.com/v1/audio/transcriptions";
+  const trimmed = trimTrailingSlashes(value);
+  if (trimmed.endsWith("/audio/transcriptions")) return trimmed;
+  if (trimmed.endsWith("/v1")) return `${trimmed}/audio/transcriptions`;
+  return `${trimmed}/v1/audio/transcriptions`;
+}
+
 function normalizeAnthropicMessagesUrl(baseUrl?: string | null): string {
   const value = String(baseUrl || "").trim();
   if (!value) return "https://api.anthropic.com/v1/messages";
-  const trimmed = value.replace(/\/+$/, "");
+  const trimmed = trimTrailingSlashes(value);
   if (trimmed.endsWith("/messages")) return trimmed;
   if (trimmed.endsWith("/v1")) return `${trimmed}/messages`;
   return `${trimmed}/v1/messages`;
@@ -2577,6 +2611,115 @@ export class LegacyService {
     "mp4", "mov", "webm",
     "zip"
   ]);
+  // Extensions we can read as plain UTF-8 text without any parsing library.
+  static readonly KB_PLAINTEXT_EXTENSIONS = new Set([
+    "txt", "md", "csv", "json", "xml", "yaml", "yml", "sql", "html", "css", "js", "ts", "java", "py"
+  ]);
+  static readonly KB_SPREADSHEET_EXTENSIONS = new Set(["xls", "xlsx"]);
+  static readonly KB_PDF_EXTENSIONS = new Set(["pdf"]);
+  // mammoth only reads the Open XML .docx format — legacy binary .doc is not supported.
+  static readonly KB_DOCX_EXTENSIONS = new Set(["docx"]);
+  // webp/svg are excluded: the underlying OCR engine's image decoder reliably supports
+  // only png/jpg/bmp, so webp would silently produce no text.
+  static readonly KB_IMAGE_OCR_EXTENSIONS = new Set(["png", "jpg", "jpeg"]);
+  // Whisper accepts these containers directly (audio track only, no ffmpeg needed for the
+  // video ones) — .mov is intentionally excluded, OpenAI's endpoint doesn't accept it.
+  static readonly KB_AUDIO_EXTENSIONS = new Set(["mp3", "wav", "m4a"]);
+  static readonly KB_TRANSCRIBABLE_VIDEO_EXTENSIONS = new Set(["mp4", "webm"]);
+  static readonly KB_EXTRACTED_TEXT_LIMIT = 20000;
+  static readonly KB_TESSDATA_PATH = process.env.TESSDATA_PATH || "/app/tessdata";
+
+  // Best-effort text extraction so Zyra's knowledge-base context can include file contents,
+  // not just file names. Runs synchronously in the upload request — everything here is local
+  // CPU/WASM work with no network call. Audio/video transcription is handled separately
+  // (transcribeKnowledgeFile) since it calls out to an AI provider and can take a while.
+  private async extractKnowledgeFileText(buffer: Buffer, ext: string): Promise<string | null> {
+    try {
+      if (LegacyService.KB_PLAINTEXT_EXTENSIONS.has(ext)) {
+        return buffer.toString("utf8").slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_SPREADSHEET_EXTENSIONS.has(ext)) {
+        const workbook = XLSX.read(buffer, { type: "buffer" });
+        const text = workbook.SheetNames
+          .map((name) => `Sheet: ${name}\n${XLSX.utils.sheet_to_csv(workbook.Sheets[name])}`)
+          .join("\n\n");
+        return text.slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_PDF_EXTENSIONS.has(ext)) {
+        const data = await pdfParse(buffer);
+        return String(data.text || "").slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_DOCX_EXTENSIONS.has(ext)) {
+        const result = await mammoth.extractRawText({ buffer });
+        return String(result.value || "").slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_IMAGE_OCR_EXTENSIONS.has(ext)) {
+        return await this.ocrImageText(buffer);
+      }
+    } catch (err) {
+      this.logger.warn(`Knowledge-base text extraction failed for .${ext} file: ${err instanceof Error ? err.message : err}`);
+    }
+    return null;
+  }
+
+  // OCR reads the English language model baked into the image at build time (see Dockerfile)
+  // so it works fully offline. Falls back to null (no extractable text) if that data isn't
+  // present — e.g. running outside the built container image.
+  private async ocrImageText(buffer: Buffer): Promise<string | null> {
+    if (!fs.existsSync(path.join(LegacyService.KB_TESSDATA_PATH, "eng.traineddata.gz"))) {
+      this.logger.warn(`OCR skipped — no tessdata found at ${LegacyService.KB_TESSDATA_PATH}`);
+      return null;
+    }
+    const worker = await createWorker("eng", 1, {
+      langPath: LegacyService.KB_TESSDATA_PATH,
+      cachePath: LegacyService.KB_TESSDATA_PATH,
+      gzip: true
+    });
+    try {
+      const { data } = await worker.recognize(buffer);
+      return String(data.text || "").trim().slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT) || null;
+    } finally {
+      await worker.terminate();
+    }
+  }
+
+  // Async speech-to-text for uploaded audio/video files, fired-and-forgotten from
+  // uploadKnowledgeFiles (mirrors the processZyraTask pattern used for AI task generation)
+  // so a multi-minute meeting recording doesn't block the upload HTTP response. Only attempted
+  // when the project has an OpenAI key allocated — no other provider offers a compatible
+  // transcription endpoint we can safely assume the shape of.
+  private async transcribeKnowledgeFile(projectId: string, fileId: string, buffer: Buffer, ext: string, mimeType: string, fileName: string): Promise<void> {
+    try {
+      const allocation = await this.zyraAiAllocation(projectId);
+      const key = allocation.key;
+      if (!key || String(key.provider || "").toLowerCase() !== "openai") {
+        await this.db.query("UPDATE knowledge_files SET extraction_status = 'unsupported' WHERE id = $1", [fileId]);
+        return;
+      }
+      const form = new FormData();
+      form.append("file", new Blob([new Uint8Array(buffer)], { type: mimeType || "application/octet-stream" }), fileName);
+      form.append("model", "whisper-1");
+      const authHeader = String(key.auth_header_name || "Authorization");
+      const scheme = String(key.auth_scheme || "Bearer").trim();
+      const headers: Record<string, string> = {};
+      headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
+      const res = await fetch(normalizeAudioTranscriptionsUrl(key.base_url), { method: "POST", headers, body: form });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({} as Body)) as Body;
+        const rawMessage = String(errBody.error?.message || errBody.error || res.status);
+        throw new Error(rawMessage);
+      }
+      const data = await res.json() as Body;
+      const text = String(data.text || "").trim().slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      await this.db.query(
+        "UPDATE knowledge_files SET extracted_text = $2, extraction_status = 'ready', updated_at = now() WHERE id = $1",
+        [fileId, text || null]
+      );
+    } catch (err) {
+      this.logger.warn(`Knowledge-base transcription failed for file ${fileId}: ${err instanceof Error ? err.message : err}`);
+      await this.db.query("UPDATE knowledge_files SET extraction_status = 'failed', updated_at = now() WHERE id = $1", [fileId]).catch(() => undefined);
+    }
+  }
 
   private async kbFile(projectId: string, fileId: string): Promise<Body> {
     const res = await this.db.query(
@@ -2627,13 +2770,22 @@ export class LegacyService {
       const originalFileName = await this.kbUniqueFileName(folderId, file.originalname);
       const storageKey = `knowledge-base/${project.organization_id}/${projectId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
       await this.storage.put(storageKey, file.buffer, file.mimetype);
+      // Audio/video transcription is slow (calls an external AI provider) and shouldn't block
+      // the upload response — it's kicked off after insert, below, and fills in extracted_text
+      // asynchronously. Everything else extracts synchronously (local CPU/WASM work only).
+      const isTranscribable = LegacyService.KB_AUDIO_EXTENSIONS.has(ext) || LegacyService.KB_TRANSCRIBABLE_VIDEO_EXTENSIONS.has(ext);
+      const extractedText = isTranscribable ? null : await this.extractKnowledgeFileText(file.buffer, ext);
+      const extractionStatus = isTranscribable ? "pending" : null;
       const res = await this.db.query(
-        `INSERT INTO knowledge_files (organization_id, project_id, folder_id, file_name, original_file_name, mime_type, file_extension, file_size, storage_key, uploaded_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [project.organization_id, projectId, folderId, path.basename(storageKey), originalFileName, file.mimetype, ext, file.size, storageKey, uid]
+        `INSERT INTO knowledge_files (organization_id, project_id, folder_id, file_name, original_file_name, mime_type, file_extension, file_size, storage_key, uploaded_by, extracted_text, extraction_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+        [project.organization_id, projectId, folderId, path.basename(storageKey), originalFileName, file.mimetype, ext, file.size, storageKey, uid, extractedText, extractionStatus]
       );
       created.push(toCamel(res.rows[0]));
       await this.logProjectActivity(projectId, uid, "uploaded", "knowledge_file", res.rows[0].id, originalFileName, {});
+      if (isTranscribable) {
+        void this.transcribeKnowledgeFile(projectId, res.rows[0].id, file.buffer, ext, file.mimetype, originalFileName).catch(() => undefined);
+      }
     }
     return { list: created, total: created.length };
   }
@@ -3128,8 +3280,8 @@ export class LegacyService {
 
       const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
       const res = await this.db.query(
-        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by)
-         VALUES ($1, 'jira', $2, $3, $4, $5, $6, $7)
+        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+         VALUES ($1, 'jira', $2, $3, $4, $5, $6, $7, 'oauth', NULL)
          ON CONFLICT (organization_id, provider) DO UPDATE SET
            external_id = EXCLUDED.external_id,
            site_url = EXCLUDED.site_url,
@@ -3137,9 +3289,11 @@ export class LegacyService {
            refresh_token = EXCLUDED.refresh_token,
            token_expires_at = EXCLUDED.token_expires_at,
            connected_by = EXCLUDED.connected_by,
+           auth_method = 'oauth',
+           personal_token_identifier = NULL,
            updated_at = now()
          RETURNING id, external_id, site_url`,
-        [workspace.id, String(resource.id), String(resource.url), accessToken, refreshToken, expiresAt, userId || null]
+        [workspace.id, String(resource.id), String(resource.url), encryptSecret(accessToken), encryptSecret(refreshToken), expiresAt, userId || null]
       );
       return { connectionId: res.rows[0].id, cloudId: res.rows[0].external_id, siteUrl: res.rows[0].site_url };
     }
@@ -3158,13 +3312,13 @@ export class LegacyService {
     });
     const accessToken = String(token.access_token || "");
     if (!accessToken) throw new BadRequestException({ error: "Linear did not return an OAuth token." });
-    const viewer = await this.linearGraphQL<Body>(accessToken, "query { organization { id urlKey } }");
+    const viewer = await this.linearGraphQL<Body>(`Bearer ${accessToken}`, "query { organization { id urlKey } }");
     const org = viewer?.organization;
     if (!org?.urlKey) throw new BadRequestException({ error: "Could not read the connected Linear workspace." });
     const expiresAt = new Date(Date.now() + Number(token.expires_in || 315360000) * 1000).toISOString();
     const res = await this.db.query(
-      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by)
-       VALUES ($1, 'linear', $2, $3, $4, $5, $6, $7)
+      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+       VALUES ($1, 'linear', $2, $3, $4, $5, $6, $7, 'oauth', NULL)
        ON CONFLICT (organization_id, provider) DO UPDATE SET
          external_id = EXCLUDED.external_id,
          site_url = EXCLUDED.site_url,
@@ -3172,11 +3326,74 @@ export class LegacyService {
          refresh_token = EXCLUDED.refresh_token,
          token_expires_at = EXCLUDED.token_expires_at,
          connected_by = EXCLUDED.connected_by,
+         auth_method = 'oauth',
+         personal_token_identifier = NULL,
          updated_at = now()
        RETURNING id, site_url`,
-      [workspace.id, String(org.id || ""), `https://linear.app/${org.urlKey}`, accessToken, String(token.refresh_token || ""), expiresAt, userId || null]
+      [workspace.id, String(org.id || ""), `https://linear.app/${org.urlKey}`, encryptSecret(accessToken), encryptSecret(String(token.refresh_token || "")), expiresAt, userId || null]
     );
     return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url };
+  }
+
+  async connectIntegrationWithToken(userId: string | null | undefined, provider: string, body: Body) {
+    const p = assertIntegrationProvider(provider);
+    if (!INTEGRATION_PAT_SUPPORTED[p]) {
+      throw new BadRequestException({ error: `${p} does not support Personal Access Token authentication.` });
+    }
+    const workspace = await this.workspace(userId);
+
+    if (p === "jira") {
+      const siteUrl = normalizeJiraSiteUrl(String(body.siteUrl || ""));
+      const email = String(body.email || "").trim();
+      const apiToken = String(body.apiToken || "").trim();
+      if (!email || !apiToken) throw new BadRequestException({ error: "Email and API token are required." });
+
+      const authHeader = `Basic ${Buffer.from(`${email}:${apiToken}`).toString("base64")}`;
+      await this.jiraFetch<Body>(`${siteUrl}/rest/api/3/myself`, { headers: { Authorization: authHeader, Accept: "application/json" } });
+
+      const res = await this.db.query(
+        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+         VALUES ($1, 'jira', NULL, $2, $3, '', now() + interval '100 years', $4, 'personal_token', $5)
+         ON CONFLICT (organization_id, provider) DO UPDATE SET
+           external_id = NULL,
+           site_url = EXCLUDED.site_url,
+           access_token = EXCLUDED.access_token,
+           refresh_token = '',
+           token_expires_at = EXCLUDED.token_expires_at,
+           connected_by = EXCLUDED.connected_by,
+           auth_method = 'personal_token',
+           personal_token_identifier = EXCLUDED.personal_token_identifier,
+           updated_at = now()
+         RETURNING id, site_url`,
+        [workspace.id, siteUrl, encryptSecret(apiToken), userId || null, email]
+      );
+      return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url, authMethod: "personal_token" };
+    }
+
+    // Linear
+    const apiKey = String(body.apiKey || "").trim();
+    if (!apiKey) throw new BadRequestException({ error: "API key is required." });
+    const viewer = await this.linearGraphQL<Body>(apiKey, "query { viewer { id } organization { id urlKey } }");
+    if (!viewer?.viewer?.id) throw new BadRequestException({ error: "Could not verify the Linear API key." });
+    const org = viewer.organization;
+
+    const res = await this.db.query(
+      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+       VALUES ($1, 'linear', $2, $3, $4, '', now() + interval '100 years', $5, 'personal_token', NULL)
+       ON CONFLICT (organization_id, provider) DO UPDATE SET
+         external_id = EXCLUDED.external_id,
+         site_url = EXCLUDED.site_url,
+         access_token = EXCLUDED.access_token,
+         refresh_token = '',
+         token_expires_at = EXCLUDED.token_expires_at,
+         connected_by = EXCLUDED.connected_by,
+         auth_method = 'personal_token',
+         personal_token_identifier = NULL,
+         updated_at = now()
+       RETURNING id, site_url`,
+      [workspace.id, String(org?.id || ""), org?.urlKey ? `https://linear.app/${org.urlKey}` : "", encryptSecret(apiKey), userId || null]
+    );
+    return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url, authMethod: "personal_token" };
   }
 
   async integrationDisconnect(userId: string | null | undefined, provider: string) {
@@ -3206,7 +3423,9 @@ export class LegacyService {
       connected: true,
       id: connection.id,
       siteUrl: connection.site_url,
-      tokenExpiresAt: connection.token_expires_at,
+      authMethod: connection.auth_method,
+      personalTokenIdentifier: connection.auth_method === "personal_token" ? connection.personal_token_identifier : undefined,
+      tokenExpiresAt: connection.auth_method === "personal_token" ? null : connection.token_expires_at,
       connectedBy: connection.connected_by,
       createdAt: connection.created_at,
       connectedProjects: projects.rows.map(toCamel)
@@ -3238,10 +3457,8 @@ export class LegacyService {
   async jiraProjects(projectId: string) {
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
-    const data = await this.jiraFetch<Body>(
-      `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/project/search?maxResults=100`,
-      { headers: { Authorization: `Bearer ${connection.access_token}` } }
-    );
+    const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
+    const data = await this.jiraFetch<Body>(`${baseUrl}/rest/api/3/project/search?maxResults=100`, { headers });
     const connected = await this.db.query(
       "SELECT jira_project_id FROM jira_project_mappings WHERE project_id = $1 AND enabled = true",
       [projectId]
@@ -3311,14 +3528,15 @@ export class LegacyService {
       mirrorFolderId = root.rows[0]?.id || null;
     }
 
+    const { baseUrl: jiraBaseUrl, headers: jiraAuthHeaders } = this.jiraBaseUrlAndAuth(connection);
     let synced = 0;
     for (const key of keys) {
       const jql = `project = "${key}" ORDER BY updated DESC`;
       const data = await this.jiraFetch<Body>(
-        `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/search/jql`,
+        `${jiraBaseUrl}/rest/api/3/search/jql`,
         {
           method: "POST",
-          headers: { Authorization: `Bearer ${connection.access_token}`, "Content-Type": "application/json" },
+          headers: { ...jiraAuthHeaders, "Content-Type": "application/json" },
           body: JSON.stringify({
             jql,
             maxResults: 100,
@@ -3423,11 +3641,12 @@ export class LegacyService {
     const issueKey = String(body.issueKey || body.jiraIssueKey || "").trim();
     const comment = String(body.comment || body.body || "").trim();
     if (!issueKey || !comment) throw new BadRequestException({ error: "Jira issue key and comment are required." });
+    const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
     await this.jiraFetch(
-      `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
+      `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${connection.access_token}`, "Content-Type": "application/json" },
+        headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({
           body: {
             type: "doc",
@@ -3457,11 +3676,12 @@ export class LegacyService {
     const jql = search
       ? `${projectClause} AND (summary ~ "${escapeJql(search)}*" OR key = "${escapeJql(search.toUpperCase())}") ORDER BY updated DESC`
       : `${projectClause} ORDER BY updated DESC`;
+    const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
     const data = await this.jiraFetch<Body>(
-      `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/search/jql`,
+      `${baseUrl}/rest/api/3/search/jql`,
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${connection.access_token}`, "Content-Type": "application/json" },
+        headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ jql, maxResults: 20, fields: ["summary", "status"] })
       }
     );
@@ -3487,6 +3707,7 @@ export class LegacyService {
     const res = await this.db.query("SELECT * FROM integration_connections WHERE organization_id = $1 AND provider = $2", [organizationId, provider]);
     const connection = res.rows[0] as Body | undefined;
     if (!connection) return null;
+    if (connection.auth_method === "personal_token") return connection; // Personal tokens don't expire; nothing to refresh.
     if (!refresh || new Date(connection.token_expires_at).getTime() > Date.now() + 60_000) return connection;
     if (provider === "linear" || !connection.refresh_token) return connection; // Linear OAuth tokens are long-lived; no refresh flow needed today.
 
@@ -3498,17 +3719,43 @@ export class LegacyService {
         grant_type: "refresh_token",
         client_id: clientId,
         client_secret: clientSecret,
-        refresh_token: connection.refresh_token
+        refresh_token: decryptSecret(String(connection.refresh_token || ""))
       })
     });
     const accessToken = String(token.access_token || "");
-    const refreshToken = String(token.refresh_token || connection.refresh_token);
+    const refreshToken = String(token.refresh_token || decryptSecret(String(connection.refresh_token || "")));
     const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
+    const encryptedAccessToken = encryptSecret(accessToken);
+    const encryptedRefreshToken = encryptSecret(refreshToken);
     await this.db.query(
       "UPDATE integration_connections SET access_token = $2, refresh_token = $3, token_expires_at = $4, updated_at = now() WHERE id = $1",
-      [connection.id, accessToken, refreshToken, expiresAt]
+      [connection.id, encryptedAccessToken, encryptedRefreshToken, expiresAt]
     );
-    return { ...connection, access_token: accessToken, refresh_token: refreshToken, token_expires_at: expiresAt };
+    return { ...connection, access_token: encryptedAccessToken, refresh_token: encryptedRefreshToken, token_expires_at: expiresAt };
+  }
+
+  // Centralizes the Bearer-vs-Basic and gateway-vs-direct-site-URL branching for Jira so call
+  // sites don't repeat the auth_method check: OAuth goes through the api.atlassian.com/ex/jira
+  // gateway with a Bearer token; a personal token calls the customer's own site directly with
+  // HTTP Basic (email:apiToken).
+  private jiraBaseUrlAndAuth(connection: Body): { baseUrl: string; headers: Record<string, string> } {
+    if (connection.auth_method === "personal_token") {
+      const email = String(connection.personal_token_identifier || "");
+      const apiToken = decryptSecret(String(connection.access_token || ""));
+      const basic = Buffer.from(`${email}:${apiToken}`).toString("base64");
+      return { baseUrl: String(connection.site_url || "").replace(/\/$/, ""), headers: { Authorization: `Basic ${basic}` } };
+    }
+    return {
+      baseUrl: `https://api.atlassian.com/ex/jira/${connection.cloud_id}`,
+      headers: { Authorization: `Bearer ${decryptSecret(String(connection.access_token || ""))}` }
+    };
+  }
+
+  // Linear personal keys are passed as-is in the Authorization header; OAuth tokens need a
+  // "Bearer " prefix. Both hit the same api.linear.app/graphql endpoint.
+  private linearAuthHeader(connection: Body): string {
+    const secret = decryptSecret(String(connection.access_token || ""));
+    return connection.auth_method === "personal_token" ? secret : `Bearer ${secret}`;
   }
 
   private async jiraFetch<T = unknown>(url: string, init: RequestInit = {}): Promise<T> {
@@ -3520,10 +3767,10 @@ export class LegacyService {
     return (await res.json()) as T;
   }
 
-  private async linearGraphQL<T = unknown>(accessToken: string, query: string, variables?: Body): Promise<T> {
+  private async linearGraphQL<T = unknown>(authHeader: string, query: string, variables?: Body): Promise<T> {
     const res = await fetch("https://api.linear.app/graphql", {
       method: "POST",
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      headers: { Authorization: authHeader, "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables })
     });
     if (!res.ok) {
@@ -3565,7 +3812,7 @@ export class LegacyService {
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
-    const data = await this.linearGraphQL<Body>(connection.access_token, "query { teams { nodes { id key name } } }");
+    const data = await this.linearGraphQL<Body>(this.linearAuthHeader(connection), "query { teams { nodes { id key name } } }");
     const connected = await this.db.query(
       "SELECT linear_team_id FROM linear_project_mappings WHERE project_id = $1 AND enabled = true",
       [projectId]
@@ -3635,10 +3882,11 @@ export class LegacyService {
       mirrorFolderId = root.rows[0]?.id || null;
     }
 
+    const linearAuthHeader = this.linearAuthHeader(connection);
     let synced = 0;
     for (const teamId of teamIds) {
       const data = await this.linearGraphQL<Body>(
-        connection.access_token,
+        linearAuthHeader,
         `query TeamIssues($teamId: String!) {
            team(id: $teamId) {
              issues(first: 100, orderBy: updatedAt) {
@@ -3752,10 +4000,11 @@ export class LegacyService {
     const issueKey = String(body.issueKey || body.linearIssueKey || "").trim();
     const comment = String(body.comment || body.body || "").trim();
     if (!issueKey || !comment) throw new BadRequestException({ error: "Linear issue key and comment are required." });
-    const lookup = await this.linearGraphQL<Body>(connection.access_token, "query Issue($id: String!) { issue(id: $id) { id } }", { id: issueKey });
+    const linearAuthHeader = this.linearAuthHeader(connection);
+    const lookup = await this.linearGraphQL<Body>(linearAuthHeader, "query Issue($id: String!) { issue(id: $id) { id } }", { id: issueKey });
     const issueId = lookup?.issue?.id || issueKey;
     await this.linearGraphQL(
-      connection.access_token,
+      linearAuthHeader,
       "mutation CreateComment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success } }",
       { issueId, body: comment }
     );
@@ -3775,10 +4024,11 @@ export class LegacyService {
     if (!teamIds.length) return { list: [] };
 
     const search = String(query.search || query.q || "").trim();
+    const linearAuthHeader = this.linearAuthHeader(connection);
     const results: Body[] = [];
     for (const teamId of teamIds) {
       const data = await this.linearGraphQL<Body>(
-        connection.access_token,
+        linearAuthHeader,
         `query TeamIssues($teamId: String!, $filter: IssueFilter) {
            team(id: $teamId) {
              issues(first: 20, orderBy: updatedAt, filter: $filter) {
@@ -4986,10 +5236,40 @@ export class LegacyService {
        LIMIT 12`,
       values
     );
-    return res.rows.map((row) => ({
+    const documents = res.rows.map((row) => ({
       title: row.title || "Knowledge base item",
       content: String(row.content_text || "").slice(0, 1500)
     }));
+    // knowledgeItemIds selection (task generation) only ever names documents (see the frontend
+    // picker), so an explicit selection should stay document-only rather than pulling in files.
+    if (selected.length) return documents;
+
+    const filesRes = await this.db.query(
+      `SELECT original_file_name, file_extension, extracted_text, extraction_status FROM knowledge_files
+       WHERE project_id = $1 AND is_deleted = false
+       ORDER BY updated_at DESC
+       LIMIT 8`,
+      [projectId]
+    );
+    const files = filesRes.rows.map((row) => ({
+      title: row.original_file_name || "Uploaded file",
+      content: row.extracted_text ? String(row.extracted_text).slice(0, 1500) : this.knowledgeFileFallbackContent(row.file_extension, row.extraction_status)
+    }));
+    return [...documents, ...files];
+  }
+
+  private knowledgeFileFallbackContent(fileExtension: string | null, extractionStatus: string | null): string {
+    const ext = fileExtension || "file";
+    if (extractionStatus === "pending") {
+      return `Uploaded file (.${ext}) — transcription is still in progress; mention it exists but do not invent its contents yet.`;
+    }
+    if (extractionStatus === "failed") {
+      return `Uploaded file (.${ext}) — automatic transcription failed for this file; mention it exists but do not invent its contents.`;
+    }
+    if (extractionStatus === "unsupported") {
+      return `Uploaded file (.${ext}) — transcription requires an OpenAI key allocated to this project (Workspace → AI Providers); mention it exists but do not invent its contents.`;
+    }
+    return `Uploaded file (.${ext}) — no extractable text is available for this file type; mention that it exists but do not invent its contents.`;
   }
 
   private async existingTestcaseSnapshot(
@@ -5046,10 +5326,11 @@ export class LegacyService {
     if (missingKeys.length) {
       const connection = await this.getJiraConnection(projectId, true).catch(() => null);
       if (connection) {
+        const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
         for (const key of missingKeys) {
           const issue = await this.jiraFetch<Body>(
-            `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,issuetype,status,priority,assignee,reporter,labels,created,updated`,
-            { headers: { Authorization: `Bearer ${connection.access_token}` } }
+            `${baseUrl}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,issuetype,status,priority,assignee,reporter,labels,created,updated`,
+            { headers }
           ).catch(() => null);
           if (!issue) continue;
           const fields = (issue.fields || {}) as Body;
@@ -5729,11 +6010,19 @@ export class LegacyService {
   }
 
   private async zyraChatProjectSnapshot(projectId: string): Promise<ZyraChatProjectSnapshot> {
-    const [knowledge, suites, testcases, jira, pending, status] = await Promise.all([
+    const [knowledge, files, suites, testcases, jira, pending, status] = await Promise.all([
       this.db.query(
         `SELECT title
          FROM knowledge_documents
          WHERE project_id = $1 AND is_deleted = false AND (document_type != 'ai_memory' OR status = 'approved')
+         ORDER BY updated_at DESC
+         LIMIT 12`,
+        [projectId]
+      ).catch(() => ({ rows: [] as Body[] })),
+      this.db.query(
+        `SELECT original_file_name
+         FROM knowledge_files
+         WHERE project_id = $1 AND is_deleted = false
          ORDER BY updated_at DESC
          LIMIT 12`,
         [projectId]
@@ -5779,8 +6068,11 @@ export class LegacyService {
       this.jiraStatus(projectId).catch(() => ({ connected: false, connectedProjects: [] }))
     ]);
     return {
-      knowledgeCount: knowledge.rows.length,
-      knowledgeTitles: knowledge.rows.map((row) => String(row.title || "")).filter(Boolean),
+      knowledgeCount: knowledge.rows.length + files.rows.length,
+      knowledgeTitles: [
+        ...knowledge.rows.map((row) => String(row.title || "")),
+        ...files.rows.map((row) => String(row.original_file_name || ""))
+      ].filter(Boolean),
       suites: suites.rows.map((row) => ({ id: String(row.id), name: String(row.name || ""), testCaseCount: Number(row.test_case_count || 0) })),
       testcaseCount: Number(testcases.rows[0]?.testcase_count || 0),
       linkedJiraTestcaseCount: Number(testcases.rows[0]?.linked_jira_testcase_count || 0),

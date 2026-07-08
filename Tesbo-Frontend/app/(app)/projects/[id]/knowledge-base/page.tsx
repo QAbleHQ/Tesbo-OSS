@@ -67,6 +67,36 @@ function doc(...content: DocNode[]): DocNode {
   return { type: "doc", content };
 }
 
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// Mirrors what TipTap's getText()/getHTML() would produce for the small set of node types
+// used by DOCUMENT_TEMPLATES below, so a freshly created document has real contentHtml/contentText
+// (searchable, and visible to Zyra) instead of relying on the user to type something first.
+function docNodeToText(node: DocNode | null | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return node.text || "";
+  const parts: string[] = (node.content || []).map(docNodeToText);
+  if (node.type === "listItem") return parts.join(" ");
+  return parts.join(node.type === "doc" || node.type === "bulletList" ? "\n" : "");
+}
+
+function docNodeToHtml(node: DocNode | null | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return escapeHtml(node.text || "");
+  const inner = (node.content || []).map(docNodeToHtml).join("");
+  const level = node.attrs?.level || 1;
+  switch (node.type) {
+    case "doc": return inner;
+    case "heading": return `<h${level}>${inner}</h${level}>`;
+    case "paragraph": return `<p>${inner}</p>`;
+    case "bulletList": return `<ul>${inner}</ul>`;
+    case "listItem": return `<li>${inner}</li>`;
+    default: return inner;
+  }
+}
+
 type DocumentTemplate = {
   key: string;
   label: string;
@@ -230,7 +260,19 @@ function Menu({
 
   return (
     <div className="inline-block" ref={triggerRef}>
-      <div onClick={() => setOpen((v) => !v)}>{trigger}</div>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setOpen((v) => !v);
+          }
+        }}
+      >
+        {trigger}
+      </div>
       {open && position && typeof document !== "undefined"
         ? createPortal(
             <div
@@ -295,7 +337,15 @@ function FolderTreeNodeRow({
           selectedId === node.id ? "bg-[var(--brand-soft)] text-[var(--brand-primary)] font-medium" : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
         }`}
         style={{ paddingLeft: `${depth * 14 + 6}px` }}
+        role="button"
+        tabIndex={0}
         onClick={() => onSelect(node.id)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect(node.id);
+          }
+        }}
       >
         {hasChildren ? (
           <button
@@ -586,6 +636,14 @@ function UploadModal({
             setFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
           }}
           onClick={() => inputRef.current?.click()}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              inputRef.current?.click();
+            }
+          }}
           className={`cursor-pointer rounded-[10px] border-2 border-dashed p-8 text-center transition-colors ${
             dragOver ? "border-[var(--brand-primary)] bg-[var(--brand-soft)]" : "border-[var(--border)]"
           }`}
@@ -835,6 +893,8 @@ function KnowledgeBasePageInner() {
         title,
         documentType: template.documentType,
         contentJson: template.content || undefined,
+        contentHtml: template.content ? docNodeToHtml(template.content) : undefined,
+        contentText: template.content ? docNodeToText(template.content) : undefined,
       });
       setCreateDocOpen(false);
       router.push(`/projects/${projectId}/knowledge-base/documents/${created.id}`);
