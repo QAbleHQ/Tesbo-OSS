@@ -3146,7 +3146,7 @@ export class LegacyService {
     if (row?.client_id && row?.client_secret && row?.redirect_uri) {
       return {
         clientId: String(row.client_id),
-        clientSecret: String(row.client_secret),
+        clientSecret: decryptSecret(String(row.client_secret)),
         redirectUri: String(row.redirect_uri)
       };
     }
@@ -3201,7 +3201,7 @@ export class LegacyService {
       "SELECT client_secret FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
       [workspace.id, p]
     ).catch(() => ({ rows: [] as Body[] }));
-    const clientSecret = requestedClientSecret || String(existing.rows[0]?.client_secret || "");
+    const clientSecret = requestedClientSecret ? encryptSecret(requestedClientSecret) : String(existing.rows[0]?.client_secret || "");
     if (!clientId || !clientSecret || !redirectUri) {
       throw new BadRequestException({ error: "Client ID, Client Secret, and Redirect URI are required." });
     }
@@ -4186,7 +4186,7 @@ export class LegacyService {
 
   async zyraChatSessions(projectId: string) {
     const res = await this.db.query(
-      `SELECT id, project_id, user_id, title, created_at, updated_at
+      `SELECT id, project_id, user_id, title, created_at, updated_at, active_plan
        FROM zyra_chat_sessions
        WHERE project_id = $1
        ORDER BY updated_at DESC
@@ -4198,7 +4198,7 @@ export class LegacyService {
 
   async zyraChatSession(projectId: string, sessionId: string) {
     const session = await this.db.query(
-      "SELECT id, project_id, user_id, title, created_at, updated_at FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2",
+      "SELECT id, project_id, user_id, title, created_at, updated_at, active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2",
       [sessionId, projectId]
     );
     if (!session.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
@@ -4244,6 +4244,11 @@ export class LegacyService {
        VALUES ($1,$2,$3,'user',$4,'sent')`,
       [sessionId, projectId, uid, message]
     );
+    // A new message supersedes any in-flight batched plan — the background loop checks the
+    // plan id before each batch and stops once it no longer matches (see continueZyraChatPlan).
+    if (sessionRes.rows[0].active_plan) {
+      await this.db.query("UPDATE zyra_chat_sessions SET active_plan = NULL WHERE id = $1", [sessionId]);
+    }
 
     const decision = await this.buildZyraChatDecision(projectId, uid, sessionId, message);
     const applied = await this.applyZyraChatOperations(projectId, uid, decision.operations);
@@ -4279,6 +4284,32 @@ export class LegacyService {
     return { message: item, session: await this.zyraChatSession(projectId, sessionId) };
   }
 
+  // Lets the user cut short a batched "all possible cases" plan. A batch already in flight
+  // when this is called can't be aborted mid-request — it still finishes and posts its own
+  // message — but continueZyraChatPlan checks active_plan before starting the next batch, so
+  // clearing it here (same mechanism a new user message already uses) reliably stops
+  // anything not yet started.
+  async stopZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
+    const uid = this.requireUser(userId);
+    const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
+    if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
+    const plan = sessionRes.rows[0].active_plan as Body | undefined;
+    if (plan) {
+      const doneCount = Number(plan.doneCount || 0);
+      const totalCount = Number(plan.totalCount || 0);
+      await this.clearZyraChatPlan(sessionId);
+      await this.postZyraPlanMessage(
+        projectId,
+        sessionId,
+        uid,
+        `Stopped at your request — ${doneCount}/${totalCount} scenarios covered. Let me know if you'd like me to continue with the rest or move on to something else.`,
+        [],
+        []
+      );
+    }
+    return this.zyraChatSession(projectId, sessionId);
+  }
+
   private async buildZyraChatDecision(projectId: string, userId: string, sessionId: string, message: string): Promise<ZyraChatDecision> {
     const intent = this.detectZyraChatIntent(message);
     const mentionedJiraKeys = this.extractJiraIssueKeys(message);
@@ -4304,7 +4335,9 @@ export class LegacyService {
 
     const provider = String(key.provider || "openai").toLowerCase();
     const model = normalizeProviderModel(provider, key.default_model);
-    const capabilities = await this.zyraProjectCapabilities(projectId);
+    const zyraAgentSettings = await this.zyraAgentSettings(projectId);
+    const capabilities = this.normalizeZyraCapabilities(zyraAgentSettings.capabilities);
+    const projectTestcaseRange = String(zyraAgentSettings.testcaseRange || "1-10");
     const knowledgeForChat = capabilities.knowledgeBase ? knowledge : [];
 
     // Hard capability gates — Zyra declines an action whose capability is disabled in settings.
@@ -4317,9 +4350,10 @@ export class LegacyService {
     if (intent === "create") {
       if (!capabilities.generation) return this.zyraCapabilityDisabled("generation", existingTestcases.length);
       try {
-        const decision = await this.generateZyraChatTestcasesWithAi({
+        const decision = await this.generateZyraChatCreateDecision({
           projectId,
           userId,
+          sessionId,
           provider,
           model,
           key,
@@ -4327,7 +4361,7 @@ export class LegacyService {
           knowledge: knowledgeForChat,
           existingTestcases,
           jiraIssueKeys: mentionedJiraKeys,
-          requestedCount: this.requestedTestcaseCount(message)
+          projectTestcaseRange
         });
         return this.applyStorageGateToGenerated(decision, capabilities);
       } catch (err) {
@@ -4431,9 +4465,10 @@ export class LegacyService {
       }
       if (modelIntent === "create") {
         if (!capabilities.generation) return this.zyraCapabilityDisabled("generation", existingTestcases.length);
-        const decision = await this.generateZyraChatTestcasesWithAi({
+        const decision = await this.generateZyraChatCreateDecision({
           projectId,
           userId,
+          sessionId,
           provider,
           model,
           key,
@@ -4441,7 +4476,7 @@ export class LegacyService {
           knowledge: knowledgeForChat,
           existingTestcases,
           jiraIssueKeys: mentionedJiraKeys,
-          requestedCount: this.requestedTestcaseCount(message)
+          projectTestcaseRange
         });
         return this.applyStorageGateToGenerated(decision, capabilities);
       }
@@ -4578,6 +4613,7 @@ export class LegacyService {
     existingTestcases: ZyraGenerationInput["existingTestcases"];
     jiraIssueKeys: string[];
     requestedCount: number;
+    testcaseRange?: string;
   }): Promise<ZyraChatDecision> {
     const jira = await this.jiraSnapshot(params.projectId, params.jiraIssueKeys);
     const aiResult = await this.generateZyraWithProvider({
@@ -4596,7 +4632,8 @@ export class LegacyService {
         knowledge: params.knowledge,
         jira,
         existingTestcases: params.existingTestcases,
-        requestedCount: params.requestedCount
+        requestedCount: params.requestedCount,
+        testcaseRange: params.testcaseRange
       }
     });
     await this.rememberZyraTurn({
@@ -4626,6 +4663,203 @@ export class LegacyService {
       })),
       testcases: aiResult.drafts.map((draft) => this.chatDraftRow(draft, "suggested", "Generated by AI from Zyra chat context."))
     };
+  }
+
+  private static readonly ZYRA_PLAN_BATCH_SIZE = 5;
+  private static readonly ZYRA_PLAN_MAX_SCENARIOS = 40;
+
+  private zyraBatchMessage(originalMessage: string, batch: string[]): string {
+    return [
+      originalMessage,
+      "",
+      "Generate exactly one distinct testcase for each of these scenarios (do not add extras, do not skip any):",
+      ...batch.map((scenario, index) => `${index + 1}. ${scenario}`)
+    ].join("\n");
+  }
+
+  // "All possible cases" no longer asks the model for everything in one shot (that instruction
+  // was truncating past the provider's output token ceiling and returning invalid JSON). Instead
+  // Zyra first plans a todo list of distinct scenarios, generates the first small batch inline,
+  // and hands the rest to a fire-and-forget loop that posts each remaining batch as its own chat
+  // message — mirroring a todo-list-then-execute-one-by-one workflow.
+  private async startZyraChatPlan(params: {
+    projectId: string;
+    userId: string;
+    sessionId: string;
+    provider: string;
+    model: string;
+    key: Body;
+    message: string;
+    knowledge: Array<{ title: string; content: string }>;
+    existingTestcases: ZyraGenerationInput["existingTestcases"];
+    jiraIssueKeys: string[];
+  }): Promise<ZyraChatDecision> {
+    let scenarios: string[] = [];
+    try {
+      scenarios = await this.planZyraChatScenarios({
+        provider: params.provider,
+        model: params.model,
+        key: params.key,
+        message: params.message,
+        knowledge: params.knowledge,
+        existingTestcases: params.existingTestcases,
+        maxScenarios: LegacyService.ZYRA_PLAN_MAX_SCENARIOS
+      });
+    } catch {
+      scenarios = [];
+    }
+
+    if (scenarios.length < 2) {
+      // Planning failed or found too little to plan around — fall back to one bounded batch
+      // rather than risk the same truncation the "generate as many as possible" prompt caused.
+      return this.generateZyraChatTestcasesWithAi({
+        projectId: params.projectId,
+        userId: params.userId,
+        provider: params.provider,
+        model: params.model,
+        key: params.key,
+        message: params.message,
+        knowledge: params.knowledge,
+        existingTestcases: params.existingTestcases,
+        jiraIssueKeys: params.jiraIssueKeys,
+        requestedCount: 10
+      });
+    }
+
+    const firstBatch = scenarios.slice(0, LegacyService.ZYRA_PLAN_BATCH_SIZE);
+    const remaining = scenarios.slice(LegacyService.ZYRA_PLAN_BATCH_SIZE);
+    const decision = await this.generateZyraChatTestcasesWithAi({
+      projectId: params.projectId,
+      userId: params.userId,
+      provider: params.provider,
+      model: params.model,
+      key: params.key,
+      message: this.zyraBatchMessage(params.message, firstBatch),
+      knowledge: params.knowledge,
+      existingTestcases: params.existingTestcases,
+      jiraIssueKeys: params.jiraIssueKeys,
+      requestedCount: firstBatch.length
+    });
+
+    if (!remaining.length) return decision;
+
+    const planId = randomUUID();
+    await this.db.query(
+      "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb, updated_at = now() WHERE id = $1",
+      [params.sessionId, JSON.stringify({
+        planId,
+        originalMessage: params.message,
+        jiraIssueKeys: params.jiraIssueKeys,
+        remainingScenarios: remaining,
+        batchSize: LegacyService.ZYRA_PLAN_BATCH_SIZE,
+        doneCount: firstBatch.length,
+        totalCount: scenarios.length
+      })]
+    );
+    void this.continueZyraChatPlan(params.projectId, params.userId, params.sessionId, planId).catch(() => undefined);
+
+    return {
+      ...decision,
+      reply: `I identified ${scenarios.length} distinct scenarios to cover. Here are the first ${firstBatch.length} — I'll keep generating the rest (${remaining.length} more) and post them here as they're ready; feel free to review these in the meantime.\n\n${decision.reply}`
+    };
+  }
+
+  private async postZyraPlanMessage(projectId: string, sessionId: string, userId: string, reply: string, testcases: Body[], activity: Body[]): Promise<void> {
+    await this.db.query(
+      `INSERT INTO zyra_chat_messages
+       (session_id, project_id, user_id, role, content, reasoning_summary, action_type, status, testcases, activity)
+       VALUES ($1,$2,$3,'assistant',$4,$5,'create','completed',$6::jsonb,$7::jsonb)`,
+      [sessionId, projectId, userId, reply, "Continuing a batched 'all possible cases' generation plan.", JSON.stringify(testcases), JSON.stringify(activity)]
+    );
+    await this.db.query("UPDATE zyra_chat_sessions SET updated_at = now() WHERE id = $1", [sessionId]);
+  }
+
+  private async clearZyraChatPlan(sessionId: string): Promise<void> {
+    await this.db.query("UPDATE zyra_chat_sessions SET active_plan = NULL WHERE id = $1", [sessionId]);
+  }
+
+  // Fire-and-forget continuation (mirrors processZyraTask's pattern): re-checks the plan id
+  // before every batch so a new user message — which clears active_plan in sendZyraChatMessage —
+  // stops this loop cleanly instead of racing further messages into the session.
+  private async continueZyraChatPlan(projectId: string, userId: string, sessionId: string, planId: string): Promise<void> {
+    for (;;) {
+      const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
+      const plan = sessionRes.rows[0]?.active_plan as Body | undefined;
+      if (!plan || plan.planId !== planId) return;
+
+      const remainingScenarios = normalizeJsonArray(plan.remainingScenarios).map(String);
+      const batchSize = Number(plan.batchSize) || LegacyService.ZYRA_PLAN_BATCH_SIZE;
+      const batch = remainingScenarios.slice(0, batchSize);
+      if (!batch.length) {
+        await this.clearZyraChatPlan(sessionId);
+        return;
+      }
+
+      const doneCount = Number(plan.doneCount || 0);
+      const totalCount = Number(plan.totalCount || 0);
+      try {
+        const allocation = await this.zyraAiAllocation(projectId);
+        if (!allocation.key) {
+          await this.postZyraPlanMessage(projectId, sessionId, userId, `I couldn't continue generating more test cases — ${allocation.reason}`, [], []);
+          await this.clearZyraChatPlan(sessionId);
+          return;
+        }
+        const capabilities = await this.zyraProjectCapabilities(projectId);
+        if (!capabilities.generation) {
+          await this.postZyraPlanMessage(projectId, sessionId, userId, "Test case generation was disabled for Zyra in this project, so I stopped generating the remaining scenarios. Enable it under Zyra → Settings → Capabilities to continue.", [], []);
+          await this.clearZyraChatPlan(sessionId);
+          return;
+        }
+        const provider = String(allocation.key.provider || "openai").toLowerCase();
+        const model = normalizeProviderModel(provider, allocation.key.default_model);
+        const originalMessage = String(plan.originalMessage || "");
+        const [knowledge, existingTestcases] = await Promise.all([
+          this.knowledgeSnapshot(projectId),
+          this.existingTestcaseSnapshot(projectId, originalMessage, "")
+        ]);
+        const decision = await this.generateZyraChatTestcasesWithAi({
+          projectId,
+          userId,
+          provider,
+          model,
+          key: allocation.key,
+          message: this.zyraBatchMessage(originalMessage, batch),
+          knowledge,
+          existingTestcases,
+          jiraIssueKeys: normalizeJsonArray(plan.jiraIssueKeys).map(String),
+          requestedCount: batch.length
+        });
+        const gated = this.applyStorageGateToGenerated(decision, capabilities);
+        const applied = await this.applyZyraChatOperations(projectId, userId, gated.operations);
+        const testcases = applied.testcases.length ? applied.testcases : gated.testcases;
+
+        const newDoneCount = doneCount + batch.length;
+        const remaining = remainingScenarios.slice(batch.length);
+        const reply = remaining.length
+          ? `Here are ${testcases.length} more test case(s) — ${newDoneCount}/${totalCount} scenarios covered so far. Still working on the remaining ${remaining.length}; I'll post the next batch shortly.`
+          : `Here are the final ${testcases.length} test case(s) — all ${totalCount} scenarios are now covered. Feel free to review and let me know if you'd like any changes.`;
+        await this.postZyraPlanMessage(projectId, sessionId, userId, reply, testcases, applied.activity);
+
+        if (!remaining.length) {
+          await this.clearZyraChatPlan(sessionId);
+          return;
+        }
+        // Re-check we're still the active plan before writing progress — the user may have
+        // sent a new message (which clears active_plan) while this batch was generating.
+        const stillActiveRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]);
+        const stillActive = stillActiveRes.rows[0]?.active_plan as Body | undefined;
+        if (!stillActive || stillActive.planId !== planId) return;
+        await this.db.query(
+          "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb, updated_at = now() WHERE id = $1",
+          [sessionId, JSON.stringify({ ...plan, remainingScenarios: remaining, doneCount: newDoneCount })]
+        );
+      } catch (err) {
+        const detail = this.extractAiErrorMessage(err);
+        await this.postZyraPlanMessage(projectId, sessionId, userId, `I ran into an issue generating more test cases (${detail}). Stopping here — ${doneCount}/${totalCount} scenarios covered.`, [], []);
+        await this.clearZyraChatPlan(sessionId);
+        return;
+      }
+    }
   }
 
   private async finalizeZyraToolDecisionWithAi(params: {
@@ -4904,7 +5138,13 @@ export class LegacyService {
     const context = existing.rows[0].context || existing.rows[0].custom_prompt || "";
     const acceptanceCriteria = existing.rows[0].acceptance_criteria || "";
     const jiraIssueKeys = Array.from(new Set([...normalizeJsonArray(existing.rows[0].jira_issue_keys).map(String), ...additionalJiraIssueKeys]));
-    const requestedCount = Number(existing.rows[0].requested_count || 5);
+    // Re-read the project's current range (rather than trusting the stored requested_count alone)
+    // so a regenerate keeps the same "generate exhaustively" instruction the initial run used —
+    // otherwise this falls back to the generic "generate exactly N" phrasing, which reads very
+    // differently to the model than "all possible cases".
+    const zyraAgentSettings = await this.zyraAgentSettings(projectId);
+    const testcaseRange = String(zyraAgentSettings.testcaseRange || "1-10");
+    const requestedCount = Number(existing.rows[0].requested_count) || this.testcaseRangeConfig(testcaseRange).requestedCount;
     const provider = String(existing.rows[0].provider || allocation.rows[0].provider || "openai").toLowerCase();
     const model = normalizeProviderModel(provider, existing.rows[0].model || allocation.rows[0].default_model);
     const knowledge = await this.knowledgeSnapshot(projectId);
@@ -4918,7 +5158,7 @@ export class LegacyService {
       authHeaderName: allocation.rows[0].auth_header_name,
       authScheme: allocation.rows[0].auth_scheme,
       projectId,
-      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, existingTestcases, requestedCount }
+      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, existingTestcases, requestedCount, testcaseRange }
     });
     const now = new Date().toISOString();
     const activity = [
@@ -5531,6 +5771,87 @@ export class LegacyService {
     return null;
   }
 
+  // Plain JSON-mode completion for internal tool calls that need a small, arbitrary JSON
+  // shape (not the fixed Zyra chat decision schema) — used to plan the scenario todo list
+  // for "all possible cases" generation without pulling in the full chat-decision prompt.
+  private async zyraJsonCompletion(provider: string, model: string, key: Body, systemPrompt: string, userPrompt: string): Promise<Body> {
+    if (provider === "anthropic") {
+      const res = await fetch(normalizeAnthropicMessagesUrl(key.base_url), {
+        method: "POST",
+        headers: this.buildAnthropicAuthHeaders(key.api_key, key.auth_header_name, key.auth_scheme),
+        body: JSON.stringify({
+          model: anthropicModelCandidates(model)[0],
+          max_tokens: 2000,
+          system: [{ type: "text", text: systemPrompt }],
+          messages: [{ role: "user", content: userPrompt }]
+        })
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({} as Body)) as Body;
+        const rawMessage = String(errBody.error?.message || errBody.error || res.status);
+        throw new Error(this.describeProviderError("anthropic", res.status, rawMessage) || `Anthropic request failed: ${rawMessage}`);
+      }
+      const data = await res.json() as Body;
+      const text = normalizeJsonArray(data.content).map((item: Body) => item?.text || "").join("\n");
+      return JSON.parse(this.extractJsonPayload(text));
+    }
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const authHeader = String(key.auth_header_name || "Authorization");
+    const scheme = String(key.auth_scheme || "Bearer").trim();
+    headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
+    const res = await fetch(normalizeChatCompletionsUrl(key.base_url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      })
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({} as Body)) as Body;
+      const rawMessage = String(errBody.error?.message || errBody.error || res.status);
+      throw new Error(this.describeProviderError(String(key.provider || "openai"), res.status, rawMessage) || `OpenAI request failed: ${rawMessage}`);
+    }
+    const data = await res.json() as Body;
+    const content = String(data.choices?.[0]?.message?.content || "{}");
+    return JSON.parse(this.extractJsonPayload(content));
+  }
+
+  // Plans a todo list of distinct scenarios to cover for an exhaustive ("all possible cases")
+  // generation request. This call is cheap and safe from truncation — it only asks for short
+  // labels, never full testcase detail — so it can never hit the same output-token ceiling
+  // that a single "generate 50 full testcases" call did.
+  private async planZyraChatScenarios(params: {
+    provider: string;
+    model: string;
+    key: Body;
+    message: string;
+    knowledge: Array<{ title: string; content: string }>;
+    existingTestcases: ZyraGenerationInput["existingTestcases"];
+    maxScenarios: number;
+  }): Promise<string[]> {
+    const systemPrompt = "You are Zyra, an expert test engineer planning exhaustive test coverage. Break the request into a todo list of distinct, non-overlapping testable scenarios (happy paths, edge cases, negative paths, boundary values). Each scenario becomes exactly one testcase later, so keep each one narrow and specific — do not write full testcase detail here, only short labels.";
+    const userPrompt = [
+      `Request: ${params.message}`,
+      "",
+      "Knowledge base:",
+      params.knowledge.map((item) => `${item.title}\n${item.content}`).join("\n\n") || "None.",
+      "",
+      "Existing testcases (avoid proposing scenarios that already have coverage):",
+      params.existingTestcases.map((tc) => `${tc.externalId} | ${tc.title}`).join("\n") || "None.",
+      "",
+      `Return ONLY JSON: {"scenarios": ["short scenario label", ...]}. List up to ${params.maxScenarios} scenarios, ordered from most to least important. No markdown, no commentary.`
+    ].join("\n");
+    const parsed = await this.zyraJsonCompletion(params.provider, params.model, params.key, systemPrompt, userPrompt);
+    const scenarios = normalizeJsonArray(parsed.scenarios).map((item) => String(item || "").trim()).filter(Boolean);
+    return scenarios.slice(0, params.maxScenarios);
+  }
+
   private async generateZyraWithOpenAi(params: {
     provider: string;
     model: string;
@@ -5609,7 +5930,11 @@ export class LegacyService {
         headers: anthropicHeaders,
         body: JSON.stringify({
           model,
-          max_tokens: 4000,
+          // 4000 was a fixed ceiling regardless of how many testcases were requested — a
+          // batch of just 5 detailed drafts could already exceed it, truncating the JSON
+          // mid-array and failing to parse. Scale with requestedCount instead, capped at
+          // 16000 (the threshold above which the SDK guidance calls for streaming).
+          max_tokens: Math.min(16000, 2000 + params.input.requestedCount * 1500),
           temperature: 0.2,
           system: [
             {
@@ -5930,9 +6255,13 @@ export class LegacyService {
     };
   }
 
-  private async zyraProjectCapabilities(projectId: string): Promise<ZyraCapabilities> {
+  private async zyraAgentSettings(projectId: string): Promise<Body> {
     const project = await this.getProject(projectId).catch(() => ({} as Body));
-    const zyraAgent = (this.parseProjectSettings((project as Body).settings).zyraAgent || {}) as Body;
+    return (this.parseProjectSettings((project as Body).settings).zyraAgent || {}) as Body;
+  }
+
+  private async zyraProjectCapabilities(projectId: string): Promise<ZyraCapabilities> {
+    const zyraAgent = await this.zyraAgentSettings(projectId);
     return this.normalizeZyraCapabilities(zyraAgent.capabilities);
   }
 
@@ -5989,12 +6318,62 @@ export class LegacyService {
     return Array.from(keys);
   }
 
-  private requestedTestcaseCount(message: string): number {
+  // Decides how many testcases Zyra chat should generate. An explicit number in the message
+  // always wins; otherwise an "all possible" / "exhaustive" style ask in the message maps to
+  // the "all" range; otherwise this falls back to whatever range the user configured in
+  // Zyra → Settings → Test case range, instead of a fixed small default that ignores it.
+  private chatTestcasePlan(message: string, projectTestcaseRange: string): { requestedCount: number; testcaseRange?: string } {
     const explicit = message.match(/\b(\d{1,2})\s+(?:testcases|test cases|tests|cases)\b/i);
-    if (explicit) return Math.max(1, Math.min(25, Number(explicit[1])));
+    if (explicit) return { requestedCount: Math.max(1, Math.min(25, Number(explicit[1]))) };
     const lower = message.toLowerCase();
-    if (lower.includes("all type") || lower.includes("all types") || lower.includes("full coverage")) return 8;
-    return 5;
+    const wantsExhaustive = /\ball( the)? possible\b|as many as possible|\bexhaustive\b|every (scenario|edge case|flow|case)|full coverage|\ball types?\b/.test(lower);
+    const range = wantsExhaustive ? "all" : projectTestcaseRange;
+    return { testcaseRange: range, requestedCount: this.testcaseRangeConfig(range).requestedCount };
+  }
+
+  // Routes "all possible cases" through the plan-then-batch flow (startZyraChatPlan) and
+  // everything else through the normal single-shot generation — shared by both create-intent
+  // branches in buildZyraChatDecision (local intent detection and model-decided intent).
+  private async generateZyraChatCreateDecision(params: {
+    projectId: string;
+    userId: string;
+    sessionId: string;
+    provider: string;
+    model: string;
+    key: Body;
+    message: string;
+    knowledge: Array<{ title: string; content: string }>;
+    existingTestcases: ZyraGenerationInput["existingTestcases"];
+    jiraIssueKeys: string[];
+    projectTestcaseRange: string;
+  }): Promise<ZyraChatDecision> {
+    const plan = this.chatTestcasePlan(params.message, params.projectTestcaseRange);
+    if (plan.testcaseRange === "all") {
+      return this.startZyraChatPlan({
+        projectId: params.projectId,
+        userId: params.userId,
+        sessionId: params.sessionId,
+        provider: params.provider,
+        model: params.model,
+        key: params.key,
+        message: params.message,
+        knowledge: params.knowledge,
+        existingTestcases: params.existingTestcases,
+        jiraIssueKeys: params.jiraIssueKeys
+      });
+    }
+    return this.generateZyraChatTestcasesWithAi({
+      projectId: params.projectId,
+      userId: params.userId,
+      provider: params.provider,
+      model: params.model,
+      key: params.key,
+      message: params.message,
+      knowledge: params.knowledge,
+      existingTestcases: params.existingTestcases,
+      jiraIssueKeys: params.jiraIssueKeys,
+      ...plan
+    });
   }
 
   private intentFromZyraModelAction(action: unknown, fallback: ZyraChatIntent): ZyraChatIntent {

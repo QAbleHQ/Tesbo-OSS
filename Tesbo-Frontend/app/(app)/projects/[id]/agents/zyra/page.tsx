@@ -10,6 +10,7 @@ import {
   getZyraChatSession,
   listZyraChatSessions,
   sendZyraChatMessage,
+  stopZyraChatPlan,
   type ZyraAgentState,
   type ZyraChatMessage,
   type ZyraChatSession,
@@ -261,6 +262,22 @@ function ThinkingBubble() {
   );
 }
 
+// ─── PlanProgressBubble ───────────────────────────────────────────────────────
+function PlanProgressBubble({ plan }: { plan: { doneCount: number; totalCount: number } }) {
+  const pct = plan.totalCount > 0 ? Math.round((plan.doneCount / plan.totalCount) * 100) : 0;
+  return (
+    <div className="flex gap-3">
+      <div className="mt-1 h-7 w-7 shrink-0 rounded-full flex items-center justify-center text-xs font-bold bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)]">Z</div>
+      <div className="max-w-[88%] rounded-2xl rounded-tl-sm border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
+        <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--brand-primary)] animate-pulse" />
+          Generating remaining scenarios — {plan.doneCount}/{plan.totalCount} covered ({pct}%). Review what's in so far; more will appear here shortly.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── NoKeyBanner ─────────────────────────────────────────────────────────────
 function NoKeyBanner({ projectId }: { projectId: string }) {
   return (
@@ -293,6 +310,7 @@ export default function ZyraChatPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [stoppingPlan, setStoppingPlan] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -340,6 +358,22 @@ export default function ZyraChatPage() {
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, sending]);
+
+  // While Zyra is working through a batched "all possible cases" plan, poll for the new
+  // chat messages it posts as each batch finishes — they arrive without the user sending
+  // anything, so the normal send/response cycle never picks them up on its own.
+  useEffect(() => {
+    if (!activeSession?.activePlan) return;
+    const sessionId = activeSession.id;
+    const interval = setInterval(() => {
+      getZyraChatSession(projectId, sessionId)
+        .then((fresh) => {
+          setActiveSession((prev) => (prev && prev.id === sessionId ? fresh : prev));
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [activeSession?.activePlan, activeSession?.id, projectId]);
 
   async function submitMessage(text: string) {
     if (!activeSession || !text.trim() || sending) return;
@@ -391,6 +425,19 @@ export default function ZyraChatPage() {
   function onQuickAction(prompt: string) {
     setInput(prompt);
     setTimeout(() => textareaRef.current?.focus(), 50);
+  }
+
+  async function handleStopPlan() {
+    if (!activeSession || stoppingPlan) return;
+    setStoppingPlan(true);
+    try {
+      const session = await stopZyraChatPlan(projectId, activeSession.id);
+      setActiveSession(session);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to stop Zyra.");
+    } finally {
+      setStoppingPlan(false);
+    }
   }
 
   // ─── Page header (shared between loading and loaded states) ─────────────────
@@ -540,6 +587,7 @@ export default function ZyraChatPage() {
 
             {messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)}
             {sending && <ThinkingBubble />}
+            {!sending && activeSession?.activePlan && <PlanProgressBubble plan={activeSession.activePlan} />}
             <div ref={endRef} />
           </div>
 
@@ -566,9 +614,16 @@ export default function ZyraChatPage() {
                   {" · "}
                   <kbd className="rounded border border-[var(--border)] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[10px]">Shift+Enter</kbd>{" "}new line
                 </p>
-                <Button type="submit" size="sm" disabled={!input.trim() || sending || !agent?.agent.active}>
-                  {sending ? "Thinking..." : "Send"}
-                </Button>
+                <div className="flex items-center gap-2">
+                  {activeSession?.activePlan && (
+                    <Button type="button" size="sm" variant="secondary" onClick={handleStopPlan} disabled={stoppingPlan}>
+                      {stoppingPlan ? "Stopping…" : "Stop"}
+                    </Button>
+                  )}
+                  <Button type="submit" size="sm" disabled={!input.trim() || sending || !agent?.agent.active}>
+                    {sending ? "Thinking..." : "Send"}
+                  </Button>
+                </div>
               </div>
             </form>
           </div>

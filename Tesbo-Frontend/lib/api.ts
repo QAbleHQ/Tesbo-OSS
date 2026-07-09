@@ -663,6 +663,14 @@ export interface ZyraChatMessage {
   createdAt: string;
 }
 
+export interface ZyraChatActivePlan {
+  planId: string;
+  remainingScenarios: string[];
+  batchSize: number;
+  doneCount: number;
+  totalCount: number;
+}
+
 export interface ZyraChatSession {
   id: string;
   projectId: string;
@@ -671,6 +679,7 @@ export interface ZyraChatSession {
   createdAt: string;
   updatedAt: string;
   messages?: ZyraChatMessage[];
+  activePlan?: ZyraChatActivePlan | null;
 }
 
 export async function getZyraAgent(projectId: string): Promise<ZyraAgentState> {
@@ -714,6 +723,12 @@ export async function sendZyraChatMessage(
   return api(`/api/projects/${projectId}/agents/zyra/chat/sessions/${sessionId}/messages`, {
     method: "POST",
     body: { message },
+  });
+}
+
+export async function stopZyraChatPlan(projectId: string, sessionId: string): Promise<ZyraChatSession> {
+  return api<ZyraChatSession>(`/api/projects/${projectId}/agents/zyra/chat/sessions/${sessionId}/stop-plan`, {
+    method: "POST",
   });
 }
 
@@ -1884,11 +1899,22 @@ export async function disconnectIntegration(provider: IntegrationProvider): Prom
   await api(`/api/workspace/integrations/${provider}/disconnect`, { method: "DELETE" });
 }
 
+export type IntegrationAuthMethod = "oauth" | "personal_token";
+
+export async function connectIntegrationToken(
+  provider: IntegrationProvider,
+  data: { siteUrl?: string; email?: string; apiToken?: string; apiKey?: string }
+): Promise<{ connectionId: string; siteUrl: string; authMethod: "personal_token" }> {
+  return api(`/api/workspace/integrations/${provider}/connect-token`, { method: "POST", body: data });
+}
+
 export interface IntegrationConnectionStatus {
   connected: boolean;
   id?: string;
   siteUrl?: string;
-  tokenExpiresAt?: string;
+  authMethod?: IntegrationAuthMethod;
+  personalTokenIdentifier?: string | null;
+  tokenExpiresAt?: string | null;
   connectedBy?: string;
   createdAt?: string;
   connectedProjects?: { projectId: string; projectName: string; projectKey: string }[];

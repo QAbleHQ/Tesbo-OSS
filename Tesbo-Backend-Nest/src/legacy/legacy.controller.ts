@@ -636,6 +636,15 @@ export class LegacyController {
     return this.legacy.sendZyraChatMessage(projectId, req.userId, sessionId, body);
   }
 
+  @Post("/api/projects/:projectId/agents/zyra/chat/sessions/:sessionId/stop-plan")
+  stopZyraChatPlan(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("sessionId") sessionId: string
+  ) {
+    return this.legacy.stopZyraChatPlan(projectId, req.userId, sessionId);
+  }
+
   @Post("/api/projects/:projectId/agents/zyra/tasks")
   createZyraTask(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.aiGenerate(projectId, req.userId, body);
@@ -944,6 +953,11 @@ export class LegacyController {
   @Post("/api/workspace/integrations/:provider/callback")
   integrationCallback(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
     return this.legacy.integrationCallback(req.userId, provider, body);
+  }
+
+  @Post("/api/workspace/integrations/:provider/connect-token")
+  connectIntegrationToken(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
+    return this.legacy.connectIntegrationWithToken(req.userId, provider, body);
   }
 
   @Delete("/api/workspace/integrations/:provider/disconnect")
