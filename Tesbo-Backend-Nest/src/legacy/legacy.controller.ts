@@ -645,6 +645,15 @@ export class LegacyController {
     return this.legacy.stopZyraChatPlan(projectId, req.userId, sessionId);
   }
 
+  @Post("/api/projects/:projectId/agents/zyra/chat/sessions/:sessionId/resume-plan")
+  resumeZyraChatPlan(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("sessionId") sessionId: string
+  ) {
+    return this.legacy.resumeZyraChatPlan(projectId, req.userId, sessionId);
+  }
+
   @Post("/api/projects/:projectId/agents/zyra/tasks")
   createZyraTask(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.aiGenerate(projectId, req.userId, body);

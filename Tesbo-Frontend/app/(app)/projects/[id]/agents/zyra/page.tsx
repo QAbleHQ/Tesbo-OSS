@@ -11,6 +11,7 @@ import {
   listZyraChatSessions,
   sendZyraChatMessage,
   stopZyraChatPlan,
+  resumeZyraChatPlan,
   type ZyraAgentState,
   type ZyraChatMessage,
   type ZyraChatSession,
@@ -359,21 +360,23 @@ export default function ZyraChatPage() {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length, sending]);
 
-  // While Zyra is working through a batched "all possible cases" plan, poll for the new
-  // chat messages it posts as each batch finishes — they arrive without the user sending
-  // anything, so the normal send/response cycle never picks them up on its own.
+  // While Zyra is actively working through a batched "all possible cases" plan, poll for
+  // the new chat messages it posts as each batch finishes — they arrive without the user
+  // sending anything, so the normal send/response cycle never picks them up on its own.
+  // A paused plan isn't running, so there's nothing new to poll for until it's resumed.
+  const isPlanRunning = activeSession?.activePlan?.status === "running";
+  const activeSessionId = activeSession?.id;
   useEffect(() => {
-    if (!activeSession?.activePlan) return;
-    const sessionId = activeSession.id;
+    if (!isPlanRunning || !activeSessionId) return;
     const interval = setInterval(() => {
-      getZyraChatSession(projectId, sessionId)
+      getZyraChatSession(projectId, activeSessionId)
         .then((fresh) => {
-          setActiveSession((prev) => (prev && prev.id === sessionId ? fresh : prev));
+          setActiveSession((prev) => (prev && prev.id === activeSessionId ? fresh : prev));
         })
         .catch(() => undefined);
     }, 3000);
     return () => clearInterval(interval);
-  }, [activeSession?.activePlan, activeSession?.id, projectId]);
+  }, [isPlanRunning, activeSessionId, projectId]);
 
   async function submitMessage(text: string) {
     if (!activeSession || !text.trim() || sending) return;
@@ -435,6 +438,19 @@ export default function ZyraChatPage() {
       setActiveSession(session);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to stop Zyra.");
+    } finally {
+      setStoppingPlan(false);
+    }
+  }
+
+  async function handleResumePlan() {
+    if (!activeSession || stoppingPlan) return;
+    setStoppingPlan(true);
+    try {
+      const session = await resumeZyraChatPlan(projectId, activeSession.id);
+      setActiveSession(session);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to resume Zyra.");
     } finally {
       setStoppingPlan(false);
     }
@@ -587,12 +603,22 @@ export default function ZyraChatPage() {
 
             {messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)}
             {sending && <ThinkingBubble />}
-            {!sending && activeSession?.activePlan && <PlanProgressBubble plan={activeSession.activePlan} />}
+            {!sending && isPlanRunning && activeSession?.activePlan && <PlanProgressBubble plan={activeSession.activePlan} />}
             <div ref={endRef} />
           </div>
 
           {/* Input — fixed at bottom */}
           <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3">
+            {activeSession?.activePlan?.status === "paused" && (
+              <div className="mb-2.5 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                <span>
+                  Paused — {activeSession.activePlan.doneCount}/{activeSession.activePlan.totalCount} scenarios covered.
+                </span>
+                <Button type="button" size="sm" variant="secondary" onClick={handleResumePlan} disabled={stoppingPlan}>
+                  {stoppingPlan ? "Resuming…" : "Resume"}
+                </Button>
+              </div>
+            )}
             <form onSubmit={onSubmit}>
               <Textarea
                 ref={textareaRef}
@@ -615,7 +641,7 @@ export default function ZyraChatPage() {
                   <kbd className="rounded border border-[var(--border)] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[10px]">Shift+Enter</kbd>{" "}new line
                 </p>
                 <div className="flex items-center gap-2">
-                  {activeSession?.activePlan && (
+                  {isPlanRunning && (
                     <Button type="button" size="sm" variant="secondary" onClick={handleStopPlan} disabled={stoppingPlan}>
                       {stoppingPlan ? "Stopping…" : "Stop"}
                     </Button>

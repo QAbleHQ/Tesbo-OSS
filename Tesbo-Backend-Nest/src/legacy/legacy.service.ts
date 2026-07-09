@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { createHash, randomBytes, randomUUID } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -88,6 +88,10 @@ type ZyraChatDecision = {
     externalIds?: string[];
     testcaseIds?: string[];
     allExisting?: boolean;
+    // move_to_suite: every testcase from the most recently generated batch (see
+    // "Most recently generated batch" in the prompt) — use instead of externalIds when the
+    // user refers to "all"/"the N cases" from a recent generation rather than naming specific ones.
+    fromLastPlan?: boolean;
     // create_suite / move_to_suite target (suite is created by name when it does not exist yet)
     suiteName?: string;
     suiteId?: string;
@@ -271,7 +275,7 @@ function normalizeAnthropicMessagesUrl(baseUrl?: string | null): string {
 }
 
 @Injectable()
-export class LegacyService {
+export class LegacyService implements OnModuleInit {
   private readonly logger = new Logger(LegacyService.name);
 
   constructor(
@@ -281,6 +285,32 @@ export class LegacyService {
     private readonly config: AppConfigService,
     private readonly storage: StorageService
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    this.resumeInterruptedZyraChatPlans().catch((err) => {
+      this.logger.warn(`Failed to resume Zyra chat plans on startup: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  // A backend restart kills any in-flight continueZyraChatPlan loop instantly — it's an
+  // in-memory fire-and-forget task, not a durable job — leaving the session's active_plan
+  // set with no further batches ever posting and no error message, until the user happens
+  // to send an unrelated message (which just cancels it as a side effect). Resume every
+  // plan that was genuinely still running (not one a user or a graceful error already
+  // paused — those wait for an explicit "continue") once at boot so a deploy/crash mid-plan
+  // self-heals instead of stalling silently.
+  private async resumeInterruptedZyraChatPlans(): Promise<void> {
+    const res = await this.db.query(
+      "SELECT id, project_id, user_id, active_plan FROM zyra_chat_sessions WHERE active_plan IS NOT NULL AND active_plan->>'status' = 'running'"
+    ).catch(() => ({ rows: [] as Body[] }));
+    for (const row of res.rows) {
+      const plan = row.active_plan as Body | null;
+      const planId = plan?.planId ? String(plan.planId) : "";
+      if (!planId) continue;
+      this.logger.log(`Resuming interrupted Zyra chat plan for session ${row.id} (${Number(plan?.doneCount) || 0}/${Number(plan?.totalCount) || 0} done)`);
+      void this.continueZyraChatPlan(String(row.project_id), row.user_id ? String(row.user_id) : null, String(row.id), planId).catch(() => undefined);
+    }
+  }
 
   private requireUser(userId?: string | null): string {
     if (!userId) throw new BadRequestException({ error: "Authentication required" });
@@ -4244,19 +4274,37 @@ export class LegacyService {
        VALUES ($1,$2,$3,'user',$4,'sent')`,
       [sessionId, projectId, uid, message]
     );
-    // A new message supersedes any in-flight batched plan — the background loop checks the
-    // plan id before each batch and stops once it no longer matches (see continueZyraChatPlan).
-    if (sessionRes.rows[0].active_plan) {
+
+    // A paused plan (stopped by the user, or paused after a batch failure) can be picked
+    // back up with a plain "continue" — resolved before any other decision-making so it
+    // doesn't get treated as a normal analytical question.
+    const existingPlan = sessionRes.rows[0].active_plan as Body | undefined;
+    if (existingPlan?.status === "paused" && this.isZyraResumeIntent(message)) {
+      const resumed = await this.resumeZyraChatPlan(projectId, uid, sessionId);
+      const lastMessage = resumed.messages[resumed.messages.length - 1];
+      return { message: lastMessage, session: resumed };
+    }
+    // Any other new message supersedes an in-flight or paused plan — the background loop
+    // checks the plan id before each batch and stops once it no longer matches (see
+    // continueZyraChatPlan).
+    if (existingPlan) {
       await this.db.query("UPDATE zyra_chat_sessions SET active_plan = NULL WHERE id = $1", [sessionId]);
     }
 
     const decision = await this.buildZyraChatDecision(projectId, uid, sessionId, message);
-    const applied = await this.applyZyraChatOperations(projectId, uid, decision.operations);
+    const applied = await this.applyZyraChatOperations(projectId, uid, sessionId, decision.operations);
     const activity = [
       { actor: "user", title: "Asked Zyra", detail: message.slice(0, 320), createdAt: new Date().toISOString() },
       ...applied.activity
     ];
     const testcases = applied.testcases.length ? applied.testcases : decision.testcases;
+    if (decision.actionType === "create" && applied.testcases.length) {
+      const ids = applied.testcases.map((tc) => tc.id).filter(Boolean);
+      await this.db.query(
+        "UPDATE zyra_chat_sessions SET last_completed_plan = $2::jsonb WHERE id = $1",
+        [sessionId, JSON.stringify({ testcaseIds: ids, totalCount: ids.length })]
+      );
+    }
     const assistant = await this.db.query(
       `INSERT INTO zyra_chat_messages
        (session_id, project_id, user_id, role, content, reasoning_summary, action_type, status, testcases, activity)
@@ -4286,23 +4334,26 @@ export class LegacyService {
 
   // Lets the user cut short a batched "all possible cases" plan. A batch already in flight
   // when this is called can't be aborted mid-request — it still finishes and posts its own
-  // message — but continueZyraChatPlan checks active_plan before starting the next batch, so
-  // clearing it here (same mechanism a new user message already uses) reliably stops
-  // anything not yet started.
+  // message — but continueZyraChatPlan checks active_plan before starting the next batch.
+  // This pauses (rather than discards) the plan, preserving remainingScenarios/doneCount so
+  // resumeZyraChatPlan — or just typing "continue" — can pick it back up later.
   async stopZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
     const uid = this.requireUser(userId);
     const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
     if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
     const plan = sessionRes.rows[0].active_plan as Body | undefined;
-    if (plan) {
+    if (plan && plan.status !== "paused") {
       const doneCount = Number(plan.doneCount || 0);
       const totalCount = Number(plan.totalCount || 0);
-      await this.clearZyraChatPlan(sessionId);
+      await this.db.query(
+        "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb WHERE id = $1",
+        [sessionId, JSON.stringify({ ...plan, status: "paused" })]
+      );
       await this.postZyraPlanMessage(
         projectId,
         sessionId,
         uid,
-        `Stopped at your request — ${doneCount}/${totalCount} scenarios covered. Let me know if you'd like me to continue with the rest or move on to something else.`,
+        `Stopped at your request — ${doneCount}/${totalCount} scenarios covered. Say "continue" any time and I'll pick back up with the remaining ${totalCount - doneCount}.`,
         [],
         []
       );
@@ -4310,10 +4361,45 @@ export class LegacyService {
     return this.zyraChatSession(projectId, sessionId);
   }
 
+  private isZyraResumeIntent(message: string): boolean {
+    return /\b(continue|resume|keep going|carry on|go ahead|proceed|pick up where)\b/i.test(message);
+  }
+
+  // Reactivates a paused plan under a fresh planId (so any stale in-flight batch from before
+  // the pause can never collide with the resumed loop) and hands it back to
+  // continueZyraChatPlan. No-ops quietly if there's nothing paused to resume.
+  async resumeZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
+    const uid = this.requireUser(userId);
+    const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
+    if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
+    const plan = sessionRes.rows[0].active_plan as Body | undefined;
+    const remainingScenarios = normalizeJsonArray(plan?.remainingScenarios).map(String);
+    if (!plan || plan.status !== "paused" || !remainingScenarios.length) {
+      return this.zyraChatSession(projectId, sessionId);
+    }
+    const planId = randomUUID();
+    const doneCount = Number(plan.doneCount || 0);
+    const totalCount = Number(plan.totalCount || 0);
+    await this.db.query(
+      "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb, updated_at = now() WHERE id = $1",
+      [sessionId, JSON.stringify({ ...plan, planId, status: "running" })]
+    );
+    await this.postZyraPlanMessage(
+      projectId,
+      sessionId,
+      uid,
+      `Resuming — ${doneCount}/${totalCount} scenarios covered so far, continuing with the remaining ${remainingScenarios.length}.`,
+      [],
+      []
+    );
+    void this.continueZyraChatPlan(projectId, uid, sessionId, planId).catch(() => undefined);
+    return this.zyraChatSession(projectId, sessionId);
+  }
+
   private async buildZyraChatDecision(projectId: string, userId: string, sessionId: string, message: string): Promise<ZyraChatDecision> {
     const intent = this.detectZyraChatIntent(message);
     const mentionedJiraKeys = this.extractJiraIssueKeys(message);
-    const [history, knowledge, existingTestcases, allocation, projectSnapshot, mentionedJira] = await Promise.all([
+    const [history, knowledge, existingTestcases, allocation, projectSnapshot, mentionedJira, lastCompletedPlanRes] = await Promise.all([
       this.db.query(
         `SELECT role, content, reasoning_summary, testcases
          FROM zyra_chat_messages
@@ -4326,8 +4412,10 @@ export class LegacyService {
       this.existingTestcaseSnapshot(projectId, message, ""),
       this.zyraAiAllocation(projectId),
       this.zyraChatProjectSnapshot(projectId),
-      this.jiraSnapshot(projectId, mentionedJiraKeys)
+      this.jiraSnapshot(projectId, mentionedJiraKeys),
+      this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }))
     ]);
+    const lastCompletedPlanCount = normalizeJsonArray((lastCompletedPlanRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).length;
     const key = allocation.key;
     if (!key) {
       return this.aiUnavailableForZyraChat(existingTestcases.length, allocation.reason);
@@ -4389,7 +4477,7 @@ export class LegacyService {
       "- update: update an existing testcase only when the user clearly asks to update/edit/mark/revise a testcase.",
       "- archive: archive an existing testcase when the user asks to remove/delete/archive testcase coverage. IMPORTANT: before archiving, always describe which testcases will be archived and explicitly ask the user to confirm (e.g. 'I found TC-5 Login Test. Should I archive it? Reply yes to confirm.'). Only include archive operations if the user's current message is a clear confirmation (yes, confirm, go ahead, proceed) after you already proposed what would be archived in the prior assistant turn.",
       "- create_suite: create a new test suite (a folder/group for testcases) when the user asks to create/add a suite, folder, or group. Put the suite name in operation.suiteName.",
-      "- move_to_suite: move/assign EXISTING testcases into a suite when the user asks to move/assign/organize/group/put existing testcases into a suite. The target suite goes in operation.suiteName (it is created automatically if it does not already exist, so you do not need a separate create_suite op for the same suite). List the testcases to move in operation.externalIds (use the external IDs shown under 'Existing suites' / 'Existing testcases'), or set operation.allExisting=true when the user means every existing testcase.",
+      "- move_to_suite: move/assign EXISTING testcases into a suite when the user asks to move/assign/organize/group/put existing testcases into a suite. The target suite goes in operation.suiteName (it is created automatically if it does not already exist, so you do not need a separate create_suite op for the same suite). List the testcases to move in operation.externalIds (use the external IDs shown under 'Existing suites' / 'Existing testcases'), set operation.allExisting=true when the user means every existing testcase, or set operation.fromLastPlan=true when the user refers to 'all'/'the N cases' from a recent generation batch (see 'Most recently generated batch' below) — fromLastPlan is exact and does not depend on you correctly recalling every external ID from earlier in the conversation, so prefer it over externalIds whenever the user is clearly referring to a just-generated batch rather than naming specific unrelated testcases.",
       "CRITICAL: moving or assigning existing testcases into a suite is NEVER a create action. Do not generate, draft, or duplicate testcases for a move/assign/organize request — only emit move_to_suite operations that reference the existing testcases. Use create only when the user explicitly asks to author brand-new testcases.",
       "When the user asks to create a suite AND move existing testcases into it in one message, return a single move_to_suite operation with the suiteName (the suite is auto-created) — or a create_suite plus move_to_suite — but never any create operations.",
       "Use the project snapshot to choose the action. If the query asks for numbers from Jira/testcase links, choose jira_pending_testcases instead of guessing.",
@@ -4400,7 +4488,7 @@ export class LegacyService {
       "Treat remove/delete requests as archive operations unless the user clearly names an existing app delete control.",
       `Detected local intent hint: ${intent}. Follow the user's actual wording if it is clearer than this hint.`,
       "Return ONLY a single valid JSON object — no markdown fences, no text before or after the JSON:",
-      "{\"reply\":\"\",\"reasoningSummary\":\"\",\"action\":\"answer|list|jira_pending_testcases|create|update|archive|create_suite|move_to_suite\",\"actionType\":\"answer|create|update|archive|suite|mixed\",\"operations\":[{\"type\":\"create|update|archive|create_suite|move_to_suite\",\"testcaseId\":\"\",\"externalId\":\"\",\"externalIds\":[],\"allExisting\":false,\"suiteName\":\"\",\"suiteId\":\"\",\"draft\":{},\"fields\":{},\"reason\":\"\"}],\"testcases\":[{}]}",
+      "{\"reply\":\"\",\"reasoningSummary\":\"\",\"action\":\"answer|list|jira_pending_testcases|create|update|archive|create_suite|move_to_suite\",\"actionType\":\"answer|create|update|archive|suite|mixed\",\"operations\":[{\"type\":\"create|update|archive|create_suite|move_to_suite\",\"testcaseId\":\"\",\"externalId\":\"\",\"externalIds\":[],\"allExisting\":false,\"fromLastPlan\":false,\"suiteName\":\"\",\"suiteId\":\"\",\"draft\":{},\"fields\":{},\"reason\":\"\"}],\"testcases\":[{}]}",
       "REPLY FIELD RULES — reply is rendered as markdown in a chat UI, must be human-readable:",
       "  - Use ## for main headings, ### for subsections, **bold** for emphasis, - for bullets, 1. for numbered steps.",
       "  - For comparisons or tabular data use markdown table syntax: | Heading | Heading |\\n|---|---|\\n| value | value |",
@@ -4411,6 +4499,9 @@ export class LegacyService {
       "",
       "Existing suites (use these names/ids for move_to_suite; reuse an existing suite instead of duplicating it):",
       projectSnapshot.suites.length ? projectSnapshot.suites.map((s) => `${s.name} (id: ${s.id}, ${s.testCaseCount} testcase(s))`).join("\n") : "No suites yet.",
+      "",
+      "Most recently generated batch (use move_to_suite with fromLastPlan=true to reference all of these together):",
+      lastCompletedPlanCount ? `${lastCompletedPlanCount} testcase(s) tracked from the last generation batch in this session.` : "No tracked batch yet in this session.",
       "",
       "Project snapshot:",
       JSON.stringify(projectSnapshot),
@@ -4488,7 +4579,7 @@ export class LegacyService {
     }
   }
 
-  private async applyZyraChatOperations(projectId: string, userId: string, operations: ZyraChatDecision["operations"]) {
+  private async applyZyraChatOperations(projectId: string, userId: string | null, sessionId: string, operations: ZyraChatDecision["operations"]) {
     const testcases: Body[] = [];
     const activity: Body[] = [];
     // Final hard gate: never persist an operation whose capability is disabled, regardless of what the model emitted.
@@ -4544,7 +4635,7 @@ export class LegacyService {
           ? await this.getProjectSuite(projectId, op.suiteId)
           : await this.resolveOrCreateSuiteByName(projectId, String(op.suiteName));
         if (!suite) continue;
-        const targets = await this.resolveZyraMoveTargets(projectId, op, suite.id);
+        const targets = await this.resolveZyraMoveTargets(projectId, sessionId, op, suite.id);
         if (!targets.length) continue;
         const movedIds = targets.map((target) => target.id);
         await this.db.query(
@@ -4582,12 +4673,28 @@ export class LegacyService {
   }
 
   // Resolve which existing testcases a move_to_suite op should affect: every non-archived testcase
-  // (allExisting), or the ones named by external id / internal id. Never creates testcases.
-  private async resolveZyraMoveTargets(projectId: string, op: ZyraChatDecision["operations"][number], targetSuiteId: string): Promise<Array<{ id: string }>> {
+  // (allExisting), the ones named by external id / internal id, or — when the model set
+  // fromLastPlan (see the move_to_suite prompt instructions) — every testcase tracked in
+  // last_completed_plan. That tracking exists because the model's own view of "which
+  // testcases did we just generate" is limited to the last 12 chat messages, which a
+  // multi-batch plan can easily outgrow; last_completed_plan is a durable, exact record
+  // instead of something the model has to re-enumerate from a possibly-truncated history.
+  // Never creates testcases.
+  private async resolveZyraMoveTargets(projectId: string, sessionId: string, op: ZyraChatDecision["operations"][number], targetSuiteId: string): Promise<Array<{ id: string }>> {
     if (op.allExisting) {
       const res = await this.db.query(
         "SELECT id FROM testcases WHERE project_id = $1 AND COALESCE(status,'') <> 'Archived' AND suite_id IS DISTINCT FROM $2::uuid",
         [projectId, targetSuiteId]
+      ).catch(() => ({ rows: [] as Body[] }));
+      return res.rows.map((row) => ({ id: String(row.id) }));
+    }
+    if (op.fromLastPlan) {
+      const planRes = await this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }));
+      const ids = normalizeJsonArray((planRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).map(String);
+      if (!ids.length) return [];
+      const res = await this.db.query(
+        "SELECT id FROM testcases WHERE project_id = $1 AND id = ANY($2::uuid[])",
+        [projectId, ids]
       ).catch(() => ({ rows: [] as Body[] }));
       return res.rows.map((row) => ({ id: String(row.id) }));
     }
@@ -4604,7 +4711,7 @@ export class LegacyService {
 
   private async generateZyraChatTestcasesWithAi(params: {
     projectId: string;
-    userId: string;
+    userId: string | null;
     provider: string;
     model: string;
     key: Body;
@@ -4748,6 +4855,7 @@ export class LegacyService {
       "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb, updated_at = now() WHERE id = $1",
       [params.sessionId, JSON.stringify({
         planId,
+        status: "running",
         originalMessage: params.message,
         jiraIssueKeys: params.jiraIssueKeys,
         remainingScenarios: remaining,
@@ -4764,7 +4872,7 @@ export class LegacyService {
     };
   }
 
-  private async postZyraPlanMessage(projectId: string, sessionId: string, userId: string, reply: string, testcases: Body[], activity: Body[]): Promise<void> {
+  private async postZyraPlanMessage(projectId: string, sessionId: string, userId: string | null, reply: string, testcases: Body[], activity: Body[]): Promise<void> {
     await this.db.query(
       `INSERT INTO zyra_chat_messages
        (session_id, project_id, user_id, role, content, reasoning_summary, action_type, status, testcases, activity)
@@ -4781,7 +4889,7 @@ export class LegacyService {
   // Fire-and-forget continuation (mirrors processZyraTask's pattern): re-checks the plan id
   // before every batch so a new user message — which clears active_plan in sendZyraChatMessage —
   // stops this loop cleanly instead of racing further messages into the session.
-  private async continueZyraChatPlan(projectId: string, userId: string, sessionId: string, planId: string): Promise<void> {
+  private async continueZyraChatPlan(projectId: string, userId: string | null, sessionId: string, planId: string): Promise<void> {
     for (;;) {
       const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
       const plan = sessionRes.rows[0]?.active_plan as Body | undefined;
@@ -4830,8 +4938,9 @@ export class LegacyService {
           requestedCount: batch.length
         });
         const gated = this.applyStorageGateToGenerated(decision, capabilities);
-        const applied = await this.applyZyraChatOperations(projectId, userId, gated.operations);
+        const applied = await this.applyZyraChatOperations(projectId, userId, sessionId, gated.operations);
         const testcases = applied.testcases.length ? applied.testcases : gated.testcases;
+        await this.recordZyraLastCompletedPlanIds(sessionId, testcases.map((tc) => tc.id).filter(Boolean));
 
         const newDoneCount = doneCount + batch.length;
         const remaining = remainingScenarios.slice(batch.length);
@@ -4855,11 +4964,27 @@ export class LegacyService {
         );
       } catch (err) {
         const detail = this.extractAiErrorMessage(err);
-        await this.postZyraPlanMessage(projectId, sessionId, userId, `I ran into an issue generating more test cases (${detail}). Stopping here — ${doneCount}/${totalCount} scenarios covered.`, [], []);
-        await this.clearZyraChatPlan(sessionId);
+        // Pause rather than discard: remainingScenarios/doneCount are unchanged (this batch
+        // never succeeded), so "continue" — or resumeZyraChatPlan — can retry from here later.
+        await this.postZyraPlanMessage(projectId, sessionId, userId, `I ran into an issue generating more test cases (${detail}). Pausing here — ${doneCount}/${totalCount} scenarios covered. Say "continue" and I'll retry the rest.`, [], []);
+        await this.db.query(
+          "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb WHERE id = $1",
+          [sessionId, JSON.stringify({ ...plan, status: "paused" })]
+        );
         return;
       }
     }
+  }
+
+  private async recordZyraLastCompletedPlanIds(sessionId: string, newIds: string[]): Promise<void> {
+    if (!newIds.length) return;
+    const res = await this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }));
+    const existingIds = normalizeJsonArray((res.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).map(String);
+    const mergedIds = Array.from(new Set([...existingIds, ...newIds]));
+    await this.db.query(
+      "UPDATE zyra_chat_sessions SET last_completed_plan = $2::jsonb WHERE id = $1",
+      [sessionId, JSON.stringify({ testcaseIds: mergedIds, totalCount: mergedIds.length })]
+    );
   }
 
   private async finalizeZyraToolDecisionWithAi(params: {

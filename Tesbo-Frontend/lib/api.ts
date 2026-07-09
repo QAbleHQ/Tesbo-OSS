@@ -665,6 +665,7 @@ export interface ZyraChatMessage {
 
 export interface ZyraChatActivePlan {
   planId: string;
+  status: "running" | "paused";
   remainingScenarios: string[];
   batchSize: number;
   doneCount: number;
@@ -728,6 +729,12 @@ export async function sendZyraChatMessage(
 
 export async function stopZyraChatPlan(projectId: string, sessionId: string): Promise<ZyraChatSession> {
   return api<ZyraChatSession>(`/api/projects/${projectId}/agents/zyra/chat/sessions/${sessionId}/stop-plan`, {
+    method: "POST",
+  });
+}
+
+export async function resumeZyraChatPlan(projectId: string, sessionId: string): Promise<ZyraChatSession> {
+  return api<ZyraChatSession>(`/api/projects/${projectId}/agents/zyra/chat/sessions/${sessionId}/resume-plan`, {
     method: "POST",
   });
 }
