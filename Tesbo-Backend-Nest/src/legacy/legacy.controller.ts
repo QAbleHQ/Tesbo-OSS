@@ -254,8 +254,8 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/testcases")
-  createTestCase(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createTestCase(projectId, body);
+  createTestCase(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createTestCase(projectId, req.userId, body);
   }
 
   @Get("/api/projects/:projectId/testcases/linked-jira-keys")
@@ -269,23 +269,23 @@ export class LegacyController {
   }
 
   @Put("/api/projects/:projectId/testcases/:testcaseId")
-  updateTestCase(@Param("testcaseId") testcaseId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateTestCase(testcaseId, body);
+  updateTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateTestCase(testcaseId, req.userId, body);
   }
 
   @Delete("/api/projects/:projectId/testcases/:testcaseId")
-  deleteTestCase(@Param("testcaseId") testcaseId: string) {
-    return this.legacy.deleteTestCase(testcaseId);
+  deleteTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string) {
+    return this.legacy.deleteTestCase(testcaseId, req.userId);
   }
 
   @Post("/api/projects/:projectId/testcases/bulk-update")
-  bulkUpdate(@Body() body: Record<string, any>) {
-    return this.legacy.bulkUpdateTestCases(body);
+  bulkUpdate(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.bulkUpdateTestCases(projectId, req.userId, body);
   }
 
   @Post("/api/projects/:projectId/testcases/bulk-delete")
-  bulkDelete(@Body() body: Record<string, any>) {
-    return this.legacy.bulkDeleteTestCases(body.testcaseIds || []);
+  bulkDelete(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.bulkDeleteTestCases(projectId, req.userId, body.testcaseIds || []);
   }
 
   @Get("/api/projects/:projectId/plans")
@@ -389,8 +389,24 @@ export class LegacyController {
   }
 
   @Patch("/api/cycles/:cycleId/executions/:executionId")
-  updateExecution(@Param("executionId") executionId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateExecution(executionId, body);
+  updateExecution(@Req() req: AuthenticatedRequest, @Param("executionId") executionId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateExecution(executionId, req.userId, body);
+  }
+
+  @Post("/api/cycles/:cycleId/executions/:executionId/attachments")
+  @UseInterceptors(FilesInterceptor("files", 10, { limits: { fileSize: LegacyService.KB_MAX_UPLOAD_SIZE } }))
+  uploadExecutionAttachments(
+    @Req() req: AuthenticatedRequest,
+    @Param("cycleId") cycleId: string,
+    @Param("executionId") executionId: string,
+    @UploadedFiles() files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    return this.legacy.uploadExecutionAttachments(cycleId, req.userId, executionId, files);
+  }
+
+  @Get("/api/cycles/:cycleId/executions/:executionId/attachments")
+  listExecutionAttachments(@Param("executionId") executionId: string) {
+    return this.legacy.listExecutionAttachments(executionId);
   }
 
   @Post("/api/cycles/:cycleId/executions/bulk-assign")
@@ -685,8 +701,8 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/agents/zyra/tasks/:taskId/save")
-  saveZyraTask(@Param("projectId") projectId: string, @Param("taskId") taskId: string, @Body() body: Record<string, any>) {
-    return this.legacy.zyraSave(projectId, taskId, body);
+  saveZyraTask(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("taskId") taskId: string, @Body() body: Record<string, any>) {
+    return this.legacy.zyraSave(projectId, req.userId, taskId, body);
   }
 
   // ─── Knowledge Base v2 (folders / documents / files) ────────────────────────

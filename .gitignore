@@ -51,3 +51,8 @@ portal-tesbo-screenshot.png
 automation-agent/
 backend/
 frontend/
+
+# Playwright / e2e smoke suite artifacts
+test-results/
+playwright-report/
+.auth/

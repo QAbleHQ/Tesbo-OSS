@@ -13,6 +13,8 @@ import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
 import { StorageService } from "../storage/storage.service";
 import { encryptSecret, decryptSecret } from "../common/crypto.util";
+import { RagIngestionService } from "../rag/rag-ingestion.service";
+import { RagRetrievalService } from "../rag/rag-retrieval.service";
 
 type Body = Record<string, any>;
 
@@ -283,8 +285,14 @@ export class LegacyService implements OnModuleInit {
     private readonly email: EmailService,
     private readonly password: PasswordService,
     private readonly config: AppConfigService,
-    private readonly storage: StorageService
+    private readonly storage: StorageService,
+    private readonly ragIngestion: RagIngestionService,
+    private readonly ragRetrieval: RagRetrievalService
   ) {}
+
+  private enqueueEmbedding(organizationId: string, projectId: string, sourceType: "document" | "file", sourceId: string, reason: "created" | "updated" | "transcribed"): void {
+    void this.ragIngestion.enqueueEmbedding({ organizationId, projectId, sourceType, sourceId, reason }).catch(() => undefined);
+  }
 
   async onModuleInit(): Promise<void> {
     this.resumeInterruptedZyraChatPlans().catch((err) => {
@@ -330,6 +338,26 @@ export class LegacyService implements OnModuleInit {
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
       [projectId, actorId, action, entityType, entityId, entityName, JSON.stringify(diff)]
     ).catch(() => undefined);
+  }
+
+  // Cached lookup for the well-known Zyra agent's actor id — resolved once and reused, since
+  // this never changes at runtime. Used to attribute testcase mutations to Zyra itself on any
+  // code path that has no originating human request in scope (e.g. a resumed background plan).
+  private zyraActorIdPromise: Promise<string | null> | null = null;
+  private async getZyraActorId(): Promise<string | null> {
+    if (!this.zyraActorIdPromise) {
+      this.zyraActorIdPromise = this.db
+        .query<{ id: string }>("SELECT a.id FROM actors a JOIN agents g ON g.id = a.id WHERE g.slug = 'zyra'")
+        .then((res) => res.rows[0]?.id || null)
+        .catch(() => null);
+    }
+    return this.zyraActorIdPromise;
+  }
+
+  // Resolves the actor to attribute a Zyra-driven mutation to: the real human user when one
+  // originated the request, otherwise Zyra's own agent actor id.
+  private async resolveZyraActor(userId: string | null): Promise<string | null> {
+    return userId || (await this.getZyraActorId());
   }
 
   private async zyraAiAllocation(projectId: string): Promise<{ key: Body | null; reason: string }> {
@@ -1196,7 +1224,7 @@ export class LegacyService implements OnModuleInit {
   async listTestCases(projectId: string, query: Body) {
     const limit = Math.min(Number(query.limit || 100), 500);
     const offset = Number(query.offset || 0);
-    const filters: string[] = ["project_id = $1"];
+    const filters: string[] = ["project_id = $1", "deleted_at IS NULL"];
     const values: any[] = [projectId];
     for (const [param, column] of [
       ["suiteId", "suite_id"],
@@ -1238,7 +1266,7 @@ export class LegacyService implements OnModuleInit {
               COALESCE(s.name, '') AS suite, COALESCE(t.component, '') AS component
        FROM testcases t
        LEFT JOIN suites s ON s.id = t.suite_id
-       WHERE t.project_id = $1
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
        ORDER BY t.updated_at DESC`,
       [projectId]
     );
@@ -1270,20 +1298,21 @@ export class LegacyService implements OnModuleInit {
   }
 
   async getTestCase(id: string) {
-    const res = await this.db.query("SELECT * FROM testcases WHERE id = $1", [id]);
+    const res = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     return toCamel(res.rows[0]);
   }
 
-  async createTestCase(projectId: string, body: Body) {
+  async createTestCase(projectId: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
     const externalId = body.externalId || (await this.nextExternalId(projectId, body.testcaseIdPrefix));
     const res = await this.db.query(
       `INSERT INTO testcases
        (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
         priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
-        automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
-       RETURNING id, external_id, title, created_at`,
+        automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$24)
+       RETURNING *`,
       [
         projectId,
         body.suiteId || null,
@@ -1307,14 +1336,20 @@ export class LegacyService implements OnModuleInit {
         body.component || null,
         body.status || "Draft",
         body.jiraIssueKey || null,
-        body.jiraUrl || null
+        body.jiraUrl || null,
+        uid
       ]
     );
-    return toCamel(res.rows[0]);
+    const created = res.rows[0];
+    await this.logProjectActivity(projectId, uid, "testcase_created", "testcase", created.id, `${created.external_id} - ${created.title}`, { after: toCamel(created) });
+    return toCamel(created);
   }
 
-  async updateTestCase(id: string, body: Body) {
-    await this.db.query(
+  async updateTestCase(id: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
+    const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
+    if (!before.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+    const res = await this.db.query(
       `UPDATE testcases SET
        suite_id=$2, title=COALESCE($3,title), description=COALESCE($4,description),
        preconditions=COALESCE($5,preconditions), postconditions=COALESCE($6,postconditions),
@@ -1323,8 +1358,10 @@ export class LegacyService implements OnModuleInit {
        automation_repo=COALESCE($13,automation_repo), automation_path=COALESCE($14,automation_path),
        automation_test_name=COALESCE($15,automation_test_name), automation_framework=COALESCE($16,automation_framework),
        automation_tags=COALESCE($17,automation_tags), owner_id=$18, component=COALESCE($19,component),
-       status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url), updated_at=now()
-       WHERE id=$1`,
+       status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url),
+       updated_by=$23, updated_at=now()
+       WHERE id=$1 AND deleted_at IS NULL
+       RETURNING *`,
       [
         id,
         body.suiteId ?? null,
@@ -1347,33 +1384,59 @@ export class LegacyService implements OnModuleInit {
         body.component ?? null,
         body.status ?? null,
         body.jiraIssueKey ?? null,
-        body.jiraUrl ?? null
+        body.jiraUrl ?? null,
+        uid
       ]
     );
+    const after = res.rows[0];
+    await this.logProjectActivity(before.rows[0].project_id, uid, "testcase_updated", "testcase", id, `${after?.external_id} - ${after?.title}`, {
+      before: toCamel(before.rows[0]),
+      after: toCamel(after)
+    });
   }
 
-  async deleteTestCase(id: string) {
-    await this.db.query("DELETE FROM testcases WHERE id = $1", [id]);
+  async deleteTestCase(id: string, actorId: string | null | undefined) {
+    const uid = this.requireUser(actorId);
+    const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
+    if (!before.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+    await this.db.query(
+      "UPDATE testcases SET deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
+      [id, uid]
+    );
+    await this.logProjectActivity(before.rows[0].project_id, uid, "testcase_deleted", "testcase", id, `${before.rows[0].external_id} - ${before.rows[0].title}`, {
+      before: toCamel(before.rows[0])
+    });
   }
 
-  async bulkUpdateTestCases(body: Body) {
+  async bulkUpdateTestCases(projectId: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
     const ids = Array.isArray(body.testcaseIds) ? body.testcaseIds : [];
     if (!ids.length) return;
     await this.db.query(
       `UPDATE testcases SET priority=COALESCE($2,priority), suite_id=COALESCE($3,suite_id),
-       status=COALESCE($4,status), owner_id=COALESCE($5,owner_id), updated_at=now() WHERE id = ANY($1::uuid[])`,
-      [ids, body.priority || null, body.suiteId || null, body.status || null, body.ownerId || null]
+       status=COALESCE($4,status), owner_id=COALESCE($5,owner_id), updated_by=$6, updated_at=now()
+       WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+      [ids, body.priority || null, body.suiteId || null, body.status || null, body.ownerId || null, uid]
     );
+    await this.logProjectActivity(projectId, uid, "testcase_bulk_updated", "testcase", null, null, {
+      testcaseIds: ids,
+      fields: { priority: body.priority || null, suiteId: body.suiteId || null, status: body.status || null, ownerId: body.ownerId || null }
+    });
   }
 
-  async bulkDeleteTestCases(ids: string[]) {
+  async bulkDeleteTestCases(projectId: string, actorId: string | null | undefined, ids: string[]) {
+    const uid = this.requireUser(actorId);
     if (!ids.length) return;
-    await this.db.query("DELETE FROM testcases WHERE id = ANY($1::uuid[])", [ids]);
+    await this.db.query(
+      "UPDATE testcases SET deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now() WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL",
+      [ids, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "testcase_bulk_deleted", "testcase", null, null, { testcaseIds: ids });
   }
 
   async linkedJiraKeys(projectId: string) {
     const res = await this.db.query(
-      "SELECT jira_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND jira_issue_key IS NOT NULL GROUP BY jira_issue_key",
+      "SELECT jira_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND jira_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY jira_issue_key",
       [projectId]
     );
     const keys = res.rows.map((r) => r.jira_issue_key);
@@ -1584,7 +1647,7 @@ export class LegacyService implements OnModuleInit {
   async addCycleTestCases(cycleId: string, body: Body) {
     const ids = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
     for (const testcaseId of ids) {
-      const tc = await this.db.query<{ title: string }>("SELECT title FROM testcases WHERE id = $1", [testcaseId]);
+      const tc = await this.db.query<{ title: string }>("SELECT title FROM testcases WHERE id = $1 AND deleted_at IS NULL", [testcaseId]);
       if (!tc.rows[0]) continue;
       const item = await this.db.query<{ id: string }>(
         "INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id",
@@ -1608,19 +1671,41 @@ export class LegacyService implements OnModuleInit {
               t.external_id, t.priority, t.type, t.suite_id, t.description, t.preconditions, t.postconditions,
               t.steps, t.test_data, t.automation_status, t.automation_tags
        FROM cycle_items ci JOIN executions e ON e.cycle_item_id = ci.id
-       LEFT JOIN testcases t ON t.id = ci.testcase_id
-       WHERE ci.cycle_id = $1 ORDER BY ci.position, ci.created_at`,
+       LEFT JOIN testcases t ON t.id = ci.testcase_id AND t.deleted_at IS NULL
+       WHERE ci.cycle_id = $1 AND e.deleted_at IS NULL ORDER BY ci.position, ci.created_at`,
       [cycleId]
     );
     return res.rows.map(toCamel);
   }
 
-  async updateExecution(executionId: string, body: Body) {
-    await this.db.query(
+  async updateExecution(executionId: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
+    const before = await this.db.query(
+      `SELECT e.*, c.project_id, COALESCE(NULLIF(ci.snapshot_title, ''), NULLIF(t.title, ''), 'Untitled test case') AS testcase_title
+       FROM executions e
+       JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       JOIN cycles c ON c.id = ci.cycle_id
+       LEFT JOIN testcases t ON t.id = ci.testcase_id
+       WHERE e.id = $1 AND e.deleted_at IS NULL`,
+      [executionId]
+    );
+    if (!before.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    const res = await this.db.query(
       `UPDATE executions SET status=COALESCE($2,status), assignee_id=$3, actual_result=COALESCE($4,actual_result),
        executed_at=CASE WHEN $2 IS NULL THEN executed_at ELSE now() END, defect_key=COALESCE($5,defect_key),
-       defect_url=COALESCE($6,defect_url), updated_at=now() WHERE id=$1`,
-      [executionId, body.status || null, body.assigneeId ?? null, body.actualResult || null, body.defectKey || null, body.defectUrl || null]
+       defect_url=COALESCE($6,defect_url), executed_by=$7, updated_at=now()
+       WHERE id=$1 AND deleted_at IS NULL
+       RETURNING *`,
+      [executionId, body.status || null, body.assigneeId ?? null, body.actualResult || null, body.defectKey || null, body.defectUrl || null, uid]
+    );
+    await this.logProjectActivity(
+      before.rows[0].project_id,
+      uid,
+      "execution_updated",
+      "execution",
+      executionId,
+      before.rows[0].testcase_title,
+      { before: toCamel(before.rows[0]), after: toCamel(res.rows[0]) }
     );
   }
 
@@ -1820,6 +1905,54 @@ export class LegacyService implements OnModuleInit {
     return { ok: true };
   }
 
+  // Execution evidence uploads — same generic `attachments` table as bug evidence
+  // (entity_type='execution'), mirroring uploadBugAttachments. The execution routes are
+  // nested under /api/cycles/:cycleId/executions/:executionId (no projectId in the path),
+  // so the project is resolved via the cycle/cycle_item join instead of being passed in.
+  async uploadExecutionAttachments(
+    cycleId: string,
+    actorId: string | null | undefined,
+    executionId: string,
+    files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    const uid = this.requireUser(actorId);
+    if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
+    const execution = await this.db.query(
+      `SELECT e.id, c.project_id FROM executions e
+       JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       JOIN cycles c ON c.id = ci.cycle_id
+       WHERE e.id = $1 AND c.id = $2 AND e.deleted_at IS NULL`,
+      [executionId, cycleId]
+    );
+    if (!execution.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    const projectId = execution.rows[0].project_id;
+
+    const created: Body[] = [];
+    for (const file of files) {
+      const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase();
+      const storageKey = `executions/${projectId}/${executionId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
+      await this.storage.put(storageKey, file.buffer, file.mimetype);
+      const res = await this.db.query(
+        `INSERT INTO attachments (project_id, entity_type, entity_id, file_name, content_type, file_size, storage_path, uploaded_by)
+         VALUES ($1, 'execution', $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [projectId, executionId, file.originalname, file.mimetype, file.size, storageKey, uid]
+      );
+      created.push(toCamel(res.rows[0]));
+    }
+    await this.logProjectActivity(projectId, uid, "execution_evidence_uploaded", "execution", executionId, null, {
+      files: created.map((file) => ({ id: file.id, fileName: file.fileName }))
+    });
+    return { list: created, total: created.length };
+  }
+
+  async listExecutionAttachments(executionId: string) {
+    const res = await this.db.query(
+      "SELECT * FROM attachments WHERE entity_type = 'execution' AND entity_id = $1 ORDER BY created_at",
+      [executionId]
+    );
+    return { list: res.rows.map(toCamel), total: res.rowCount };
+  }
+
   async executionReport(projectId: string, query: Body) {
     const filterBy = String(query.filterBy || "overall");
     const filterValue = query.filterValue ? String(query.filterValue) : null;
@@ -1927,9 +2060,9 @@ export class LegacyService implements OnModuleInit {
        LEFT JOIN suites s ON s.id = t.suite_id
        LEFT JOIN cycle_items ci ON ci.testcase_id = t.id
        LEFT JOIN cycles c ON c.id = ci.cycle_id
-       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
        LEFT JOIN bugs b ON b.execution_id = e.id
-       WHERE t.project_id = $1
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
        ORDER BY t.external_id, c.created_at DESC NULLS LAST`,
       [projectId]
     );
@@ -1947,12 +2080,12 @@ export class LegacyService implements OnModuleInit {
     const values = scopeValue ? [scopeValue] : [];
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM projects${projectsWhere}`, values),
-      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases${childWhere}`, values),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases_active${childWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM suites${childWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM plans${childWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM cycles${childWhere}`, values),
       this.db.query<{ status: string; count: string }>(
-        `SELECT e.status, COUNT(*) AS count FROM executions e JOIN cycle_items ci ON ci.id = e.cycle_item_id JOIN cycles c ON c.id = ci.cycle_id${
+        `SELECT e.status, COUNT(*) AS count FROM executions_active e JOIN cycle_items ci ON ci.id = e.cycle_item_id JOIN cycles c ON c.id = ci.cycle_id${
           projectId
             ? " WHERE c.project_id = $1"
             : organizationId
@@ -1976,12 +2109,12 @@ export class LegacyService implements OnModuleInit {
   }
 
   async repositorySummary(projectId: string) {
-    const total = await this.db.query<{ count: string }>("SELECT COUNT(*) AS count FROM testcases WHERE project_id = $1", [projectId]);
+    const total = await this.db.query<{ count: string }>("SELECT COUNT(*) AS count FROM testcases_active WHERE project_id = $1", [projectId]);
     const byStatus = await this.groupTestcases(projectId, "status");
     const byPriority = await this.groupTestcases(projectId, "priority");
     const bySuite = await this.db.query<{ name: string; count: string }>(
       `SELECT COALESCE(s.name, 'Unassigned') AS name, COUNT(t.id) AS count
-       FROM testcases t LEFT JOIN suites s ON s.id = t.suite_id
+       FROM testcases_active t LEFT JOIN suites s ON s.id = t.suite_id
        WHERE t.project_id = $1 GROUP BY s.name ORDER BY s.name`,
       [projectId]
     );
@@ -2024,14 +2157,14 @@ export class LegacyService implements OnModuleInit {
           NULL::text AS diff,
           created_at
         FROM testcases
-        WHERE project_id = $1
+        WHERE project_id = $1 AND deleted_at IS NULL
 
         UNION ALL
         SELECT
           project_id, ('testcase-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
           'updated'::text, 'testcase'::text, id::text, COALESCE(external_id || ' - ' || title, title), NULL::text, updated_at
         FROM testcases
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
+        WHERE project_id = $1 AND deleted_at IS NULL AND updated_at > created_at + interval '1 second'
 
         UNION ALL
         SELECT
@@ -2476,6 +2609,7 @@ export class LegacyService implements OnModuleInit {
       ]
     );
     await this.logProjectActivity(projectId, uid, "created", "knowledge_document", res.rows[0].id, title, {});
+    this.enqueueEmbedding(project.organization_id, projectId, "document", res.rows[0].id, "created");
     return toCamel(res.rows[0]);
   }
 
@@ -2554,6 +2688,7 @@ export class LegacyService implements OnModuleInit {
       [documentId, nextTitle, nextJson, nextHtml, nextText, body.documentType || null, nextStatus, reviewedBy, reviewedAt, uid]
     );
     await this.logProjectActivity(projectId, uid, "updated", "knowledge_document", documentId, nextTitle, {});
+    if (contentChanged) this.enqueueEmbedding(res.rows[0].organization_id, projectId, "document", documentId, "updated");
     return toCamel(res.rows[0]);
   }
 
@@ -2596,6 +2731,7 @@ export class LegacyService implements OnModuleInit {
       ]
     );
     await this.logProjectActivity(projectId, uid, "duplicated", "knowledge_document", res.rows[0].id, res.rows[0].title, {});
+    this.enqueueEmbedding(project.organization_id, projectId, "document", res.rows[0].id, "created");
     return toCamel(res.rows[0]);
   }
 
@@ -2720,6 +2856,7 @@ export class LegacyService implements OnModuleInit {
   // transcription endpoint we can safely assume the shape of.
   private async transcribeKnowledgeFile(projectId: string, fileId: string, buffer: Buffer, ext: string, mimeType: string, fileName: string): Promise<void> {
     try {
+      const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
       const allocation = await this.zyraAiAllocation(projectId);
       const key = allocation.key;
       if (!key || String(key.provider || "").toLowerCase() !== "openai") {
@@ -2745,6 +2882,7 @@ export class LegacyService implements OnModuleInit {
         "UPDATE knowledge_files SET extracted_text = $2, extraction_status = 'ready', updated_at = now() WHERE id = $1",
         [fileId, text || null]
       );
+      if (text) this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "file", fileId, "transcribed");
     } catch (err) {
       this.logger.warn(`Knowledge-base transcription failed for file ${fileId}: ${err instanceof Error ? err.message : err}`);
       await this.db.query("UPDATE knowledge_files SET extraction_status = 'failed', updated_at = now() WHERE id = $1", [fileId]).catch(() => undefined);
@@ -2814,7 +2952,11 @@ export class LegacyService implements OnModuleInit {
       created.push(toCamel(res.rows[0]));
       await this.logProjectActivity(projectId, uid, "uploaded", "knowledge_file", res.rows[0].id, originalFileName, {});
       if (isTranscribable) {
+        // Embedding is enqueued once the transcript lands (transcribeKnowledgeFile), not here —
+        // there's no content yet for audio/video at upload time.
         void this.transcribeKnowledgeFile(projectId, res.rows[0].id, file.buffer, ext, file.mimetype, originalFileName).catch(() => undefined);
+      } else {
+        this.enqueueEmbedding(project.organization_id, projectId, "file", res.rows[0].id, "created");
       }
     }
     return { list: created, total: created.length };
@@ -3620,12 +3762,13 @@ export class LegacyService implements OnModuleInit {
           const summary = String(fields.summary || "");
           const description = jiraDescriptionToText(fields.description);
           const url = `${connection.site_url}/browse/${issue.key}`;
-          await this.db.query(
+          const mirrorRes = await this.db.query<{ id: string }>(
             `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
              VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'jira', $7, $8)
              ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
                title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
-               source_url = EXCLUDED.source_url, updated_at = now()`,
+               source_url = EXCLUDED.source_url, updated_at = now()
+             RETURNING id`,
             [
               project.rows[0]?.organization_id,
               projectId,
@@ -3637,6 +3780,7 @@ export class LegacyService implements OnModuleInit {
               url
             ]
           );
+          if (mirrorRes.rows[0]?.id) this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "document", mirrorRes.rows[0].id, "updated");
         }
       }
     }
@@ -3978,12 +4122,13 @@ export class LegacyService implements OnModuleInit {
         synced += 1;
 
         if (mirrorFolderId) {
-          await this.db.query(
+          const mirrorRes = await this.db.query<{ id: string }>(
             `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
              VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'linear', $7, $8)
              ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
                title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
-               source_url = EXCLUDED.source_url, updated_at = now()`,
+               source_url = EXCLUDED.source_url, updated_at = now()
+             RETURNING id`,
             [
               organizationId,
               projectId,
@@ -3995,6 +4140,7 @@ export class LegacyService implements OnModuleInit {
               String(issue.url || "")
             ]
           );
+          if (mirrorRes.rows[0]?.id) this.enqueueEmbedding(organizationId, projectId, "document", mirrorRes.rows[0].id, "updated");
         }
       }
     }
@@ -4399,7 +4545,7 @@ export class LegacyService implements OnModuleInit {
   private async buildZyraChatDecision(projectId: string, userId: string, sessionId: string, message: string): Promise<ZyraChatDecision> {
     const intent = this.detectZyraChatIntent(message);
     const mentionedJiraKeys = this.extractJiraIssueKeys(message);
-    const [history, knowledge, existingTestcases, allocation, projectSnapshot, mentionedJira, lastCompletedPlanRes] = await Promise.all([
+    const [history, knowledgeFallback, ragKnowledge, existingTestcases, allocation, projectSnapshot, mentionedJira, lastCompletedPlanRes] = await Promise.all([
       this.db.query(
         `SELECT role, content, reasoning_summary, testcases
          FROM zyra_chat_messages
@@ -4409,12 +4555,18 @@ export class LegacyService implements OnModuleInit {
         [sessionId, projectId]
       ),
       this.knowledgeSnapshot(projectId),
+      // Semantic (embeddings) retrieval, run in parallel with the always-cheap recency
+      // fallback above so a project with nothing embedded yet (or an Anthropic-only key)
+      // pays no extra latency — retrieveKnowledgeContext never throws, resolves to [] on
+      // any failure.
+      this.ragRetrieval.retrieveKnowledgeContext(projectId, message),
       this.existingTestcaseSnapshot(projectId, message, ""),
       this.zyraAiAllocation(projectId),
       this.zyraChatProjectSnapshot(projectId),
       this.jiraSnapshot(projectId, mentionedJiraKeys),
       this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }))
     ]);
+    const knowledge = ragKnowledge.length ? ragKnowledge : knowledgeFallback;
     const lastCompletedPlanCount = normalizeJsonArray((lastCompletedPlanRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).length;
     const key = allocation.key;
     if (!key) {
@@ -4582,6 +4734,9 @@ export class LegacyService implements OnModuleInit {
   private async applyZyraChatOperations(projectId: string, userId: string | null, sessionId: string, operations: ZyraChatDecision["operations"]) {
     const testcases: Body[] = [];
     const activity: Body[] = [];
+    // No originating human request in scope on some paths (e.g. a resumed background plan) —
+    // attribute the mutation to Zyra's own agent actor id in that case instead of leaving it null.
+    const actorId = await this.resolveZyraActor(userId);
     // Final hard gate: never persist an operation whose capability is disabled, regardless of what the model emitted.
     const capabilities = await this.zyraProjectCapabilities(projectId);
     const allowed = operations.filter((op) => {
@@ -4593,7 +4748,7 @@ export class LegacyService implements OnModuleInit {
       if (op.type === "create" && op.draft) {
         let created: Body | null = null;
         try {
-          created = await this.createTestCase(projectId, {
+          created = await this.createTestCase(projectId, actorId, {
             title: op.draft.title,
             description: op.draft.description || op.draft.expectedSummary || "",
             preconditions: op.draft.preconditions || "",
@@ -4613,22 +4768,22 @@ export class LegacyService implements OnModuleInit {
         const row = await this.getTestCase(created.id);
         testcases.push(this.chatTestcaseRow(row, "created", op.reason));
         activity.push({ actor: "agent", title: "Created testcase", detail: `${created.externalId} ${created.title}`, createdAt: new Date().toISOString() });
-        await this.logProjectActivity(projectId, userId, "zyra_created", "testcase", created.id, `${created.externalId} - ${created.title}`, { source: "zyra_chat", reason: op.reason || null });
+        await this.logProjectActivity(projectId, actorId, "zyra_created", "testcase", created.id, `${created.externalId} - ${created.title}`, { source: "zyra_chat", reason: op.reason || null });
       } else if ((op.type === "update" || op.type === "archive") && (op.testcaseId || op.externalId)) {
         const found = await this.findProjectTestcase(projectId, op.testcaseId, op.externalId);
         if (!found) continue;
         const fields = op.type === "archive" ? { status: "Archived" } : this.sanitizeZyraUpdateFields(op.fields || {});
-        await this.patchTestCaseFromZyra(found.id, fields);
+        await this.patchTestCaseFromZyra(found.id, actorId, fields);
         const row = await this.getTestCase(found.id);
         const action = op.type === "archive" ? "archived" : "updated";
         testcases.push(this.chatTestcaseRow(row, action, op.reason));
         activity.push({ actor: "agent", title: `${action[0].toUpperCase()}${action.slice(1)} testcase`, detail: `${row.externalId} ${row.title}`, createdAt: new Date().toISOString() });
-        await this.logProjectActivity(projectId, userId, `zyra_${action}`, "testcase", found.id, `${row.externalId} - ${row.title}`, { source: "zyra_chat", fields, reason: op.reason || null });
+        await this.logProjectActivity(projectId, actorId, `zyra_${action}`, "testcase", found.id, `${row.externalId} - ${row.title}`, { source: "zyra_chat", fields, reason: op.reason || null });
       } else if (op.type === "create_suite" && op.suiteName) {
         const suite = await this.resolveOrCreateSuiteByName(projectId, op.suiteName);
         activity.push({ actor: "agent", title: suite.created ? "Created suite" : "Suite already exists", detail: suite.name, createdAt: new Date().toISOString() });
         if (suite.created) {
-          await this.logProjectActivity(projectId, userId, "zyra_suite_created", "suite", suite.id, suite.name, { source: "zyra_chat", reason: op.reason || null });
+          await this.logProjectActivity(projectId, actorId, "zyra_suite_created", "suite", suite.id, suite.name, { source: "zyra_chat", reason: op.reason || null });
         }
       } else if (op.type === "move_to_suite" && (op.suiteName || op.suiteId)) {
         const suite = op.suiteId
@@ -4639,15 +4794,15 @@ export class LegacyService implements OnModuleInit {
         if (!targets.length) continue;
         const movedIds = targets.map((target) => target.id);
         await this.db.query(
-          "UPDATE testcases SET suite_id = $2, updated_at = now() WHERE project_id = $1 AND id = ANY($3::uuid[])",
-          [projectId, suite.id, movedIds]
+          "UPDATE testcases SET suite_id = $2, updated_by = $4, updated_at = now() WHERE project_id = $1 AND id = ANY($3::uuid[]) AND deleted_at IS NULL",
+          [projectId, suite.id, movedIds, actorId]
         );
         for (const target of targets.slice(0, 25)) {
           const row = await this.getTestCase(target.id);
           testcases.push(this.chatTestcaseRow(row, "moved", op.reason || `Moved to suite ${suite.name}`));
         }
         activity.push({ actor: "agent", title: `Moved ${movedIds.length} testcase(s) to suite`, detail: `${suite.name}${"created" in suite && suite.created ? " (created)" : ""}`, createdAt: new Date().toISOString() });
-        await this.logProjectActivity(projectId, userId, "zyra_moved_to_suite", "suite", suite.id, suite.name, { source: "zyra_chat", movedCount: movedIds.length, testcaseIds: movedIds, reason: op.reason || null });
+        await this.logProjectActivity(projectId, actorId, "zyra_moved_to_suite", "suite", suite.id, suite.name, { source: "zyra_chat", movedCount: movedIds.length, testcaseIds: movedIds, reason: op.reason || null });
       }
     }
     return { testcases, activity };
@@ -4683,7 +4838,7 @@ export class LegacyService implements OnModuleInit {
   private async resolveZyraMoveTargets(projectId: string, sessionId: string, op: ZyraChatDecision["operations"][number], targetSuiteId: string): Promise<Array<{ id: string }>> {
     if (op.allExisting) {
       const res = await this.db.query(
-        "SELECT id FROM testcases WHERE project_id = $1 AND COALESCE(status,'') <> 'Archived' AND suite_id IS DISTINCT FROM $2::uuid",
+        "SELECT id FROM testcases WHERE project_id = $1 AND COALESCE(status,'') <> 'Archived' AND suite_id IS DISTINCT FROM $2::uuid AND deleted_at IS NULL",
         [projectId, targetSuiteId]
       ).catch(() => ({ rows: [] as Body[] }));
       return res.rows.map((row) => ({ id: String(row.id) }));
@@ -4693,7 +4848,7 @@ export class LegacyService implements OnModuleInit {
       const ids = normalizeJsonArray((planRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).map(String);
       if (!ids.length) return [];
       const res = await this.db.query(
-        "SELECT id FROM testcases WHERE project_id = $1 AND id = ANY($2::uuid[])",
+        "SELECT id FROM testcases WHERE project_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL",
         [projectId, ids]
       ).catch(() => ({ rows: [] as Body[] }));
       return res.rows.map((row) => ({ id: String(row.id) }));
@@ -4703,7 +4858,7 @@ export class LegacyService implements OnModuleInit {
     const internalIds = [...(op.testcaseIds || []), ...(op.testcaseId ? [op.testcaseId] : [])].map((value) => String(value).trim()).filter((value) => uuidPattern.test(value));
     if (!externalIds.length && !internalIds.length) return [];
     const res = await this.db.query(
-      "SELECT id FROM testcases WHERE project_id = $1 AND (external_id = ANY($2::text[]) OR id = ANY($3::uuid[]))",
+      "SELECT id FROM testcases WHERE project_id = $1 AND (external_id = ANY($2::text[]) OR id = ANY($3::uuid[])) AND deleted_at IS NULL",
       [projectId, externalIds, internalIds]
     ).catch(() => ({ rows: [] as Body[] }));
     return res.rows.map((row) => ({ id: String(row.id) }));
@@ -5391,7 +5546,7 @@ export class LegacyService implements OnModuleInit {
     return this.formatAiTask(res.rows[0]);
   }
 
-  async zyraSave(projectId: string, taskId: string, body: Body) {
+  async zyraSave(projectId: string, userId: string | null | undefined, taskId: string, body: Body) {
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     let suiteId = body.suiteId || null;
@@ -5410,7 +5565,7 @@ export class LegacyService implements OnModuleInit {
     const jiraUrl = jiraTicket.rows[0]?.jira_url || null;
     const existingLinked = jiraIssueKey
       ? await this.db.query(
-          "SELECT id FROM testcases WHERE project_id = $1 AND jira_issue_key = $2 ORDER BY updated_at ASC",
+          "SELECT id FROM testcases WHERE project_id = $1 AND jira_issue_key = $2 AND deleted_at IS NULL ORDER BY updated_at ASC",
           [projectId, jiraIssueKey]
         )
       : { rows: [] as Body[] };
@@ -5438,10 +5593,10 @@ export class LegacyService implements OnModuleInit {
         jiraUrl
       };
       if (existingLinked.rows[index]?.id) {
-        await this.updateTestCase(existingLinked.rows[index].id, payload);
+        await this.updateTestCase(existingLinked.rows[index].id, userId, payload);
         touched.push({ id: existingLinked.rows[index].id, title: draft.title, updated: true });
       } else {
-        const testcase = await this.createTestCase(projectId, payload);
+        const testcase = await this.createTestCase(projectId, userId, payload);
         created.push(testcase);
         touched.push(testcase);
       }
@@ -5568,20 +5723,22 @@ export class LegacyService implements OnModuleInit {
       [projectId, title]
     );
     const stampedEntry = `## ${new Date().toISOString()}\n${entry.trim()}`.slice(0, 2500);
+    const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
     if (existing.rows[0]) {
       const content = [stampedEntry, String(existing.rows[0].content_text || "")].filter(Boolean).join("\n\n").slice(0, 20000);
       await this.db.query(
         "UPDATE knowledge_documents SET content_text = $2, content_html = $3, updated_at = now() WHERE id = $1",
         [existing.rows[0].id, content, `<pre>${escapeHtml(content)}</pre>`]
       );
+      this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "document", existing.rows[0].id, "updated");
       return;
     }
-    const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
-    await this.db.query(
+    const inserted = await this.db.query<{ id: string }>(
       `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, is_ai_generated, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, 'general', 'published', true, $7, $7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, 'general', 'published', true, $7, $7) RETURNING id`,
       [project.rows[0]?.organization_id, projectId, folderId, title, stampedEntry, `<pre>${escapeHtml(stampedEntry)}</pre>`, userId]
     );
+    if (inserted.rows[0]?.id) this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "document", inserted.rows[0].id, "created");
   }
 
   private async knowledgeSnapshot(projectId: string, selectedItemIds: string[] = []): Promise<Array<{ title: string; content: string }>> {
@@ -5653,7 +5810,7 @@ export class LegacyService implements OnModuleInit {
     const res = await this.db.query(
       `SELECT external_id, title, description, priority, status, steps
        FROM testcases
-       WHERE project_id = $1
+       WHERE project_id = $1 AND deleted_at IS NULL
        ORDER BY ${orderBy}
        LIMIT 25`,
       values
@@ -6533,7 +6690,7 @@ export class LegacyService implements OnModuleInit {
       ).catch(() => ({ rows: [] as Body[] })),
       this.db.query(
         `SELECT s.id, s.name, COUNT(t.id)::int AS test_case_count
-         FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id
+         FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id AND t.deleted_at IS NULL
          WHERE s.project_id = $1
          GROUP BY s.id, s.name
          ORDER BY s.position, s.name
@@ -6545,7 +6702,7 @@ export class LegacyService implements OnModuleInit {
            COUNT(*)::int AS testcase_count,
            COUNT(*) FILTER (WHERE jira_issue_key IS NOT NULL AND COALESCE(status, '') <> 'Archived')::int AS linked_jira_testcase_count
          FROM testcases
-         WHERE project_id = $1`,
+         WHERE project_id = $1 AND deleted_at IS NULL`,
         [projectId]
       ).catch(() => ({ rows: [{}] as Body[] })),
       this.db.query(
@@ -6596,6 +6753,7 @@ export class LegacyService implements OnModuleInit {
            SELECT jira_issue_key, COUNT(*)::int AS testcase_count
            FROM testcases
            WHERE project_id = $1
+             AND deleted_at IS NULL
              AND jira_issue_key IS NOT NULL
              AND COALESCE(status, '') <> 'Archived'
            GROUP BY jira_issue_key
@@ -6616,6 +6774,7 @@ export class LegacyService implements OnModuleInit {
            SELECT jira_issue_key, COUNT(*)::int AS testcase_count
            FROM testcases
            WHERE project_id = $1
+             AND deleted_at IS NULL
              AND jira_issue_key IS NOT NULL
              AND COALESCE(status, '') <> 'Archived'
            GROUP BY jira_issue_key
@@ -6692,7 +6851,7 @@ export class LegacyService implements OnModuleInit {
   private async findProjectTestcase(projectId: string, testcaseId?: string, externalId?: string) {
     const res = await this.db.query(
       `SELECT id FROM testcases
-       WHERE project_id = $1 AND (($2::uuid IS NOT NULL AND id = $2::uuid) OR ($3::text IS NOT NULL AND external_id = $3::text))
+       WHERE project_id = $1 AND deleted_at IS NULL AND (($2::uuid IS NOT NULL AND id = $2::uuid) OR ($3::text IS NOT NULL AND external_id = $3::text))
        LIMIT 1`,
       [projectId, testcaseId || null, externalId || null]
     ).catch(() => ({ rows: [] as Body[] }));
@@ -6709,7 +6868,7 @@ export class LegacyService implements OnModuleInit {
     return cleaned;
   }
 
-  private async patchTestCaseFromZyra(testcaseId: string, fields: Body) {
+  private async patchTestCaseFromZyra(testcaseId: string, actorId: string | null, fields: Body) {
     const keys = [
       ["title", "title"],
       ["description", "description"],
@@ -6735,7 +6894,8 @@ export class LegacyService implements OnModuleInit {
       sets.push(`${column} = $${values.length}${column === "steps" ? "::jsonb" : ""}`);
     }
     if (!sets.length) return;
-    await this.db.query(`UPDATE testcases SET ${sets.join(", ")}, updated_at = now() WHERE id = $1`, values);
+    values.push(actorId);
+    await this.db.query(`UPDATE testcases SET ${sets.join(", ")}, updated_by = $${values.length}, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, values);
   }
 
   private chatDraftRow(value: Body, action: string, reason?: string): Body {
@@ -6822,7 +6982,7 @@ export class LegacyService implements OnModuleInit {
 
   private async groupTestcases(projectId: string, column: string) {
     const res = await this.db.query<{ name: string; count: string }>(
-      `SELECT COALESCE(${column}, 'Unspecified') AS name, COUNT(*) AS count FROM testcases WHERE project_id = $1 GROUP BY ${column}`,
+      `SELECT COALESCE(${column}, 'Unspecified') AS name, COUNT(*) AS count FROM testcases_active WHERE project_id = $1 GROUP BY ${column}`,
       [projectId]
     );
     return res.rows.map((r) => ({ name: r.name, count: Number(r.count) }));

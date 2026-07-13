@@ -9,7 +9,9 @@
 #   Backend:  http://localhost:1011/health
 services:
   postgres:
-    image: postgres:16-alpine
+    # pgvector/pgvector:pg16 is a drop-in postgres:16 image with the pgvector extension
+    # prebuilt (needed for Zyra's knowledge-base embedding search, migration V54).
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-tesbo}
@@ -28,6 +30,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # Durable AOF persistence so queued knowledge-base embedding jobs (BullMQ) survive a
+    # container restart instead of silently vanishing.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - tesbo_redisdata:/data
     ports:
       - "${REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -56,6 +63,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       migrator:
         condition: service_completed_successfully
     environment:
@@ -63,6 +72,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-tesbo}
       DATABASE_USER: ${POSTGRES_USER:-postgres}
       DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:1010}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:1010,http://127.0.0.1:1010,http://localhost:3000,http://127.0.0.1:3000}
       JIRA_REDIRECT_URI: ${JIRA_REDIRECT_URI:-http://localhost:1010/jira/callback}
@@ -130,4 +140,5 @@ services:
 
 volumes:
   tesbo_pgdata:
+  tesbo_redisdata:
   backend_uploads:
