@@ -3,6 +3,15 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import {
+  IconArrowsSort,
+  IconChevronDown,
+  IconFilter,
+  IconFolders,
+  IconLayoutGrid,
+  IconList,
+  IconPlus,
+} from "@tabler/icons-react";
 import { authMe, listProjects, listTestCases, listSuites, createProject, getWorkspace, listActivity, listProjectMembers, listTestRuns } from "@/lib/api";
 import type { ProjectSummary, ProjectType } from "@/lib/api";
 import type { SuiteNode } from "@/lib/api";
@@ -19,15 +28,45 @@ import {
 } from "@/components/ui";
 import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
 
+type RunCounts = { passed: number; failed: number; blocked: number; total: number };
+type ProjectStatus = "active" | "configured" | "setup_required";
+
 type ProjectWithStats = ProjectSummary & {
   testCaseCount: number;
   suites: SuiteNode[];
   teamMembers: { userId: string; name: string }[];
   lastActivityAt: string | null;
-  status: "active" | "configured" | "setup_required";
-  passRateTrend: number[];   // pass % per run, ascending by date, 0–100
+  status: ProjectStatus;
+  runCounts: RunCounts | null; // latest completed run's breakdown, null if no runs
   currentPassRate: number | null; // latest run's pass %, null if no runs
 };
+
+const VIEW_STORAGE_KEY = "tesbo_projects_view";
+
+const PROJECT_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+
+function hashSeed(seed: string): number {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function projectColor(seed: string): string {
+  return PROJECT_COLORS[hashSeed(seed) % PROJECT_COLORS.length];
+}
+
+const STATUS_META: Record<ProjectStatus, { label: string; text: string; dot: string; fill: string }> = {
+  active: { label: "Active", text: "var(--status-pass-text)", dot: "var(--status-pass-dot)", fill: "var(--status-pass-fill)" },
+  configured: { label: "Configured", text: "var(--status-notrun-text)", dot: "var(--status-notrun-dot)", fill: "var(--status-notrun-fill)" },
+  setup_required: { label: "Setup required", text: "var(--status-blocked-text)", dot: "var(--status-blocked-dot)", fill: "var(--status-blocked-fill)" },
+};
+
+function passRateTextColor(rate: number | null): string {
+  if (rate === null) return "var(--muted-soft)";
+  if (rate >= 90) return "var(--success)";
+  if (rate >= 70) return "var(--warning)";
+  return "var(--error)";
+}
 
 function formatRelativeTime(iso: string): string {
   const ts = new Date(iso).getTime();
@@ -42,78 +81,6 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(diffMs / day)}d ago`;
 }
 
-// Deterministic placeholder when no real run data exists (0–100 pass-rate scale)
-function placeholderPassTrend(seed: string, count = 14): number[] {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) {
-    h = Math.imul(31, h) + seed.charCodeAt(i) | 0;
-  }
-  const rand = () => { h ^= h << 13; h ^= h >> 17; h ^= h << 5; return (Math.abs(h) % 1000) / 1000; };
-  const base = 55 + rand() * 25;
-  const pts: number[] = [];
-  let v = base;
-  for (let i = 0; i < count; i++) {
-    v = Math.max(10, Math.min(98, v + (rand() - 0.5) * 14));
-    pts.push(v);
-  }
-  return pts;
-}
-
-// Color the sparkline green when pass rate is high, amber when it drops
-function passRateColor(rate: number | null): { stroke: string; gradId: string } {
-  if (rate === null) return { stroke: "var(--muted)", gradId: "sg-muted" };
-  if (rate >= 80) return { stroke: "#16a34a", gradId: "sg-pass" };       // green-600
-  if (rate >= 50) return { stroke: "#d97706", gradId: "sg-warn" };       // amber-600
-  return { stroke: "#dc2626", gradId: "sg-fail" };                        // red-600
-}
-
-function MiniSparkline({ data, currentPassRate }: { data: number[]; currentPassRate: number | null }) {
-  const W = 300;
-  const H = 60;
-  const px = 2;
-  const py = 5;
-
-  // Always anchor y-axis: min=0, max=100 so drops are visually meaningful
-  const lo = 0;
-  const hi = 100;
-  const range = hi - lo;
-
-  const pts = data.map((v, i) => [
-    px + (i / Math.max(data.length - 1, 1)) * (W - px * 2),
-    H - py - ((Math.max(0, Math.min(100, v)) - lo) / range) * (H - py * 2),
-  ] as [number, number]);
-
-  const line = pts.reduce((acc, [x, y], i) => {
-    if (i === 0) return `M ${x.toFixed(1)} ${y.toFixed(1)}`;
-    const [px0, py0] = pts[i - 1];
-    const cpx = ((px0 + x) / 2).toFixed(1);
-    return `${acc} C ${cpx} ${py0.toFixed(1)}, ${cpx} ${y.toFixed(1)}, ${x.toFixed(1)} ${y.toFixed(1)}`;
-  }, "");
-
-  const area = `${line} L ${pts[pts.length - 1][0].toFixed(1)} ${H} L ${pts[0][0].toFixed(1)} ${H} Z`;
-  const { stroke, gradId } = passRateColor(currentPassRate);
-
-  return (
-    <svg
-      width="100%"
-      height={H}
-      viewBox={`0 0 ${W} ${H}`}
-      preserveAspectRatio="none"
-      className="pointer-events-none absolute bottom-0 left-0 right-0"
-      aria-hidden="true"
-    >
-      <defs>
-        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" style={{ stopColor: stroke, stopOpacity: 0.14 }} />
-          <stop offset="100%" style={{ stopColor: stroke, stopOpacity: 0 }} />
-        </linearGradient>
-      </defs>
-      <path d={area} style={{ fill: `url(#${gradId})` }} />
-      <path d={line} fill="none" style={{ stroke, strokeOpacity: 0.45 }} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "U";
@@ -121,11 +88,125 @@ function getInitials(name: string): string {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
 }
 
+function PassRateBar({ counts }: { counts: RunCounts }) {
+  const { passed, failed, blocked, total } = counts;
+  if (total <= 0) return null;
+  const pct = (n: number) => `${((n / total) * 100).toFixed(1)}%`;
+  return (
+    <div className="mt-3.5">
+      <div className="flex h-[5px] gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
+        {passed > 0 && <div className="h-full" style={{ width: pct(passed), background: "var(--status-pass-dot)" }} />}
+        {failed > 0 && <div className="h-full" style={{ width: pct(failed), background: "var(--status-fail-dot)" }} />}
+        {blocked > 0 && <div className="h-full" style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
+      </div>
+      <div className="mt-2 flex flex-wrap gap-3">
+        <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: "var(--status-pass-dot)" }} />
+          {passed} passed
+        </span>
+        <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: "var(--status-fail-dot)" }} />
+          {failed} failed
+        </span>
+        {blocked > 0 && (
+          <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: "var(--status-blocked-dot)" }} />
+            {blocked} blocked
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TeamAvatars({ team }: { team: { userId: string; name: string }[] }) {
+  if (team.length === 0) return <span className="text-xs text-[var(--muted)]">No members assigned</span>;
+  return (
+    <div className="flex items-center">
+      {team.slice(0, 4).map((member, idx) => (
+        <span
+          key={member.userId}
+          className={`inline-flex h-6 w-6 items-center justify-center rounded-full border-2 border-[var(--surface)] text-[10px] font-semibold text-white ${idx > 0 ? "-ml-1.5" : ""}`}
+          style={{ background: projectColor(member.userId) }}
+          title={member.name}
+        >
+          {getInitials(member.name)}
+        </span>
+      ))}
+      {team.length > 4 ? (
+        <span className="-ml-1.5 inline-flex h-6 min-w-6 items-center justify-center rounded-full border-2 border-[var(--surface)] bg-[var(--surface-tertiary)] px-1.5 text-[10px] font-semibold text-[var(--foreground)]">
+          +{team.length - 4}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: ProjectStatus }) {
+  const meta = STATUS_META[status];
+  return (
+    <span
+      className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-medium"
+      style={{ background: meta.fill, color: meta.text }}
+    >
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: meta.dot }} />
+      {meta.label}
+    </span>
+  );
+}
+
+function ProjectsToolbar({ viewMode, onViewModeChange }: { viewMode: "grid" | "list"; onViewModeChange: (v: "grid" | "list") => void }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
+        >
+          <IconArrowsSort size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+          Sort: Last updated
+          <IconChevronDown size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
+        </button>
+        <button
+          type="button"
+          className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
+        >
+          <IconFilter size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+          Filter
+        </button>
+      </div>
+      <div className="flex items-center gap-0.5 rounded-[6px] bg-[var(--surface-secondary)] p-[3px]">
+        <button
+          type="button"
+          onClick={() => onViewModeChange("grid")}
+          aria-label="Grid view"
+          aria-pressed={viewMode === "grid"}
+          className="flex h-[26px] w-7 items-center justify-center rounded-[4px] transition-colors"
+          style={{ background: viewMode === "grid" ? "var(--surface)" : "transparent", color: viewMode === "grid" ? "var(--brand-primary)" : "var(--muted-soft)" }}
+        >
+          <IconLayoutGrid size={15} stroke={1.75} />
+        </button>
+        <button
+          type="button"
+          onClick={() => onViewModeChange("list")}
+          aria-label="List view"
+          aria-pressed={viewMode === "list"}
+          className="flex h-[26px] w-7 items-center justify-center rounded-[4px] transition-colors"
+          style={{ background: viewMode === "list" ? "var(--surface)" : "transparent", color: viewMode === "list" ? "var(--brand-primary)" : "var(--muted-soft)" }}
+        >
+          <IconList size={15} stroke={1.75} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ProjectsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [projects, setProjects] = useState<ProjectWithStats[]>([]);
   const [loading, setLoading] = useState(true);
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createKey, setCreateKey] = useState("");
@@ -134,6 +215,16 @@ function ProjectsPageContent() {
   const [createError, setCreateError] = useState("");
   const [workspaceRole, setWorkspaceRole] = useState<string>("");
   const canCreateProject = workspaceRole === "owner" || workspaceRole === "admin" || workspaceRole === "manager";
+
+  useEffect(() => {
+    const saved = localStorage.getItem(VIEW_STORAGE_KEY);
+    if (saved === "grid" || saved === "list") setViewMode(saved);
+  }, []);
+
+  function handleViewModeChange(next: "grid" | "list") {
+    setViewMode(next);
+    localStorage.setItem(VIEW_STORAGE_KEY, next);
+  }
 
   useEffect(() => {
     if (canCreateProject && searchParams.get("create") === "1") {
@@ -163,13 +254,18 @@ function ProjectsPageContent() {
               const status: ProjectWithStats["status"] =
                 tcRes.total === 0 ? "setup_required" : (lastActivityAt ? "active" : "configured");
 
-              // Build pass rate trend from most recent 14 completed runs (ascending)
               const completedRuns = [...runs]
                 .filter((r) => r.totalCases > 0)
-                .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
-                .slice(-14);
-              const passRateTrend = completedRuns.map((r) => Math.round((r.passed / r.totalCases) * 100));
+                .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
               const latestRun = completedRuns[completedRuns.length - 1];
+              const runCounts: RunCounts | null = latestRun
+                ? {
+                    passed: latestRun.passed,
+                    failed: latestRun.failed,
+                    blocked: Math.max(0, latestRun.totalCases - latestRun.passed - latestRun.failed),
+                    total: latestRun.totalCases,
+                  }
+                : null;
               const currentPassRate = latestRun
                 ? Math.round((latestRun.passed / latestRun.totalCases) * 100)
                 : null;
@@ -182,7 +278,7 @@ function ProjectsPageContent() {
                 teamMembers: members.map((m) => ({ userId: m.userId, name: m.name || m.email || "Unknown User" })),
                 lastActivityAt,
                 status,
-                passRateTrend,
+                runCounts,
                 currentPassRate,
               };
             })
@@ -243,11 +339,13 @@ function ProjectsPageContent() {
           subtitle="Tesbo Test Manager end-to-end test management projects."
           actions={canCreateProject ? (
             <Button onClick={() => setCreateOpen(true)}>
+              <IconPlus size={16} stroke={2} />
               {projects.length === 0 ? "Create your first project" : "Create project"}
             </Button>
           ) : null}
         />
       )}
+      filterBar={projects.length > 0 ? <ProjectsToolbar viewMode={viewMode} onViewModeChange={handleViewModeChange} /> : null}
     >
       {projects.length === 0 ? (
         <EmptyStateBlock
@@ -257,7 +355,12 @@ function ProjectsPageContent() {
               ? "Create a Tesbo Test Manager project for full E2E test management."
               : "You do not have project access yet. Ask your manager to grant access."
           }
-          action={canCreateProject ? <Button onClick={() => setCreateOpen(true)}>Create first project</Button> : null}
+          action={canCreateProject ? (
+            <Button onClick={() => setCreateOpen(true)}>
+              <IconPlus size={16} stroke={2} />
+              Create first project
+            </Button>
+          ) : null}
         />
       ) : null}
 
@@ -312,95 +415,127 @@ function ProjectsPageContent() {
 
       {projects.length > 0 && (
         <div className="mt-6">
-          <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
-            <svg className="h-4 w-4 text-[var(--brand-primary)]" fill="none" stroke="currentColor" strokeWidth={1.75} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 7h8l2 2h8v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" /></svg>
-            Tesbo Test Manager Projects
-          </h3>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {projects.map((p) => (
-              <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
-                <Card className="relative flex h-full flex-col overflow-hidden p-5 transition hover:border-[var(--border-strong)]">
-                  <MiniSparkline
-                    data={p.passRateTrend.length >= 2 ? p.passRateTrend : placeholderPassTrend(p.id)}
-                    currentPassRate={p.currentPassRate}
-                  />
-                  <div className="relative min-w-0">
-                    <h2 className="line-clamp-2 break-words text-xl font-semibold leading-7 text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">
-                      {p.name}
-                    </h2>
-                    <span className="mt-1.5 inline-block rounded bg-[var(--surface-secondary)] px-2 py-0.5 font-mono text-xs text-[var(--muted)]">
-                      {p.key}
-                    </span>
-                  </div>
-                  {p.description ? (
-                    <p className="mt-2 line-clamp-2 text-sm text-[var(--muted)]">{p.description}</p>
-                  ) : (
-                    <p className="mt-2 text-sm text-[var(--muted-soft)]">Add project context to guide test case planning and execution.</p>
-                  )}
-                  <div className="mt-4 grid grid-cols-3 gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-secondary)] p-3">
-                    <div>
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted-soft)]">Test cases</p>
-                      <p className="mt-1 text-base font-semibold text-[var(--foreground)]">{p.testCaseCount}</p>
-                    </div>
-                    <div>
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted-soft)]">Suites</p>
-                      <p className="mt-1 text-base font-semibold text-[var(--foreground)]">{p.suites.length}</p>
-                    </div>
-                    <div>
-                      <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--muted-soft)]">Pass rate</p>
-                      {p.currentPassRate !== null ? (
-                        <p className={`mt-1 text-base font-semibold ${p.currentPassRate >= 80 ? "text-green-600" : p.currentPassRate >= 50 ? "text-amber-600" : "text-red-600"}`}>
-                          {p.currentPassRate}%
-                        </p>
-                      ) : (
-                        <p className="mt-1 text-base font-semibold text-[var(--muted-soft)]">—</p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="mt-3 flex items-center justify-between gap-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--muted-soft)]">Team</p>
-                    {p.teamMembers.length > 0 ? (
-                      <div className="flex items-center">
-                        {p.teamMembers.slice(0, 4).map((member, idx) => (
-                          <span
-                            key={member.userId}
-                            className={`inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--surface)] bg-[var(--brand-soft)] text-[11px] font-semibold text-[var(--brand-primary)] ${idx > 0 ? "-ml-2" : ""}`}
-                            title={member.name}
-                          >
-                            {getInitials(member.name)}
-                          </span>
-                        ))}
-                        {p.teamMembers.length > 4 ? (
-                          <span className="-ml-2 inline-flex h-7 min-w-7 items-center justify-center rounded-full border border-[var(--surface)] bg-[var(--surface-tertiary)] px-2 text-[11px] font-semibold text-[var(--foreground)]">
-                            +{p.teamMembers.length - 4}
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <span className="text-xs text-[var(--muted)]">No members assigned</span>
-                    )}
-                  </div>
-                  <div className="relative mt-3 border-t border-[var(--border-subtle)] pb-10 pt-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-xs text-[var(--muted)]">
-                        {p.lastActivityAt
-                          ? `Updated ${formatRelativeTime(p.lastActivityAt)}`
-                          : `Created ${formatRelativeTime(p.createdAt)}`}
-                      </span>
-                      {p.passRateTrend.length > 0 ? (
-                        <span className="flex items-center gap-1 text-[11px] font-medium text-[var(--muted-soft)]">
-                          <svg className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M3 17l4-8 4 4 4-6 4 3" /></svg>
-                          Pass trend · {p.passRateTrend.length} run{p.passRateTrend.length !== 1 ? "s" : ""}
-                        </span>
-                      ) : (
-                        <span className="text-[11px] text-[var(--muted-soft)]">No runs yet</span>
-                      )}
-                    </div>
-                  </div>
-                </Card>
-              </Link>
-            ))}
+          <div className="mb-4 flex items-center gap-2">
+            <IconFolders size={15} stroke={1.75} className="text-[var(--muted-soft)]" />
+            <span className="text-xs font-medium uppercase tracking-[0.06em] text-[var(--muted)]">Tesbo Test Manager Projects</span>
+            <span className="rounded-full bg-[var(--surface-secondary)] px-2 py-0.5 text-[11px] font-medium text-[var(--muted)]">{projects.length}</span>
           </div>
+
+          {viewMode === "grid" ? (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {projects.map((p) => {
+                const color = projectColor(p.id);
+                return (
+                  <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
+                    <Card className="flex h-full flex-col overflow-hidden p-0 transition hover:border-[var(--border-strong)]">
+                      <div className="border-b border-[var(--border-subtle)] p-5">
+                        <div className="mb-2.5 flex items-start gap-3">
+                          <div
+                            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-sm font-semibold text-white"
+                            style={{ background: color }}
+                          >
+                            {p.name.trim().charAt(0).toUpperCase() || "P"}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <h2 className="truncate text-[15px] font-medium leading-5 text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">
+                              {p.name}
+                            </h2>
+                            <span className="mt-0.5 block font-mono text-[11px] uppercase tracking-wide text-[var(--muted-soft)]">
+                              {p.key}
+                            </span>
+                          </div>
+                          <StatusBadge status={p.status} />
+                        </div>
+                        <p className="line-clamp-2 text-[13px] leading-6 text-[var(--muted)]">
+                          {p.description || "Add project context to guide test case planning and execution."}
+                        </p>
+                      </div>
+
+                      <div className="border-b border-[var(--border-subtle)] p-5">
+                        <div className="grid grid-cols-3 gap-2">
+                          <div className="border-r border-[var(--border-subtle)] pr-2 text-center">
+                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{p.testCaseCount}</div>
+                            <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Test cases</div>
+                          </div>
+                          <div className="border-r border-[var(--border-subtle)] px-2 text-center">
+                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{p.suites.length}</div>
+                            <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Suites</div>
+                          </div>
+                          <div className="pl-2 text-center">
+                            <div className="text-xl font-semibold tracking-tight" style={{ color: passRateTextColor(p.currentPassRate) }}>
+                              {p.currentPassRate !== null ? `${p.currentPassRate}%` : "—"}
+                            </div>
+                            <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Pass rate</div>
+                          </div>
+                        </div>
+                        {p.runCounts ? <PassRateBar counts={p.runCounts} /> : null}
+                      </div>
+
+                      <div className="flex items-center justify-between gap-3 p-5">
+                        <TeamAvatars team={p.teamMembers} />
+                        <span className="whitespace-nowrap font-mono text-[11px] text-[var(--muted-soft)]">
+                          {p.lastActivityAt ? formatRelativeTime(p.lastActivityAt) : `Created ${formatRelativeTime(p.createdAt)}`}
+                        </span>
+                      </div>
+                    </Card>
+                  </Link>
+                );
+              })}
+            </div>
+          ) : (
+            <Card className="overflow-hidden p-0">
+              <div
+                className="grid items-center gap-0 border-b border-[var(--border-subtle)] px-5 py-2.5"
+                style={{ gridTemplateColumns: "1fr 90px 70px 110px 160px 100px" }}
+              >
+                <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Project</div>
+                <div className="text-center text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Test cases</div>
+                <div className="text-center text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Suites</div>
+                <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Pass rate</div>
+                <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Team</div>
+                <div className="text-right text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Updated</div>
+              </div>
+              {projects.map((p) => {
+                const color = projectColor(p.id);
+                return (
+                  <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
+                    <div
+                      className="grid items-center gap-0 border-b border-[var(--border-subtle)] px-5 py-3 transition-colors last:border-b-0 hover:bg-[var(--surface-secondary)]"
+                      style={{ gridTemplateColumns: "1fr 90px 70px 110px 160px 100px" }}
+                    >
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-semibold text-white" style={{ background: color }}>
+                          {p.name.trim().charAt(0).toUpperCase() || "P"}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="truncate text-[13px] font-medium text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">{p.name}</div>
+                          <div className="font-mono text-[11px] uppercase text-[var(--muted-soft)]">{p.key}</div>
+                        </div>
+                      </div>
+                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.testCaseCount}</div>
+                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.suites.length}</div>
+                      <div>
+                        {p.currentPassRate !== null ? (
+                          <div className="flex items-center gap-2">
+                            <div className="h-1 max-w-[60px] flex-1 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
+                              <div className="h-full rounded-full" style={{ width: `${p.currentPassRate}%`, background: "var(--status-pass-dot)" }} />
+                            </div>
+                            <span className="text-xs font-medium" style={{ color: passRateTextColor(p.currentPassRate) }}>{p.currentPassRate}%</span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-[var(--muted-soft)]">No runs yet</span>
+                        )}
+                      </div>
+                      <TeamAvatars team={p.teamMembers} />
+                      <div className="text-right font-mono text-[11px] text-[var(--muted-soft)]">
+                        {p.lastActivityAt ? formatRelativeTime(p.lastActivityAt) : formatRelativeTime(p.createdAt)}
+                      </div>
+                    </div>
+                  </Link>
+                );
+              })}
+            </Card>
+          )}
         </div>
       )}
     </ListWorkspaceLayout>

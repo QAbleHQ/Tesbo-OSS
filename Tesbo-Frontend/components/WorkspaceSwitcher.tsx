@@ -103,7 +103,7 @@ export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolea
         }`}
         aria-label="Switch workspace"
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[var(--denim)] text-xs font-semibold text-white">
+        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[var(--cta-primary)] text-xs font-semibold text-white">
           {active.name.slice(0, 1).toUpperCase()}
         </span>
         {!isCollapsed && (

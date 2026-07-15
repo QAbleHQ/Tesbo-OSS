@@ -22,6 +22,8 @@ import {
   IconShield,
   IconKey,
   IconList,
+  IconLayoutDashboard,
+  IconFolders,
 } from "@tabler/icons-react";
 import { authMe, logout } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -83,7 +85,8 @@ const projectNavSections: Array<{ section: string; items: NavItemConfig[] }> = [
 type MenuIconName =
   | "home" | "sparkles" | "book" | "list" | "fileText" | "clipboard"
   | "play" | "bug" | "chart" | "activity" | "settings" | "users" | "plug"
-  | "logout" | "chevronLeft" | "chevronRight" | "adminPanel" | "key";
+  | "logout" | "chevronLeft" | "chevronRight" | "adminPanel" | "key"
+  | "dashboard" | "folders";
 
 function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconName; className?: string }) {
   const props = { className, size: 20, stroke: 1.75 } as const;
@@ -106,6 +109,8 @@ function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconNam
     case "chevronRight": return <IconChevronRight {...props} />;
     case "adminPanel":   return <IconShield {...props} />;
     case "key":          return <IconKey {...props} />;
+    case "dashboard":    return <IconLayoutDashboard {...props} />;
+    case "folders":      return <IconFolders {...props} />;
     default:             return null;
   }
 }
@@ -225,6 +230,7 @@ function SidebarContent() {
 
   const showProjectNav = !isInSettings && isInProject && Boolean(projectId);
   const showSettingsNav = isInSettings;
+  const showWorkspaceNav = !isInSettings && !isInProject;
 
   return (
     <aside
@@ -287,6 +293,21 @@ function SidebarContent() {
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Workspace top-level mode */}
+        {showWorkspaceNav && (
+          <div className="space-y-3">
+            <div>
+              {!isCollapsed && (
+                <p className="mb-1 px-3 text-[11px] font-medium uppercase tracking-[0.06em] text-[var(--ink-300)]">Overview</p>
+              )}
+              <div className="space-y-0.5">
+                <NavLink href="/dashboard" label="Dashboard" icon="dashboard" active={pathname === "/dashboard"} collapsed={isCollapsed} />
+                <NavLink href="/projects" label="Projects" icon="folders" active={pathname === "/projects"} collapsed={isCollapsed} />
+              </div>
+            </div>
           </div>
         )}
 
