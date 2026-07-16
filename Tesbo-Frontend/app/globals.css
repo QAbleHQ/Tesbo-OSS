@@ -18,6 +18,8 @@
   /* Legacy brand alias → now points to Tesbo Violet (text-safe shade) */
   --primary: #4A2FA0;
   --brand-primary: #4A2FA0;
+  /* Text-optimized accent (mockup "accentLight"): deep violet on light, pale violet on dark */
+  --accent-light: #4A2FA0;
   --brand-hover: #3D2585;
   --brand-pressed: #2F1D66;
   --brand-soft: #EDE8FB;
@@ -156,6 +158,7 @@
 
   --primary: #7C5FCC;
   --brand-primary: #7C5FCC;
+  --accent-light: #C4B5FD;
   --brand-hover: #6B4FBB;
   --brand-pressed: #5A3FA8;
   --brand-soft: rgba(124, 95, 204, 0.18);
@@ -339,6 +342,23 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   }
 }
 
+@keyframes tesbo-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  animation: tesbo-fade-in 180ms ease both;
+}
+
+/* Full-bleed override: a page whose root carries `.tc-fullbleed` fills the whole
+   content region (no centered 1280px column, no wrapper padding) — used by the
+   test-case repository's edge-to-edge IDE workspace. Scoped via :has() so every
+   other route keeps the default centered page. */
+.tesbo-page:has(> .tc-fullbleed) {
+  max-width: none;
+  padding: 0;
+}
+
 .tesbo-section {
   margin-bottom: 1.25rem;
 }
@@ -393,6 +413,18 @@ button[class*="bg-[var(--surface-tertiary)]"] {
 .tesbo-nav-item {
   border: 1px solid transparent;
   border-left: 2px solid transparent;
+}
+
+/*
+ * Plain (unlayered) rule, deliberately not a Tailwind utility class: the global
+ * `a { color: var(--brand-primary); }` rule below is also unlayered, and unlayered
+ * CSS always wins over Tailwind's @layer utilities regardless of specificity — so a
+ * `text-[var(--foreground)]` class on a <Link> (which renders an <a>) is silently
+ * ignored. Matching it here with an equally-unlayered, higher-specificity class rule
+ * is what actually wins.
+ */
+.tesbo-nav-item-idle {
+  color: var(--foreground);
 }
 
 .tesbo-nav-item-active {
@@ -458,6 +490,8 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   letter-spacing: 0.07em;
   padding: 10px 12px;
   color: var(--muted-soft);
+  /* Opaque fill matching the recessed table body so the sticky header stays legible while rows scroll under it */
+  background: var(--background);
 }
 .tesbo-table.tc-repo-table td {
   height: auto;

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { IconColumns } from "@tabler/icons-react";
 import { StatusChip } from "@/components/ui";
 import type { TestCaseListItem } from "@/lib/api";
@@ -190,6 +191,11 @@ export type RepositoryTestCaseTableProps = {
   onOpenRow: (id: string) => void;
   /** Suite column shows automatically when the suite panel is collapsed, matching the design spec. */
   suitePanelOpen: boolean;
+  /**
+   * When provided, the "Columns" control is portaled into this element (e.g. the
+   * filter bar, beside the other dropdowns) instead of its own strip above the table.
+   */
+  columnsSlot?: HTMLElement | null;
 };
 
 export function RepositoryTestCaseTable({
@@ -203,6 +209,7 @@ export function RepositoryTestCaseTable({
   onToggleCase,
   onOpenRow,
   suitePanelOpen,
+  columnsSlot,
 }: RepositoryTestCaseTableProps) {
   const [dataOrder, setDataOrder] = useState<RepoDataColumnId[]>(DEFAULT_DATA_ORDER);
   const [visible, setVisible] = useState<Record<RepoDataColumnId, boolean>>(DEFAULT_VISIBLE);
@@ -429,7 +436,7 @@ export function RepositoryTestCaseTable({
             <button
               type="button"
               onClick={() => void onOpenRow(tc.id)}
-              className={`${innerTruncate} text-left font-mono text-[12px] font-medium text-[var(--brand-primary)] hover:underline`}
+              className={`${innerTruncate} text-left font-mono text-[12px] font-medium text-[var(--accent-light)] hover:underline`}
             >
               {tc.externalId}
             </button>
@@ -460,7 +467,7 @@ export function RepositoryTestCaseTable({
                 {tags.map((tag) => (
                   <span
                     key={tag}
-                    className="rounded-[4px] bg-[var(--surface-secondary)] px-1.5 py-px font-mono text-[10px] text-[var(--muted)]"
+                    className="rounded-[4px] bg-[var(--surface-secondary)] px-1.5 py-px font-mono text-[10px] text-[var(--muted-soft)]"
                   >
                     {tag}
                   </span>
@@ -538,54 +545,61 @@ export function RepositoryTestCaseTable({
     }
   }
 
-  return (
-    <>
-      <div className="flex h-10 flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] bg-[var(--background)] px-4">
-        <span className="font-mono text-[11px] text-[var(--muted-soft)]">
-          {visibleDataColumns.length} of {DATA_COLUMN_IDS.length} fields shown
-        </span>
-        <div ref={columnsMenuRef} className="relative">
-          <button
-            type="button"
-            onClick={() => setColumnsMenuOpen((o) => !o)}
-            className="flex h-[26px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] px-2.5 text-[12px] font-medium text-[var(--ink-600)] hover:bg-[var(--ink-100)]"
-          >
-            <IconColumns size={13} stroke={1.75} />
-            Columns
-          </button>
-          {columnsMenuOpen && (
-            <div className="absolute right-0 top-full z-30 mt-1 w-72 max-h-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
-              <p className="px-3 pb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted-soft)]">
-                Show fields (field id)
-              </p>
-              {DATA_COLUMN_IDS.map((id) => (
-                <label
-                  key={id}
-                  className="flex cursor-pointer items-start gap-2 px-3 py-1.5 text-sm hover:bg-[var(--surface-secondary)]"
-                >
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={visible[id]}
-                    onChange={() => toggleColumnVisible(id)}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="text-[var(--foreground)]">{COLUMN_LABELS[id]}</span>
-                    <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted)]">{FIELD_IDS[id]}</span>
-                  </span>
-                </label>
-              ))}
-              <p className="mt-2 border-t border-[var(--border-subtle)] px-3 pt-2 text-[11px] text-[var(--muted)]">
-                {
-                  "The selection column stays first. Drag headers to reorder data fields, and drag header edges to resize columns."
-                }
-              </p>
-            </div>
-          )}
+  const columnsControl = (
+    <div ref={columnsMenuRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setColumnsMenuOpen((o) => !o)}
+        className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+      >
+        <IconColumns size={13} stroke={1.75} />
+        Columns
+      </button>
+      {columnsMenuOpen && (
+        <div className="absolute right-0 top-full z-30 mt-1 w-72 max-h-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
+          <p className="px-3 pb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted-soft)]">
+            Show fields · {visibleDataColumns.length} of {DATA_COLUMN_IDS.length}
+          </p>
+          {DATA_COLUMN_IDS.map((id) => (
+            <label
+              key={id}
+              className="flex cursor-pointer items-start gap-2 px-3 py-1.5 text-sm hover:bg-[var(--surface-secondary)]"
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={visible[id]}
+                onChange={() => toggleColumnVisible(id)}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="text-[var(--foreground)]">{COLUMN_LABELS[id]}</span>
+                <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted)]">{FIELD_IDS[id]}</span>
+              </span>
+            </label>
+          ))}
+          <p className="mt-2 border-t border-[var(--border-subtle)] px-3 pt-2 text-[11px] text-[var(--muted)]">
+            {
+              "The selection column stays first. Drag headers to reorder data fields, and drag header edges to resize columns."
+            }
+          </p>
         </div>
-      </div>
+      )}
+    </div>
+  );
 
-      <div className="w-full min-w-0 overflow-x-auto">
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* Columns control lives beside the filter dropdowns via a portal; falls back to
+          a thin strip only if no slot was provided. */}
+      {columnsSlot
+        ? createPortal(columnsControl, columnsSlot)
+        : (
+          <div className="flex h-10 shrink-0 items-center justify-end border-b border-[var(--border)] bg-[var(--background)] px-4">
+            {columnsControl}
+          </div>
+        )}
+
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-auto bg-[var(--background)]">
         <table
           className="tesbo-table tc-repo-table max-w-full"
           style={{
@@ -602,7 +616,7 @@ export function RepositoryTestCaseTable({
               />
             ))}
           </colgroup>
-          <thead>
+          <thead className="sticky top-0 z-[2]">
             <tr>{orderedColumns.map((col) => renderHeaderCell(col))}</tr>
           </thead>
           <tbody>
@@ -620,6 +634,6 @@ export function RepositoryTestCaseTable({
           </tbody>
         </table>
       </div>
-    </>
+    </div>
   );
 }

@@ -144,13 +144,13 @@ function NavLink({
       } ${
         active
           ? "tesbo-nav-item tesbo-nav-item-active"
-          : "tesbo-nav-item tesbo-nav-item-idle text-[var(--ink-400)] hover:text-[var(--ink-800)]"
+          : "tesbo-nav-item tesbo-nav-item-idle"
       }`}
     >
       <MenuIcon
         name={icon}
         className={`h-[18px] w-[18px] shrink-0 ${
-          active ? "text-[var(--denim)]" : "text-[var(--ink-300)]"
+          active ? "text-[var(--denim)]" : "text-[var(--ink-400)]"
         }`}
       />
       {collapsed ? <span className="sr-only">{label}</span> : <span className="truncate">{label}</span>}
@@ -162,7 +162,7 @@ function BackToProjects({ collapsed }: { collapsed: boolean }) {
   return (
     <Link
       href="/projects"
-      className={`group flex items-center rounded-[6px] py-2 text-[13px] transition-colors duration-150 tesbo-nav-item tesbo-nav-item-idle text-[var(--ink-400)] hover:text-[var(--ink-800)] ${
+      className={`group flex items-center rounded-[6px] py-2 text-[13px] transition-colors duration-150 tesbo-nav-item tesbo-nav-item-idle ${
         collapsed ? "justify-center px-2" : "gap-2 pl-3 pr-3"
       }`}
     >

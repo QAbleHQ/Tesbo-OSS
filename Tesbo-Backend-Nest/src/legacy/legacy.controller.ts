@@ -594,6 +594,21 @@ export class LegacyController {
     return this.legacy.repositorySummary(projectId);
   }
 
+  @Get("/api/projects/:projectId/reports/overview")
+  reportsOverview(@Param("projectId") projectId: string) {
+    return this.legacy.reportsOverview(projectId);
+  }
+
+  @Get("/api/projects/:projectId/reports/insights")
+  reportsInsights(@Param("projectId") projectId: string) {
+    return this.legacy.reportsInsights(projectId);
+  }
+
+  @Get("/api/projects/:projectId/reports/trends")
+  reportsTrends(@Param("projectId") projectId: string) {
+    return this.legacy.reportsTrends(projectId);
+  }
+
   @Post("/api/projects/:projectId/ai/generate-testcases")
   generateAi(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.aiGenerate(projectId, req.userId, body);

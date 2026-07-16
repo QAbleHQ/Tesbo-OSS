@@ -1266,7 +1266,7 @@ export function getAutomationSessionTraceUrl(projectId: string, sessionId: strin
 }
 
 // Plans
-export async function listPlans(projectId: string): Promise<Record<string, unknown>[]> {
+export async function listPlans(projectId: string): Promise<PlanListItem[]> {
   return api(`/api/projects/${projectId}/plans`);
 }
 
@@ -1286,12 +1286,28 @@ export async function deletePlan(planId: string): Promise<void> {
   await api(`/api/plans/${planId}`, { method: "DELETE" });
 }
 
-export async function listPlanItems(planId: string): Promise<{ id: string; suiteId: string | null; testcaseId: string | null; position: number }[]> {
+export interface PlanItem {
+  id: string;
+  suiteId: string | null;
+  testcaseId: string | null;
+  position: number;
+  tcExternalId: string | null;
+  tcTitle: string | null;
+  tcPriority: string | null;
+  suiteName: string | null;
+  lastStatus: string | null;
+}
+
+export async function listPlanItems(planId: string): Promise<PlanItem[]> {
   return api(`/api/plans/${planId}/items`);
 }
 
 export async function addPlanItem(planId: string, data: { suiteId?: string; testcaseId?: string; position?: number }): Promise<void> {
   await api(`/api/plans/${planId}/items`, { method: "POST", body: data });
+}
+
+export async function removePlanItem(planId: string, itemId: string): Promise<void> {
+  await api(`/api/plans/${planId}/items/${itemId}`, { method: "DELETE" });
 }
 
 // Plan Runs & Progress
@@ -1336,12 +1352,13 @@ export interface PlanListItem {
   targetRelease: string;
   ownerId: string | null;
   createdAt: string;
+  caseCount: number;
   runCount: number;
-  totalCases: number;
   passed: number;
   failed: number;
-  untested: number;
-  completionPercent: number;
+  blocked: number;
+  skipped: number;
+  lastRunAt: string | null;
 }
 
 export async function listPlanRuns(planId: string): Promise<PlanRunItem[]> {
@@ -1378,6 +1395,9 @@ export interface TestRunListItem {
   totalCases: number;
   passed: number;
   failed: number;
+  blocked: number;
+  skipped: number;
+  untested: number;
 }
 
 export interface TestRunDetail {
@@ -1859,6 +1879,82 @@ export interface RepositorySummary {
 
 export async function getRepositorySummary(projectId: string): Promise<RepositorySummary> {
   return api<RepositorySummary>(`/api/projects/${projectId}/reports/repository-summary`);
+}
+
+// ── Report: shared cycle pass-rate series ──
+export interface CyclePassRatePoint {
+  id: string;
+  name: string;
+  createdAt: string;
+  total: number;
+  executed: number;
+  passRate: number | null;
+}
+
+// ── Report: Overview ──
+export interface SuiteHealthRow {
+  suiteName: string;
+  executed: number;
+  passedPct: number;
+  failedPct: number;
+  blockedPct: number;
+}
+
+export interface ReportsOverview {
+  passRateTrend: CyclePassRatePoint[];
+  trendDelta: number;
+  suiteHealth: SuiteHealthRow[];
+  aiSummary: string;
+  flakyCount: number;
+  coverageGapCount: number;
+  untestedP1Count: number;
+}
+
+export async function getReportsOverview(projectId: string): Promise<ReportsOverview> {
+  return api<ReportsOverview>(`/api/projects/${projectId}/reports/overview`);
+}
+
+// ── Report: AI Insights ──
+export interface FlakyTestRow {
+  testcaseId: string;
+  externalId: string;
+  title: string;
+  suiteName: string;
+  runs: { runName: string; status: string }[];
+  flipCount: number;
+  flakinessLabel: "High" | "Medium" | "Low";
+}
+
+export interface CoverageRow {
+  suiteName: string;
+  total: number;
+  covered: number;
+  pct: number;
+}
+
+export interface ReportsInsights {
+  healthScore: number;
+  healthLabel: string;
+  flakyTests: FlakyTestRow[];
+  coverageGaps: CoverageRow[];
+  coverageBySuite: CoverageRow[];
+  untestedP1Count: number;
+}
+
+export async function getReportsInsights(projectId: string): Promise<ReportsInsights> {
+  return api<ReportsInsights>(`/api/projects/${projectId}/reports/insights`);
+}
+
+// ── Report: Trends ──
+export interface ReportsTrends {
+  passRateTrend: CyclePassRatePoint[];
+  trendDelta: number;
+  executionVelocity: { name: string; count: number }[];
+  bugDiscoveryRate: { week: string; count: number }[];
+}
+
+export async function getReportsTrends(projectId: string): Promise<ReportsTrends> {
+  return api<ReportsTrends>(`/api/projects/${projectId}/reports/trends`);
 }
 
 // ── App integrations (Jira, Linear) ──

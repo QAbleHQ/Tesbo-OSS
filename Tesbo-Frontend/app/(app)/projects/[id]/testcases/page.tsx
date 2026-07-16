@@ -2,6 +2,7 @@
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   IconChevronDown,
   IconChevronRight,
@@ -39,12 +40,12 @@ import {
   type RepositorySummary,
 } from "@/lib/api";
 import { RepositoryTestCaseTable } from "@/components/testcases/RepositoryTestCaseTable";
+import { useTopBarSlots } from "@/components/TopBarSlots";
 import {
   Button,
   Input,
   Select,
   Textarea,
-  Card,
   Modal,
   EmptyStateBlock,
   StatusChip,
@@ -103,6 +104,18 @@ export default function TestCasesPage() {
   const projectId = params.id as string;
   const activeSuiteId = searchParams.get("suiteId");
   const activeJiraIssueKey = searchParams.get("jiraIssueKey") || "";
+
+  // Take over the shared TopBar with this page's breadcrumb + actions (portaled below),
+  // and hide the default global "Search projects" search while this page is mounted.
+  const { startEl: topBarStartEl, endEl: topBarEndEl, setFilled: setTopBarFilled } = useTopBarSlots();
+  useEffect(() => {
+    setTopBarFilled(true);
+    return () => setTopBarFilled(false);
+  }, [setTopBarFilled]);
+
+  // Filter-bar slot that the table portals its "Columns" control into, so it sits
+  // inline beside the type/status/priority dropdowns instead of in its own strip.
+  const [columnsSlotEl, setColumnsSlotEl] = useState<HTMLElement | null>(null);
 
   const [suites, setSuites] = useState<SuiteNode[]>([]);
   const [projectName, setProjectName] = useState("");
@@ -694,20 +707,34 @@ export default function TestCasesPage() {
   }
 
   return (
-    <main className="px-6 py-6">
-      <div className="w-full">
-        {/* Breadcrumb + actions bar */}
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-1.5 text-[12px]">
-            {projectName && (
-              <>
-                <span className="text-[var(--muted-soft)]">{projectName}</span>
-                <IconChevronRight size={12} stroke={1.75} className="text-[var(--muted-soft)]" />
-              </>
-            )}
-            <span className="font-medium text-[var(--foreground)]">Test cases</span>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
+    // Full-bleed, full-height IDE-style workspace. `tc-fullbleed` makes the wrapping
+    // .tesbo-page drop its centered 1280px cap + padding, so this fills the whole
+    // content region below the 3.5rem TopBar and the table scrolls internally.
+    <main className="tc-fullbleed flex flex-col pb-4 pr-4 pt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* This page takes over the shared TopBar: breadcrumb (start slot) + actions (end slot). */}
+        {topBarStartEl &&
+          createPortal(
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
+              {projectName && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                  >
+                    {projectName}
+                  </button>
+                  <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
+                </>
+              )}
+              <span className="font-medium text-[var(--brand-primary)]">Test cases</span>
+            </nav>,
+            topBarStartEl,
+          )}
+        {topBarEndEl &&
+          createPortal(
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => setIsImportModalOpen(true)}
@@ -778,11 +805,12 @@ export default function TestCasesPage() {
                 <IconPlus size={14} stroke={2} />
                 Add test case
               </button>
-            </div>
-        </div>
+            </div>,
+            topBarEndEl,
+          )}
 
         {/* Title + stats row */}
-        <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+        <div className="mb-3 flex shrink-0 flex-wrap items-start justify-between gap-4 pl-4">
           <div>
             <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">
               Test case repository
@@ -814,14 +842,16 @@ export default function TestCasesPage() {
         </div>
 
         {loading ? (
-          <p className="mt-5 text-[var(--muted)]">Loading...</p>
+          <div className="flex min-h-0 flex-1 items-center justify-center rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--muted)]">
+            Loading…
+          </div>
         ) : (
-          <div className="mt-5 flex items-start gap-4">
-            {/* ── Suite sidebar ── */}
-            <aside className={`shrink-0 sticky top-6 transition-[width] duration-150 ${suitePanelOpen ? "w-[220px]" : "w-[38px]"}`}>
-              <nav className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
+            {/* ── Suite panel ── */}
+            <aside className={`flex shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] transition-[width] duration-150 ${suitePanelOpen ? "w-[260px]" : "w-[38px]"}`}>
+              <nav className="flex min-h-0 flex-1 flex-col">
                 {/* Header: label + add-suite + collapse toggle */}
-                <div className={`flex h-10 items-center border-b border-[var(--border)] px-3 ${suitePanelOpen ? "justify-between" : "justify-center"}`}>
+                <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${suitePanelOpen ? "justify-between" : "justify-center"}`}>
                   {suitePanelOpen && (
                     <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
                       <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
@@ -862,15 +892,15 @@ export default function TestCasesPage() {
                 {!suitePanelOpen ? null : (
                 <>
                 {/* Suite list — scrollable, all test cases + tree share one scroll region */}
-                <div className="max-h-[calc(100vh-280px)] overflow-y-auto p-2">
+                <div className="min-h-0 flex-1 overflow-y-auto p-2">
                   {/* All test cases */}
                   <button
                     type="button"
                     onClick={() => router.push(`/projects/${projectId}/testcases`)}
                     className={`mb-1 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] transition-colors ${
                       !activeSuiteId
-                        ? "bg-[var(--brand-soft)] font-medium text-[var(--brand-primary)]"
-                        : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
+                        ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
+                        : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)]"
                     }`}
                   >
                     <span>All test cases</span>
@@ -935,7 +965,7 @@ export default function TestCasesPage() {
                                 router.push(`/projects/${projectId}/testcases?suiteId=${suite.id}`)
                               }
                               className={`ml-1 min-w-0 flex-1 truncate text-left text-[12.5px] font-medium ${
-                                isActive ? "text-[var(--brand-primary)]" : "text-[var(--foreground)]"
+                                isActive ? "text-[var(--accent-light)]" : "text-[var(--ink-600)]"
                               }`}
                             >
                               {suite.name}
@@ -1004,7 +1034,7 @@ export default function TestCasesPage() {
                                         router.push(`/projects/${projectId}/testcases?suiteId=${child.id}`)
                                       }
                                       className={`min-w-0 flex-1 truncate text-left text-[12px] font-medium ${
-                                        childActive ? "text-[var(--brand-primary)]" : "text-[var(--foreground)]"
+                                        childActive ? "text-[var(--accent-light)]" : "text-[var(--ink-600)]"
                                       }`}
                                     >
                                       {child.name}
@@ -1072,11 +1102,9 @@ export default function TestCasesPage() {
             </aside>
 
             {/* ── Main content ── */}
-            <div className="min-w-0 flex-1 space-y-3">
-              {/* Toolbar */}
-              <Card className="overflow-hidden p-0">
-                {/* Filter row */}
-                <div className="flex min-h-[48px] flex-wrap items-center gap-2 px-4 py-2">
+            <div className="flex min-w-0 flex-1 flex-col bg-[var(--surface)]">
+              {/* Filter bar */}
+              <div className="flex min-h-[48px] shrink-0 flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2">
                   <label className="flex h-[30px] min-w-[200px] max-w-[280px] flex-1 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--muted-soft)] transition-colors focus-within:border-[var(--brand-primary)]">
                     <IconSearch size={13} stroke={1.75} className="shrink-0" />
                     <input
@@ -1163,6 +1191,8 @@ export default function TestCasesPage() {
                         <option key={option} value={option}>{option}</option>
                       ))}
                     </select>
+                    {/* Columns control renders here (portaled from the table), as the 4th dropdown. */}
+                    <div ref={setColumnsSlotEl} className="flex items-center empty:hidden" />
                     {activeFilterCount > 0 && (
                       <button
                         type="button"
@@ -1177,7 +1207,7 @@ export default function TestCasesPage() {
 
                 {/* Bulk action bar (when rows selected) */}
                 {selectedCaseIds.length > 0 && (
-                  <div className="flex h-10 items-center gap-2.5 border-t border-[var(--border)] bg-[var(--brand-soft)] px-4 text-[12px]">
+                  <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--brand-soft)] px-4 text-[12px]">
                     <span className="font-medium text-[var(--brand-primary)]">
                       {selectedCaseIds.length} selected
                     </span>
@@ -1202,15 +1232,15 @@ export default function TestCasesPage() {
 
                 {/* Content */}
                 {suiteCasesError ? (
-                  <p className="border-t border-[var(--border)] p-4 text-sm text-[var(--error-foreground)]">
+                  <p className="flex min-h-0 flex-1 items-center justify-center p-4 text-sm text-[var(--error-foreground)]">
                     {suiteCasesError}
                   </p>
                 ) : suiteCasesLoading ? (
-                  <p className="border-t border-[var(--border)] p-4 text-sm text-[var(--muted)]">
+                  <p className="flex min-h-0 flex-1 items-center justify-center p-4 text-sm text-[var(--muted)]">
                     Loading test cases...
                   </p>
                 ) : suiteCasesTotal === 0 ? (
-                  <div className="border-t border-[var(--border)] p-10 text-center">
+                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center p-10 text-center">
                     <p className="text-[15px] font-semibold text-[var(--foreground)]">No test cases found</p>
                     <p className="mt-2 text-[13px] text-[var(--muted)]">
                       {activeFilterCount > 0
@@ -1229,7 +1259,7 @@ export default function TestCasesPage() {
                     </button>
                   </div>
                 ) : (
-                  <div className="border-t border-[var(--border)]">
+                  <div className="flex min-h-0 flex-1 flex-col">
                     <RepositoryTestCaseTable
                       key={projectId}
                       projectId={projectId}
@@ -1242,10 +1272,11 @@ export default function TestCasesPage() {
                       onToggleCase={toggleCaseSelection}
                       onOpenRow={openViewPanel}
                       suitePanelOpen={suitePanelOpen}
+                      columnsSlot={columnsSlotEl}
                     />
 
                     {/* Pagination */}
-                    <div className="flex h-11 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-4 text-[12px]">
+                    <div className="flex h-11 shrink-0 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-4 text-[12px]">
                       <span className="text-[var(--muted)]">
                         <span className="font-medium text-[var(--foreground)]">{suiteCasesTotal}</span>{" "}
                         {suiteCasesTotal === 1 ? "result" : "results"}
@@ -1293,7 +1324,6 @@ export default function TestCasesPage() {
                     </div>
                   </div>
                 )}
-              </Card>
             </div>
           </div>
         )}

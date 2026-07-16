@@ -1470,7 +1470,39 @@ export class LegacyService implements OnModuleInit {
   }
 
   async listPlans(projectId: string) {
-    const res = await this.db.query("SELECT * FROM plans WHERE project_id = $1 ORDER BY created_at DESC", [projectId]);
+    const res = await this.db.query(
+      `SELECT p.*,
+              COALESCE(pi.case_count, 0)::int AS case_count,
+              COALESCE(runs.run_count, 0)::int AS run_count,
+              COALESCE(runs.passed, 0)::int AS passed,
+              COALESCE(runs.failed, 0)::int AS failed,
+              COALESCE(runs.blocked, 0)::int AS blocked,
+              COALESCE(runs.skipped, 0)::int AS skipped,
+              runs.last_run_at
+       FROM plans p
+       LEFT JOIN (
+         SELECT plan_id, COUNT(*)::int AS case_count
+         FROM plan_items
+         GROUP BY plan_id
+       ) pi ON pi.plan_id = p.id
+       LEFT JOIN (
+         SELECT c.plan_id,
+                COUNT(DISTINCT c.id)::int AS run_count,
+                COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+                COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
+                COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+                COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+                MAX(COALESCE(c.started_at, c.created_at)) AS last_run_at
+         FROM cycles c
+         LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
+         LEFT JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE c.plan_id IS NOT NULL
+         GROUP BY c.plan_id
+       ) runs ON runs.plan_id = p.id
+       WHERE p.project_id = $1
+       ORDER BY p.created_at DESC`,
+      [projectId]
+    );
     return res.rows.map(toCamel);
   }
 
@@ -1500,7 +1532,27 @@ export class LegacyService implements OnModuleInit {
   }
 
   async planItems(planId: string) {
-    const res = await this.db.query("SELECT * FROM plan_items WHERE plan_id = $1 ORDER BY position, created_at", [planId]);
+    const res = await this.db.query(
+      `SELECT pi.*,
+              t.external_id AS tc_external_id, t.title AS tc_title, t.priority AS tc_priority,
+              s.name AS suite_name,
+              lastex.status AS last_status
+       FROM plan_items pi
+       LEFT JOIN testcases t ON t.id = pi.testcase_id
+       LEFT JOIN suites s ON s.id = pi.suite_id
+       LEFT JOIN LATERAL (
+         SELECT e.status
+         FROM cycles c
+         JOIN cycle_items ci ON ci.cycle_id = c.id AND ci.testcase_id = pi.testcase_id
+         JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE c.plan_id = pi.plan_id
+         ORDER BY e.executed_at DESC NULLS LAST, e.created_at DESC
+         LIMIT 1
+       ) lastex ON pi.testcase_id IS NOT NULL
+       WHERE pi.plan_id = $1
+       ORDER BY pi.position, pi.created_at`,
+      [planId]
+    );
     return res.rows.map(toCamel);
   }
 
@@ -1589,7 +1641,22 @@ export class LegacyService implements OnModuleInit {
   }
 
   async listCycles(projectId: string) {
-    const res = await this.db.query("SELECT * FROM cycles WHERE project_id = $1 ORDER BY created_at DESC", [projectId]);
+    const res = await this.db.query(
+      `SELECT c.*,
+              COUNT(ci.id)::int AS total_cases,
+              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
+              COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+              COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+       FROM cycles c
+       LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       WHERE c.project_id = $1
+       GROUP BY c.id
+       ORDER BY c.created_at DESC`,
+      [projectId]
+    );
     return res.rows.map(toCamel);
   }
 
@@ -2144,15 +2211,276 @@ export class LegacyService implements OnModuleInit {
        WHERE t.project_id = $1 GROUP BY s.name ORDER BY s.name`,
       [projectId]
     );
+    const updatedCounts = await this.db.query<{ today: string; this_week: string; this_month: string }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE updated_at >= now() - interval '1 day')::int AS today,
+         COUNT(*) FILTER (WHERE updated_at >= date_trunc('week', now()))::int AS this_week,
+         COUNT(*) FILTER (WHERE updated_at >= date_trunc('month', now()))::int AS this_month
+       FROM testcases_active WHERE project_id = $1`,
+      [projectId]
+    );
+    const addedByDate = await this.db.query<{ date: string; count: string }>(
+      `SELECT to_char(d::date, 'YYYY-MM-DD') AS date, COALESCE(t.cnt, 0)::int AS count
+       FROM generate_series((now()::date - interval '29 days'), now()::date, interval '1 day') AS d
+       LEFT JOIN (
+         SELECT date_trunc('day', created_at) AS day, COUNT(*) AS cnt
+         FROM testcases_active WHERE project_id = $1 AND created_at >= now() - interval '30 days'
+         GROUP BY 1
+       ) t ON t.day = d
+       ORDER BY d`,
+      [projectId]
+    );
     return {
       totalTestCases: Number(total.rows[0]?.count || 0),
       bySuite: bySuite.rows.map((r) => ({ name: r.name, count: Number(r.count) })),
       byStatus,
       byPriority,
-      addedByDate: [],
-      updatedToday: 0,
-      updatedThisWeek: 0,
-      updatedThisMonth: 0
+      addedByDate: addedByDate.rows.map((r) => ({ date: r.date, count: Number(r.count) })),
+      updatedToday: Number(updatedCounts.rows[0]?.today || 0),
+      updatedThisWeek: Number(updatedCounts.rows[0]?.this_week || 0),
+      updatedThisMonth: Number(updatedCounts.rows[0]?.this_month || 0)
+    };
+  }
+
+  private async cyclePassRateSeries(projectId: string, limit: number) {
+    const res = await this.db.query<{ id: string; name: string; created_at: string; total: number; passed: number; executed: number }>(
+      `SELECT c.id, c.name, c.created_at,
+              COUNT(ci.id)::int AS total,
+              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested')::int AS executed
+       FROM cycles c
+       LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       WHERE c.project_id = $1
+       GROUP BY c.id
+       ORDER BY c.created_at ASC`,
+      [projectId]
+    );
+    const rows = res.rows.slice(-limit);
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      createdAt: r.created_at,
+      total: Number(r.total) || 0,
+      executed: Number(r.executed) || 0,
+      passRate: Number(r.executed) > 0 ? Math.round((Number(r.passed) / Number(r.executed)) * 100) : null
+    }));
+  }
+
+  private async suiteHealth(projectId: string) {
+    const res = await this.db.query<{ suite_name: string; passed: string; failed: string; blocked: string; skipped: string; executed: string }>(
+      `SELECT COALESCE(s.name, 'Unassigned') AS suite_name,
+              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
+              COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+              COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+              COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested')::int AS executed
+       FROM testcases t
+       LEFT JOIN suites s ON s.id = t.suite_id
+       LEFT JOIN cycle_items ci ON ci.testcase_id = t.id
+       LEFT JOIN cycles c ON c.id = ci.cycle_id AND c.project_id = t.project_id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
+       GROUP BY s.name
+       ORDER BY s.name`,
+      [projectId]
+    );
+    return res.rows.map((r) => {
+      const executed = Number(r.executed) || 0;
+      const pct = (n: number) => (executed > 0 ? Math.round((n / executed) * 100) : 0);
+      return {
+        suiteName: r.suite_name,
+        executed,
+        passedPct: pct(Number(r.passed) || 0),
+        failedPct: pct(Number(r.failed) || 0),
+        blockedPct: pct(Number(r.blocked) || 0)
+      };
+    });
+  }
+
+  private async coverageBySuite(projectId: string) {
+    const res = await this.db.query<{ suite_name: string; total_cases: string; covered_cases: string }>(
+      `SELECT COALESCE(s.name, 'Unassigned') AS suite_name,
+              COUNT(DISTINCT t.id)::int AS total_cases,
+              COUNT(DISTINCT covered.testcase_id)::int AS covered_cases
+       FROM testcases t
+       LEFT JOIN suites s ON s.id = t.suite_id
+       LEFT JOIN LATERAL (
+         SELECT ci.testcase_id
+         FROM cycle_items ci
+         JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE ci.testcase_id = t.id AND e.status IS NOT NULL AND e.status <> 'Untested'
+         LIMIT 1
+       ) covered ON true
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
+       GROUP BY s.name
+       ORDER BY s.name`,
+      [projectId]
+    );
+    return res.rows.map((r) => {
+      const total = Number(r.total_cases) || 0;
+      const covered = Number(r.covered_cases) || 0;
+      const pct = total > 0 ? Math.round((covered / total) * 100) : 0;
+      return { suiteName: r.suite_name, total, covered, pct };
+    });
+  }
+
+  private async untestedP1Count(projectId: string) {
+    const res = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM (
+         SELECT t.id
+         FROM testcases t
+         LEFT JOIN cycle_items ci ON ci.testcase_id = t.id
+         LEFT JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE t.project_id = $1 AND t.deleted_at IS NULL AND t.priority = 'P1'
+         GROUP BY t.id
+         HAVING COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested') = 0
+       ) sub`,
+      [projectId]
+    );
+    return Number(res.rows[0]?.count || 0);
+  }
+
+  private async detectFlakyTests(projectId: string) {
+    const res = await this.db.query<{
+      testcase_id: string;
+      external_id: string;
+      title: string;
+      suite_name: string;
+      status: string;
+      run_name: string;
+      run_created_at: string;
+    }>(
+      `SELECT ci.testcase_id, COALESCE(t.external_id, '') AS external_id,
+              COALESCE(t.title, ci.snapshot_title, 'Untitled test case') AS title,
+              COALESCE(s.name, 'Unassigned') AS suite_name,
+              e.status, c.name AS run_name, c.created_at AS run_created_at
+       FROM cycle_items ci
+       JOIN executions e ON e.cycle_item_id = ci.id
+       JOIN cycles c ON c.id = ci.cycle_id
+       LEFT JOIN testcases t ON t.id = ci.testcase_id
+       LEFT JOIN suites s ON s.id = t.suite_id
+       WHERE c.project_id = $1 AND e.status IS NOT NULL AND e.status <> 'Untested'
+       ORDER BY ci.testcase_id, c.created_at ASC`,
+      [projectId]
+    );
+    const byTestcase = new Map<string, typeof res.rows>();
+    for (const row of res.rows) {
+      const list = byTestcase.get(row.testcase_id) || [];
+      list.push(row);
+      byTestcase.set(row.testcase_id, list);
+    }
+    const flaky: Body[] = [];
+    for (const [testcaseId, rows] of byTestcase) {
+      if (rows.length < 2) continue;
+      const distinctStatuses = new Set(rows.map((r) => r.status));
+      if (distinctStatuses.size < 2) continue;
+      let flips = 0;
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i].status !== rows[i - 1].status) flips++;
+      }
+      const flipRate = flips / (rows.length - 1);
+      flaky.push({
+        testcaseId,
+        externalId: rows[0].external_id,
+        title: rows[0].title,
+        suiteName: rows[0].suite_name,
+        runs: rows.map((r) => ({ runName: r.run_name, status: r.status })),
+        flipCount: flips,
+        flakinessLabel: flipRate >= 0.5 ? "High" : flipRate >= 0.25 ? "Medium" : "Low"
+      });
+    }
+    flaky.sort((a, b) => (b.flipCount as number) - (a.flipCount as number));
+    return flaky.slice(0, 20);
+  }
+
+  async reportsOverview(projectId: string) {
+    const [passRateSeries, suiteHealth, coverage, untestedP1, flaky] = await Promise.all([
+      this.cyclePassRateSeries(projectId, 10),
+      this.suiteHealth(projectId),
+      this.coverageBySuite(projectId),
+      this.untestedP1Count(projectId),
+      this.detectFlakyTests(projectId)
+    ]);
+    const withRate = passRateSeries.filter((p) => p.passRate !== null);
+    const trendDelta = withRate.length >= 2 ? withRate[withRate.length - 1].passRate! - withRate[0].passRate! : 0;
+    const coverageGaps = coverage.filter((c) => c.pct < 70);
+
+    const summaryParts: string[] = [];
+    if (flaky.length > 0) {
+      const top = flaky[0] as { suiteName: string; externalId: string };
+      summaryParts.push(`${top.suiteName} suite has a flaky test (${top.externalId}) with inconsistent results across runs.`);
+    }
+    if (coverageGaps.length > 0) {
+      const worst = coverageGaps[0];
+      summaryParts.push(`${worst.suiteName} suite shows low coverage — only ${worst.covered} of ${worst.total} cases executed.`);
+    }
+    if (withRate.length >= 2) {
+      summaryParts.push(`Overall pass rate ${trendDelta >= 0 ? "improved" : "declined"} ${Math.abs(trendDelta)}% over the last ${withRate.length} runs.`);
+    }
+    if (summaryParts.length === 0) summaryParts.push("Not enough execution history yet to generate insights.");
+
+    return {
+      passRateTrend: passRateSeries,
+      trendDelta,
+      suiteHealth,
+      aiSummary: summaryParts.join(" "),
+      flakyCount: flaky.length,
+      coverageGapCount: coverageGaps.length,
+      untestedP1Count: untestedP1
+    };
+  }
+
+  async reportsInsights(projectId: string) {
+    const [coverage, untestedP1, flaky, passRateSeries] = await Promise.all([
+      this.coverageBySuite(projectId),
+      this.untestedP1Count(projectId),
+      this.detectFlakyTests(projectId),
+      this.cyclePassRateSeries(projectId, 10)
+    ]);
+    const withRate = passRateSeries.filter((p) => p.passRate !== null);
+    const avgPassRate = withRate.length > 0 ? withRate.reduce((sum, p) => sum + (p.passRate as number), 0) / withRate.length : 0;
+    const avgCoverage = coverage.length > 0 ? coverage.reduce((sum, c) => sum + c.pct, 0) / coverage.length : 0;
+    const untestedPenalty = untestedP1 === 0 ? 10 : Math.max(0, 10 - untestedP1);
+    // v1 heuristic: 60% weight on recent pass rate, 30% on average suite coverage, up to
+    // 10 bonus points for having no untested P1s, minus 5 points per detected flaky test.
+    // Tunable — no historical baseline exists yet to calibrate weights against.
+    const rawScore = avgPassRate * 0.6 + avgCoverage * 0.3 + untestedPenalty - flaky.length * 5;
+    const healthScore = Math.max(0, Math.min(100, Math.round(rawScore)));
+    const healthLabel = healthScore >= 70 ? "Healthy" : healthScore >= 40 ? "Needs attention" : "At risk";
+
+    return {
+      healthScore,
+      healthLabel,
+      flakyTests: flaky,
+      coverageGaps: coverage.filter((c) => c.pct < 70),
+      coverageBySuite: coverage,
+      untestedP1Count: untestedP1
+    };
+  }
+
+  async reportsTrends(projectId: string) {
+    const [passRateSeries, bugRate] = await Promise.all([
+      this.cyclePassRateSeries(projectId, 12),
+      this.db.query<{ week: string; count: string }>(
+        `SELECT to_char(d::date, 'YYYY-MM-DD') AS week, COALESCE(b.cnt, 0)::int AS count
+         FROM generate_series(date_trunc('week', now() - interval '6 weeks'), date_trunc('week', now()), interval '1 week') AS d
+         LEFT JOIN (
+           SELECT date_trunc('week', created_at) AS week, COUNT(*) AS cnt
+           FROM bugs WHERE project_id = $1
+           GROUP BY 1
+         ) b ON b.week = d
+         ORDER BY d`,
+        [projectId]
+      )
+    ]);
+    const withRate = passRateSeries.filter((p) => p.passRate !== null);
+    const trendDelta = withRate.length >= 2 ? withRate[withRate.length - 1].passRate! - withRate[0].passRate! : 0;
+    return {
+      passRateTrend: passRateSeries,
+      trendDelta,
+      executionVelocity: passRateSeries.map((p) => ({ name: p.name, count: p.executed })),
+      bugDiscoveryRate: bugRate.rows.map((r) => ({ week: r.week, count: Number(r.count) }))
     };
   }
 

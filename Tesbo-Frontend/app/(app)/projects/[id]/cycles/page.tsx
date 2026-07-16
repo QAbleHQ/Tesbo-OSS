@@ -1,9 +1,23 @@
 "use client";
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import Link from "next/link";
-import { IconPencil, IconTrash, IconCalendarEvent, IconPlayerPlay } from "@tabler/icons-react";
+import {
+  IconArrowRight,
+  IconCalendarEvent,
+  IconCircleCheck,
+  IconCircleDashed,
+  IconCircleMinus,
+  IconCircleX,
+  IconClipboardList,
+  IconClock,
+  IconDeviceDesktop,
+  IconPencil,
+  IconPlayerPlay,
+  IconPlus,
+  IconTrash,
+} from "@tabler/icons-react";
 import {
   authMe,
   listTestRuns,
@@ -11,6 +25,8 @@ import {
   updateTestRun,
   deleteTestRun,
   getProject,
+  listProjectMembers,
+  listPlans,
   type TestRunListItem,
   type TestEnvironmentSetting,
 } from "@/lib/api";
@@ -42,6 +58,101 @@ function statusTone(status: string): "neutral" | "brand" | "ai" | "success" | "w
   }
 }
 
+const STATUS_FILTERS: { value: string; label: string; dot: string }[] = [
+  { value: "all", label: "All", dot: "var(--ink-400)" },
+  { value: "Planning", label: "Planning", dot: "var(--warning)" },
+  { value: "In Progress", label: "In Progress", dot: "var(--info)" },
+  { value: "Completed", label: "Completed", dot: "var(--success)" },
+];
+
+const STATUS_SORT_ORDER: Record<string, number> = { Planning: 0, "In Progress": 1, Completed: 2 };
+type SortOption = "newest" | "oldest" | "name" | "status";
+
+const RUN_AVATAR_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+
+function hashSeed(seed: string): number {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function getInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "U";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+}
+
+function formatDuration(startedAt: string | null, endedAt: string | null): string {
+  if (!startedAt) return "—";
+  const start = new Date(startedAt).getTime();
+  const end = endedAt ? new Date(endedAt).getTime() : Date.now();
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return "—";
+  const totalMinutes = Math.round((end - start) / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function formatDate(iso: string): string {
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return "—";
+  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+function passRateColor(pct: number): string {
+  if (pct >= 80) return "var(--status-pass-text)";
+  if (pct >= 50) return "var(--status-blocked-text)";
+  return "var(--status-fail-text)";
+}
+
+function RunAvatar({ name }: { name: string }) {
+  const color = RUN_AVATAR_COLORS[hashSeed(name) % RUN_AVATAR_COLORS.length];
+  return (
+    <div
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xs font-bold tracking-wide text-white"
+      style={{ background: color }}
+    >
+      {getInitials(name)}
+    </div>
+  );
+}
+
+function OwnerAvatar({ name }: { name: string }) {
+  const color = RUN_AVATAR_COLORS[hashSeed(name) % RUN_AVATAR_COLORS.length];
+  return (
+    <span
+      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-[var(--surface)] text-[10px] font-semibold text-white"
+      style={{ background: color }}
+      title={name}
+    >
+      {getInitials(name)}
+    </span>
+  );
+}
+
+function RunProgressBar({ passed, failed, blocked, total }: { passed: number; failed: number; blocked: number; total: number }) {
+  const pct = (n: number) => `${total ? (n / total) * 100 : 0}%`;
+  return (
+    <div className="flex h-[5px] gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
+      {passed > 0 && <div className="h-full" style={{ width: pct(passed), background: "var(--status-pass-dot)" }} />}
+      {failed > 0 && <div className="h-full" style={{ width: pct(failed), background: "var(--status-fail-dot)" }} />}
+      {blocked > 0 && <div className="h-full" style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
+    </div>
+  );
+}
+
+function StatTile({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] px-5 py-3.5">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">{label}</div>
+      <div className="mt-1.5 text-[22px] font-semibold leading-none tracking-tight" style={{ color: color ?? "var(--foreground)" }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
 type ProjectSettingsPayload = {
   testRunEnvironments?: Array<{ name?: string; url?: string }>;
 };
@@ -54,6 +165,11 @@ export default function TestRunsPage() {
 
   const [runs, setRuns] = useState<TestRunListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [ownerNames, setOwnerNames] = useState<Record<string, string>>({});
+  const [planNames, setPlanNames] = useState<Record<string, string>>({});
+
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sortBy, setSortBy] = useState<SortOption>("newest");
 
   /* modal state */
   const [showCreate, setShowCreate] = useState(false);
@@ -102,13 +218,20 @@ export default function TestRunsPage() {
   }
 
   const load = useCallback(() => {
-    Promise.all([listTestRuns(projectId), getProject(projectId)])
-      .then(([runsData, project]) => {
+    Promise.all([
+      listTestRuns(projectId),
+      getProject(projectId),
+      listProjectMembers(projectId).catch(() => []),
+      listPlans(projectId).catch(() => []),
+    ])
+      .then(([runsData, project, members, plans]) => {
         setRuns(runsData);
         const parsedSettings = parseProjectSettings(project.settings);
         setEnvironmentOptions(normalizeTestRunEnvironments(parsedSettings.testRunEnvironments));
         const myRole = typeof project.myRole === "string" ? project.myRole.toLowerCase() : "";
         setCanManageRuns(!myRole || ["owner", "admin", "manager"].includes(myRole));
+        setOwnerNames(Object.fromEntries(members.map((m) => [m.userId, m.name || m.email || "Unknown user"])));
+        setPlanNames(Object.fromEntries(plans.map((p) => [p.id, p.name])));
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -123,6 +246,41 @@ export default function TestRunsPage() {
       load();
     });
   }, [router, load]);
+
+  const summary = useMemo(() => {
+    const totalRuns = runs.length;
+    const inProgress = runs.filter((r) => r.status === "In Progress").length;
+    let totalExecuted = 0;
+    let totalPassed = 0;
+    let openFailures = 0;
+    for (const r of runs) {
+      totalExecuted += r.passed + r.failed + r.blocked + r.skipped;
+      totalPassed += r.passed;
+      openFailures += r.failed;
+    }
+    const passRate = totalExecuted > 0 ? Math.round((totalPassed / totalExecuted) * 100) : null;
+    return { totalRuns, inProgress, passRate, openFailures };
+  }, [runs]);
+
+  const visibleRuns = useMemo(() => {
+    const filtered = statusFilter === "all" ? runs : runs.filter((r) => r.status === statusFilter);
+    const sorted = [...filtered];
+    switch (sortBy) {
+      case "oldest":
+        sorted.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+        break;
+      case "name":
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case "status":
+        sorted.sort((a, b) => (STATUS_SORT_ORDER[a.status] ?? 99) - (STATUS_SORT_ORDER[b.status] ?? 99));
+        break;
+      case "newest":
+      default:
+        sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    }
+    return sorted;
+  }, [runs, statusFilter, sortBy]);
 
   /* create */
   async function handleCreate(e: React.FormEvent) {
@@ -213,15 +371,6 @@ export default function TestRunsPage() {
           actions={
             canManageRuns ? (
               <div className="flex items-center gap-2">
-                <Button
-                  onClick={() => {
-                    resetForm();
-                    setFormError(null);
-                    setShowCreate(true);
-                  }}
-                >
-                  Create Test Run
-                </Button>
                 <Link
                   href={`/projects/${projectId}/cycles/schedule`}
                   className="inline-flex h-9 items-center gap-2 rounded-[6px] border border-[var(--ink-200)] px-4 text-[13px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
@@ -229,6 +378,16 @@ export default function TestRunsPage() {
                   <IconCalendarEvent size={15} stroke={1.75} />
                   Schedule
                 </Link>
+                <Button
+                  onClick={() => {
+                    resetForm();
+                    setFormError(null);
+                    setShowCreate(true);
+                  }}
+                >
+                  <IconPlus size={15} stroke={2} />
+                  Create Test Run
+                </Button>
               </div>
             ) : undefined
           }
@@ -249,94 +408,170 @@ export default function TestRunsPage() {
         />
       )}
 
-      {/* Cards list */}
-      <div className="grid gap-3">
-        {runs.map((r) => {
-          const total = r.totalCases;
-          const passRate = total > 0 ? Math.round((r.passed / total) * 100) : null;
-          const passRateColor =
-            passRate === null ? "var(--ink-400)"
-            : passRate >= 80 ? "var(--status-pass-text)"
-            : passRate >= 50 ? "var(--status-blocked-text)"
-            : "var(--status-fail-text)";
-          return (
-            <Card key={r.id} className="p-5 transition-colors hover:border-[var(--border-strong)]">
-              <div className="flex items-start justify-between gap-4">
-                {/* Left: name + meta */}
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Link
-                      href={`/projects/${projectId}/cycles/${r.id}`}
-                      className="text-[15px] font-medium text-[var(--ink-800)] hover:text-[var(--denim)] transition-colors"
-                    >
-                      {r.name}
-                    </Link>
-                    <StatusChip tone={statusTone(r.status)}>{r.status}</StatusChip>
-                  </div>
-                  {r.description && (
-                    <p className="mt-1 line-clamp-1 text-[13px] text-[var(--ink-400)]">
-                      {r.description}
-                    </p>
-                  )}
-                  <div className="mt-2 flex flex-wrap items-center gap-3 text-[12px] text-[var(--ink-400)]">
-                    {r.environment && (
-                      <span className="rounded bg-[var(--ink-50)] px-2 py-0.5 font-medium">
-                        {r.environment}
-                      </span>
-                    )}
-                    {r.buildVersion && (
-                      <span className="rounded bg-[var(--ink-50)] px-2 py-0.5 font-mono">
-                        {r.buildVersion}
-                      </span>
-                    )}
-                    <span>{new Date(r.createdAt).toLocaleDateString()}</span>
-                  </div>
-                </div>
+      {runs.length > 0 && (
+        <>
+          {/* Summary stats */}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <StatTile label="Total Runs" value={String(summary.totalRuns)} />
+            <StatTile label="In Progress" value={String(summary.inProgress)} color="var(--info-foreground)" />
+            <StatTile
+              label="Pass Rate"
+              value={summary.passRate !== null ? `${summary.passRate}%` : "—"}
+              color={summary.passRate !== null ? passRateColor(summary.passRate) : undefined}
+            />
+            <StatTile label="Open Failures" value={String(summary.openFailures)} color="var(--status-fail-text)" />
+          </div>
 
-                {/* Right: stats + actions */}
-                <div className="flex shrink-0 items-center gap-5">
-                  <div className="text-right">
-                    <p className="text-[18px] font-semibold leading-none text-[var(--ink-800)]">{total}</p>
-                    <p className="mt-1 text-[11px] text-[var(--ink-400)]">cases</p>
-                  </div>
-                  <div className="text-right">
-                    {passRate !== null ? (
-                      <>
-                        <p className="text-[18px] font-semibold leading-none" style={{ color: passRateColor }}>{passRate}%</p>
-                        <p className="mt-1 text-[11px] text-[var(--ink-400)]">pass rate</p>
-                      </>
-                    ) : (
-                      <>
-                        <p className="text-[18px] font-semibold leading-none text-[var(--ink-300)]">—</p>
-                        <p className="mt-1 text-[11px] text-[var(--ink-400)]">no cases</p>
-                      </>
-                    )}
+          {/* Filters */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="mr-1 text-[12px] text-[var(--muted-soft)]">Status</span>
+            {STATUS_FILTERS.map((f) => {
+              const active = statusFilter === f.value;
+              return (
+                <button
+                  key={f.value}
+                  type="button"
+                  onClick={() => setStatusFilter(f.value)}
+                  className={`flex h-[26px] items-center gap-1.5 rounded-full border px-3 text-[11.5px] font-medium transition-colors ${
+                    active
+                      ? "border-[var(--brand-border)] bg-[var(--brand-soft)] text-[var(--brand-primary)]"
+                      : "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:border-[var(--brand-border)] hover:text-[var(--foreground)]"
+                  }`}
+                >
+                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: f.dot }} />
+                  {f.label}
+                </button>
+              );
+            })}
+            <div className="ml-auto flex items-center gap-2">
+              <span className="text-[12px] text-[var(--muted-soft)]">Sort</span>
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as SortOption)}
+                className="h-[28px] rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[12px] text-[var(--ink-600)] outline-none"
+              >
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="name">Name A–Z</option>
+                <option value="status">Status</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Run cards */}
+          <div className="grid gap-3">
+            {visibleRuns.map((r) => {
+              const total = r.totalCases;
+              const executed = r.passed + r.failed + r.blocked + r.skipped;
+              const ownerName = r.ownerId ? ownerNames[r.ownerId] : null;
+              const planName = r.planId ? planNames[r.planId] : null;
+              return (
+                <Card key={r.id} className="p-0 transition-colors hover:border-[var(--border-strong)]">
+                  <div className="flex items-center gap-3 p-4">
+                    <RunAvatar name={r.name} />
+
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-0.5 flex flex-wrap items-center gap-2">
+                        <Link
+                          href={`/projects/${projectId}/cycles/${r.id}`}
+                          className="text-[14.5px] font-semibold text-[var(--foreground)] hover:text-[var(--brand-primary)]"
+                        >
+                          {r.name}
+                        </Link>
+                        <StatusChip tone={statusTone(r.status)}>{r.status}</StatusChip>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--muted-soft)]">
+                        {planName && (
+                          <span className="flex items-center gap-1">
+                            <IconClipboardList size={12} stroke={1.75} />
+                            {planName}
+                          </span>
+                        )}
+                        {r.environment && (
+                          <span className="flex items-center gap-1">
+                            <IconDeviceDesktop size={12} stroke={1.75} />
+                            {r.environment}
+                          </span>
+                        )}
+                        <span className="flex items-center gap-1">
+                          <IconClock size={12} stroke={1.75} />
+                          <span className="font-mono">{formatDuration(r.startedAt, r.endedAt)}</span>
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <IconCalendarEvent size={12} stroke={1.75} />
+                          {formatDate(r.createdAt)}
+                        </span>
+                      </div>
+                    </div>
+
+                    {ownerName && <OwnerAvatar name={ownerName} />}
+
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Link
+                        href={`/projects/${projectId}/cycles/${r.id}`}
+                        title="View run"
+                        className="flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--muted-soft)] transition-colors hover:bg-[var(--ink-100)] hover:text-[var(--foreground)]"
+                      >
+                        <IconArrowRight size={15} stroke={1.75} />
+                      </Link>
+                      {canManageRuns && (
+                        <>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setFormError(null); openEdit(r); }}
+                            className="flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--muted-soft)] transition-colors hover:bg-[var(--ink-100)] hover:text-[var(--foreground)]"
+                            title="Edit run"
+                          >
+                            <IconPencil size={15} stroke={1.75} />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setFormError(null); setDeleteTarget(r); }}
+                            className="flex h-7 w-7 items-center justify-center rounded-[6px] text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--status-fail-text)]"
+                            title="Delete run"
+                          >
+                            <IconTrash size={15} stroke={1.75} />
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
 
-                  {canManageRuns && (
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setFormError(null); openEdit(r); }}
-                        className="rounded-[6px] p-1.5 text-[var(--ink-400)] transition-colors hover:bg-[var(--ink-100)] hover:text-[var(--ink-800)]"
-                        title="Edit"
-                      >
-                        <IconPencil size={15} stroke={1.75} />
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setFormError(null); setDeleteTarget(r); }}
-                        className="rounded-[6px] p-1.5 text-[var(--ink-400)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--status-fail-text)]"
-                        title="Delete"
-                      >
-                        <IconTrash size={15} stroke={1.75} />
-                      </button>
+                  {total > 0 && (
+                    <div className="border-t border-[var(--border-subtle)] px-4 py-3">
+                      <RunProgressBar passed={r.passed} failed={r.failed} blocked={r.blocked} total={total} />
+                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-4">
+                          <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-pass-text)]">
+                            <IconCircleCheck size={13} stroke={1.75} />
+                            {r.passed} passed
+                          </span>
+                          <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-fail-text)]">
+                            <IconCircleX size={13} stroke={1.75} />
+                            {r.failed} failed
+                          </span>
+                          <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-blocked-text)]">
+                            <IconCircleMinus size={13} stroke={1.75} />
+                            {r.blocked} blocked
+                          </span>
+                          <span className="flex items-center gap-1 text-[11.5px] text-[var(--muted-soft)]">
+                            <IconCircleDashed size={13} stroke={1.75} />
+                            {r.untested} untested
+                          </span>
+                        </div>
+                        <span className="text-[11.5px] text-[var(--muted)]">
+                          {executed} / {total} cases
+                        </span>
+                      </div>
                     </div>
                   )}
-                </div>
-              </div>
-            </Card>
-          );
-        })}
-      </div>
+                </Card>
+              );
+            })}
+            {visibleRuns.length === 0 && (
+              <p className="py-8 text-center text-[13px] text-[var(--muted)]">No test runs match this filter.</p>
+            )}
+          </div>
+        </>
+      )}
 
       {/* Create Modal */}
       <Modal
