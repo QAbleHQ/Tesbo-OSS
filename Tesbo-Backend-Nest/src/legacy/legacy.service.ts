@@ -13,6 +13,7 @@ import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
 import { StorageService } from "../storage/storage.service";
 import { encryptSecret, decryptSecret } from "../common/crypto.util";
+import { ApiTokenService } from "../auth/api-token.service";
 import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
 
@@ -287,8 +288,33 @@ export class LegacyService implements OnModuleInit {
     private readonly config: AppConfigService,
     private readonly storage: StorageService,
     private readonly ragIngestion: RagIngestionService,
-    private readonly ragRetrieval: RagRetrievalService
+    private readonly ragRetrieval: RagRetrievalService,
+    private readonly apiTokens: ApiTokenService
   ) {}
+
+  // --- API tokens (project-scoped machine credentials) -------------------
+  // Backs GET/POST/DELETE /api/projects/:id/apikeys. Access is gated by the
+  // same project-membership check used across the rest of the API.
+
+  async listApiKeys(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.apiTokens.listTokens(projectId);
+  }
+
+  async createApiKey(userId: string | null | undefined, projectId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const name = String(body?.name || "").trim();
+    if (!name) throw new BadRequestException({ error: "name is required" });
+    return this.apiTokens.issueToken(uid, projectId, name, body?.scopes);
+  }
+
+  async revokeApiKey(userId: string | null | undefined, projectId: string, keyId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    const removed = await this.apiTokens.revokeToken(projectId, keyId);
+    if (!removed) throw new NotFoundException({ error: "API key not found" });
+    return { ok: true };
+  }
 
   private enqueueEmbedding(organizationId: string, projectId: string, sourceType: "document" | "file", sourceId: string, reason: "created" | "updated" | "transcribed"): void {
     void this.ragIngestion.enqueueEmbedding({ organizationId, projectId, sourceType, sourceId, reason }).catch(() => undefined);

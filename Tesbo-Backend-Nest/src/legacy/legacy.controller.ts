@@ -214,17 +214,19 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:id/apikeys")
-  apiKeys() {
-    return [];
+  apiKeys(@Req() req: AuthenticatedRequest, @Param("id") id: string) {
+    return this.legacy.listApiKeys(req.userId, id);
   }
 
   @Post("/api/projects/:id/apikeys")
-  createApiKey() {
-    return { id: "local-api-key", token: "local-dev-token", createdAt: new Date().toISOString() };
+  createApiKey(@Req() req: AuthenticatedRequest, @Param("id") id: string, @Body() body: Record<string, any>) {
+    return this.legacy.createApiKey(req.userId, id, body);
   }
 
   @Delete("/api/projects/:id/apikeys/:keyId")
-  revokeApiKey() {}
+  revokeApiKey(@Req() req: AuthenticatedRequest, @Param("id") id: string, @Param("keyId") keyId: string) {
+    return this.legacy.revokeApiKey(req.userId, id, keyId);
+  }
 
   @Get("/api/projects/:projectId/suites")
   listSuites(@Param("projectId") projectId: string) {
