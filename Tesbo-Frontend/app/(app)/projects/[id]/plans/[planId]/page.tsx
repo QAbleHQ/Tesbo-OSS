@@ -388,7 +388,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={handleDelete}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--error)]/30 bg-transparent px-3 text-[12px] font-medium text-[var(--error)] transition-colors hover:bg-[var(--error)]/10"
+                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error)]"
                   >
                     <IconTrash size={13} stroke={1.75} />
                     Delete

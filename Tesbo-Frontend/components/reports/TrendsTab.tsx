@@ -43,7 +43,10 @@ export function TrendsTab({ trends, loading }: { trends: ReportsTrends | null; l
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
           <h3 className="mb-3.5 text-[13px] font-semibold text-[var(--foreground)]">Execution velocity</h3>
-          <VerticalBarChart data={trends.executionVelocity.map((v) => ({ label: v.name.slice(0, 8), value: v.count }))} color="var(--brand-primary)" />
+          <VerticalBarChart
+            data={trends.executionVelocity.map((v) => ({ label: v.name.length > 9 ? `${v.name.slice(0, 8)}…` : v.name, value: v.count }))}
+            color="var(--brand-primary)"
+          />
         </div>
         <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
           <h3 className="mb-3.5 text-[13px] font-semibold text-[var(--foreground)]">Bug discovery rate</h3>

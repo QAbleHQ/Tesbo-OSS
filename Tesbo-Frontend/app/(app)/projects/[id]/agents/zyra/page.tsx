@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { IconClipboardCheck, IconCopy, IconPlus, IconSettings, IconSparkles } from "@tabler/icons-react";
 import {
   authMe,
   createZyraChatSession,
@@ -17,8 +18,20 @@ import {
   type ZyraChatSession,
   type ZyraChatTestcaseRow,
 } from "@/lib/api";
-import { Button, Textarea } from "@/components/ui";
+import { Button, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader } from "@/components/workflows";
+
+// ─── Zyra icon badge — gradient sparkle mark used in the header and per-message ──
+function ZyraMark({ size = 24 }: { size?: number }) {
+  return (
+    <div
+      className="flex shrink-0 items-center justify-center rounded-[7px]"
+      style={{ width: size, height: size, background: "linear-gradient(135deg, #7C5FCC 0%, #4F46E5 100%)" }}
+    >
+      <IconSparkles size={Math.round(size * 0.58)} stroke={1.9} className="text-white" />
+    </div>
+  );
+}
 
 // ─── Quick actions shown on empty chat ───────────────────────────────────────
 const QUICK_ACTIONS = [
@@ -94,59 +107,102 @@ function formatTime(value?: string) {
   }).format(new Date(value));
 }
 
-function stepsPreview(value: unknown): string {
-  if (!value) return "";
+function firstStepPreview(value: unknown): string {
+  if (!value) return "—";
   if (Array.isArray(value)) {
-    return value.map((step) => {
-      if (typeof step === "string") return step;
-      return [step.step, step.action, step.expected].filter(Boolean).join(" → ");
-    }).filter(Boolean).slice(0, 3).join(" | ");
+    const first = value[0];
+    if (!first) return "—";
+    if (typeof first === "string") return first;
+    const n = first.step ?? 1;
+    const text = first.action || first.expected || "";
+    return text ? `${n} → ${text}` : "—";
   }
-  if (typeof value !== "string") return String(value);
-  try { return stepsPreview(JSON.parse(value)); } catch { return value; }
+  if (typeof value !== "string") return "—";
+  try { return firstStepPreview(JSON.parse(value)); } catch { return "—"; }
+}
+
+// ─── Tone maps — mirror RepositoryTestCaseTable's priority/status conventions ──
+function priorityTone(priority?: string) {
+  if (priority === "P0") return "error" as const;
+  if (priority === "P1") return "warning" as const;
+  if (priority === "P2") return "confidenceHigh" as const;
+  return "neutral" as const;
+}
+
+function statusTone(status?: string) {
+  if (status === "Approved") return "success" as const;
+  if (status === "In Review") return "warning" as const;
+  if (status === "Deprecated" || status === "Archived") return "error" as const;
+  return "brand" as const;
+}
+
+function actionColor(action?: string): string {
+  if (action === "archived") return "text-[var(--status-fail-text)]";
+  if (action === "updated") return "text-[var(--info-foreground)]";
+  if (action === "created") return "text-[var(--success-foreground)]";
+  return "text-[var(--muted)]";
+}
+
+function summarizeTestcaseActions(rows: ZyraChatTestcaseRow[]): string | null {
+  if (!rows.length) return null;
+  const counts = rows.reduce<Record<string, number>>((acc, row) => {
+    const key = row.action || "suggested";
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const verb = counts.created ? "generated" : counts.updated ? "updated" : counts.archived ? "archived" : "suggested";
+  return `${rows.length} test case${rows.length === 1 ? "" : "s"} ${verb}`;
 }
 
 // ─── TestcaseTable ────────────────────────────────────────────────────────────
 function TestcaseTable({ rows }: { rows: ZyraChatTestcaseRow[] }) {
   if (!rows.length) return null;
   return (
-    <div className="mt-4 overflow-hidden rounded-xl border border-[var(--border)]">
+    <div className="mt-3 overflow-hidden rounded-lg border border-[var(--border)]">
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-[var(--border)] text-sm">
-          <thead className="bg-[var(--surface-secondary)]">
+          <thead className="bg-[var(--background)]">
             <tr className="text-left text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
-              <th className="px-4 py-2.5">Test case</th>
-              <th className="px-3 py-2.5">Priority</th>
-              <th className="px-3 py-2.5">Status</th>
-              <th className="px-3 py-2.5">Coverage</th>
-              <th className="px-3 py-2.5">Action</th>
+              <th className="px-3 py-2">ID</th>
+              <th className="px-3 py-2">Title</th>
+              <th className="px-3 py-2">Priority</th>
+              <th className="px-3 py-2">Status</th>
+              <th className="px-3 py-2">First step</th>
+              <th className="px-3 py-2">Source</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--border)] bg-[var(--surface)]">
             {rows.map((row, i) => (
               <tr key={`${row.id || row.externalId || row.title}-${i}`} className="align-top hover:bg-[var(--surface-secondary)] transition-colors">
-                <td className="max-w-[280px] px-4 py-3">
-                  <div className="font-medium text-[var(--foreground)]">
-                    {row.externalId && <span className="mr-1 text-[var(--muted)]">{row.externalId}</span>}
-                    {row.title}
+                <td className="px-3 py-3">
+                  <div className="flex flex-col gap-1">
+                    <span className="font-mono text-[11px] text-[var(--muted)]">{row.externalId || "—"}</span>
+                    <StatusChip tone="info" className="w-fit !rounded-full !px-1.5 !py-0 !text-[10px] !font-medium">
+                      {row.type || "Functional"}
+                    </StatusChip>
                   </div>
-                  {row.type && <div className="mt-0.5 text-[11px] text-[var(--muted)]">{row.type}</div>}
                 </td>
+                <td className="max-w-[280px] px-3 py-3 text-[12px] leading-snug text-[var(--foreground)]">{row.title}</td>
                 <td className="px-3 py-3">
-                  <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${row.priority === "P1" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" : row.priority === "P3" ? "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400" : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"}`}>
+                  <StatusChip tone={priorityTone(row.priority)} className="!rounded-[5px] !px-[7px] !py-[2px] !font-mono !text-[11px] !font-semibold">
                     {row.priority || "P2"}
-                  </span>
-                </td>
-                <td className="px-3 py-3 text-xs text-[var(--muted)]">{row.status || "Draft"}</td>
-                <td className="max-w-[360px] px-3 py-3 text-xs text-[var(--muted)]">
-                  <div className="line-clamp-2">{row.expectedSummary || row.preconditions || "—"}</div>
-                  {!!row.stepsJson && <div className="mt-1 line-clamp-1 text-[10px] opacity-70">{stepsPreview(row.stepsJson)}</div>}
+                  </StatusChip>
                 </td>
                 <td className="px-3 py-3">
-                  <span className={`text-xs font-medium capitalize ${row.action === "archived" ? "text-red-500" : row.action === "updated" ? "text-blue-500" : row.action === "created" ? "text-green-600 dark:text-green-400" : "text-[var(--muted)]"}`}>
-                    {row.action || "suggested"}
-                  </span>
-                  {row.reason && <div className="mt-0.5 text-[10px] text-[var(--muted)] line-clamp-2">{row.reason}</div>}
+                  <StatusChip tone={statusTone(row.status)} className="!px-[9px] !py-[2px] !text-[11px] !font-medium">
+                    {row.status || "Draft"}
+                  </StatusChip>
+                </td>
+                <td className="max-w-[220px] px-3 py-3 text-[11px] leading-snug text-[var(--muted)]">
+                  <div className="line-clamp-2">{firstStepPreview(row.stepsJson)}</div>
+                </td>
+                <td className="px-3 py-3">
+                  <div className="flex flex-col gap-0.5">
+                    <span className={`text-[11px] font-semibold capitalize ${actionColor(row.action)}`}>
+                      {row.action || "suggested"}
+                    </span>
+                    <span className="text-[10px] text-[var(--muted)]">AI · Zyra chat</span>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -187,7 +243,7 @@ function resolveContent(message: ZyraChatMessage): { text: string; testcases: Zy
 }
 
 // ─── MessageBubble ────────────────────────────────────────────────────────────
-function MessageBubble({ message }: { message: ZyraChatMessage }) {
+function MessageBubble({ message, projectId }: { message: ZyraChatMessage; projectId: string }) {
   const isUser = message.role === "user";
   const [copied, setCopied] = useState(false);
   const { text, testcases, reasoning } = isUser ? { text: message.content, testcases: [], reasoning: null } : resolveContent(message);
@@ -199,49 +255,66 @@ function MessageBubble({ message }: { message: ZyraChatMessage }) {
     });
   }
 
+  if (isUser) {
+    return (
+      <article className="flex justify-end">
+        <div className="flex max-w-[70%] flex-col items-end gap-1">
+          <div className="rounded-[10px] border border-[var(--brand-border)] bg-[var(--brand-soft)] px-3.5 py-2.5 text-sm leading-relaxed text-[var(--foreground)]">
+            <div className="whitespace-pre-wrap">{text}</div>
+          </div>
+          <time className="px-1 font-mono text-[10px] text-[var(--muted)]">{formatTime(message.createdAt)}</time>
+        </div>
+      </article>
+    );
+  }
+
+  const metaLabel = summarizeTestcaseActions(testcases);
+
   return (
-    <article className={`group flex gap-3 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-      <div className={`mt-1 h-7 w-7 shrink-0 rounded-full flex items-center justify-center text-xs font-bold ${isUser ? "bg-[var(--brand-primary)] text-white" : "bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)]"}`}>
-        {isUser ? "You" : "Z"}
+    <article className="flex flex-col gap-2.5">
+      <div className="flex items-center gap-2">
+        <ZyraMark size={24} />
+        <span className="text-xs font-semibold text-[var(--foreground)]">Zyra</span>
+        {metaLabel && <span className="text-[11px] text-[var(--muted)]">{metaLabel}</span>}
       </div>
 
-      <div className={`flex-1 ${isUser ? "items-end" : "items-start"} flex flex-col gap-1 min-w-0`}>
-        {!isUser && reasoning && (
-          <details className="max-w-[88%] w-full mb-1">
-            <summary className="cursor-pointer text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)] select-none">
-              Zyra reasoning
-            </summary>
-            <div className="mt-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-xs leading-5 text-[var(--muted)]">
-              {reasoning}
-            </div>
-          </details>
+      {reasoning && (
+        <details className="w-full max-w-[720px]">
+          <summary className="cursor-pointer text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)] select-none">
+            Zyra reasoning
+          </summary>
+          <div className="mt-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-xs leading-5 text-[var(--muted)]">
+            {reasoning}
+          </div>
+        </details>
+      )}
+
+      <div
+        className="zyra-prose max-w-[720px] text-[13px] leading-[1.7] text-[var(--muted)]"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
+      />
+
+      <TestcaseTable rows={testcases} />
+
+      <div className="flex items-center gap-2">
+        {testcases.length > 0 && (
+          <Link
+            href={`/projects/${projectId}/testcases`}
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--border)] px-2.5 text-[11px] font-medium text-[var(--muted)] hover:border-[var(--brand-border)] hover:text-[var(--foreground)]"
+          >
+            <IconClipboardCheck size={13} stroke={1.9} />
+            View test cases
+          </Link>
         )}
-
-        <div className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${isUser ? "rounded-tr-sm bg-[var(--brand-primary)] text-white" : "rounded-tl-sm border border-[var(--border)] bg-[var(--surface)] text-[var(--foreground)]"}`}>
-          {isUser ? (
-            <div className="whitespace-pre-wrap">{text}</div>
-          ) : (
-            <div
-              className="zyra-prose"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }}
-            />
-          )}
-
-          {!isUser && <TestcaseTable rows={testcases} />}
-        </div>
-
-        <div className={`flex items-center gap-2 px-1 ${isUser ? "flex-row-reverse" : "flex-row"}`}>
-          <time className="text-[10px] text-[var(--muted)]">{formatTime(message.createdAt)}</time>
-          {!isUser && (
-            <button
-              type="button"
-              onClick={handleCopy}
-              className="text-[10px] text-[var(--muted)] opacity-0 group-hover:opacity-100 transition-opacity hover:text-[var(--foreground)]"
-            >
-              {copied ? "Copied" : "Copy"}
-            </button>
-          )}
-        </div>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--border)] px-2.5 text-[11px] font-medium text-[var(--muted)] hover:border-[var(--brand-border)] hover:text-[var(--foreground)]"
+        >
+          <IconCopy size={13} stroke={1.9} />
+          {copied ? "Copied" : "Copy"}
+        </button>
+        <time className="ml-auto font-mono text-[10px] text-[var(--muted)]">{formatTime(message.createdAt)}</time>
       </div>
     </article>
   );
@@ -250,14 +323,12 @@ function MessageBubble({ message }: { message: ZyraChatMessage }) {
 // ─── ThinkingBubble ───────────────────────────────────────────────────────────
 function ThinkingBubble() {
   return (
-    <div className="flex gap-3">
-      <div className="mt-1 h-7 w-7 shrink-0 rounded-full flex items-center justify-center text-xs font-bold bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)]">Z</div>
-      <div className="rounded-2xl rounded-tl-sm border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
-        <div className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--muted)] animate-bounce [animation-delay:0ms]" />
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--muted)] animate-bounce [animation-delay:150ms]" />
-          <span className="h-1.5 w-1.5 rounded-full bg-[var(--muted)] animate-bounce [animation-delay:300ms]" />
-        </div>
+    <div className="flex items-center gap-2">
+      <ZyraMark size={24} />
+      <div className="flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2">
+        <span className="h-1.5 w-1.5 rounded-full bg-[var(--muted)] animate-bounce [animation-delay:0ms]" />
+        <span className="h-1.5 w-1.5 rounded-full bg-[var(--muted)] animate-bounce [animation-delay:150ms]" />
+        <span className="h-1.5 w-1.5 rounded-full bg-[var(--muted)] animate-bounce [animation-delay:300ms]" />
       </div>
     </div>
   );
@@ -267,13 +338,11 @@ function ThinkingBubble() {
 function PlanProgressBubble({ plan }: { plan: { doneCount: number; totalCount: number } }) {
   const pct = plan.totalCount > 0 ? Math.round((plan.doneCount / plan.totalCount) * 100) : 0;
   return (
-    <div className="flex gap-3">
-      <div className="mt-1 h-7 w-7 shrink-0 rounded-full flex items-center justify-center text-xs font-bold bg-[var(--surface)] border border-[var(--border)] text-[var(--muted)]">Z</div>
-      <div className="max-w-[88%] rounded-2xl rounded-tl-sm border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
-        <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--brand-primary)] animate-pulse" />
-          Generating remaining scenarios — {plan.doneCount}/{plan.totalCount} covered ({pct}%). Review what's in so far; more will appear here shortly.
-        </div>
+    <div className="flex items-start gap-2">
+      <ZyraMark size={24} />
+      <div className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3.5 py-2.5 text-xs text-[var(--muted)]">
+        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--brand-primary)] animate-pulse" />
+        Generating remaining scenarios — {plan.doneCount}/{plan.totalCount} covered ({pct}%). Review what&apos;s in so far; more will appear here shortly.
       </div>
     </div>
   );
@@ -459,20 +528,26 @@ export default function ZyraChatPage() {
   // ─── Page header (shared between loading and loaded states) ─────────────────
   const pageHeader = (
     <PageHeader
-      title="Zyra"
+      title={
+        <>
+          <ZyraMark size={28} />
+          Zyra
+        </>
+      }
       subtitle="AI test case assistant — generate, update, and manage test cases through conversation."
       actions={
         <div className="flex flex-wrap items-center gap-2">
           {agent && (
-            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${agent.agent.active ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${agent.agent.active ? "bg-green-500" : "bg-amber-500"}`} />
+            <StatusChip tone={agent.agent.active ? "success" : "warning"} dot>
               {agent.agent.active ? "AI connected" : "No AI key"}
-            </span>
+            </StatusChip>
           )}
-          <Link href={`/projects/${projectId}/agents/tasks`} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
+          <Link href={`/projects/${projectId}/agents/tasks`} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
+            <IconClipboardCheck size={15} stroke={1.9} />
             Task board
           </Link>
-          <Link href={`/projects/${projectId}/agents/zyra/settings`} className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
+          <Link href={`/projects/${projectId}/agents/zyra/settings`} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
+            <IconSettings size={15} stroke={1.9} />
             Settings
           </Link>
         </div>
@@ -521,7 +596,10 @@ export default function ZyraChatPage() {
                 {sessions.length} {sessions.length === 1 ? "session" : "sessions"}
               </p>
             </div>
-            <Button size="sm" variant="secondary" onClick={() => void createSession()}>+ New</Button>
+            <Button size="sm" variant="secondary" onClick={() => void createSession()}>
+              <IconPlus size={13} stroke={2} />
+              New
+            </Button>
           </div>
 
           {/* Session list — scrollable */}
@@ -536,16 +614,16 @@ export default function ZyraChatPage() {
                   key={session.id}
                   type="button"
                   onClick={() => void openSession(session.id)}
-                  className={`w-full rounded-lg px-3 py-2.5 text-left transition-colors border-l-2 ${
+                  className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
                     isActive
-                      ? "border-[var(--brand-primary)] bg-[var(--surface-secondary)]"
+                      ? "border-[var(--brand-border)] bg-[var(--surface-secondary)]"
                       : "border-transparent hover:bg-[var(--surface-secondary)]"
                   }`}
                 >
-                  <span className={`block truncate text-[13px] font-medium ${isActive ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
+                  <span className={`block truncate text-[12px] font-medium ${isActive ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
                     {session.title}
                   </span>
-                  <span className="mt-0.5 block text-[11px] text-[var(--muted-soft)]">
+                  <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted-soft)]">
                     {formatTime(session.updatedAt)}
                   </span>
                 </button>
@@ -559,10 +637,16 @@ export default function ZyraChatPage() {
           {/* Chat header — fixed */}
           <div className="shrink-0 border-b border-[var(--border)] bg-[var(--surface)] px-5 py-3">
             <p className="text-sm font-semibold text-[var(--foreground)]">{activeSession?.title || "Zyra"}</p>
-            <p className="text-xs text-[var(--muted)]">
-              {agent?.aiKey
-                ? `${agent.aiKey.provider.toUpperCase()} · ${agent.aiKey.defaultModel || "default model"}`
-                : "No AI key connected"}
+            <p className="mt-0.5 flex items-center gap-1.5">
+              {agent?.aiKey ? (
+                <>
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">{agent.aiKey.provider}</span>
+                  <span className="text-[var(--border)]">·</span>
+                  <span className="font-mono text-[11px] text-[var(--muted)]">{agent.aiKey.defaultModel || "default model"}</span>
+                </>
+              ) : (
+                <span className="text-xs text-[var(--muted)]">No AI key connected</span>
+              )}
             </p>
           </div>
 
@@ -601,7 +685,7 @@ export default function ZyraChatPage() {
               </div>
             )}
 
-            {messages.map((msg) => <MessageBubble key={msg.id} message={msg} />)}
+            {messages.map((msg) => <MessageBubble key={msg.id} message={msg} projectId={projectId} />)}
             {sending && <ThinkingBubble />}
             {!sending && isPlanRunning && activeSession?.activePlan && <PlanProgressBubble plan={activeSession.activePlan} />}
             <div ref={endRef} />

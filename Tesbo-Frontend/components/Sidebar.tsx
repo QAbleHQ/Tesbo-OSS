@@ -75,6 +75,7 @@ const projectNavSections: Array<{ section: string; items: NavItemConfig[] }> = [
         children: [
           { href: "agents/tasks", label: "Tasks", icon: "clipboard" },
           { href: "agents", label: "Agent list", icon: "settings" },
+          { href: "agents/zyra/settings", label: "Zyra settings", icon: "key" },
         ],
       },
       { href: "knowledge-base", label: "Knowledge base", icon: "book" },

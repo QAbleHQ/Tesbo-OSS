@@ -56,8 +56,9 @@ export function DonutChart({
     <svg width={size} height={size} viewBox="0 0 36 36">
       {segments.map((d) => {
         if (d.value === 0) return null;
-        const dashArray = `${d.pct * circumference} ${circumference}`;
-        const dashOffset = circumference - d.cumulative * circumference;
+        const segmentLength = d.pct * circumference;
+        const dashArray = `${segmentLength} ${circumference - segmentLength}`;
+        const dashOffset = -d.cumulative * circumference;
         return (
           <circle
             key={d.label}
@@ -69,7 +70,6 @@ export function DonutChart({
             strokeWidth="3.5"
             strokeDasharray={dashArray}
             strokeDashoffset={dashOffset}
-            strokeLinecap="round"
             transform="rotate(-90 18 18)"
           />
         );
@@ -235,13 +235,13 @@ export function VerticalBarChart({
 }) {
   if (data.length === 0) return <p className="py-8 text-center text-[13px] text-[var(--muted-soft)]">No data available</p>;
   const max = Math.max(...data.map((d) => d.value), 1);
-  const bw = (width / data.length) * 0.55;
-  const gap = (width / data.length) * 0.45;
+  const slot = width / data.length;
+  const bw = Math.min(slot * 0.55, 48);
   return (
     <svg viewBox={`0 0 ${width} ${height + 18}`} className="w-full">
       {data.map((d, i) => {
         const bh = Math.max((d.value / max) * height, d.value > 0 ? 2 : 0);
-        const x = i * (width / data.length) + gap / 2;
+        const x = i * slot + (slot - bw) / 2;
         return (
           <g key={i}>
             <rect x={x} y={height - bh} width={bw} height={bh} rx="3" fill={color} opacity={0.8} />

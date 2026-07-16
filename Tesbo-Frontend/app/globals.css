@@ -350,6 +350,14 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   animation: tesbo-fade-in 180ms ease both;
 }
 
+@keyframes tesbo-slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.slide-in-right {
+  animation: tesbo-slide-in-right 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
 /* Full-bleed override: a page whose root carries `.tc-fullbleed` fills the whole
    content region (no centered 1280px column, no wrapper padding) — used by the
    test-case repository's edge-to-edge IDE workspace. Scoped via :has() so every
