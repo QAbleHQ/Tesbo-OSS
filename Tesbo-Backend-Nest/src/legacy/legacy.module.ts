@@ -10,6 +10,7 @@ import { SignupService } from "./signup.service";
 @Module({
   imports: [AuthModule, StorageModule, RagModule],
   controllers: [LegacyController, SignupController],
-  providers: [LegacyService, SignupService]
+  providers: [LegacyService, SignupService],
+  exports: [LegacyService]
 })
 export class LegacyModule {}

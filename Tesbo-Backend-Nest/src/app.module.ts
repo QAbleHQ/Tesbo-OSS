@@ -9,6 +9,7 @@ import { SetupModule } from "./setup/setup.module";
 import { HealthModule } from "./health/health.module";
 import { AdminModule } from "./admin/admin.module";
 import { LegacyModule } from "./legacy/legacy.module";
+import { McpModule } from "./mcp/mcp.module";
 
 @Module({
   imports: [
@@ -23,7 +24,8 @@ import { LegacyModule } from "./legacy/legacy.module";
     SetupModule,
     HealthModule,
     AdminModule,
-    LegacyModule
+    LegacyModule,
+    McpModule
   ]
 })
 export class AppModule {}

@@ -30,6 +30,7 @@ export class AuthMiddleware implements NestMiddleware {
           req.userId = principal.userId;
           req.apiToken = {
             tokenId: principal.tokenId,
+            userId: principal.userId,
             projectId: principal.projectId,
             scopes: principal.scopes
           };
