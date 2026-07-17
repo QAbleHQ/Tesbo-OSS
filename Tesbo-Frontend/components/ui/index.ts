@@ -9,11 +9,13 @@ export type { StatusBadgeProps, TestStatus } from "@/components/ui/StatusBadge";
 export { default as PriorityBadge } from "@/components/ui/PriorityBadge";
 export type { PriorityBadgeProps, Priority } from "@/components/ui/PriorityBadge";
 export { default as Modal } from "@/components/ui/Modal";
+export { default as Drawer } from "@/components/ui/Drawer";
 export { default as EmptyStateBlock } from "@/components/ui/EmptyStateBlock";
 
 export { Field, FieldLabel, FieldHint, FieldError } from "@/components/ui/Field";
 export { default as Input } from "@/components/ui/Input";
 export type { InputProps } from "@/components/ui/Input";
+export { default as PasswordInput } from "@/components/ui/PasswordInput";
 export { default as Select } from "@/components/ui/Select";
 export type { SelectProps } from "@/components/ui/Select";
 export { default as Textarea } from "@/components/ui/Textarea";

@@ -4,6 +4,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import React from "react";
+import { IconRefresh, IconSettings, IconPlug } from "@tabler/icons-react";
 import {
   authMe,
   getJiraStatus,
@@ -11,21 +12,28 @@ import {
   createZyraTask,
   listJiraTickets,
   listLinearTickets,
+  listAllTickets,
   listLinkedJiraKeys,
+  listLinkedLinearKeys,
+  getRequirementsSummary,
   syncJiraTickets,
   syncLinearTickets,
   type JiraConnection,
   type LinearConnection,
+  type RequirementsSummary,
+  type TicketSourceStats,
 } from "@/lib/api";
 import { Button, Input, StatusChip } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
 const PAGE_SIZE = 25;
 
-type TicketProvider = "jira" | "linear";
+type Source = "all" | "jira" | "linear";
+type TicketSource = "jira" | "linear";
 
 interface Requirement {
   id: string;
+  source: TicketSource;
   key: string;
   summary: string;
   description: string;
@@ -39,6 +47,14 @@ interface Requirement {
   createdAt: string | null;
   updatedAt: string | null;
 }
+
+const SOURCE_TABS: Array<{ id: Source; label: string; logoBg: string; logoLetter: string }> = [
+  { id: "all", label: "All Sources", logoBg: "#5A4F80", logoLetter: "Σ" },
+  { id: "jira", label: "Jira", logoBg: "#0052CC", logoLetter: "J" },
+  { id: "linear", label: "Linear", logoBg: "#5E6AD2", logoLetter: "L" },
+];
+
+const EMPTY_STATS: TicketSourceStats = { total: 0, covered: 0, uncovered: 0, types: [], statuses: [] };
 
 function jiraStatusTone(status: string): "neutral" | "success" | "warning" | "info" {
   const s = status.toLowerCase();
@@ -80,6 +96,20 @@ function IssueTypeIcon({ type }: { type: string }) {
   );
 }
 
+function SourceBadge({ source }: { source: TicketSource }) {
+  const tab = SOURCE_TABS.find((t) => t.id === source);
+  if (!tab) return null;
+  return (
+    <span
+      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
+      style={{ background: tab.logoBg }}
+      title={tab.label}
+    >
+      {tab.logoLetter}
+    </span>
+  );
+}
+
 function SearchBar({
   value,
   onChange,
@@ -99,7 +129,7 @@ function SearchBar({
       }}
       className="flex items-center gap-2"
     >
-      <div className="relative flex-1">
+      <div className="relative flex-1 max-w-sm">
         <svg
           className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted-soft)]"
           fill="none"
@@ -116,7 +146,7 @@ function SearchBar({
           className="pl-9"
         />
       </div>
-      <Button type="submit" variant="secondary">Search</Button>
+      <Button type="submit" variant="secondary" size="sm">Search</Button>
     </form>
   );
 }
@@ -127,41 +157,83 @@ export default function RequirementsPage() {
   const projectId = params.id as string;
 
   const [loading, setLoading] = useState(true);
-  const [provider, setProvider] = useState<TicketProvider>("jira");
+  const [source, setSource] = useState<Source>("all");
   const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
   const [linearStatus, setLinearStatus] = useState<LinearConnection | null>(null);
+  const [summary, setSummary] = useState<RequirementsSummary | null>(null);
   const [tickets, setTickets] = useState<Requirement[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [coverageFilter, setCoverageFilter] = useState<"" | "covered" | "uncovered">("");
   const [syncing, setSyncing] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [linkedJiraKeys, setLinkedJiraKeys] = useState<Set<string>>(new Set());
   const [jiraKeyCounts, setJiraKeyCounts] = useState<Record<string, number>>({});
+  const [linkedLinearKeys, setLinkedLinearKeys] = useState<Set<string>>(new Set());
+  const [linearKeyCounts, setLinearKeyCounts] = useState<Record<string, number>>({});
   const [syncError, setSyncError] = useState<string | null>(null);
   const [generatingKey, setGeneratingKey] = useState<string | null>(null);
 
-  const connectionStatus = provider === "jira" ? jiraStatus : linearStatus;
+  const jiraConnected = jiraStatus?.connected ?? false;
+  const linearConnected = linearStatus?.connected ?? false;
+  const anyConnected = jiraConnected || linearConnected;
+  const sourceConnected = source === "jira" ? jiraConnected : source === "linear" ? linearConnected : anyConnected;
+  const stats = summary?.[source] ?? EMPTY_STATS;
+  const coveragePct = stats.total ? Math.round((stats.covered / stats.total) * 100) : 0;
+
+  function tcCountFor(req: Requirement): number {
+    return req.source === "jira" ? jiraKeyCounts[req.key] || 0 : linearKeyCounts[req.key] || 0;
+  }
+
+  function isLinked(req: Requirement): boolean {
+    return req.source === "jira" ? linkedJiraKeys.has(req.key) : linkedLinearKeys.has(req.key);
+  }
 
   const loadTickets = useCallback(
-    async (activeProvider: TicketProvider, pageNum: number, query: string) => {
+    async (
+      activeSource: Source,
+      pageNum: number,
+      query: string,
+      filters: { issueType?: string; status?: string; coverage?: "" | "covered" | "uncovered" }
+    ) => {
+      const listParams = {
+        limit: PAGE_SIZE,
+        offset: pageNum * PAGE_SIZE,
+        search: query || undefined,
+        issueType: filters.issueType || undefined,
+        status: filters.status || undefined,
+        coverage: filters.coverage || undefined,
+      };
       try {
-        if (activeProvider === "jira") {
-          const data = await listJiraTickets(projectId, { limit: PAGE_SIZE, offset: pageNum * PAGE_SIZE, search: query || undefined });
+        if (activeSource === "all") {
+          const data = await listAllTickets(projectId, listParams);
           setTickets(
             data.list.map((t) => ({
-              id: t.id, key: t.jiraIssueKey, summary: t.summary, description: t.description,
+              id: t.id, source: t.source, key: t.key, summary: t.summary, description: t.description,
+              issueType: t.issueType, status: t.status, priority: t.priority, assignee: t.assignee,
+              reporter: t.reporter, labels: t.labels, url: t.url, createdAt: t.createdAt, updatedAt: t.updatedAt,
+            }))
+          );
+          setTotal(data.total);
+        } else if (activeSource === "jira") {
+          const data = await listJiraTickets(projectId, listParams);
+          setTickets(
+            data.list.map((t) => ({
+              id: t.id, source: "jira", key: t.jiraIssueKey, summary: t.summary, description: t.description,
               issueType: t.issueType, status: t.status, priority: t.priority, assignee: t.assignee,
               reporter: t.reporter, labels: t.labels, url: t.jiraUrl, createdAt: t.jiraCreatedAt, updatedAt: t.jiraUpdatedAt,
             }))
           );
           setTotal(data.total);
         } else {
-          const data = await listLinearTickets(projectId, { limit: PAGE_SIZE, offset: pageNum * PAGE_SIZE, search: query || undefined });
+          const data = await listLinearTickets(projectId, listParams);
           setTickets(
             data.list.map((t) => ({
-              id: t.id, key: t.linearIssueKey, summary: t.summary, description: t.description,
+              id: t.id, source: "linear", key: t.linearIssueKey, summary: t.summary, description: t.description,
               issueType: t.issueType, status: t.status, priority: t.priority, assignee: t.assignee,
               reporter: t.reporter, labels: t.labels, url: t.linearUrl, createdAt: t.linearCreatedAt, updatedAt: t.linearUpdatedAt,
             }))
@@ -174,6 +246,22 @@ export default function RequirementsPage() {
     },
     [projectId]
   );
+
+  const refreshLinkedKeys = useCallback(async () => {
+    const [jiraKeysRes, linearKeysRes] = await Promise.all([
+      listLinkedJiraKeys(projectId).catch(() => ({ keys: [], counts: {} })),
+      listLinkedLinearKeys(projectId).catch(() => ({ keys: [], counts: {} })),
+    ]);
+    setLinkedJiraKeys(new Set(jiraKeysRes.keys));
+    setJiraKeyCounts(jiraKeysRes.counts ?? {});
+    setLinkedLinearKeys(new Set(linearKeysRes.keys));
+    setLinearKeyCounts(linearKeysRes.counts ?? {});
+  }, [projectId]);
+
+  const refreshSummary = useCallback(async () => {
+    const data = await getRequirementsSummary(projectId).catch(() => null);
+    setSummary(data);
+  }, [projectId]);
 
   useEffect(() => {
     (async () => {
@@ -188,23 +276,24 @@ export default function RequirementsPage() {
       ]);
       setJiraStatus(jStatus);
       setLinearStatus(lStatus);
-      await loadTickets("jira", 0, "");
-      const jiraKeysRes = await listLinkedJiraKeys(projectId).catch(() => ({ keys: [], counts: {} }));
-      setLinkedJiraKeys(new Set(jiraKeysRes.keys));
-      setJiraKeyCounts(jiraKeysRes.counts ?? {});
+      await loadTickets("all", 0, "", {});
+      await Promise.all([refreshLinkedKeys(), refreshSummary()]);
       setLoading(false);
     })();
-  }, [projectId, loadTickets, router]);
+  }, [projectId, loadTickets, refreshLinkedKeys, refreshSummary, router]);
 
   useEffect(() => {
-    if (!loading) loadTickets(provider, page, search);
-  }, [provider, page, search, loadTickets, loading]);
+    if (!loading) loadTickets(source, page, search, { issueType: typeFilter, status: statusFilter, coverage: coverageFilter });
+  }, [source, page, search, typeFilter, statusFilter, coverageFilter, loadTickets, loading]);
 
-  function handleProviderChange(next: TicketProvider) {
-    setProvider(next);
+  function handleSourceChange(next: Source) {
+    setSource(next);
     setPage(0);
     setSearch("");
     setSearchInput("");
+    setTypeFilter("");
+    setStatusFilter("");
+    setCoverageFilter("");
     setExpandedId(null);
   }
 
@@ -212,11 +301,14 @@ export default function RequirementsPage() {
     setSyncing(true);
     setSyncError(null);
     try {
-      if (provider === "jira") await syncJiraTickets(projectId);
-      else await syncLinearTickets(projectId);
-      await loadTickets(provider, page, search);
+      const jobs: Promise<unknown>[] = [];
+      if (source === "jira" || (source === "all" && jiraConnected)) jobs.push(syncJiraTickets(projectId));
+      if (source === "linear" || (source === "all" && linearConnected)) jobs.push(syncLinearTickets(projectId));
+      await Promise.all(jobs);
+      await loadTickets(source, page, search, { issueType: typeFilter, status: statusFilter, coverage: coverageFilter });
+      await refreshSummary();
     } catch (err) {
-      setSyncError(err instanceof Error ? err.message : `Failed to sync ${provider === "jira" ? "Jira" : "Linear"} tickets.`);
+      setSyncError(err instanceof Error ? err.message : "Failed to sync tickets.");
     } finally {
       setSyncing(false);
     }
@@ -226,20 +318,22 @@ export default function RequirementsPage() {
     setGeneratingKey(ticket.key);
     setSyncError(null);
     try {
-      const existingCount = jiraKeyCounts[ticket.key] || 0;
+      const existingCount = tcCountFor(ticket);
+      const providerLabel = ticket.source === "jira" ? "Jira" : "Linear";
       const story = `${ticket.key}: ${ticket.summary}`;
       const context = [
         ticket.description,
         ticket.status ? `Status: ${ticket.status}` : "",
         ticket.priority ? `Priority: ${ticket.priority}` : "",
         mode === "regenerate"
-          ? `Regenerate testcase coverage for ${ticket.key}. Update existing linked testcases where coverage overlaps, and add new testcases for new or changed Jira requirements. Mark regenerated cases clearly with Zyra/Jira tags. Existing linked testcase count: ${existingCount}.`
-          : `Generate testcase coverage for ${ticket.key}. Mark generated cases clearly with Zyra/Jira tags.`
+          ? `Regenerate testcase coverage for ${ticket.key}. Update existing linked testcases where coverage overlaps, and add new testcases for new or changed ${providerLabel} requirements. Mark regenerated cases clearly with Zyra/${providerLabel} tags. Existing linked testcase count: ${existingCount}.`
+          : `Generate testcase coverage for ${ticket.key}. Mark generated cases clearly with Zyra/${providerLabel} tags.`
       ].filter(Boolean).join("\n\n");
       await createZyraTask(projectId, {
         story,
         context,
-        jiraIssueKeys: [ticket.key],
+        jiraIssueKeys: ticket.source === "jira" ? [ticket.key] : undefined,
+        linearIssueKeys: ticket.source === "linear" ? [ticket.key] : undefined,
       });
       router.push(`/projects/${projectId}/agents/tasks`);
     } catch (err) {
@@ -264,28 +358,81 @@ export default function RequirementsPage() {
       header={
         <PageHeader
           title="Requirements"
-          subtitle="Requirements to be developed, synced from Jira (and future integrations) and turned into test coverage with Zyra. Full documents live in the Knowledge base's Requirements folder."
+          subtitle="Requirements to be developed, synced from Jira and Linear, and turned into test coverage with Zyra. Full documents live in the Knowledge base's Requirements folder."
+          actions={
+            <Link
+              href={`/projects/${projectId}/settings?tab=integrations`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
+            >
+              <IconSettings size={15} stroke={1.75} />
+              Manage integrations
+            </Link>
+          }
         />
       }
     >
-      <div className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1">
-        {(["jira", "linear"] as TicketProvider[]).map((p) => (
-          <button
-            key={p}
-            type="button"
-            onClick={() => handleProviderChange(p)}
-            className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-              provider === p
-                ? "bg-[var(--brand-primary)] text-white"
-                : "text-[var(--muted)] hover:bg-[var(--surface-secondary)]"
-            }`}
-          >
-            {p === "jira" ? "Jira" : "Linear"}
-          </button>
-        ))}
+      {/* Source tabs + coverage stat strip */}
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1">
+          {SOURCE_TABS.map((tab) => {
+            const count = summary?.[tab.id]?.total ?? 0;
+            const active = source === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => handleSourceChange(tab.id)}
+                className={`inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                  active
+                    ? "bg-[var(--brand-primary)] text-white"
+                    : "text-[var(--muted)] hover:bg-[var(--surface-secondary)]"
+                }`}
+              >
+                <span
+                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
+                  style={{ background: tab.logoBg }}
+                >
+                  {tab.logoLetter}
+                </span>
+                {tab.label}
+                <span
+                  className={`rounded-full px-1.5 py-0.5 text-[11px] font-mono ${
+                    active ? "bg-white/20" : "bg-[var(--surface-tertiary)] text-[var(--muted)]"
+                  }`}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
+            <div className="text-base font-semibold text-[var(--foreground)]">{stats.total}</div>
+            <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
+          </div>
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
+            <div className="text-base font-semibold text-[var(--success-foreground)]">{stats.covered}</div>
+            <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Covered</div>
+          </div>
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
+            <div className="text-base font-semibold text-[var(--warning-foreground)]">{stats.uncovered}</div>
+            <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Uncovered</div>
+          </div>
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 min-w-[120px]">
+            <div className="mb-1.5 flex items-baseline justify-between gap-2">
+              <span className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Coverage</span>
+              <span className="text-sm font-semibold text-[var(--foreground)]">{coveragePct}%</span>
+            </div>
+            <div className="h-1 rounded-full bg-[var(--surface-tertiary)] overflow-hidden">
+              <div className="h-full rounded-full bg-[var(--success)] transition-[width]" style={{ width: `${coveragePct}%` }} />
+            </div>
+          </div>
+        </div>
       </div>
 
-      {connectionStatus?.connected && (
+      {sourceConnected && (
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button
@@ -293,17 +440,17 @@ export default function RequirementsPage() {
               disabled={syncing}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--surface-tertiary)] text-[var(--foreground)] px-3 py-1.5 text-sm font-medium hover:bg-[var(--surface-tertiary)] disabled:opacity-50 transition-colors"
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-              {syncing ? "Syncing…" : `Sync ${provider === "jira" ? "Jira" : "Linear"}`}
+              <IconRefresh size={15} stroke={1.75} />
+              {syncing ? "Syncing…" : `Sync ${source === "all" ? "all sources" : source === "jira" ? "Jira" : "Linear"}`}
             </button>
-            <Link
-              href={`/projects/${projectId}/settings/integrations/${provider}`}
-              className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
-            >
-              Manage
-            </Link>
+            {source !== "all" && (
+              <Link
+                href={`/projects/${projectId}/settings/integrations/${source}`}
+                className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
+              >
+                Manage
+              </Link>
+            )}
             <Link
               href={`/projects/${projectId}/knowledge-base`}
               className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
@@ -326,18 +473,16 @@ export default function RequirementsPage() {
         </div>
       )}
 
-      {!connectionStatus?.connected && tickets.length === 0 && (
+      {!sourceConnected && tickets.length === 0 && (
         <div className="rounded-xl border border-dashed border-[var(--border)] p-12 text-center">
           <div className="mx-auto w-14 h-14 rounded-full bg-[var(--brand-soft)] flex items-center justify-center">
-            <svg viewBox="0 0 24 24" className="w-7 h-7 text-[var(--brand-primary)]" fill="currentColor">
-              <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53ZM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77ZM2 11.6c0 2.4 1.95 4.34 4.35 4.35h1.78v1.71c0 2.4 1.95 4.35 4.35 4.35V12.44a.84.84 0 0 0-.84-.84H2Z" />
-            </svg>
+            <IconPlug size={26} stroke={1.75} className="text-[var(--brand-primary)]" />
           </div>
           <h2 className="mt-4 text-lg font-semibold text-[var(--foreground)]">
-            Connect {provider === "jira" ? "Jira" : "Linear"} to Get Started
+            Connect {source === "all" ? "Jira or Linear" : source === "jira" ? "Jira" : "Linear"} to Get Started
           </h2>
           <p className="mt-2 text-sm text-[var(--muted)] max-w-sm mx-auto">
-            Link your {provider === "jira" ? "Jira" : "Linear"} account to automatically import tickets as requirements and use them as context for generating test cases.
+            Link your {source === "all" ? "Jira or Linear" : source === "jira" ? "Jira" : "Linear"} account to automatically import tickets as requirements and use them as context for generating test cases.
           </p>
           <Link
             href={`/projects/${projectId}/settings?tab=integrations`}
@@ -349,11 +494,11 @@ export default function RequirementsPage() {
         </div>
       )}
 
-      {connectionStatus?.connected && tickets.length === 0 && !search && (
+      {sourceConnected && tickets.length === 0 && !search && !typeFilter && !statusFilter && !coverageFilter && (
         <div className="rounded-xl border border-dashed border-[var(--border)] p-12 text-center">
           <h2 className="text-lg font-semibold text-[var(--foreground)]">No Requirements Synced Yet</h2>
           <p className="mt-2 text-sm text-[var(--muted)] max-w-sm mx-auto">
-            Click &quot;Sync {provider === "jira" ? "Jira" : "Linear"}&quot; to pull tickets from your connected projects.
+            Click &quot;Sync&quot; to pull tickets from your connected projects.
           </p>
           <div className="mt-4 flex items-center justify-center gap-3">
             <button
@@ -361,45 +506,77 @@ export default function RequirementsPage() {
               disabled={syncing}
               className="rounded-lg bg-[var(--brand-primary)] text-white px-5 py-2 text-sm font-medium hover:bg-[var(--brand-hover)] disabled:opacity-50 transition-colors"
             >
-              {syncing ? "Syncing…" : `Sync ${provider === "jira" ? "Jira" : "Linear"} Tickets`}
+              {syncing ? "Syncing…" : "Sync Tickets"}
             </button>
-            <Link
-              href={`/projects/${projectId}/settings/integrations/${provider}`}
-              className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
-            >
-              Manage {provider === "jira" ? "Jira Projects" : "Linear Teams"}
-            </Link>
+            {source !== "all" && (
+              <Link
+                href={`/projects/${projectId}/settings/integrations/${source}`}
+                className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
+              >
+                Manage {source === "jira" ? "Jira Projects" : "Linear Teams"}
+              </Link>
+            )}
           </div>
         </div>
       )}
 
-      {(tickets.length > 0 || search) && (
+      {(tickets.length > 0 || search || typeFilter || statusFilter || coverageFilter) && (
         <>
-          <SearchBar
-            value={searchInput}
-            onChange={setSearchInput}
-            onSearch={() => {
-              setPage(0);
-              setSearch(searchInput);
-            }}
-            placeholder="Search requirements by key or summary…"
-          />
-
-          {search && (
-            <div className="text-sm text-[var(--muted)]">
-              Showing results for &quot;{search}&quot;
+          <div className="flex flex-wrap items-center gap-2">
+            <SearchBar
+              value={searchInput}
+              onChange={setSearchInput}
+              onSearch={() => {
+                setPage(0);
+                setSearch(searchInput);
+              }}
+              placeholder="Search by key or summary…"
+            />
+            <select
+              value={typeFilter}
+              onChange={(e) => { setPage(0); setTypeFilter(e.target.value); }}
+              className="h-9 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[13px] text-[var(--foreground)] outline-none"
+            >
+              <option value="">All types</option>
+              {stats.types.map((t) => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+            <select
+              value={statusFilter}
+              onChange={(e) => { setPage(0); setStatusFilter(e.target.value); }}
+              className="h-9 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[13px] text-[var(--foreground)] outline-none"
+            >
+              <option value="">All statuses</option>
+              {stats.statuses.map((s) => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+            <select
+              value={coverageFilter}
+              onChange={(e) => { setPage(0); setCoverageFilter(e.target.value as "" | "covered" | "uncovered"); }}
+              className="h-9 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[13px] text-[var(--foreground)] outline-none"
+            >
+              <option value="">Coverage: All</option>
+              <option value="covered">Covered</option>
+              <option value="uncovered">Uncovered</option>
+            </select>
+            {(search || typeFilter || statusFilter || coverageFilter) && (
               <button
                 onClick={() => {
                   setSearch("");
                   setSearchInput("");
+                  setTypeFilter("");
+                  setStatusFilter("");
+                  setCoverageFilter("");
                   setPage(0);
                 }}
-                className="ml-2 text-[var(--brand-primary)] hover:underline"
+                className="text-sm text-[var(--brand-primary)] hover:underline"
               >
-                Clear
+                Clear filters
               </button>
-            </div>
-          )}
+            )}
+          </div>
 
           <div className="flex items-center justify-between text-sm text-[var(--muted)]">
             <span>
@@ -411,8 +588,8 @@ export default function RequirementsPage() {
             </span>
           </div>
 
-          <div className="rounded-xl border border-[var(--border)] overflow-hidden">
-            <table className="w-full text-sm">
+          <div className="rounded-xl border border-[var(--border)] overflow-x-auto">
+            <table className="w-full text-sm" style={{ minWidth: 900 }}>
               <thead>
                 <tr className="bg-[var(--surface-secondary)] border-b border-[var(--border)]">
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-28">Key</th>
@@ -421,131 +598,151 @@ export default function RequirementsPage() {
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-28">Status</th>
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-20">Priority</th>
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-32">Assignee</th>
-                  <th className="text-right px-4 py-2.5 font-medium text-[var(--muted-soft)] w-52">Action</th>
+                  <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-24">Coverage</th>
+                  <th className="text-right px-4 py-2.5 font-medium text-[var(--muted-soft)] w-64">Action</th>
                 </tr>
               </thead>
               <tbody>
-                {tickets.map((ticket) => (
-                  <React.Fragment key={ticket.id}>
-                    <tr
-                      onClick={() => setExpandedId(expandedId === ticket.id ? null : ticket.id)}
-                      className="border-b border-[var(--border-subtle)] hover:bg-[var(--surface-secondary)]/30 cursor-pointer transition-colors"
-                    >
-                      <td className="px-4 py-2.5">
-                        <a
-                          href={ticket.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="font-mono text-xs text-[var(--brand-primary)] hover:underline"
-                        >
-                          {ticket.key}
-                        </a>
-                      </td>
-                      <td className="px-4 py-2.5 text-[var(--foreground)] truncate max-w-xs">
-                        {ticket.summary}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <IssueTypeIcon type={ticket.issueType} />
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <StatusChip tone={jiraStatusTone(ticket.status)}>{ticket.status}</StatusChip>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <PriorityIcon priority={ticket.priority} />
-                      </td>
-                      <td className="px-4 py-2.5 text-[var(--muted-soft)] text-xs truncate">
-                        {ticket.assignee || "Unassigned"}
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        <div className="inline-flex items-center gap-2">
-                          {linkedJiraKeys.has(ticket.key) && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                              </svg>
-                              {jiraKeyCounts[ticket.key] || 0} saved
-                            </span>
-                          )}
-                          {linkedJiraKeys.has(ticket.key) ? (
-                            <>
-                              <Link
-                                href={`/projects/${projectId}/testcases?jiraIssueKey=${encodeURIComponent(ticket.key)}`}
-                                onClick={(e) => e.stopPropagation()}
-                                className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-xs font-semibold text-[var(--foreground)] shadow-sm hover:bg-[var(--surface-secondary)]"
-                              >
-                                View testcases
-                              </Link>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  void handleGenerateFromTicket(ticket, "regenerate");
-                                }}
-                                disabled={generatingKey === ticket.key}
-                                className="rounded-lg bg-[var(--brand-primary)] px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[var(--brand-hover)] disabled:opacity-50"
-                              >
-                                {generatingKey === ticket.key ? "Assigning..." : "Regenerate with Zyra"}
-                              </button>
-                            </>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void handleGenerateFromTicket(ticket, "generate");
-                              }}
-                              disabled={generatingKey === ticket.key}
-                              className="rounded-lg bg-[var(--brand-primary)] px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[var(--brand-hover)] disabled:opacity-50"
-                            >
-                              {generatingKey === ticket.key ? "Assigning..." : "Assign to Zyra"}
-                            </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                    {expandedId === ticket.id && (
-                      <tr key={`${ticket.id}-detail`} className="bg-[var(--surface-secondary)]/20">
-                        <td colSpan={7} className="px-4 py-4">
-                          <div className="space-y-3">
-                            {ticket.description && (
-                              <div>
-                                <h4 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wide mb-1">
-                                  Description
-                                </h4>
-                                <p className="text-sm text-[var(--muted)] whitespace-pre-wrap max-h-48 overflow-y-auto">
-                                  {ticket.description}
-                                </p>
-                              </div>
-                            )}
-                            <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-[var(--muted)]">
-                              {ticket.reporter && (
-                                <span>Reporter: <span className="text-[var(--muted)]">{ticket.reporter}</span></span>
-                              )}
-                              {ticket.labels && (
-                                <span>Labels: <span className="text-[var(--muted)]">{ticket.labels}</span></span>
-                              )}
-                              {ticket.createdAt && (
-                                <span>Created: <span className="text-[var(--muted)]">{new Date(ticket.createdAt).toLocaleDateString()}</span></span>
-                              )}
-                              {ticket.updatedAt && (
-                                <span>Updated: <span className="text-[var(--muted)]">{new Date(ticket.updatedAt).toLocaleDateString()}</span></span>
-                              )}
-                            </div>
+                {tickets.map((ticket) => {
+                  const linked = isLinked(ticket);
+                  const tcCount = tcCountFor(ticket);
+                  return (
+                    <React.Fragment key={ticket.id}>
+                      <tr
+                        onClick={() => setExpandedId(expandedId === ticket.id ? null : ticket.id)}
+                        className="border-b border-[var(--border-subtle)] hover:bg-[var(--surface-secondary)]/30 cursor-pointer transition-colors"
+                      >
+                        <td className="px-4 py-2.5">
+                          <div className="flex items-center gap-1.5">
+                            {source === "all" && <SourceBadge source={ticket.source} />}
                             <a
                               href={ticket.url}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-block text-xs text-[var(--brand-primary)] hover:underline"
+                              onClick={(e) => e.stopPropagation()}
+                              className="font-mono text-xs text-[var(--brand-primary)] hover:underline"
                             >
-                              Open in {provider === "jira" ? "Jira" : "Linear"} →
+                              {ticket.key}
                             </a>
                           </div>
                         </td>
+                        <td className="px-4 py-2.5 text-[var(--foreground)] truncate max-w-xs">
+                          {ticket.summary}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <IssueTypeIcon type={ticket.issueType} />
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <StatusChip tone={jiraStatusTone(ticket.status)}>{ticket.status}</StatusChip>
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <PriorityIcon priority={ticket.priority} />
+                        </td>
+                        <td className="px-4 py-2.5 text-[var(--muted-soft)] text-xs truncate">
+                          {ticket.assignee || "Unassigned"}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          {tcCount > 0 ? (
+                            <div className="flex items-center gap-1.5">
+                              <div className="w-8 h-1 rounded-full bg-[var(--surface-tertiary)] overflow-hidden">
+                                <div className="h-full w-full rounded-full bg-[var(--success)]" />
+                              </div>
+                              <span className="text-[11px] font-mono font-medium text-[var(--success-foreground)]">{tcCount} TC</span>
+                            </div>
+                          ) : (
+                            <span className="text-[11px] text-[var(--muted-soft)]">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5 text-right">
+                          <div className="inline-flex items-center gap-2">
+                            {linked && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
+                                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                {tcCount} saved
+                              </span>
+                            )}
+                            {linked ? (
+                              <>
+                                <Link
+                                  href={`/projects/${projectId}/testcases?${ticket.source === "jira" ? "jiraIssueKey" : "linearIssueKey"}=${encodeURIComponent(ticket.key)}`}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1 text-xs font-semibold text-[var(--foreground)] shadow-sm hover:bg-[var(--surface-secondary)]"
+                                >
+                                  View testcases
+                                </Link>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleGenerateFromTicket(ticket, "regenerate");
+                                  }}
+                                  disabled={generatingKey === ticket.key}
+                                  className="rounded-lg bg-[var(--brand-primary)] px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[var(--brand-hover)] disabled:opacity-50"
+                                >
+                                  {generatingKey === ticket.key ? "Assigning..." : "Regenerate with Zyra"}
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleGenerateFromTicket(ticket, "generate");
+                                }}
+                                disabled={generatingKey === ticket.key}
+                                className="rounded-lg bg-[var(--brand-primary)] px-2.5 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[var(--brand-hover)] disabled:opacity-50"
+                              >
+                                {generatingKey === ticket.key ? "Assigning..." : "Assign to Zyra"}
+                              </button>
+                            )}
+                          </div>
+                        </td>
                       </tr>
-                    )}
-                  </React.Fragment>
-                ))}
+                      {expandedId === ticket.id && (
+                        <tr key={`${ticket.id}-detail`} className="bg-[var(--surface-secondary)]/20">
+                          <td colSpan={8} className="px-4 py-4">
+                            <div className="space-y-3">
+                              {ticket.description && (
+                                <div>
+                                  <h4 className="text-xs font-semibold text-[var(--muted)] uppercase tracking-wide mb-1">
+                                    Description
+                                  </h4>
+                                  <p className="text-sm text-[var(--muted)] whitespace-pre-wrap max-h-48 overflow-y-auto">
+                                    {ticket.description}
+                                  </p>
+                                </div>
+                              )}
+                              <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-[var(--muted)]">
+                                {ticket.reporter && (
+                                  <span>Reporter: <span className="text-[var(--muted)]">{ticket.reporter}</span></span>
+                                )}
+                                {ticket.labels && (
+                                  <span>Labels: <span className="text-[var(--muted)]">{ticket.labels}</span></span>
+                                )}
+                                {ticket.createdAt && (
+                                  <span>Created: <span className="text-[var(--muted)]">{new Date(ticket.createdAt).toLocaleDateString()}</span></span>
+                                )}
+                                {ticket.updatedAt && (
+                                  <span>Updated: <span className="text-[var(--muted)]">{new Date(ticket.updatedAt).toLocaleDateString()}</span></span>
+                                )}
+                              </div>
+                              <a
+                                href={ticket.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-block text-xs text-[var(--brand-primary)] hover:underline"
+                              >
+                                Open in {ticket.source === "jira" ? "Jira" : "Linear"} →
+                              </a>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -559,8 +756,8 @@ export default function RequirementsPage() {
               >
                 Previous
               </button>
-              <span className="text-sm text-[var(--muted)]">
-                {page + 1} / {totalPages}
+              <span className="rounded-lg bg-[var(--brand-primary)] px-3 py-1.5 text-sm font-mono font-medium text-white">
+                {page + 1}
               </span>
               <button
                 onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}

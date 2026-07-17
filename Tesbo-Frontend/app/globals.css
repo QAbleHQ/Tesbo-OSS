@@ -358,11 +358,40 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   animation: tesbo-slide-in-right 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
 }
 
+/* ── Auth branding-panel decorations (login/signup split shell) ───── */
+@keyframes tesbo-auth-orb-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(30px, -20px) scale(1.1); }
+}
+@keyframes tesbo-auth-orb-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-20px, 30px) scale(0.9); }
+}
+@keyframes tesbo-auth-fade-slide {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.auth-orb-1 { animation: tesbo-auth-orb-1 8s ease-in-out infinite; }
+.auth-orb-2 { animation: tesbo-auth-orb-2 10s ease-in-out infinite; }
+.auth-fade-slide { animation: tesbo-auth-fade-slide 0.3s ease both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-orb-1, .auth-orb-2, .auth-fade-slide { animation: none; }
+}
+
 /* Full-bleed override: a page whose root carries `.tc-fullbleed` fills the whole
    content region (no centered 1280px column, no wrapper padding) — used by the
    test-case repository's edge-to-edge IDE workspace. Scoped via :has() so every
    other route keeps the default centered page. */
 .tesbo-page:has(> .tc-fullbleed) {
+  max-width: none;
+  padding: 0;
+}
+
+/* Same escape hatch as .tc-fullbleed above, for pages that still want their own
+   padding (not edge-to-edge) but need to fill the full content width instead of
+   the centered 1280px column — e.g. the Test Run Detail screen's stat/table layout. */
+.tesbo-page:has(> .tr-detail-fullwidth) {
   max-width: none;
   padding: 0;
 }
@@ -826,7 +855,7 @@ textarea:focus-visible {
   color: var(--foreground);
 }
 
-.zyra-md-table-wrap { overflow-x: auto; margin: 0.6rem 0; border-radius: 8px; border: 1px solid var(--border); }
+.zyra-md-table-wrap { overflow-x: auto; margin: 0.6rem 0; border-radius: 8px; border: 1px solid var(--border-strong); }
 .zyra-md-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
 .zyra-md-table th {
   text-align: left;
@@ -837,17 +866,17 @@ textarea:focus-visible {
   color: var(--muted);
   background: var(--surface-secondary);
   padding: 0.4rem 0.75rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
 }
 .zyra-md-table td {
   padding: 0.375rem 0.75rem;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-strong);
   color: var(--foreground);
   vertical-align: top;
 }
 .zyra-md-table tbody tr:last-child td { border-bottom: none; }
-.zyra-md-table tbody tr:hover { background: var(--surface-secondary); }
+.zyra-md-table tbody tr:hover { background: var(--surface-tertiary); }
 
 /* Knowledge Base rich text editor (TipTap) */
 .tiptap-editor { outline: none; }

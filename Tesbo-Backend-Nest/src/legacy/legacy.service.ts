@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as XLSX from "xlsx";
+import archiver from "archiver";
 import pdfParse from "pdf-parse";
 import * as mammoth from "mammoth";
 import { createWorker } from "tesseract.js";
@@ -61,6 +62,7 @@ type ZyraGenerationInput = {
   feedback: string;
   knowledge: Array<{ title: string; content: string }>;
   jira: Array<{ key: string; summary: string; description: string }>;
+  linear: Array<{ key: string; summary: string; description: string }>;
   existingTestcases: Array<{ externalId: string; title: string; description: string; priority: string; status: string; stepsSummary: string }>;
   requestedCount: number;
   testcaseRange?: string; // "minimum" | "1-10" | "10-30" | "all"
@@ -170,6 +172,13 @@ function normalizeJsonArray(value: unknown): any[] {
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Strips path separators/control characters from a folder or document/file name so it's safe
+// to use as a zip entry path segment (used only by exportKnowledgeFolder).
+function sanitizeZipEntryName(value: string): string {
+  const cleaned = value.replace(/[/\\]+/g, "-").replace(/[\x00-\x1f]/g, "").trim();
+  return cleaned || "Untitled";
 }
 
 function escapeJql(value: string): string {
@@ -1034,6 +1043,7 @@ export class LegacyService implements OnModuleInit {
 
   async createAiKey(userId: string | null | undefined, body: Body) {
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     const name = String(body.name || "").trim();
     const apiKey = String(body.apiKey || "").trim();
     const provider = String(body.provider || "openai").trim().toLowerCase();
@@ -1068,6 +1078,7 @@ export class LegacyService implements OnModuleInit {
 
   async deleteAiKey(userId: string | null | undefined, keyId: string) {
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     await this.db.query("DELETE FROM workspace_ai_keys WHERE id = $1 AND organization_id = $2", [keyId, workspace.id]);
     return { ok: true };
   }
@@ -1076,6 +1087,7 @@ export class LegacyService implements OnModuleInit {
     const projectId = String(body.projectId || "");
     if (!projectId) throw new BadRequestException({ error: "projectId is required" });
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     const project = await this.db.query("SELECT id FROM projects WHERE id = $1 AND organization_id = $2", [projectId, workspace.id]);
     if (!project.rows[0]) throw new NotFoundException({ error: "Project not found" });
     const keyId = body.workspaceAiKeyId || null;
@@ -1258,7 +1270,8 @@ export class LegacyService implements OnModuleInit {
       ["priority", "priority"],
       ["type", "type"],
       ["automationStatus", "automation_status"],
-      ["jiraIssueKey", "jira_issue_key"]
+      ["jiraIssueKey", "jira_issue_key"],
+      ["linearIssueKey", "linear_issue_key"]
     ] as const) {
       if (query[param]) {
         values.push(query[param]);
@@ -1274,7 +1287,7 @@ export class LegacyService implements OnModuleInit {
     values.push(limit, offset);
     const res = await this.db.query(
       `SELECT id, external_id, title, priority, type, automation_status, automation_tags, status,
-              suite_id, owner_id, updated_at, jira_issue_key, jira_url
+              suite_id, owner_id, updated_at, jira_issue_key, jira_url, linear_issue_key, linear_url
        FROM testcases WHERE ${where}
        ORDER BY updated_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values
@@ -1336,8 +1349,9 @@ export class LegacyService implements OnModuleInit {
       `INSERT INTO testcases
        (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
         priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
-        automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url, created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$24)
+        automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
+        linear_issue_key, linear_url, attachments, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
        RETURNING *`,
       [
         projectId,
@@ -1363,6 +1377,9 @@ export class LegacyService implements OnModuleInit {
         body.status || "Draft",
         body.jiraIssueKey || null,
         body.jiraUrl || null,
+        body.linearIssueKey || null,
+        body.linearUrl || null,
+        body.attachments || null,
         uid
       ]
     );
@@ -1385,7 +1402,8 @@ export class LegacyService implements OnModuleInit {
        automation_test_name=COALESCE($15,automation_test_name), automation_framework=COALESCE($16,automation_framework),
        automation_tags=COALESCE($17,automation_tags), owner_id=$18, component=COALESCE($19,component),
        status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url),
-       updated_by=$23, updated_at=now()
+       linear_issue_key=COALESCE($23,linear_issue_key), linear_url=COALESCE($24,linear_url),
+       attachments=COALESCE($25,attachments), updated_by=$26, updated_at=now()
        WHERE id=$1 AND deleted_at IS NULL
        RETURNING *`,
       [
@@ -1411,6 +1429,9 @@ export class LegacyService implements OnModuleInit {
         body.status ?? null,
         body.jiraIssueKey ?? null,
         body.jiraUrl ?? null,
+        body.linearIssueKey ?? null,
+        body.linearUrl ?? null,
+        body.attachments ?? null,
         uid
       ]
     );
@@ -1467,6 +1488,15 @@ export class LegacyService implements OnModuleInit {
     );
     const keys = res.rows.map((r) => r.jira_issue_key);
     return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.jira_issue_key, r.count])) };
+  }
+
+  async linkedLinearKeys(projectId: string) {
+    const res = await this.db.query(
+      "SELECT linear_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND linear_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY linear_issue_key",
+      [projectId]
+    );
+    const keys = res.rows.map((r) => r.linear_issue_key);
+    return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.linear_issue_key, r.count])) };
   }
 
   async listPlans(projectId: string) {
@@ -1875,8 +1905,8 @@ export class LegacyService implements OnModuleInit {
 
     const bugId = await this.db.transaction(async (client) => {
       const res = await client.query(
-        `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, reported_by, integration_provider, integration_issue_key, betterbugs_url)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, severity, reported_by, integration_provider, integration_issue_key, betterbugs_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
         [
           projectId,
           links[0]?.executionId || null,
@@ -1886,6 +1916,7 @@ export class LegacyService implements OnModuleInit {
           body.description || "",
           body.externalUrl || null,
           body.status || "Open",
+          body.severity || "Medium",
           userId || null,
           body.integrationProvider || null,
           body.integrationIssueKey || null,
@@ -1909,14 +1940,15 @@ export class LegacyService implements OnModuleInit {
   async updateBug(bugId: string, body: Body) {
     await this.db.query(
       `UPDATE bugs SET title=COALESCE($2,title), description=COALESCE($3,description), external_url=COALESCE($4,external_url),
-       status=COALESCE($5,status), integration_provider=COALESCE($6,integration_provider), integration_issue_key=COALESCE($7,integration_issue_key),
-       betterbugs_url=COALESCE($8,betterbugs_url), updated_at=now() WHERE id=$1`,
+       status=COALESCE($5,status), severity=COALESCE($6,severity), integration_provider=COALESCE($7,integration_provider), integration_issue_key=COALESCE($8,integration_issue_key),
+       betterbugs_url=COALESCE($9,betterbugs_url), updated_at=now() WHERE id=$1`,
       [
         bugId,
         body.title || null,
         body.description || null,
         body.externalUrl || null,
         body.status || null,
+        body.severity || null,
         body.integrationProvider || null,
         body.integrationIssueKey || null,
         body.betterbugsUrl || null
@@ -2484,112 +2516,96 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
+  async projectDashboardSummary(projectId: string) {
+    const [counts, requirements, bugSeverity, activeRuns, addedThisWeek, passRateWindows] = await Promise.all([
+      this.analytics(projectId),
+      this.requirementsSummary(projectId),
+      this.db.query<{ severity: string; count: string }>(
+        `SELECT severity, COUNT(*)::int AS count FROM bugs WHERE project_id = $1 AND status IN ('Open', 'Reopened') GROUP BY severity`,
+        [projectId]
+      ),
+      this.db.query<{ count: string }>(`SELECT COUNT(*)::int AS count FROM cycles WHERE project_id = $1 AND status = 'In Progress'`, [projectId]),
+      this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::int AS count FROM testcases_active WHERE project_id = $1 AND created_at >= now() - interval '7 days'`,
+        [projectId]
+      ),
+      // Compares the pass rate of executions recorded in the last 7 days against the 7 days
+      // before that, so the dashboard's "+N% this week" badge reflects real execution activity
+      // rather than an all-time trend.
+      this.db.query<{ passed_recent: string; executed_recent: string; passed_prior: string; executed_prior: string }>(
+        `SELECT
+           COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '7 days')::int AS passed_recent,
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '7 days')::int AS executed_recent,
+           COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS passed_prior,
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS executed_prior
+         FROM executions e
+         JOIN cycle_items ci ON ci.id = e.cycle_item_id
+         JOIN cycles c ON c.id = ci.cycle_id
+         WHERE c.project_id = $1`,
+        [projectId]
+      )
+    ]);
+
+    const bySeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 } as Record<string, number>;
+    for (const row of bugSeverity.rows) {
+      if (row.severity in bySeverity) bySeverity[row.severity] = Number(row.count);
+    }
+    const openBugsTotal = Object.values(bySeverity).reduce((a, b) => a + b, 0);
+
+    const untested = counts.executionStatus.Untested || 0;
+    const executed = counts.executionTotal - untested;
+    const passRateValue = executed > 0 ? Math.round(((counts.executionStatus.Passed || 0) / executed) * 100) : null;
+
+    const w = passRateWindows.rows[0];
+    const recentExecuted = Number(w?.executed_recent || 0);
+    const priorExecuted = Number(w?.executed_prior || 0);
+    const recentRate = recentExecuted > 0 ? (Number(w!.passed_recent) / recentExecuted) * 100 : null;
+    const priorRate = priorExecuted > 0 ? (Number(w!.passed_prior) / priorExecuted) * 100 : null;
+    const passRateDeltaThisWeek = recentRate !== null && priorRate !== null ? Math.round(recentRate - priorRate) : null;
+
+    const totalRequirements = requirements.all.total;
+    const coveredRequirements = requirements.all.covered;
+    const coveragePct = totalRequirements > 0 ? Math.round((coveredRequirements / totalRequirements) * 100) : null;
+
+    return {
+      testCases: { total: counts.testCaseCount, addedThisWeek: Number(addedThisWeek.rows[0]?.count || 0) },
+      passRate: { value: passRateValue, deltaThisWeek: passRateDeltaThisWeek },
+      openBugs: { total: openBugsTotal, bySeverity },
+      coverage: { pct: coveragePct, totalRequirements },
+      plans: counts.planCount,
+      suites: counts.suiteCount,
+      activeRuns: Number(activeRuns.rows[0]?.count || 0)
+    };
+  }
+
   async listActivity(projectId: string, query: Body) {
     const limit = Math.min(Math.max(Number(query.limit || 30), 1), 100);
     const offset = Math.max(Number(query.offset || 0), 0);
     const entityType = String(query.entityType || "").trim();
+    const actorId = String(query.actorId || "").trim();
+    const search = String(query.search || "").trim();
+    const since = String(query.since || "").trim();
     const values: any[] = [projectId];
     const filters = ["project_id = $1"];
     if (entityType) {
-      values.push(entityType);
-      filters.push(`entity_type = $${values.length}`);
+      values.push(entityType.split(",").map((t) => t.trim()).filter(Boolean));
+      filters.push(`entity_type = ANY($${values.length}::text[])`);
+    }
+    if (actorId) {
+      values.push(actorId);
+      filters.push(`actor_id = $${values.length}`);
+    }
+    if (since) {
+      values.push(since);
+      filters.push(`created_at >= $${values.length}::timestamptz`);
+    }
+    if (search) {
+      values.push(`%${search.toLowerCase()}%`);
+      filters.push(`(lower(coalesce(entity_name,'')) LIKE $${values.length} OR lower(coalesce(actor_name,'')) LIKE $${values.length} OR lower(action) LIKE $${values.length})`);
     }
     const where = filters.join(" AND ");
 
-    const eventsSql = `
-      WITH activity_events AS (
-        SELECT
-          project_id,
-          ('testcase-created-' || id::text) AS id,
-          NULL::uuid AS actor_id,
-          NULL::text AS actor_email,
-          NULL::text AS actor_name,
-          'created'::text AS action,
-          'testcase'::text AS entity_type,
-          id::text AS entity_id,
-          COALESCE(external_id || ' - ' || title, title) AS entity_name,
-          NULL::text AS diff,
-          created_at
-        FROM testcases
-        WHERE project_id = $1 AND deleted_at IS NULL
-
-        UNION ALL
-        SELECT
-          project_id, ('testcase-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'testcase'::text, id::text, COALESCE(external_id || ' - ' || title, title), NULL::text, updated_at
-        FROM testcases
-        WHERE project_id = $1 AND deleted_at IS NULL AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          project_id, ('suite-created-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'created'::text, 'suite'::text, id::text, name, NULL::text, created_at
-        FROM suites
-        WHERE project_id = $1
-
-        UNION ALL
-        SELECT
-          project_id, ('suite-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'suite'::text, id::text, name, NULL::text, updated_at
-        FROM suites
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          project_id, ('plan-created-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'created'::text, 'plan'::text, id::text, name, NULL::text, created_at
-        FROM plans
-        WHERE project_id = $1
-
-        UNION ALL
-        SELECT
-          project_id, ('plan-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'plan'::text, id::text, name, NULL::text, updated_at
-        FROM plans
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          project_id, ('cycle-created-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'created'::text, 'cycle'::text, id::text, name, NULL::text, created_at
-        FROM cycles
-        WHERE project_id = $1
-
-        UNION ALL
-        SELECT
-          project_id, ('cycle-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'cycle'::text, id::text, name, NULL::text, updated_at
-        FROM cycles
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          b.project_id, ('bug-created-' || b.id::text), b.reported_by, u.email, u.name,
-          'created'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.created_at
-        FROM bugs b
-        LEFT JOIN users u ON u.id = b.reported_by
-        WHERE b.project_id = $1
-
-        UNION ALL
-        SELECT
-          b.project_id, ('bug-updated-' || b.id::text), b.reported_by, u.email, u.name,
-          'updated'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.updated_at
-        FROM bugs b
-        LEFT JOIN users u ON u.id = b.reported_by
-        WHERE b.project_id = $1 AND b.updated_at > b.created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          a.project_id, a.id::text, a.actor_id, u.email, u.name,
-          a.action::text, a.entity_type::text, a.entity_id::text, a.entity_name::text, a.diff::text, a.created_at
-        FROM audit_logs a
-        LEFT JOIN users u ON u.id = a.actor_id
-        WHERE a.project_id = $1
-      )
-      SELECT *
-      FROM activity_events
-      WHERE ${where}
-    `;
+    const eventsSql = this.activityEventsSql(where);
 
     const total = await this.db.query<{ count: string }>(
       `SELECT COUNT(*) AS count FROM (${eventsSql}) counted`,
@@ -2601,6 +2617,174 @@ export class LegacyService implements OnModuleInit {
       values
     );
     return { list: res.rows.map(toCamel), total: Number(total.rows[0]?.count || 0) };
+  }
+
+  // Testcase created/updated/deleted are intentionally NOT synthesized from the `testcases`
+  // table here — logProjectActivity already records testcase_created/testcase_updated/
+  // testcase_deleted (with real actor attribution) on every mutation, so a timestamp-derived
+  // row here would double-count them. Suites/plans/cycles/bugs have no equivalent audit trail,
+  // so those still derive synthetic created/updated rows from the base tables.
+  private activityEventsSql(outerWhere: string): string {
+    return `
+      WITH activity_events AS (
+        SELECT
+          project_id,
+          ('suite-created-' || id::text) AS id,
+          NULL::uuid AS actor_id,
+          NULL::text AS actor_email,
+          NULL::text AS actor_name,
+          NULL::text AS actor_kind,
+          'created'::text AS action,
+          'suite'::text AS entity_type,
+          id::text AS entity_id,
+          name AS entity_name,
+          NULL::text AS diff,
+          created_at
+        FROM suites
+        WHERE project_id = $1
+
+        UNION ALL
+        SELECT
+          project_id, ('suite-updated-' || id::text), NULL::uuid, NULL::text, NULL::text, NULL::text,
+          'updated'::text, 'suite'::text, id::text, name, NULL::text, updated_at
+        FROM suites
+        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          p.project_id, ('plan-created-' || p.id::text), p.owner_id, u.email, u.name,
+          CASE WHEN p.owner_id IS NOT NULL THEN 'user' END,
+          'created'::text, 'plan'::text, p.id::text, p.name, NULL::text, p.created_at
+        FROM plans p
+        LEFT JOIN users u ON u.id = p.owner_id
+        WHERE p.project_id = $1
+
+        UNION ALL
+        SELECT
+          project_id, ('plan-updated-' || id::text), NULL::uuid, NULL::text, NULL::text, NULL::text,
+          'updated'::text, 'plan'::text, id::text, name, NULL::text, updated_at
+        FROM plans
+        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          c.project_id, ('cycle-created-' || c.id::text), c.owner_id, u.email, u.name,
+          CASE WHEN c.owner_id IS NOT NULL THEN 'user' END,
+          'created'::text, 'cycle'::text, c.id::text, c.name, NULL::text, c.created_at
+        FROM cycles c
+        LEFT JOIN users u ON u.id = c.owner_id
+        WHERE c.project_id = $1
+
+        UNION ALL
+        SELECT
+          project_id, ('cycle-updated-' || id::text), NULL::uuid, NULL::text, NULL::text, NULL::text,
+          'updated'::text, 'cycle'::text, id::text, name, NULL::text, updated_at
+        FROM cycles
+        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          b.project_id, ('bug-created-' || b.id::text), b.reported_by, u.email, u.name,
+          CASE WHEN b.reported_by IS NOT NULL THEN 'user' END,
+          'created'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.created_at
+        FROM bugs b
+        LEFT JOIN users u ON u.id = b.reported_by
+        WHERE b.project_id = $1
+
+        UNION ALL
+        SELECT
+          b.project_id, ('bug-updated-' || b.id::text), b.reported_by, u.email, u.name,
+          CASE WHEN b.reported_by IS NOT NULL THEN 'user' END,
+          'updated'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.updated_at
+        FROM bugs b
+        LEFT JOIN users u ON u.id = b.reported_by
+        WHERE b.project_id = $1 AND b.updated_at > b.created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          a.project_id, a.id::text, a.actor_id, u.email, COALESCE(u.name, g.display_name),
+          CASE WHEN g.id IS NOT NULL THEN 'agent' WHEN u.id IS NOT NULL THEN 'user' END,
+          a.action::text, a.entity_type::text, a.entity_id::text, a.entity_name::text, a.diff::text, a.created_at
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a.actor_id
+        LEFT JOIN agents g ON g.id = a.actor_id
+        WHERE a.project_id = $1
+      )
+      -- The Zyra chat flow calls the shared createTestCase/patchTestCaseFromZyra helpers (which
+      -- already log testcase_created/testcase_updated) and then logs a second zyra_created/
+      -- zyra_updated/zyra_archived row for the same entity a moment later, so both would render
+      -- as duplicate feed rows for the same mutation. Drop the plain testcase_* row whenever a
+      -- zyra_* sibling exists for the same entity within a few seconds; the zyra_* row carries
+      -- the AI-specific action label and reason, and actor attribution already says who/what did it.
+      SELECT ae.*
+      FROM activity_events ae
+      WHERE ${outerWhere}
+        AND NOT (
+          ae.action IN ('testcase_created', 'testcase_updated')
+          AND EXISTS (
+            SELECT 1 FROM activity_events z
+            WHERE z.entity_id = ae.entity_id
+              AND z.action IN ('zyra_created', 'zyra_updated', 'zyra_archived')
+              AND abs(extract(epoch FROM z.created_at - ae.created_at)) < 5
+          )
+        )
+    `;
+  }
+
+  // Powers the Activity screen's right-hand summary panel: this-week action-category counts,
+  // an actor leaderboard, and a per-entity-type breakdown — all scoped to the same trailing
+  // 7-day window so the three widgets read as one consistent "this week" snapshot.
+  async activitySummary(projectId: string) {
+    const eventsSql = this.activityEventsSql(
+      "ae.project_id = $1 AND ae.created_at >= now() - interval '7 days'"
+    );
+    const [weekly, leaderboard, byEntityType] = await Promise.all([
+      this.db.query(
+        `
+        SELECT
+          COUNT(*) FILTER (WHERE action ILIKE 'zyra%')::int AS ai_actions,
+          COUNT(*) FILTER (WHERE action NOT ILIKE 'zyra%' AND action ILIKE '%creat%')::int AS created,
+          COUNT(*) FILTER (WHERE action NOT ILIKE 'zyra%' AND action ILIKE '%updat%')::int AS updated,
+          COUNT(*) FILTER (WHERE action NOT ILIKE 'zyra%' AND action ILIKE '%delet%')::int AS deleted,
+          COUNT(*)::int AS total
+        FROM (${eventsSql}) e
+        `,
+        [projectId]
+      ),
+      this.db.query(
+        `
+        SELECT actor_id, actor_name, actor_email, actor_kind, COUNT(*)::int AS count
+        FROM (${eventsSql}) e
+        WHERE actor_id IS NOT NULL
+        GROUP BY actor_id, actor_name, actor_email, actor_kind
+        ORDER BY count DESC
+        LIMIT 6
+        `,
+        [projectId]
+      ),
+      this.db.query(
+        `
+        SELECT entity_type, COUNT(*)::int AS count
+        FROM (${eventsSql}) e
+        GROUP BY entity_type
+        ORDER BY count DESC
+        `,
+        [projectId]
+      )
+    ]);
+
+    const w = weekly.rows[0] || {};
+    return {
+      weekly: {
+        created: Number(w.created || 0),
+        updated: Number(w.updated || 0),
+        aiActions: Number(w.ai_actions || 0),
+        deleted: Number(w.deleted || 0),
+        total: Number(w.total || 0)
+      },
+      activeMembers: leaderboard.rows.map(toCamel),
+      byEntityType: byEntityType.rows.map(toCamel)
+    };
   }
 
   async listKnowledge(projectId: string, query: Body) {
@@ -2751,6 +2935,31 @@ export class LegacyService implements OnModuleInit {
     return { ...toCamel(folder), breadcrumb };
   }
 
+  // Project-wide counts (not just the folder currently in view) for the listing screen's
+  // stat tiles. Root folder is excluded from the folder count / total since it's a
+  // container, not a listable item — mirrors how the folder tree itself hides the root row.
+  async knowledgeBaseSummary(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const [folders, documents, files] = await Promise.all([
+      this.db.query<{ count: string }>(
+        "SELECT COUNT(*)::int AS count FROM knowledge_folders WHERE project_id = $1 AND is_root = false AND is_deleted = false",
+        [projectId]
+      ),
+      this.db.query<{ count: string }>(
+        "SELECT COUNT(*)::int AS count FROM knowledge_documents WHERE project_id = $1 AND is_deleted = false",
+        [projectId]
+      ),
+      this.db.query<{ count: string }>(
+        "SELECT COUNT(*)::int AS count FROM knowledge_files WHERE project_id = $1 AND is_deleted = false",
+        [projectId]
+      )
+    ]);
+    const folderCount = Number(folders.rows[0]?.count || 0);
+    const documentCount = Number(documents.rows[0]?.count || 0);
+    const fileCount = Number(files.rows[0]?.count || 0);
+    return { folders: folderCount, documents: documentCount, files: fileCount, total: documentCount + fileCount };
+  }
+
   async updateKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string, body: Body) {
     const uid = this.requireUser(userId);
     await this.requireProjectAccess(uid, projectId);
@@ -2874,6 +3083,75 @@ export class LegacyService implements OnModuleInit {
     if (!res.rows[0]) throw new NotFoundException({ error: "Folder not found" });
     await this.logProjectActivity(projectId, uid, "restored", "knowledge_folder", folderId, res.rows[0].name, {});
     return toCamel(res.rows[0]);
+  }
+
+  // Bundles a folder (and every non-deleted subfolder beneath it) into a zip: documents as
+  // self-contained .html files (contentHtml, no external CSS dependency), files re-read from
+  // storage under their original names. Folder structure is preserved as directories in the zip.
+  async exportKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string): Promise<{ buffer: Buffer; filename: string }> {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const folder = await this.kbFolder(projectId, folderId);
+
+    const descendants = await this.db.query<{ id: string; parent_folder_id: string | null; name: string }>(
+      `WITH RECURSIVE descendants AS (
+         SELECT id, parent_folder_id, name, 0 AS depth FROM knowledge_folders WHERE id = $1 AND is_deleted = false
+         UNION ALL
+         SELECT kf.id, kf.parent_folder_id, kf.name, d.depth + 1
+         FROM knowledge_folders kf JOIN descendants d ON kf.parent_folder_id = d.id
+         WHERE kf.is_deleted = false
+       )
+       SELECT id, parent_folder_id, name FROM descendants ORDER BY depth`,
+      [folderId]
+    );
+    const folderIds = descendants.rows.map((row) => row.id);
+
+    // Rows arrive parent-before-child (ORDER BY depth), so each parent's zip path is always
+    // already resolved by the time its children are processed.
+    const zipPathByFolderId = new Map<string, string>([[folderId, ""]]);
+    for (const row of descendants.rows) {
+      if (row.id === folderId) continue;
+      const parentPath = zipPathByFolderId.get(row.parent_folder_id || "") ?? "";
+      const segment = sanitizeZipEntryName(row.name);
+      zipPathByFolderId.set(row.id, parentPath ? `${parentPath}/${segment}` : segment);
+    }
+
+    const [documents, files] = await Promise.all([
+      this.db.query<{ folder_id: string; title: string; content_html: string | null }>(
+        "SELECT folder_id, title, content_html FROM knowledge_documents WHERE folder_id = ANY($1::uuid[]) AND is_deleted = false",
+        [folderIds]
+      ),
+      this.db.query<{ folder_id: string; original_file_name: string; storage_key: string }>(
+        "SELECT folder_id, original_file_name, storage_key FROM knowledge_files WHERE folder_id = ANY($1::uuid[]) AND is_deleted = false",
+        [folderIds]
+      )
+    ]);
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    const chunks: Buffer[] = [];
+    archive.on("data", (chunk: Buffer) => chunks.push(chunk));
+    const finished = new Promise<void>((resolve, reject) => {
+      archive.on("end", () => resolve());
+      archive.on("error", reject);
+    });
+
+    for (const doc of documents.rows) {
+      const folderPath = zipPathByFolderId.get(doc.folder_id) || "";
+      const entryName = `${sanitizeZipEntryName(doc.title || "Untitled")}.html`;
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(doc.title || "Untitled")}</title></head><body>${doc.content_html || ""}</body></html>`;
+      archive.append(Buffer.from(html, "utf-8"), { name: folderPath ? `${folderPath}/${entryName}` : entryName });
+    }
+    for (const file of files.rows) {
+      const folderPath = zipPathByFolderId.get(file.folder_id) || "";
+      const entryName = sanitizeZipEntryName(file.original_file_name);
+      const buffer = await this.storage.getBuffer(file.storage_key);
+      archive.append(buffer, { name: folderPath ? `${folderPath}/${entryName}` : entryName });
+    }
+
+    await archive.finalize();
+    await finished;
+
+    return { buffer: Buffer.concat(chunks), filename: `${sanitizeZipEntryName(folder.is_root ? "Knowledge base" : folder.name)}.zip` };
   }
 
   async listKnowledgeFolderItems(projectId: string, userId: string | null | undefined, folderId: string, query: Body) {
@@ -3546,7 +3824,8 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
-  async adminCustomers() {
+  async adminCustomers(userId: string | null | undefined) {
+    await this.requirePlatformAdmin(userId);
     const summary = await this.analytics();
     const customers = await this.db.query(
       `SELECT o.id, o.name, o.slug, o.created_at,
@@ -3579,12 +3858,25 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async adminList() {
+  async adminList(userId: string | null | undefined) {
+    await this.requirePlatformAdmin(userId);
     const res = await this.db.query(
-      `SELECT pa.id, pa.user_id, pa.role, u.email, u.name, u.avatar_url, pa.created_at
-       FROM platform_admins pa JOIN users u ON u.id = pa.user_id ORDER BY pa.created_at`
+      `SELECT pa.id, pa.user_id, pa.role, u.email, u.name, u.avatar_url, pa.granted_by,
+              gb.email AS granted_by_email, gb.name AS granted_by_name, pa.created_at
+       FROM platform_admins pa
+       JOIN users u ON u.id = pa.user_id
+       LEFT JOIN users gb ON gb.id = pa.granted_by
+       ORDER BY pa.created_at`
     );
-    return res.rows.map(toCamel);
+    return res.rows.map((row) => {
+      const item = toCamel(row);
+      if (row.granted_by) {
+        item.grantedBy = { email: row.granted_by_email, name: row.granted_by_name };
+      }
+      delete item.grantedByEmail;
+      delete item.grantedByName;
+      return item;
+    });
   }
 
   async publicBranding() {
@@ -3624,18 +3916,20 @@ export class LegacyService implements OnModuleInit {
     return value;
   }
 
-  async addAdmin(body: Body, grantedBy?: string | null) {
+  async addAdmin(userId: string | null | undefined, body: Body) {
+    const grantedBy = await this.requirePlatformAdmin(userId);
     const email = String(body.email || "").trim().toLowerCase();
     if (!email) throw new BadRequestException({ error: "email is required" });
     const uid = await this.upsertUser(email);
     const res = await this.db.query(
       "INSERT INTO platform_admins (user_id, role, granted_by) VALUES ($1, 'admin', $2) ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role RETURNING id, user_id, role",
-      [uid, grantedBy || null]
+      [uid, grantedBy]
     );
     return { ...toCamel(res.rows[0]), email };
   }
 
-  async deleteAdmin(adminId: string) {
+  async deleteAdmin(userId: string | null | undefined, adminId: string) {
+    await this.requirePlatformAdmin(userId);
     await this.db.query("DELETE FROM platform_admins WHERE id = $1 AND role <> 'owner'", [adminId]);
   }
 
@@ -3720,6 +4014,7 @@ export class LegacyService implements OnModuleInit {
   async updateIntegrationConfig(userId: string | null | undefined, provider: string, body: Body) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     const clientId = String(body.clientId || "").trim();
     const requestedClientSecret = String(body.clientSecret || "").trim();
     const redirectUri = String(body.redirectUri || "").trim();
@@ -3778,6 +4073,7 @@ export class LegacyService implements OnModuleInit {
   async integrationCallback(userId: string | null | undefined, provider: string, body: Body) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     const code = String(body.code || "");
     if (!code) throw new BadRequestException({ error: "Authorization code is required." });
     const { clientId, clientSecret, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
@@ -3867,6 +4163,7 @@ export class LegacyService implements OnModuleInit {
       throw new BadRequestException({ error: `${p} does not support Personal Access Token authentication.` });
     }
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
 
     if (p === "jira") {
       const siteUrl = normalizeJiraSiteUrl(String(body.siteUrl || ""));
@@ -3925,6 +4222,7 @@ export class LegacyService implements OnModuleInit {
   async integrationDisconnect(userId: string | null | undefined, provider: string) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     await this.db.query("DELETE FROM integration_connections WHERE organization_id = $1 AND provider = $2", [workspace.id, p]);
     return { disconnected: true };
   }
@@ -4150,6 +4448,18 @@ export class LegacyService implements OnModuleInit {
     if (search) {
       values.push(`%${search}%`);
       filters.push(`(jira_issue_key ILIKE $${values.length} OR summary ILIKE $${values.length})`);
+    }
+    if (query.issueType) {
+      values.push(String(query.issueType));
+      filters.push(`issue_type = $${values.length}`);
+    }
+    if (query.status) {
+      values.push(String(query.status));
+      filters.push(`status = $${values.length}`);
+    }
+    if (query.coverage === "covered" || query.coverage === "uncovered") {
+      const exists = `EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = jira_tickets.project_id AND t.jira_issue_key = jira_tickets.jira_issue_key AND t.deleted_at IS NULL)`;
+      filters.push(query.coverage === "covered" ? exists : `NOT ${exists}`);
     }
     const count = await this.db.query(`SELECT COUNT(*)::int AS count FROM jira_tickets WHERE ${filters.join(" AND ")}`, values);
     values.push(limit, offset);
@@ -4511,6 +4821,18 @@ export class LegacyService implements OnModuleInit {
       values.push(`%${search}%`);
       filters.push(`(linear_issue_key ILIKE $${values.length} OR summary ILIKE $${values.length})`);
     }
+    if (query.issueType) {
+      values.push(String(query.issueType));
+      filters.push(`issue_type = $${values.length}`);
+    }
+    if (query.status) {
+      values.push(String(query.status));
+      filters.push(`status = $${values.length}`);
+    }
+    if (query.coverage === "covered" || query.coverage === "uncovered") {
+      const exists = `EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = linear_tickets.project_id AND t.linear_issue_key = linear_tickets.linear_issue_key AND t.deleted_at IS NULL)`;
+      filters.push(query.coverage === "covered" ? exists : `NOT ${exists}`);
+    }
     const count = await this.db.query(`SELECT COUNT(*)::int AS count FROM linear_tickets WHERE ${filters.join(" AND ")}`, values);
     values.push(limit, offset);
     const res = await this.db.query(
@@ -4521,6 +4843,95 @@ export class LegacyService implements OnModuleInit {
       values
     );
     return { list: res.rows.map(toCamel), total: count.rows[0]?.count ?? 0 };
+  }
+
+  // Merged view for the Requirements page's "All Sources" tab — UNION ALL over jira_tickets and
+  // linear_tickets into one shape (source discriminator + shared coverage flag), sharing one
+  // pagination/search/filter pass instead of stitching two independently-paginated lists client-side.
+  async allTickets(projectId: string, query: Body) {
+    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
+    const offset = Math.max(0, Number(query.offset || 0));
+    const search = String(query.search || "").trim();
+    const combined = `
+      SELECT id, 'jira' AS source, jira_issue_key AS key, summary, description, issue_type, status, priority,
+             assignee, reporter, labels, jira_created_at AS created_at, jira_updated_at AS updated_at,
+             jira_url AS url, synced_at,
+             EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = jira_tickets.project_id AND t.jira_issue_key = jira_tickets.jira_issue_key AND t.deleted_at IS NULL) AS has_coverage
+      FROM jira_tickets WHERE project_id = $1
+      UNION ALL
+      SELECT id, 'linear' AS source, linear_issue_key AS key, summary, description, issue_type, status, priority,
+             assignee, reporter, labels, linear_created_at AS created_at, linear_updated_at AS updated_at,
+             linear_url AS url, synced_at,
+             EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = linear_tickets.project_id AND t.linear_issue_key = linear_tickets.linear_issue_key AND t.deleted_at IS NULL) AS has_coverage
+      FROM linear_tickets WHERE project_id = $1
+    `;
+    const filters: string[] = [];
+    const values: any[] = [projectId];
+    if (search) {
+      values.push(`%${search}%`);
+      filters.push(`(key ILIKE $${values.length} OR summary ILIKE $${values.length})`);
+    }
+    if (query.issueType) {
+      values.push(String(query.issueType));
+      filters.push(`issue_type = $${values.length}`);
+    }
+    if (query.status) {
+      values.push(String(query.status));
+      filters.push(`status = $${values.length}`);
+    }
+    if (query.coverage === "covered" || query.coverage === "uncovered") {
+      filters.push(`has_coverage = ${query.coverage === "covered"}`);
+    }
+    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const count = await this.db.query(`SELECT COUNT(*)::int AS count FROM (${combined}) combined ${where}`, values);
+    values.push(limit, offset);
+    const res = await this.db.query(
+      `SELECT * FROM (${combined}) combined
+       ${where}
+       ORDER BY updated_at DESC NULLS LAST, synced_at DESC
+       LIMIT $${values.length - 1} OFFSET $${values.length}`,
+      values
+    );
+    return { list: res.rows.map(toCamel), total: count.rows[0]?.count ?? 0 };
+  }
+
+  // Coverage/type/status aggregates for the Requirements page's stat strip + filter dropdown
+  // options. Type/status are free-text synced verbatim from Jira/Linear (no fixed enum), so option
+  // lists are derived from what's actually in the project rather than a hardcoded set.
+  async requirementsSummary(projectId: string) {
+    const bySource = async (table: "jira_tickets" | "linear_tickets", keyColumn: "jira_issue_key" | "linear_issue_key") => {
+      const stats = await this.db.query(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE EXISTS (
+                  SELECT 1 FROM testcases t WHERE t.project_id = src.project_id AND t.${keyColumn} = src.${keyColumn} AND t.deleted_at IS NULL
+                ))::int AS covered
+         FROM ${table} src WHERE project_id = $1`,
+        [projectId]
+      );
+      const types = await this.db.query(`SELECT DISTINCT issue_type FROM ${table} WHERE project_id = $1 AND issue_type <> '' ORDER BY issue_type`, [projectId]);
+      const statuses = await this.db.query(`SELECT DISTINCT status FROM ${table} WHERE project_id = $1 AND status <> '' ORDER BY status`, [projectId]);
+      const total = stats.rows[0]?.total ?? 0;
+      const covered = stats.rows[0]?.covered ?? 0;
+      return {
+        total,
+        covered,
+        uncovered: total - covered,
+        types: types.rows.map((r) => r.issue_type as string),
+        statuses: statuses.rows.map((r) => r.status as string)
+      };
+    };
+    const [jira, linear] = await Promise.all([
+      bySource("jira_tickets", "jira_issue_key"),
+      bySource("linear_tickets", "linear_issue_key")
+    ]);
+    const all = {
+      total: jira.total + linear.total,
+      covered: jira.covered + linear.covered,
+      uncovered: jira.uncovered + linear.uncovered,
+      types: Array.from(new Set([...jira.types, ...linear.types])).sort(),
+      statuses: Array.from(new Set([...jira.statuses, ...linear.statuses])).sort()
+    };
+    return { all, jira, linear };
   }
 
   async linearComment(projectId: string, body: Body) {
@@ -5247,6 +5658,7 @@ export class LegacyService implements OnModuleInit {
         feedback: "",
         knowledge: params.knowledge,
         jira,
+        linear: [],
         existingTestcases: params.existingTestcases,
         requestedCount: params.requestedCount,
         testcaseRange: params.testcaseRange
@@ -5554,6 +5966,7 @@ export class LegacyService implements OnModuleInit {
     const acceptanceCriteria = String(body.acceptanceCriteria || "").trim();
     if (!story) throw new BadRequestException({ error: "story is required" });
     const jiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String);
+    const linearIssueKeys = normalizeJsonArray(body.linearIssueKeys).map(String);
     const knowledgeItemIds = normalizeJsonArray(body.knowledgeItemIds).map(String).filter(Boolean);
     const feedback = String(body.feedback || "").trim();
     const now = new Date().toISOString();
@@ -5564,14 +5977,15 @@ export class LegacyService implements OnModuleInit {
     const sourceSummary = [
       { type: "story", title: "User story", detail: story.slice(0, 320) },
       ...(context ? [{ type: "context", title: "User context", detail: context.slice(0, 320) }] : []),
-      ...jiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Selected Jira ticket queued for Zyra." }))
+      ...jiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Selected Jira ticket queued for Zyra." })),
+      ...linearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Selected Linear ticket queued for Zyra." }))
     ];
     const res = await this.db.query(
       `INSERT INTO ai_generation_requests
        (project_id, requested_by, provider, model, user_story, acceptance_criteria, custom_prompt, requested_count,
-        generated_count, generated_payload, agent_name, task_status, feedback, context, jira_issue_keys,
+        generated_count, generated_payload, agent_name, task_status, feedback, context, jira_issue_keys, linear_issue_keys,
         token_input, token_output, token_total, source_summary, activity_log)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,'[]'::jsonb,$9,'todo',$10,$11,$12::jsonb,0,0,0,$13::jsonb,$14::jsonb)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,'[]'::jsonb,$9,'todo',$10,$11,$12::jsonb,$13::jsonb,0,0,0,$14::jsonb,$15::jsonb)
        RETURNING *`,
       [
         projectId,
@@ -5586,6 +6000,7 @@ export class LegacyService implements OnModuleInit {
         feedback,
         context,
         JSON.stringify(jiraIssueKeys),
+        JSON.stringify(linearIssueKeys),
         JSON.stringify(sourceSummary),
         JSON.stringify(activityLog)
       ]
@@ -5632,6 +6047,7 @@ export class LegacyService implements OnModuleInit {
       const acceptanceCriteria = String(task.acceptance_criteria || "");
       const feedback = String(task.feedback || "");
       const jiraIssueKeys = normalizeJsonArray(task.jira_issue_keys).map(String);
+      const linearIssueKeys = normalizeJsonArray(task.linear_issue_keys).map(String);
       const projectSettings = this.parseProjectSettings((await this.getProject(projectId)).settings).zyraAgent || {};
       const testcaseRange = String((projectSettings as Body).testcaseRange || "1-10");
       const { requestedCount } = this.testcaseRangeConfig(testcaseRange);
@@ -5639,6 +6055,7 @@ export class LegacyService implements OnModuleInit {
       const model = normalizeProviderModel(provider, task.model || allocation.rows[0].default_model);
       const knowledge = await this.knowledgeSnapshot(projectId, options.knowledgeItemIds || []);
       const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
+      const linear = await this.linearSnapshot(projectId, linearIssueKeys);
       const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
       const aiResult = await this.generateZyraWithProvider({
         provider,
@@ -5648,7 +6065,7 @@ export class LegacyService implements OnModuleInit {
         authHeaderName: allocation.rows[0].auth_header_name,
         authScheme: allocation.rows[0].auth_scheme,
         projectId,
-        input: { story, context, acceptanceCriteria, feedback, knowledge, jira, existingTestcases, requestedCount, testcaseRange }
+        input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
       });
       const drafts = aiResult.drafts;
       const inputText = [
@@ -5658,6 +6075,7 @@ export class LegacyService implements OnModuleInit {
         feedback,
         knowledge.map((item) => `${item.title}\n${item.content}`).join("\n"),
         jira.map((t) => `${t.key} ${t.summary}`).join("\n"),
+        linear.map((t) => `${t.key} ${t.summary}`).join("\n"),
         existingTestcases.map((tc) => `${tc.externalId} ${tc.title} ${tc.description}`).join("\n")
       ].join("\n");
       const tokenInput = aiResult.usage.input || estimateTokens(inputText);
@@ -5667,12 +6085,13 @@ export class LegacyService implements OnModuleInit {
         ...(context ? [{ type: "context", title: "User context", detail: context.slice(0, 320) }] : []),
         ...knowledge.map((item) => ({ type: "knowledge_base", title: item.title, detail: item.content.slice(0, 320) })),
         ...jira.map((item) => ({ type: "jira", title: item.key, detail: `${item.summary} ${item.description}`.trim().slice(0, 320) })),
+        ...linear.map((item) => ({ type: "linear", title: item.key, detail: `${item.summary} ${item.description}`.trim().slice(0, 320) })),
         ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
       ];
       const finishedAt = new Date().toISOString();
       const activity = [
-        { actor: "agent", stage: "in_progress", title: "Read available sources", detail: `Considered ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and the supplied story/context.`, createdAt: finishedAt },
-        { actor: "agent", stage: "in_progress", title: "Generation plan", detail: this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length }), createdAt: finishedAt },
+        { actor: "agent", stage: "in_progress", title: "Read available sources", detail: `Considered ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and the supplied story/context.`, createdAt: finishedAt },
+        { actor: "agent", stage: "in_progress", title: "Generation plan", detail: this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length }), createdAt: finishedAt },
         { actor: "agent", stage: "in_review", title: "Generated testcase drafts", detail: `Generated ${drafts.length} testcase draft(s) with ${provider}${aiResult.requestId ? ` request ${aiResult.requestId}` : ""}. Cached input tokens: ${aiResult.usage.cached}.`, createdAt: finishedAt }
       ];
       await this.db.query(
@@ -5691,7 +6110,7 @@ export class LegacyService implements OnModuleInit {
         model,
         key: allocation.rows[0],
         userMessage: story,
-        outcome: `Generated ${drafts.length} testcase draft(s) using ${knowledge.length} knowledge-base item(s) and ${jira.length} Jira ticket(s). Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length })}`
+        outcome: `Generated ${drafts.length} testcase draft(s) using ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), and ${linear.length} Linear ticket(s). Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length })}`
       });
     } catch (error) {
       const failedAt = new Date().toISOString();
@@ -5740,6 +6159,7 @@ export class LegacyService implements OnModuleInit {
     const feedbackText = String(body.feedback || "").trim();
     const referenceNote = String(body.referenceNote || "").trim();
     const additionalJiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String).filter(Boolean);
+    const additionalLinearIssueKeys = normalizeJsonArray(body.linearIssueKeys).map(String).filter(Boolean);
     const feedback = [
       feedbackText,
       referenceNote ? `Referenced docs or tickets for knowledge base:\n${referenceNote}` : ""
@@ -5760,7 +6180,8 @@ export class LegacyService implements OnModuleInit {
       detail: [
         feedbackText,
         referenceNote ? `References: ${referenceNote}` : "",
-        additionalJiraIssueKeys.length ? `Jira tickets: ${additionalJiraIssueKeys.join(", ")}` : ""
+        additionalJiraIssueKeys.length ? `Jira tickets: ${additionalJiraIssueKeys.join(", ")}` : "",
+        additionalLinearIssueKeys.length ? `Linear tickets: ${additionalLinearIssueKeys.join(", ")}` : ""
       ].filter(Boolean).join("\n"),
       createdAt: new Date().toISOString()
     }];
@@ -5772,6 +6193,7 @@ export class LegacyService implements OnModuleInit {
     const context = existing.rows[0].context || existing.rows[0].custom_prompt || "";
     const acceptanceCriteria = existing.rows[0].acceptance_criteria || "";
     const jiraIssueKeys = Array.from(new Set([...normalizeJsonArray(existing.rows[0].jira_issue_keys).map(String), ...additionalJiraIssueKeys]));
+    const linearIssueKeys = Array.from(new Set([...normalizeJsonArray(existing.rows[0].linear_issue_keys).map(String), ...additionalLinearIssueKeys]));
     // Re-read the project's current range (rather than trusting the stored requested_count alone)
     // so a regenerate keeps the same "generate exhaustively" instruction the initial run used —
     // otherwise this falls back to the generic "generate exactly N" phrasing, which reads very
@@ -5783,6 +6205,7 @@ export class LegacyService implements OnModuleInit {
     const model = normalizeProviderModel(provider, existing.rows[0].model || allocation.rows[0].default_model);
     const knowledge = await this.knowledgeSnapshot(projectId);
     const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
+    const linear = await this.linearSnapshot(projectId, linearIssueKeys);
     const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
     const aiResult = await this.generateZyraWithProvider({
       provider,
@@ -5792,12 +6215,12 @@ export class LegacyService implements OnModuleInit {
       authHeaderName: allocation.rows[0].auth_header_name,
       authScheme: allocation.rows[0].auth_scheme,
       projectId,
-      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, existingTestcases, requestedCount, testcaseRange }
+      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
     });
     const now = new Date().toISOString();
     const activity = [
       { actor: "agent", stage: "in_progress", title: "Moved task back to Todo", detail: "Zyra queued the task again after reviewer feedback.", createdAt: now },
-      { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
+      { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
       { actor: "agent", stage: "in_review", title: "Regenerated testcase drafts", detail: `Updated this task with ${aiResult.drafts.length} regenerated draft(s). Cached input tokens: ${aiResult.usage.cached}.`, createdAt: now }
     ];
     const previousSources = normalizeJsonArray(existing.rows[0].source_summary);
@@ -5805,6 +6228,7 @@ export class LegacyService implements OnModuleInit {
       ...previousSources,
       ...(referenceNote ? [{ type: "feedback_reference", title: "Reviewer reference", detail: referenceNote.slice(0, 320) }] : []),
       ...additionalJiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Referenced by reviewer feedback." })),
+      ...additionalLinearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Referenced by reviewer feedback." })),
       ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
     ];
     const res = await this.db.query(
@@ -5812,7 +6236,7 @@ export class LegacyService implements OnModuleInit {
        SET generated_count = $3, generated_payload = $4::jsonb, feedback = $5,
            token_input = token_input + $6, token_output = token_output + $7, token_total = token_total + $8,
            activity_log = activity_log || $9::jsonb, source_summary = $10::jsonb, jira_issue_keys = $11::jsonb,
-           task_status = 'in_review', updated_at = now()
+           linear_issue_keys = $12::jsonb, task_status = 'in_review', updated_at = now()
        WHERE id = $1 AND project_id = $2
        RETURNING *`,
       [
@@ -5826,7 +6250,8 @@ export class LegacyService implements OnModuleInit {
         aiResult.usage.total,
         JSON.stringify(activity),
         JSON.stringify(nextSources),
-        JSON.stringify(jiraIssueKeys)
+        JSON.stringify(jiraIssueKeys),
+        JSON.stringify(linearIssueKeys)
       ]
     );
     await this.rememberZyraTurn({
@@ -5839,7 +6264,8 @@ export class LegacyService implements OnModuleInit {
       outcome: [
         `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
         referenceNote ? `Reviewer references: ${referenceNote}` : "",
-        additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : ""
+        additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
+        additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
       ].filter(Boolean).join(" ")
     });
     return {
@@ -5912,15 +6338,29 @@ export class LegacyService implements OnModuleInit {
     const selectedIndexes = normalizeJsonArray(body.selectedDraftIndexes).map(Number);
     const selected = selectedIndexes.length ? selectedIndexes.map((index) => drafts[index]).filter(Boolean) : drafts;
     const jiraKeys = normalizeJsonArray(existing.rows[0].jira_issue_keys).map(String).filter(Boolean);
+    const linearKeys = normalizeJsonArray(existing.rows[0].linear_issue_keys).map(String).filter(Boolean);
     const jiraIssueKey = jiraKeys[0] || null;
+    const linearIssueKey = linearKeys[0] || null;
     const jiraTicket = jiraIssueKey
       ? await this.db.query("SELECT jira_url FROM jira_tickets WHERE project_id = $1 AND jira_issue_key = $2 LIMIT 1", [projectId, jiraIssueKey]).catch(() => ({ rows: [] as Body[] }))
       : { rows: [] as Body[] };
     const jiraUrl = jiraTicket.rows[0]?.jira_url || null;
+    const linearTicket = linearIssueKey
+      ? await this.db.query("SELECT linear_url FROM linear_tickets WHERE project_id = $1 AND linear_issue_key = $2 LIMIT 1", [projectId, linearIssueKey]).catch(() => ({ rows: [] as Body[] }))
+      : { rows: [] as Body[] };
+    const linearUrl = linearTicket.rows[0]?.linear_url || null;
+    // A task carries either Jira or Linear keys, never both (the Requirements page creates one
+    // task per ticket) — this just resolves whichever one applies for the "already linked, update
+    // in place" lookup below.
     const existingLinked = jiraIssueKey
       ? await this.db.query(
           "SELECT id FROM testcases WHERE project_id = $1 AND jira_issue_key = $2 AND deleted_at IS NULL ORDER BY updated_at ASC",
           [projectId, jiraIssueKey]
+        )
+      : linearIssueKey
+      ? await this.db.query(
+          "SELECT id FROM testcases WHERE project_id = $1 AND linear_issue_key = $2 AND deleted_at IS NULL ORDER BY updated_at ASC",
+          [projectId, linearIssueKey]
         )
       : { rows: [] as Body[] };
     const created = [];
@@ -5931,6 +6371,7 @@ export class LegacyService implements OnModuleInit {
         ...baseTags,
         "zyra",
         ...(jiraIssueKey ? [`jira:${jiraIssueKey}`] : []),
+        ...(linearIssueKey ? [`linear:${linearIssueKey}`] : []),
         existingLinked.rows[index]?.id ? "zyra-regenerated" : "zyra-generated"
       ])).join(",");
       const payload = {
@@ -5944,7 +6385,9 @@ export class LegacyService implements OnModuleInit {
         status: "Draft",
         automationTags: tags,
         jiraIssueKey,
-        jiraUrl
+        jiraUrl,
+        linearIssueKey,
+        linearUrl
       };
       if (existingLinked.rows[index]?.id) {
         await this.updateTestCase(existingLinked.rows[index].id, userId, payload);
@@ -6262,6 +6705,34 @@ export class LegacyService implements OnModuleInit {
     });
   }
 
+  // Only reads the linear_tickets sync cache, unlike jiraSnapshot's live-API fallback for missing
+  // keys — the Requirements page only ever selects keys it just listed from that same cache, so a
+  // cache miss here would mean the ticket was deleted/unsynced, not "not synced yet".
+  private async linearSnapshot(projectId: string, keys: string[]): Promise<Array<{ key: string; summary: string; description: string }>> {
+    const selectedKeys = Array.from(new Set(keys.map((key) => key.trim()).filter(Boolean)));
+    if (!selectedKeys.length) return [];
+    const res = await this.db.query(
+      `SELECT linear_issue_key, summary, description FROM linear_tickets
+       WHERE project_id = $1 AND linear_issue_key = ANY($2::text[])`,
+      [projectId, selectedKeys]
+    ).catch(() => ({ rows: [] as any[] }));
+    const byKey = new Map<string, { key: string; summary: string; description: string }>(
+      res.rows.map((row) => [
+        String(row.linear_issue_key),
+        {
+          key: String(row.linear_issue_key),
+          summary: String(row.summary || ""),
+          description: String(row.description || "")
+        }
+      ])
+    );
+    return selectedKeys.map((key) => byKey.get(key) || {
+      key,
+      summary: "Selected Linear ticket",
+      description: "Ticket details were not available from the local cache, but the selected key was included for Zyra context."
+    });
+  }
+
   private async generateZyraWithProvider(params: {
     provider: string;
     model: string;
@@ -6280,7 +6751,7 @@ export class LegacyService implements OnModuleInit {
   private zyraSystemPrompt(): string {
     return [
       "You are Zyra the Test Generator, an AI testcase generation agent.",
-      "Generate practical, detailed QA testcases from the supplied product story, user context, Jira tickets, knowledge-base sources, Zyra memory, and existing testcase repository context.",
+      "Generate practical, detailed QA testcases from the supplied product story, user context, Jira/Linear tickets, knowledge-base sources, Zyra memory, and existing testcase repository context.",
       "Review existing testcases before generating. Do not duplicate existing coverage; instead fill gaps, deepen weak coverage, or create clearly distinct edge cases.",
       "Prioritize edge cases, boundary values, negative paths, permissions, data integrity, state transitions, and traceability.",
       "Return only valid JSON matching this shape: {\"drafts\":[{\"title\":\"\",\"preconditions\":\"\",\"stepsJson\":\"[]\",\"expectedSummary\":\"\",\"priority\":\"P1|P2|P3\",\"tags\":[\"\"]}]}",
@@ -6296,6 +6767,9 @@ export class LegacyService implements OnModuleInit {
     const jira = input.jira.length
       ? input.jira.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n")
       : "No Jira tickets were selected.";
+    const linear = input.linear.length
+      ? input.linear.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n")
+      : "No Linear tickets were selected.";
     const existingTestcases = input.existingTestcases.length
       ? input.existingTestcases.map((item) => `${item.externalId}: ${item.title}\nPriority: ${item.priority}; Status: ${item.status}\n${item.description}\nSteps: ${item.stepsSummary}`).join("\n\n")
       : "No existing testcases were available.";
@@ -6305,6 +6779,8 @@ export class LegacyService implements OnModuleInit {
       knowledge,
       "Jira tickets:",
       jira,
+      "Linear tickets:",
+      linear,
       "Existing testcases to review for context and duplicate avoidance:",
       existingTestcases
     ].join("\n\n");
@@ -6664,12 +7140,14 @@ export class LegacyService implements OnModuleInit {
     feedback: string;
     knowledgeCount: number;
     jiraCount: number;
+    linearCount?: number;
   }): string {
     const signals = [
       input.context ? "project context" : null,
       input.acceptanceCriteria ? "acceptance criteria" : null,
       input.knowledgeCount ? `${input.knowledgeCount} knowledge-base source(s)` : null,
       input.jiraCount ? `${input.jiraCount} Jira ticket(s)` : null,
+      input.linearCount ? `${input.linearCount} Linear ticket(s)` : null,
       input.feedback ? "review feedback" : null
     ].filter(Boolean).join(", ");
     return `I checked ${signals || "the submitted story"} and planned coverage across happy path, negative, boundary, permission, data-state, and traceability risks before drafting the testcases.`;
@@ -7286,6 +7764,7 @@ export class LegacyService implements OnModuleInit {
     const item = toCamel(row as QueryResultRow);
     item.drafts = normalizeJsonArray(row.generated_payload);
     item.jiraIssueKeys = normalizeJsonArray(row.jira_issue_keys);
+    item.linearIssueKeys = normalizeJsonArray(row.linear_issue_keys);
     item.sources = normalizeJsonArray(row.source_summary);
     item.activities = normalizeJsonArray(row.activity_log);
     item.tokenUsage = {

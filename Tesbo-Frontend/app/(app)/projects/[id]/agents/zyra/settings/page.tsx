@@ -212,8 +212,8 @@ export default function ZyraSettingsPage() {
                   <p className="mt-1 text-[var(--warning-foreground)] opacity-80">
                     Add an Anthropic or OpenAI key in workspace settings, then allocate it to this project.
                   </p>
-                  <Link href="/settings/integrations" className="mt-3 inline-flex items-center gap-1 font-medium text-[var(--warning-foreground)] underline underline-offset-2 hover:opacity-80">
-                    Go to workspace integrations →
+                  <Link href="/settings?tab=ai" className="mt-3 inline-flex items-center gap-1 font-medium text-[var(--warning-foreground)] underline underline-offset-2 hover:opacity-80">
+                    Go to workspace AI providers →
                   </Link>
                 </div>
               </div>

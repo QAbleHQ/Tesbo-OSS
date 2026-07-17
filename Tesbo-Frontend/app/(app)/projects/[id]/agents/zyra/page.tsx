@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconClipboardCheck, IconCopy, IconPlus, IconSettings, IconSparkles } from "@tabler/icons-react";
+import { IconChevronRight, IconClipboardCheck, IconCopy, IconPlus, IconSettings, IconSparkles } from "@tabler/icons-react";
 import {
   authMe,
   createZyraChatSession,
+  getProject,
   getZyraAgent,
   getZyraChatSession,
   listZyraChatSessions,
@@ -19,7 +21,7 @@ import {
   type ZyraChatTestcaseRow,
 } from "@/lib/api";
 import { Button, StatusChip, Textarea } from "@/components/ui";
-import { PageHeader } from "@/components/workflows";
+import { useTopBarSlots } from "@/components/TopBarSlots";
 
 // ─── Zyra icon badge — gradient sparkle mark used in the header and per-message ──
 function ZyraMark({ size = 24 }: { size?: number }) {
@@ -358,7 +360,7 @@ function NoKeyBanner({ projectId }: { projectId: string }) {
         Zyra needs an Anthropic or OpenAI key allocated to this project before it can respond.
       </p>
       <div className="mt-4 flex flex-col gap-2">
-        <Link href="/settings/integrations" className="inline-flex items-center justify-center gap-1 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700">
+        <Link href="/settings?tab=ai" className="inline-flex items-center justify-center gap-1 rounded-lg bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700">
           Set up AI key
         </Link>
         <Link href={`/projects/${projectId}/agents/zyra/settings`} className="text-xs text-amber-700/70 hover:underline dark:text-amber-400/70">
@@ -374,6 +376,16 @@ export default function ZyraChatPage() {
   const params = useParams();
   const router = useRouter();
   const projectId = params.id as string;
+
+  // Take over the shared TopBar with this page's breadcrumb + actions (portaled below),
+  // matching the full-bleed IDE-workspace pattern used by the Test Cases / Plan Details screens.
+  const { startEl: topBarStartEl, endEl: topBarEndEl, setFilled: setTopBarFilled } = useTopBarSlots();
+  useEffect(() => {
+    setTopBarFilled(true);
+    return () => setTopBarFilled(false);
+  }, [setTopBarFilled]);
+
+  const [projectName, setProjectName] = useState("");
   const [agent, setAgent] = useState<ZyraAgentState | null>(null);
   const [sessions, setSessions] = useState<ZyraChatSession[]>([]);
   const [activeSession, setActiveSession] = useState<ZyraChatSession | null>(null);
@@ -406,7 +418,12 @@ export default function ZyraChatPage() {
 
   const loadData = useCallback(async () => {
     try {
-      const [agentData, sessionData] = await Promise.all([getZyraAgent(projectId), refreshSessions()]);
+      const [project, agentData, sessionData] = await Promise.all([
+        getProject(projectId),
+        getZyraAgent(projectId),
+        refreshSessions(),
+      ]);
+      setProjectName(String(project.name || ""));
       setAgent(agentData);
       if (sessionData[0]) await openSession(sessionData[0].id);
       else await createSession();
@@ -525,219 +542,235 @@ export default function ZyraChatPage() {
     }
   }
 
-  // ─── Page header (shared between loading and loaded states) ─────────────────
-  const pageHeader = (
-    <PageHeader
-      title={
-        <>
-          <ZyraMark size={28} />
-          Zyra
-        </>
-      }
-      subtitle="AI test case assistant — generate, update, and manage test cases through conversation."
-      actions={
-        <div className="flex flex-wrap items-center gap-2">
-          {agent && (
-            <StatusChip tone={agent.agent.active ? "success" : "warning"} dot>
-              {agent.agent.active ? "AI connected" : "No AI key"}
-            </StatusChip>
-          )}
-          <Link href={`/projects/${projectId}/agents/tasks`} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
-            <IconClipboardCheck size={15} stroke={1.9} />
-            Task board
-          </Link>
-          <Link href={`/projects/${projectId}/agents/zyra/settings`} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
-            <IconSettings size={15} stroke={1.9} />
-            Settings
-          </Link>
-        </div>
-      }
-    />
-  );
-
-  if (loading) {
-    return (
-      // calc subtracts tesbo-page vertical padding (2rem top + 2.75rem bottom = 4.75rem)
-      <div className="flex flex-col w-full" style={{ height: "calc(100vh - 4.75rem)" }}>
-        {pageHeader}
-        <div className="flex flex-1 items-center justify-center">
-          <div className="text-center space-y-2">
-            <div className="h-8 w-8 rounded-full border-2 border-[var(--brand-primary)] border-t-transparent animate-spin mx-auto" />
-            <p className="text-sm text-[var(--muted)]">Loading Zyra...</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    // Full-height flex column — fills the available viewport minus tesbo-page vertical padding
-    <div className="flex flex-col w-full" style={{ height: "calc(100vh - 4.75rem)" }}>
-      {pageHeader}
-
-      {/* Error banner */}
-      {error && (
-        <div className="mb-3 shrink-0 rounded-xl border border-[var(--error)]/40 bg-[var(--error-soft)] px-4 py-3 text-sm text-[var(--error)] flex items-start justify-between gap-3">
-          <span>{error}</span>
-          <button type="button" onClick={() => setError(null)} className="shrink-0 text-[var(--error)]/60 hover:text-[var(--error)]">✕</button>
-        </div>
-      )}
-
-      {/* Main grid — flex-1 + min-h-0 so it takes remaining height without overflowing */}
-      <div className="flex-1 min-h-0 grid gap-4 lg:grid-cols-[280px_minmax(0,1fr)] pb-6">
-
-        {/* ── Session sidebar ─────────────────────────────────────────── */}
-        <aside className="flex flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
-          {/* Sidebar header */}
-          <div className="shrink-0 flex items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-3">
-            <div>
-              <p className="text-sm font-semibold text-[var(--foreground)]">Conversations</p>
-              <p className="text-[11px] text-[var(--muted)]">
-                {sessions.length} {sessions.length === 1 ? "session" : "sessions"}
-              </p>
-            </div>
-            <Button size="sm" variant="secondary" onClick={() => void createSession()}>
-              <IconPlus size={13} stroke={2} />
-              New
-            </Button>
-          </div>
-
-          {/* Session list — scrollable */}
-          <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-            {sessions.length === 0 && (
-              <p className="px-3 py-8 text-center text-xs text-[var(--muted)]">No conversations yet</p>
-            )}
-            {sessions.map((session) => {
-              const isActive = activeSession?.id === session.id;
-              return (
-                <button
-                  key={session.id}
-                  type="button"
-                  onClick={() => void openSession(session.id)}
-                  className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
-                    isActive
-                      ? "border-[var(--brand-border)] bg-[var(--surface-secondary)]"
-                      : "border-transparent hover:bg-[var(--surface-secondary)]"
-                  }`}
-                >
-                  <span className={`block truncate text-[12px] font-medium ${isActive ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
-                    {session.title}
-                  </span>
-                  <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted-soft)]">
-                    {formatTime(session.updatedAt)}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </aside>
-
-        {/* ── Chat area ───────────────────────────────────────────────── */}
-        <section className="flex flex-col rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] overflow-hidden min-h-0">
-          {/* Chat header — fixed */}
-          <div className="shrink-0 border-b border-[var(--border)] bg-[var(--surface)] px-5 py-3">
-            <p className="text-sm font-semibold text-[var(--foreground)]">{activeSession?.title || "Zyra"}</p>
-            <p className="mt-0.5 flex items-center gap-1.5">
-              {agent?.aiKey ? (
+    // Full-bleed, full-height IDE-style workspace — same pattern as the Test Cases / Plan
+    // Details screens. `tc-fullbleed` makes the wrapping .tesbo-page drop its centered
+    // 1280px cap + padding, so this fills the whole content region below the 3.5rem TopBar.
+    <main className="tc-fullbleed flex flex-col pb-4 pr-4 pt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* This page takes over the shared TopBar: breadcrumb (start slot) + actions (end slot). */}
+        {topBarStartEl &&
+          createPortal(
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
+              {projectName && (
                 <>
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">{agent.aiKey.provider}</span>
-                  <span className="text-[var(--border)]">·</span>
-                  <span className="font-mono text-[11px] text-[var(--muted)]">{agent.aiKey.defaultModel || "default model"}</span>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                  >
+                    {projectName}
+                  </button>
+                  <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
-              ) : (
-                <span className="text-xs text-[var(--muted)]">No AI key connected</span>
               )}
+              <span className="font-medium text-[var(--brand-primary)]">Zyra</span>
+            </nav>,
+            topBarStartEl,
+          )}
+        {topBarEndEl &&
+          createPortal(
+            <div className="flex flex-wrap items-center gap-2">
+              {agent && (
+                <StatusChip tone={agent.agent.active ? "success" : "warning"} dot>
+                  {agent.agent.active ? "AI connected" : "No AI key"}
+                </StatusChip>
+              )}
+              <Link href={`/projects/${projectId}/agents/tasks`} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
+                <IconClipboardCheck size={15} stroke={1.9} />
+                Task board
+              </Link>
+              <Link href={`/projects/${projectId}/agents/zyra/settings`} className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 text-sm font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)]">
+                <IconSettings size={15} stroke={1.9} />
+                Settings
+              </Link>
+            </div>,
+            topBarEndEl,
+          )}
+
+        {/* Title + subtitle row */}
+        <div className="mb-3 flex shrink-0 items-center gap-2.5 pl-4">
+          <ZyraMark size={28} />
+          <div>
+            <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">Zyra</h1>
+            <p className="mt-[1px] text-[13px] text-[var(--muted-soft)]">
+              AI test case assistant — generate, update, and manage test cases through conversation.
             </p>
           </div>
+        </div>
 
-          {/* Messages — scrollable */}
-          <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
-            {!messages.length && (
-              <div className="flex h-full flex-col items-center justify-center gap-6 py-8">
-                {!agent?.agent.active ? (
-                  <NoKeyBanner projectId={projectId} />
-                ) : (
-                  <>
-                    <div className="text-center max-w-md">
-                      <div className="mx-auto mb-3 h-12 w-12 rounded-2xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-xl font-bold text-white">Z</div>
-                      <h3 className="text-base font-semibold text-[var(--foreground)]">How can I help?</h3>
-                      <p className="mt-1 text-sm text-[var(--muted)]">
-                        Generate test cases, find coverage gaps, update existing tests, or review your test suite — all through conversation.
-                      </p>
-                    </div>
-                    <div className="w-full max-w-2xl">
-                      <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">Quick actions</p>
-                      <div className="flex flex-wrap gap-2">
-                        {QUICK_ACTIONS.map((action) => (
-                          <button
-                            key={action.label}
-                            type="button"
-                            onClick={() => onQuickAction(action.prompt)}
-                            className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-xs font-medium text-[var(--foreground)] transition-all hover:border-[var(--brand-primary)] hover:shadow-sm active:scale-95"
-                          >
-                            {action.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {messages.map((msg) => <MessageBubble key={msg.id} message={msg} projectId={projectId} />)}
-            {sending && <ThinkingBubble />}
-            {!sending && isPlanRunning && activeSession?.activePlan && <PlanProgressBubble plan={activeSession.activePlan} />}
-            <div ref={endRef} />
+        {/* Error banner */}
+        {error && (
+          <div className="ml-4 mb-3 shrink-0 rounded-xl border border-[var(--error)]/40 bg-[var(--error-soft)] px-4 py-3 text-sm text-[var(--error)] flex items-start justify-between gap-3">
+            <span>{error}</span>
+            <button type="button" onClick={() => setError(null)} className="shrink-0 text-[var(--error)]/60 hover:text-[var(--error)]">✕</button>
           </div>
+        )}
 
-          {/* Input — fixed at bottom */}
-          <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3">
-            {activeSession?.activePlan?.status === "paused" && (
-              <div className="mb-2.5 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
-                <span>
-                  Paused — {activeSession.activePlan.doneCount}/{activeSession.activePlan.totalCount} scenarios covered.
-                </span>
-                <Button type="button" size="sm" variant="secondary" onClick={handleResumePlan} disabled={stoppingPlan}>
-                  {stoppingPlan ? "Resuming…" : "Resume"}
+        {loading ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
+            <div className="text-center space-y-2">
+              <div className="h-8 w-8 rounded-full border-2 border-[var(--brand-primary)] border-t-transparent animate-spin mx-auto" />
+              <p className="text-sm text-[var(--muted)]">Loading Zyra...</p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
+
+            {/* ── Session sidebar ─────────────────────────────────────────── */}
+            <aside className="flex w-[260px] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] overflow-hidden">
+              {/* Sidebar header */}
+              <div className="shrink-0 flex items-center justify-between gap-2 border-b border-[var(--border)] px-4 py-3">
+                <div>
+                  <p className="text-sm font-semibold text-[var(--foreground)]">Conversations</p>
+                  <p className="text-[11px] text-[var(--muted)]">
+                    {sessions.length} {sessions.length === 1 ? "session" : "sessions"}
+                  </p>
+                </div>
+                <Button size="sm" variant="secondary" onClick={() => void createSession()}>
+                  <IconPlus size={13} stroke={2} />
+                  New
                 </Button>
               </div>
-            )}
-            <form onSubmit={onSubmit}>
-              <Textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={onKeyDown}
-                rows={3}
-                placeholder={
-                  agent?.agent.active
-                    ? "Ask Zyra to generate, update, or review test cases..."
-                    : "Connect an AI key to start chatting with Zyra"
-                }
-                disabled={sending || !agent?.agent.active}
-                className="resize-none"
-              />
-              <div className="mt-2.5 flex items-center justify-between gap-3">
-                <p className="text-[11px] text-[var(--muted)]">
-                  <kbd className="rounded border border-[var(--border)] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[10px]">Enter</kbd>{" "}send
-                  {" · "}
-                  <kbd className="rounded border border-[var(--border)] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[10px]">Shift+Enter</kbd>{" "}new line
-                </p>
-                <div className="flex items-center gap-2">
-                  {isPlanRunning && (
-                    <Button type="button" size="sm" variant="secondary" onClick={handleStopPlan} disabled={stoppingPlan}>
-                      {stoppingPlan ? "Stopping…" : "Stop"}
-                    </Button>
-                  )}
-                  <Button type="submit" size="sm" disabled={!input.trim() || sending || !agent?.agent.active}>
-                    {sending ? "Thinking..." : "Send"}
-                  </Button>
-                </div>
+
+              {/* Session list — scrollable */}
+              <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+                {sessions.length === 0 && (
+                  <p className="px-3 py-8 text-center text-xs text-[var(--muted)]">No conversations yet</p>
+                )}
+                {sessions.map((session) => {
+                  const isActive = activeSession?.id === session.id;
+                  return (
+                    <button
+                      key={session.id}
+                      type="button"
+                      onClick={() => void openSession(session.id)}
+                      className={`w-full rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                        isActive
+                          ? "border-[var(--brand-border)] bg-[var(--surface-secondary)]"
+                          : "border-transparent hover:bg-[var(--surface-secondary)]"
+                      }`}
+                    >
+                      <span className={`block truncate text-[12px] font-medium ${isActive ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
+                        {session.title}
+                      </span>
+                      <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted-soft)]">
+                        {formatTime(session.updatedAt)}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
-            </form>
+            </aside>
+
+            {/* ── Chat area ───────────────────────────────────────────────── */}
+            <section className="flex flex-1 min-w-0 flex-col bg-[var(--surface-secondary)] overflow-hidden">
+              {/* Chat header — fixed */}
+              <div className="shrink-0 border-b border-[var(--border)] bg-[var(--surface)] px-5 py-3">
+                <p className="text-sm font-semibold text-[var(--foreground)]">{activeSession?.title || "Zyra"}</p>
+                <p className="mt-0.5 flex items-center gap-1.5">
+                  {agent?.aiKey ? (
+                    <>
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">{agent.aiKey.provider}</span>
+                      <span className="text-[var(--border)]">·</span>
+                      <span className="font-mono text-[11px] text-[var(--muted)]">{agent.aiKey.defaultModel || "default model"}</span>
+                    </>
+                  ) : (
+                    <span className="text-xs text-[var(--muted)]">No AI key connected</span>
+                  )}
+                </p>
+              </div>
+
+              {/* Messages — scrollable */}
+              <div className="flex-1 overflow-y-auto px-5 py-5 space-y-5">
+                {!messages.length && (
+                  <div className="flex h-full flex-col items-center justify-center gap-6 py-8">
+                    {!agent?.agent.active ? (
+                      <NoKeyBanner projectId={projectId} />
+                    ) : (
+                      <>
+                        <div className="text-center max-w-md">
+                          <div className="mx-auto mb-3 h-12 w-12 rounded-2xl bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center text-xl font-bold text-white">Z</div>
+                          <h3 className="text-base font-semibold text-[var(--foreground)]">How can I help?</h3>
+                          <p className="mt-1 text-sm text-[var(--muted)]">
+                            Generate test cases, find coverage gaps, update existing tests, or review your test suite — all through conversation.
+                          </p>
+                        </div>
+                        <div className="w-full max-w-2xl">
+                          <p className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">Quick actions</p>
+                          <div className="flex flex-wrap gap-2">
+                            {QUICK_ACTIONS.map((action) => (
+                              <button
+                                key={action.label}
+                                type="button"
+                                onClick={() => onQuickAction(action.prompt)}
+                                className="rounded-full border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-xs font-medium text-[var(--foreground)] transition-all hover:border-[var(--brand-primary)] hover:shadow-sm active:scale-95"
+                              >
+                                {action.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {messages.map((msg) => <MessageBubble key={msg.id} message={msg} projectId={projectId} />)}
+                {sending && <ThinkingBubble />}
+                {!sending && isPlanRunning && activeSession?.activePlan && <PlanProgressBubble plan={activeSession.activePlan} />}
+                <div ref={endRef} />
+              </div>
+
+              {/* Input — fixed at bottom */}
+              <div className="shrink-0 border-t border-[var(--border)] bg-[var(--surface)] px-4 py-3">
+                {activeSession?.activePlan?.status === "paused" && (
+                  <div className="mb-2.5 flex items-center justify-between gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                    <span>
+                      Paused — {activeSession.activePlan.doneCount}/{activeSession.activePlan.totalCount} scenarios covered.
+                    </span>
+                    <Button type="button" size="sm" variant="secondary" onClick={handleResumePlan} disabled={stoppingPlan}>
+                      {stoppingPlan ? "Resuming…" : "Resume"}
+                    </Button>
+                  </div>
+                )}
+                <form onSubmit={onSubmit}>
+                  <Textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={onKeyDown}
+                    rows={3}
+                    placeholder={
+                      agent?.agent.active
+                        ? "Ask Zyra to generate, update, or review test cases..."
+                        : "Connect an AI key to start chatting with Zyra"
+                    }
+                    disabled={sending || !agent?.agent.active}
+                    className="resize-none"
+                  />
+                  <div className="mt-2.5 flex items-center justify-between gap-3">
+                    <p className="text-[11px] text-[var(--muted)]">
+                      <kbd className="rounded border border-[var(--border)] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[10px]">Enter</kbd>{" "}send
+                      {" · "}
+                      <kbd className="rounded border border-[var(--border)] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[10px]">Shift+Enter</kbd>{" "}new line
+                    </p>
+                    <div className="flex items-center gap-2">
+                      {isPlanRunning && (
+                        <Button type="button" size="sm" variant="secondary" onClick={handleStopPlan} disabled={stoppingPlan}>
+                          {stoppingPlan ? "Stopping…" : "Stop"}
+                        </Button>
+                      )}
+                      <Button type="submit" size="sm" disabled={!input.trim() || sending || !agent?.agent.active}>
+                        {sending ? "Thinking..." : "Send"}
+                      </Button>
+                    </div>
+                  </div>
+                </form>
+              </div>
+            </section>
           </div>
-        </section>
+        )}
       </div>
 
       {/* Inline styles for markdown prose */}
@@ -759,6 +792,6 @@ export default function ZyraChatPage() {
         }
         .zyra-prose li { margin: 0.2rem 0; }
       `}</style>
-    </div>
+    </main>
   );
 }

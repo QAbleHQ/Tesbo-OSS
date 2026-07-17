@@ -104,6 +104,7 @@ export default function TestCasesPage() {
   const projectId = params.id as string;
   const activeSuiteId = searchParams.get("suiteId");
   const activeJiraIssueKey = searchParams.get("jiraIssueKey") || "";
+  const activeLinearIssueKey = searchParams.get("linearIssueKey") || "";
 
   // Take over the shared TopBar with this page's breadcrumb + actions (portaled below),
   // and hide the default global "Search projects" search while this page is mounted.
@@ -324,6 +325,7 @@ export default function TestCasesPage() {
         priority: suitePriorityFilter === "all" ? undefined : suitePriorityFilter,
         type: suiteTypeFilter === "all" ? undefined : suiteTypeFilter,
         jiraIssueKey: activeJiraIssueKey || undefined,
+        linearIssueKey: activeLinearIssueKey || undefined,
         search: debouncedSuiteSearch || undefined,
       });
       setSuiteCases(list);
@@ -345,6 +347,7 @@ export default function TestCasesPage() {
     suiteStatusFilter,
     suiteTypeFilter,
     activeJiraIssueKey,
+    activeLinearIssueKey,
     pageSize,
   ]);
 
@@ -1161,6 +1164,16 @@ export default function TestCasesPage() {
                         <IconX size={11} stroke={2.5} />
                       </button>
                     )}
+                    {activeLinearIssueKey && (
+                      <button
+                        type="button"
+                        onClick={() => router.replace(`/projects/${projectId}/testcases`)}
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--info-soft,#EEF2FF)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--info-foreground,#2D3DB0)] hover:opacity-80"
+                      >
+                        <span className="opacity-70">Linear:</span> {activeLinearIssueKey}
+                        <IconX size={11} stroke={2.5} />
+                      </button>
+                    )}
                     <select
                       value={suiteTypeFilter}
                       onChange={(e) => setSuiteTypeFilter(e.target.value)}
@@ -1522,8 +1535,8 @@ export default function TestCasesPage() {
                         </div>
                       </div>
                       <Field>
-                        <FieldLabel>Attachments</FieldLabel>
-                        <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Links/paths to screenshots, logs, or reference docs" />
+                        <FieldLabel>Notes</FieldLabel>
+                        <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Add notes, links to screenshots, logs, or reference docs" />
                       </Field>
                     </div>
                   )}
@@ -1581,8 +1594,8 @@ export default function TestCasesPage() {
                             </Field>
                           </div>
                           <Field>
-                            <FieldLabel>Attachments</FieldLabel>
-                            <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Links/paths to screenshots, logs, or reference docs" />
+                            <FieldLabel>Notes</FieldLabel>
+                            <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Add notes, links to screenshots, logs, or reference docs" />
                           </Field>
                         </div>
                       )}

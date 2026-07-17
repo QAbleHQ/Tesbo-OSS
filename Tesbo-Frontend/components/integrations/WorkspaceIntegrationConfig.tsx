@@ -188,7 +188,7 @@ export function WorkspaceIntegrationConfig({
   }
 
   const breadcrumb = (
-    <Link href="/settings/integrations" className="text-[var(--brand-primary)] hover:underline">
+    <Link href="/settings?tab=integrations" className="text-[var(--brand-primary)] hover:underline">
       &larr; Back to Integrations
     </Link>
   );

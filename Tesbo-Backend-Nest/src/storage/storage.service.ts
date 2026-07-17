@@ -67,6 +67,18 @@ export class StorageService {
     return fs.existsSync(this.localPath(key));
   }
 
+  // Reads the full object into memory — used where the caller needs the raw bytes
+  // (e.g. bundling into a zip export) rather than a URL/path to stream from.
+  async getBuffer(key: string): Promise<Buffer> {
+    if (this.s3) {
+      const res = await this.s3.send(new GetObjectCommand({ Bucket: this.config.s3Bucket, Key: this.prefixedKey(key) }));
+      const body = res.Body as { transformToByteArray?: () => Promise<Uint8Array> } | undefined;
+      if (body?.transformToByteArray) return Buffer.from(await body.transformToByteArray());
+      throw new Error(`Unable to read object body for key: ${key}`);
+    }
+    return fs.promises.readFile(this.localPath(key));
+  }
+
   // Returns either a short-lived, access-scoped redirect URL (S3) or a local file path to
   // stream directly (local disk) — callers must only call this after their own permission
   // checks pass, since the returned URL/path grants access to the file's contents.

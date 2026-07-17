@@ -8,7 +8,7 @@ export default function WorkspaceProjectAccessPage() {
   const router = useRouter();
 
   useEffect(() => {
-    router.replace("/settings/members");
+    router.replace("/settings?tab=members");
   }, [router]);
 
   return (

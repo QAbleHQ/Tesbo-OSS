@@ -272,17 +272,6 @@ function SidebarContent() {
               <BackToProjects collapsed={isCollapsed} />
             </div>
 
-            <div>
-              {!isCollapsed && (
-                <p className="mb-1 px-3 text-[11px] font-medium uppercase tracking-[0.06em] text-[var(--ink-300)]">Workspace</p>
-              )}
-              <div className="space-y-0.5">
-                <NavLink href="/settings/members" label="Members" icon="users" active={isPathActive("/settings/members")} collapsed={isCollapsed} />
-                <NavLink href="/settings/integrations" label="Integrations" icon="plug" active={isPathActive("/settings/integrations")} collapsed={isCollapsed} />
-                <NavLink href="/settings/ai-providers" label="AI Providers" icon="sparkles" active={isPathActive("/settings/ai-providers")} collapsed={isCollapsed} />
-              </div>
-            </div>
-
             {isPlatformAdmin && (
               <div>
                 {!isCollapsed && (
@@ -290,7 +279,6 @@ function SidebarContent() {
                 )}
                 <div className="space-y-0.5">
                   <NavLink href="/admin" label="System Health" icon="activity" active={pathname === "/admin"} collapsed={isCollapsed} />
-                  <NavLink href="/admin/admins" label="Manage Admins" icon="users" active={isPathActive("/admin/admins")} collapsed={isCollapsed} />
                 </div>
               </div>
             )}
@@ -363,14 +351,6 @@ function SidebarContent() {
                 </div>
               </div>
             ))}
-
-            <NavLink
-              href={`${projectPathPrefix}/settings`}
-              label="Settings"
-              icon="settings"
-              active={pathname === `${projectPathPrefix}/settings` || (pathname?.startsWith(`${projectPathPrefix}/settings/`) ?? false)}
-              collapsed={isCollapsed}
-            />
           </div>
         )}
       </nav>
@@ -379,9 +359,18 @@ function SidebarContent() {
       <div className="space-y-1 border-t border-[var(--glass-border)] p-2.5">
         {!isInSettings && (
           <NavLink
-            href="/settings/members"
+            href="/settings"
             label="Workspace settings"
             icon="settings"
+            collapsed={isCollapsed}
+          />
+        )}
+        {!isInSettings && isInProject && (
+          <NavLink
+            href={`${projectPathPrefix}/settings`}
+            label="Project settings"
+            icon="settings"
+            active={pathname === `${projectPathPrefix}/settings` || (pathname?.startsWith(`${projectPathPrefix}/settings/`) ?? false)}
             collapsed={isCollapsed}
           />
         )}

@@ -597,6 +597,7 @@ export interface ZyraTask {
   feedback: string;
   context: string;
   jiraIssueKeys: string[];
+  linearIssueKeys: string[];
   drafts: AiGeneratedDraft[];
   sources: Array<{ type: string; title: string; detail: string }>;
   activities: Array<{ actor: "user" | "agent" | string; stage: string; title: string; detail: string; createdAt: string }>;
@@ -746,6 +747,7 @@ export async function createZyraTask(
     context?: string;
     acceptanceCriteria?: string;
     jiraIssueKeys?: string[];
+    linearIssueKeys?: string[];
     knowledgeItemIds?: string[];
     count?: number;
   }
@@ -763,7 +765,7 @@ export async function getZyraTask(projectId: string, taskId: string): Promise<Zy
 export async function sendZyraFeedback(
   projectId: string,
   taskId: string,
-  data: string | { feedback: string; referenceNote?: string; jiraIssueKeys?: string[] }
+  data: string | { feedback: string; referenceNote?: string; jiraIssueKeys?: string[]; linearIssueKeys?: string[] }
 ): Promise<GenerateAiTestCasesResponse & { task: ZyraTask; tokenUsage: { input: number; output: number; total: number } }> {
   return api(`/api/projects/${projectId}/agents/zyra/tasks/${taskId}/feedback`, {
     method: "POST",
@@ -847,6 +849,8 @@ export interface TestCaseListItem {
   updatedAt: string;
   jiraIssueKey?: string | null;
   jiraUrl?: string | null;
+  linearIssueKey?: string | null;
+  linearUrl?: string | null;
 }
 
 export async function listTestCases(
@@ -860,6 +864,7 @@ export async function listTestCases(
     type?: string;
     automationStatus?: string;
     jiraIssueKey?: string;
+    linearIssueKey?: string;
     search?: string;
   }
 ): Promise<{ list: TestCaseListItem[]; total: number }> {
@@ -872,6 +877,7 @@ export async function listTestCases(
   if (params?.type) sp.set("type", params.type);
   if (params?.automationStatus) sp.set("automationStatus", params.automationStatus);
   if (params?.jiraIssueKey) sp.set("jiraIssueKey", params.jiraIssueKey);
+  if (params?.linearIssueKey) sp.set("linearIssueKey", params.linearIssueKey);
   if (params?.search) sp.set("search", params.search);
   const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000"}/api/projects/${projectId}/testcases?${sp}`, { credentials: "include" });
   const list = await res.json();
@@ -914,6 +920,10 @@ export async function bulkDeleteTestCases(projectId: string, data: { testcaseIds
 
 export async function listLinkedJiraKeys(projectId: string): Promise<{ keys: string[]; counts: Record<string, number> }> {
   return api<{ keys: string[]; counts: Record<string, number> }>(`/api/projects/${projectId}/testcases/linked-jira-keys`);
+}
+
+export async function listLinkedLinearKeys(projectId: string): Promise<{ keys: string[]; counts: Record<string, number> }> {
+  return api<{ keys: string[]; counts: Record<string, number> }>(`/api/projects/${projectId}/testcases/linked-linear-keys`);
 }
 
 // Test case import/export
@@ -1687,12 +1697,15 @@ export interface BugAttachment {
   createdAt: string;
 }
 
+export type BugSeverity = "Critical" | "High" | "Medium" | "Low";
+
 export interface BugItem {
   id: string;
   title: string;
   description: string;
   externalUrl: string;
   status: string;
+  severity: BugSeverity;
   executionId: string | null;
   testcaseId: string | null;
   cycleId: string | null;
@@ -1724,6 +1737,7 @@ export async function createBug(projectId: string, data: {
   title: string;
   description?: string;
   externalUrl?: string;
+  severity?: BugSeverity;
   integrationProvider?: "JIRA" | "LINEAR" | null;
   integrationIssueKey?: string | null;
   betterbugsUrl?: string | null;
@@ -1737,6 +1751,7 @@ export async function updateBug(bugId: string, data: {
   description?: string;
   externalUrl?: string;
   status?: string;
+  severity?: BugSeverity;
   integrationProvider?: "JIRA" | "LINEAR" | null;
   integrationIssueKey?: string | null;
   betterbugsUrl?: string | null;
@@ -1957,6 +1972,21 @@ export async function getReportsTrends(projectId: string): Promise<ReportsTrends
   return api<ReportsTrends>(`/api/projects/${projectId}/reports/trends`);
 }
 
+// ── Project Home dashboard summary ──
+export interface ProjectDashboardSummary {
+  testCases: { total: number; addedThisWeek: number };
+  passRate: { value: number | null; deltaThisWeek: number | null };
+  openBugs: { total: number; bySeverity: { Critical: number; High: number; Medium: number; Low: number } };
+  coverage: { pct: number | null; totalRequirements: number };
+  plans: number;
+  suites: number;
+  activeRuns: number;
+}
+
+export async function getProjectDashboardSummary(projectId: string): Promise<ProjectDashboardSummary> {
+  return api<ProjectDashboardSummary>(`/api/projects/${projectId}/dashboard`);
+}
+
 // ── App integrations (Jira, Linear) ──
 // Connecting/configuring an app is workspace-scoped (one connection per organization per
 // provider) — see settings/integrations. Mapping which remote project/team feeds a given Tesbo
@@ -2105,15 +2135,31 @@ export async function addJiraComment(
   });
 }
 
-export async function listJiraTickets(
-  projectId: string,
-  params?: { limit?: number; offset?: number; search?: string }
-): Promise<{ list: JiraTicket[]; total: number }> {
+export interface TicketListParams {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  issueType?: string;
+  status?: string;
+  coverage?: "covered" | "uncovered";
+}
+
+function ticketListParamsToSearch(params?: TicketListParams): URLSearchParams {
   const sp = new URLSearchParams();
   if (params?.limit != null) sp.set("limit", String(params.limit));
   if (params?.offset != null) sp.set("offset", String(params.offset));
   if (params?.search) sp.set("search", params.search);
-  const query = sp.toString();
+  if (params?.issueType) sp.set("issueType", params.issueType);
+  if (params?.status) sp.set("status", params.status);
+  if (params?.coverage) sp.set("coverage", params.coverage);
+  return sp;
+}
+
+export async function listJiraTickets(
+  projectId: string,
+  params?: TicketListParams
+): Promise<{ list: JiraTicket[]; total: number }> {
+  const query = ticketListParamsToSearch(params).toString();
   return api<{ list: JiraTicket[]; total: number }>(
     `/api/projects/${projectId}/jira/tickets${query ? `?${query}` : ""}`
   );
@@ -2206,13 +2252,9 @@ export async function addLinearComment(projectId: string, issueKey: string, comm
 
 export async function listLinearTickets(
   projectId: string,
-  params?: { limit?: number; offset?: number; search?: string }
+  params?: TicketListParams
 ): Promise<{ list: LinearTicket[]; total: number }> {
-  const sp = new URLSearchParams();
-  if (params?.limit != null) sp.set("limit", String(params.limit));
-  if (params?.offset != null) sp.set("offset", String(params.offset));
-  if (params?.search) sp.set("search", params.search);
-  const query = sp.toString();
+  const query = ticketListParamsToSearch(params).toString();
   return api<{ list: LinearTicket[]; total: number }>(
     `/api/projects/${projectId}/linear/tickets${query ? `?${query}` : ""}`
   );
@@ -2222,6 +2264,54 @@ export async function searchLinearIssuesLive(projectId: string, search: string):
   const sp = new URLSearchParams();
   if (search) sp.set("search", search);
   return api(`/api/projects/${projectId}/linear/search-issues?${sp.toString()}`);
+}
+
+// ── Requirements page: cross-source (Jira + Linear) aggregates ──
+
+export interface TicketSourceStats {
+  total: number;
+  covered: number;
+  uncovered: number;
+  types: string[];
+  statuses: string[];
+}
+
+export interface RequirementsSummary {
+  all: TicketSourceStats;
+  jira: TicketSourceStats;
+  linear: TicketSourceStats;
+}
+
+export async function getRequirementsSummary(projectId: string): Promise<RequirementsSummary> {
+  return api<RequirementsSummary>(`/api/projects/${projectId}/tickets/summary`);
+}
+
+export interface AllSourcesTicket {
+  id: string;
+  source: "jira" | "linear";
+  key: string;
+  summary: string;
+  description: string;
+  issueType: string;
+  status: string;
+  priority: string;
+  assignee: string;
+  reporter: string;
+  labels: string;
+  url: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+  hasCoverage: boolean;
+}
+
+export async function listAllTickets(
+  projectId: string,
+  params?: TicketListParams
+): Promise<{ list: AllSourcesTicket[]; total: number }> {
+  const query = ticketListParamsToSearch(params).toString();
+  return api<{ list: AllSourcesTicket[]; total: number }>(
+    `/api/projects/${projectId}/tickets${query ? `?${query}` : ""}`
+  );
 }
 
 // ── Knowledge Base ──
@@ -2516,6 +2606,7 @@ export interface ActivityLogItem {
   actorId: string | null;
   actorEmail: string | null;
   actorName: string | null;
+  actorKind: "user" | "agent" | null;
   action: string;
   entityType: string;
   entityId: string | null;
@@ -2526,16 +2617,35 @@ export interface ActivityLogItem {
 
 export async function listActivity(
   projectId: string,
-  params?: { limit?: number; offset?: number; entityType?: string }
+  params?: { limit?: number; offset?: number; entityType?: string; actorId?: string; search?: string; since?: string }
 ): Promise<{ list: ActivityLogItem[]; total: number }> {
   const sp = new URLSearchParams();
   if (params?.limit != null) sp.set("limit", String(params.limit));
   if (params?.offset != null) sp.set("offset", String(params.offset));
   if (params?.entityType) sp.set("entityType", params.entityType);
+  if (params?.actorId) sp.set("actorId", params.actorId);
+  if (params?.search) sp.set("search", params.search);
+  if (params?.since) sp.set("since", params.since);
   const query = sp.toString();
   return api<{ list: ActivityLogItem[]; total: number }>(
     `/api/projects/${projectId}/activity${query ? `?${query}` : ""}`
   );
+}
+
+export interface ActivitySummary {
+  weekly: { created: number; updated: number; aiActions: number; deleted: number; total: number };
+  activeMembers: {
+    actorId: string;
+    actorName: string | null;
+    actorEmail: string | null;
+    actorKind: "user" | "agent" | null;
+    count: number;
+  }[];
+  byEntityType: { entityType: string; count: number }[];
+}
+
+export async function getActivitySummary(projectId: string): Promise<ActivitySummary> {
+  return api<ActivitySummary>(`/api/projects/${projectId}/activity/summary`);
 }
 
 // ── Tesbo Test Manager reports module ─────────────────────────────────────────

@@ -17,6 +17,7 @@ import {
   listTestRuns,
   type BugItem,
   type BugAttachment,
+  type BugSeverity,
 } from "@/lib/api";
 import {
   Button,
@@ -38,6 +39,7 @@ import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceFie
 type ViewMode = "kanban" | "list";
 
 const BUG_STATUSES = ["Open", "In Progress", "Reopened", "Closed"] as const;
+const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
 const PAGE_SIZE = 15;
 
 const STATUS_TONE: Record<string, "error" | "success" | "info" | "warning"> = {
@@ -54,11 +56,23 @@ const STATUS_COLOR: Record<string, string> = {
   Closed: "var(--success)",
 };
 
+const SEVERITY_TONE: Record<BugSeverity, "error" | "warning" | "neutral" | "success"> = {
+  Critical: "error",
+  High: "warning",
+  Medium: "neutral",
+  Low: "success",
+};
+
 /* ───── Status badge ───── */
 function BugStatusBadge({ status }: { status: string }) {
   return (
     <StatusChip tone={STATUS_TONE[status] || "error"}>{status}</StatusChip>
   );
+}
+
+/* ───── Severity badge ───── */
+function BugSeverityBadge({ severity }: { severity: BugSeverity }) {
+  return <StatusChip tone={SEVERITY_TONE[severity]}>{severity}</StatusChip>;
 }
 
 /* ───── View toggle buttons ───── */
@@ -161,6 +175,10 @@ function KanbanCard({
           {bug.description}
         </p>
       )}
+
+      <div className="mb-2">
+        <BugSeverityBadge severity={bug.severity} />
+      </div>
 
       <div className="flex items-center gap-2 flex-wrap">
         {bug.links.slice(0, 2).map((link) => (
@@ -352,6 +370,7 @@ export default function BugsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
   const [createDesc, setCreateDesc] = useState("");
+  const [createSeverity, setCreateSeverity] = useState<BugSeverity>("Medium");
   const [createLinks, setCreateLinks] = useState<LinkRow[]>([]);
   const [createDestination, setCreateDestination] = useState<TrackingDestination>("TESBO");
   const [createSelfSystem, setCreateSelfSystem] = useState<SelfLoggedSystem>("OTHER");
@@ -365,6 +384,7 @@ export default function BugsPage() {
   const [editBug, setEditBug] = useState<BugItem | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editDesc, setEditDesc] = useState("");
+  const [editSeverity, setEditSeverity] = useState<BugSeverity>("Medium");
   const [editLinks, setEditLinks] = useState<LinkRow[]>([]);
   const [editDestination, setEditDestination] = useState<TrackingDestination>("TESBO");
   const [editSelfSystem, setEditSelfSystem] = useState<SelfLoggedSystem>("OTHER");
@@ -454,6 +474,7 @@ export default function BugsPage() {
     setShowCreate(false);
     setCreateTitle("");
     setCreateDesc("");
+    setCreateSeverity("Medium");
     setCreateLinks([]);
     setCreateDestination("TESBO");
     setCreateSelfSystem(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "OTHER");
@@ -472,6 +493,7 @@ export default function BugsPage() {
       const bug = await createBug(projectId, {
         title: createTitle.trim(),
         description: createDesc.trim(),
+        severity: createSeverity,
         externalUrl: selfLogged ? createUrl.trim() : undefined,
         integrationProvider: selfLogged && createSelfSystem !== "OTHER" ? createSelfSystem : null,
         integrationIssueKey: null,
@@ -497,6 +519,7 @@ export default function BugsPage() {
     setEditBug(bug);
     setEditTitle(bug.title);
     setEditDesc(bug.description);
+    setEditSeverity(bug.severity);
     setEditLinks(
       bug.links.map((link) => ({
         cycleId: link.cycleId || "",
@@ -532,6 +555,7 @@ export default function BugsPage() {
         title: editTitle.trim(),
         description: editDesc.trim(),
         status: editStatus,
+        severity: editSeverity,
         externalUrl: selfLogged ? editUrl.trim() : undefined,
         integrationProvider: selfLogged && editSelfSystem !== "OTHER" ? editSelfSystem : null,
         integrationIssueKey: null,
@@ -684,6 +708,7 @@ export default function BugsPage() {
                         <tr>
                           <th>Title</th>
                           <th>Status</th>
+                          <th>Severity</th>
                           <th>Test Case</th>
                           <th>Test Run</th>
                           <th>Reporter</th>
@@ -726,6 +751,9 @@ export default function BugsPage() {
                             </td>
                             <td>
                               <BugStatusBadge status={b.status} />
+                            </td>
+                            <td>
+                              <BugSeverityBadge severity={b.severity} />
                             </td>
                             <td>
                               {b.links.length ? (
@@ -842,7 +870,10 @@ export default function BugsPage() {
                 <h3 className="text-base font-semibold text-[var(--foreground)] break-words leading-snug">
                   {viewBug.title}
                 </h3>
-                <BugStatusBadge status={viewBug.status} />
+                <div className="flex items-center gap-2 shrink-0">
+                  <BugSeverityBadge severity={viewBug.severity} />
+                  <BugStatusBadge status={viewBug.status} />
+                </div>
               </div>
             </div>
 
@@ -1039,6 +1070,16 @@ export default function BugsPage() {
               placeholder="Steps to reproduce, expected vs actual behavior…"
             />
           </Field>
+          <Field>
+            <FieldLabel>Severity</FieldLabel>
+            <Select value={createSeverity} onChange={(e) => setCreateSeverity(e.target.value as BugSeverity)}>
+              {BUG_SEVERITIES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </Select>
+          </Field>
           <BugEvidenceField
             mode={createEvidenceMode}
             onModeChange={setCreateEvidenceMode}
@@ -1162,6 +1203,16 @@ export default function BugsPage() {
               <option value="In Progress">In Progress</option>
               <option value="Closed">Closed</option>
               <option value="Reopened">Reopened</option>
+            </Select>
+          </Field>
+          <Field>
+            <FieldLabel>Severity</FieldLabel>
+            <Select value={editSeverity} onChange={(e) => setEditSeverity(e.target.value as BugSeverity)}>
+              {BUG_SEVERITIES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
             </Select>
           </Field>
           <div className="flex justify-end gap-2 pt-2">
