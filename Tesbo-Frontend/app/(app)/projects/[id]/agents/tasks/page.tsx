@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { IconSparkles } from "@tabler/icons-react";
 import {
   authMe,
   createZyraTask,
@@ -17,29 +18,16 @@ import {
 } from "@/lib/api";
 import { Button, Field, FieldLabel, Modal, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
+import TaskQuickViewPanel, { JIRA_BADGE_CLASS, normalizeTaskStatus as normalizeStatus, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
 
 const columns = [
-  { key: "todo", label: "Todo" },
-  { key: "in_progress", label: "In Progress" },
-  { key: "in_review", label: "In Review" },
-  { key: "done", label: "Done" },
+  { key: "todo", label: "Pending", dot: "var(--muted-soft)" },
+  { key: "in_progress", label: "In Progress", dot: "var(--warning)" },
+  { key: "in_review", label: "In Review", dot: "var(--accent-light)" },
+  { key: "done", label: "Done", dot: "var(--success)" },
 ] as const;
 
 type TaskView = "tasks" | "kanban";
-
-function normalizeStatus(status: string): string {
-  if (status === "accepted") return "done";
-  if (status === "rejected") return "todo";
-  return status || "todo";
-}
-
-function tone(status: string): "neutral" | "info" | "success" | "warning" {
-  const normalized = normalizeStatus(status);
-  if (normalized === "done") return "success";
-  if (normalized === "in_review") return "info";
-  if (normalized === "in_progress") return "warning";
-  return "neutral";
-}
 
 export default function ZyraTasksPage() {
   const params = useParams();
@@ -59,6 +47,12 @@ export default function ZyraTasksPage() {
   const [activeView, setActiveView] = useState<TaskView>("tasks");
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [quickViewTask, setQuickViewTask] = useState<ZyraTask | null>(null);
+
+  function handleTaskUpdated(updated: ZyraTask) {
+    setQuickViewTask(updated);
+    setState((prev) => (prev ? { ...prev, tasks: prev.tasks.map((t) => (t.id === updated.id ? updated : t)) } : prev));
+  }
 
   const loadData = useCallback(async () => {
     try {
@@ -167,7 +161,17 @@ export default function ZyraTasksPage() {
     <StandardPageLayout
       header={
         <PageHeader
-          title="Zyra"
+          title={
+            <>
+              <span
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px]"
+                style={{ background: "linear-gradient(135deg, var(--brand-primary), var(--accent-light))" }}
+              >
+                <IconSparkles size={15} stroke={1.75} className="text-white" />
+              </span>
+              Zyra
+            </>
+          }
           subtitle="Track every task on the Kanban board, then open a card to review generated testcases, feedback, sources, and activity."
           actions={
             <div className="flex flex-wrap items-center gap-2">
@@ -204,7 +208,18 @@ export default function ZyraTasksPage() {
             </button>
           ))}
         </div>
-        <StatusChip tone={state.agent.active ? "success" : "warning"}>{state.agent.active ? "Active" : "Inactive"}</StatusChip>
+        <div className="flex items-center gap-1.5 pb-2.5">
+          <span
+            className="h-[7px] w-[7px] rounded-full"
+            style={{ background: state.agent.active ? "var(--success)" : "var(--muted-soft)" }}
+          />
+          <span
+            className="text-xs font-medium"
+            style={{ color: state.agent.active ? "var(--success-foreground)" : "var(--muted-soft)" }}
+          >
+            {state.agent.active ? "Active" : "Inactive"}
+          </span>
+        </div>
       </div>
 
       {activeView === "tasks" ? (
@@ -218,10 +233,11 @@ export default function ZyraTasksPage() {
           </div>
           <div className="divide-y divide-[var(--border)]">
             {tasks.map((task) => (
-              <Link
+              <button
+                type="button"
                 key={task.id}
-                href={`/projects/${projectId}/agents/tasks/${task.id}`}
-                className="grid gap-3 px-4 py-4 transition-colors hover:bg-[var(--surface-secondary)] lg:grid-cols-[minmax(240px,1fr)_140px_180px_150px_120px] lg:items-center"
+                onClick={() => setQuickViewTask(task)}
+                className="grid w-full gap-3 px-4 py-4 text-left transition-colors hover:bg-[var(--surface-secondary)] lg:grid-cols-[minmax(240px,1fr)_140px_180px_150px_120px] lg:items-center"
               >
                 <div className="min-w-0">
                   <h2 className="line-clamp-2 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h2>
@@ -230,14 +246,14 @@ export default function ZyraTasksPage() {
                 <div><StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip></div>
                 <div className="flex flex-wrap gap-1.5">
                   {task.jiraIssueKeys.slice(0, 2).map((key) => (
-                    <span key={key} className="rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--brand-primary)]">{key}</span>
+                    <span key={key} className={JIRA_BADGE_CLASS}>{key}</span>
                   ))}
                   {task.jiraIssueKeys.length === 0 && <span className="text-xs text-[var(--muted)]">No tickets</span>}
                   {task.jiraIssueKeys.length > 2 && <span className="text-xs text-[var(--muted)]">+{task.jiraIssueKeys.length - 2}</span>}
                 </div>
                 <span className="text-sm text-[var(--foreground)]">{task.generatedCount} testcase{task.generatedCount === 1 ? "" : "s"}</span>
-                <span className="text-sm text-[var(--muted)]">{task.tokenUsage.total}</span>
-              </Link>
+                <span className="font-mono text-sm text-[var(--muted)]">{task.tokenUsage.total}</span>
+              </button>
             ))}
             {tasks.length === 0 && <div className="p-8 text-center text-sm text-[var(--muted)]">No tasks in queue</div>}
           </div>
@@ -246,23 +262,30 @@ export default function ZyraTasksPage() {
         <div className="grid gap-4 xl:grid-cols-4">
           {columns.map((column) => {
             const columnTasks = tasksByColumn.get(column.key) || [];
+            const isDone = column.key === "done";
             return (
               <section key={column.key} className="min-w-0 rounded-xl border border-[var(--border)] bg-[var(--surface-secondary)] p-3">
                 <div className="mb-3 flex items-center justify-between gap-2">
-                  <h2 className="text-sm font-semibold text-[var(--foreground)]">{column.label}</h2>
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full" style={{ background: column.dot }} />
+                    <h2 className="text-xs font-semibold uppercase tracking-[0.06em] text-[var(--foreground)]">{column.label}</h2>
+                  </div>
                   <span className="rounded-full bg-[var(--surface)] px-2 py-0.5 text-xs text-[var(--muted)]">{columnTasks.length}</span>
                 </div>
                 <div className="space-y-3">
                   {columnTasks.map((task) => (
-                    <Link key={task.id} href={`/projects/${projectId}/agents/tasks/${task.id}`} className="block rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 transition-colors hover:border-[var(--brand-primary)]">
+                    <button
+                      type="button"
+                      key={task.id}
+                      onClick={() => setQuickViewTask(task)}
+                      className={`block w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition-[opacity,border-color] hover:border-[var(--brand-primary)] ${isDone ? "opacity-75 hover:opacity-100" : ""}`}
+                    >
                       <StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
                       <h3 className="mt-2 line-clamp-3 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h3>
                       {task.jiraIssueKeys.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {task.jiraIssueKeys.slice(0, 3).map((key) => (
-                            <span key={key} className="rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--brand-primary)]">
-                              {key}
-                            </span>
+                            <span key={key} className={JIRA_BADGE_CLASS}>{key}</span>
                           ))}
                           {task.jiraIssueKeys.length > 3 && (
                             <span className="rounded-full bg-[var(--surface-secondary)] px-2 py-0.5 text-[11px] font-medium text-[var(--muted)]">
@@ -272,7 +295,7 @@ export default function ZyraTasksPage() {
                         </div>
                       )}
                       <p className="mt-2 text-xs text-[var(--muted)]">{task.generatedCount} testcase{task.generatedCount === 1 ? "" : "s"} generated - {task.tokenUsage.total} tokens</p>
-                    </Link>
+                    </button>
                   ))}
                   {columnTasks.length === 0 && <div className="rounded-lg border border-dashed border-[var(--border)] p-4 text-center text-xs text-[var(--muted)]">No tasks</div>}
                 </div>
@@ -280,6 +303,15 @@ export default function ZyraTasksPage() {
             );
           })}
         </div>
+      )}
+
+      {quickViewTask && (
+        <TaskQuickViewPanel
+          task={quickViewTask}
+          projectId={projectId}
+          onClose={() => setQuickViewTask(null)}
+          onTaskUpdated={handleTaskUpdated}
+        />
       )}
 
       <Modal open={createOpen} onClose={() => !working && setCreateOpen(false)} title="Create Zyra task" className="max-w-3xl">

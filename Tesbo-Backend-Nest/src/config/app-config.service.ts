@@ -11,6 +11,7 @@ export class AppConfigService {
   readonly databaseUrl = this.normalizeDatabaseUrl(this.string("DATABASE_URL", "postgresql://localhost:5432/tesbo"));
   readonly databaseUser = this.optionalString("DATABASE_USER");
   readonly databasePassword = this.optionalString("DATABASE_PASSWORD");
+  readonly redisUrl = this.string("REDIS_URL", "redis://localhost:6379");
   readonly postmarkApiToken = this.string("POSTMARK_API_TOKEN", "");
   readonly postmarkFromEmail = this.string("POSTMARK_FROM_EMAIL", "noreply@example.com");
   readonly otpExpiryMinutes = this.integer("OTP_EXPIRY_MINUTES", 10);

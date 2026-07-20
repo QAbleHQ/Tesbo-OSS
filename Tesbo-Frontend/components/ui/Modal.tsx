@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import { useEffect } from "react";
 import { createPortal } from "react-dom";
 import { cx } from "@/components/ui/cx";
 
@@ -13,14 +14,25 @@ type ModalProps = {
 };
 
 export default function Modal({ open, onClose, title, children, className }: ModalProps) {
+  useEffect(() => {
+    if (!open) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, onClose]);
+
   if (!open || typeof document === "undefined") return null;
 
   return createPortal(
     <div
+      role="presentation"
       className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay-backdrop)] p-4 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
+        role="presentation"
         className={cx(
           "w-full rounded-[10px] border border-[var(--border)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-elevated)]",
           className === undefined ? "max-w-[560px]" : className,

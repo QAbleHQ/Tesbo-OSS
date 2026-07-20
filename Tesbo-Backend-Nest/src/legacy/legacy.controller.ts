@@ -214,17 +214,19 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:id/apikeys")
-  apiKeys() {
-    return [];
+  apiKeys(@Req() req: AuthenticatedRequest, @Param("id") id: string) {
+    return this.legacy.listApiKeys(req.userId, id);
   }
 
   @Post("/api/projects/:id/apikeys")
-  createApiKey() {
-    return { id: "local-api-key", token: "local-dev-token", createdAt: new Date().toISOString() };
+  createApiKey(@Req() req: AuthenticatedRequest, @Param("id") id: string, @Body() body: Record<string, any>) {
+    return this.legacy.createApiKey(req.userId, id, body);
   }
 
   @Delete("/api/projects/:id/apikeys/:keyId")
-  revokeApiKey() {}
+  revokeApiKey(@Req() req: AuthenticatedRequest, @Param("id") id: string, @Param("keyId") keyId: string) {
+    return this.legacy.revokeApiKey(req.userId, id, keyId);
+  }
 
   @Get("/api/projects/:projectId/suites")
   listSuites(@Param("projectId") projectId: string) {
@@ -254,13 +256,18 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/testcases")
-  createTestCase(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createTestCase(projectId, body);
+  createTestCase(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createTestCase(projectId, req.userId, body);
   }
 
   @Get("/api/projects/:projectId/testcases/linked-jira-keys")
   linkedJiraKeys(@Param("projectId") projectId: string) {
     return this.legacy.linkedJiraKeys(projectId);
+  }
+
+  @Get("/api/projects/:projectId/testcases/linked-linear-keys")
+  linkedLinearKeys(@Param("projectId") projectId: string) {
+    return this.legacy.linkedLinearKeys(projectId);
   }
 
   @Get("/api/projects/:projectId/testcases/:testcaseId")
@@ -269,23 +276,23 @@ export class LegacyController {
   }
 
   @Put("/api/projects/:projectId/testcases/:testcaseId")
-  updateTestCase(@Param("testcaseId") testcaseId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateTestCase(testcaseId, body);
+  updateTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateTestCase(testcaseId, req.userId, body);
   }
 
   @Delete("/api/projects/:projectId/testcases/:testcaseId")
-  deleteTestCase(@Param("testcaseId") testcaseId: string) {
-    return this.legacy.deleteTestCase(testcaseId);
+  deleteTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string) {
+    return this.legacy.deleteTestCase(testcaseId, req.userId);
   }
 
   @Post("/api/projects/:projectId/testcases/bulk-update")
-  bulkUpdate(@Body() body: Record<string, any>) {
-    return this.legacy.bulkUpdateTestCases(body);
+  bulkUpdate(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.bulkUpdateTestCases(projectId, req.userId, body);
   }
 
   @Post("/api/projects/:projectId/testcases/bulk-delete")
-  bulkDelete(@Body() body: Record<string, any>) {
-    return this.legacy.bulkDeleteTestCases(body.testcaseIds || []);
+  bulkDelete(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.bulkDeleteTestCases(projectId, req.userId, body.testcaseIds || []);
   }
 
   @Get("/api/projects/:projectId/plans")
@@ -389,8 +396,24 @@ export class LegacyController {
   }
 
   @Patch("/api/cycles/:cycleId/executions/:executionId")
-  updateExecution(@Param("executionId") executionId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateExecution(executionId, body);
+  updateExecution(@Req() req: AuthenticatedRequest, @Param("executionId") executionId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateExecution(executionId, req.userId, body);
+  }
+
+  @Post("/api/cycles/:cycleId/executions/:executionId/attachments")
+  @UseInterceptors(FilesInterceptor("files", 10, { limits: { fileSize: LegacyService.KB_MAX_UPLOAD_SIZE } }))
+  uploadExecutionAttachments(
+    @Req() req: AuthenticatedRequest,
+    @Param("cycleId") cycleId: string,
+    @Param("executionId") executionId: string,
+    @UploadedFiles() files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    return this.legacy.uploadExecutionAttachments(cycleId, req.userId, executionId, files);
+  }
+
+  @Get("/api/cycles/:cycleId/executions/:executionId/attachments")
+  listExecutionAttachments(@Param("executionId") executionId: string) {
+    return this.legacy.listExecutionAttachments(executionId);
   }
 
   @Post("/api/cycles/:cycleId/executions/bulk-assign")
@@ -556,6 +579,11 @@ export class LegacyController {
     return this.legacy.analytics(projectId);
   }
 
+  @Get("/api/projects/:projectId/dashboard")
+  projectDashboard(@Param("projectId") projectId: string) {
+    return this.legacy.projectDashboardSummary(projectId);
+  }
+
   @Get("/api/cycles/:cycleId/report/summary")
   cycleSummary() {
     return { total: 0, passed: 0, failed: 0, blocked: 0, skipped: 0, untested: 0 };
@@ -574,6 +602,21 @@ export class LegacyController {
   @Get("/api/projects/:projectId/reports/repository-summary")
   repositorySummary(@Param("projectId") projectId: string) {
     return this.legacy.repositorySummary(projectId);
+  }
+
+  @Get("/api/projects/:projectId/reports/overview")
+  reportsOverview(@Param("projectId") projectId: string) {
+    return this.legacy.reportsOverview(projectId);
+  }
+
+  @Get("/api/projects/:projectId/reports/insights")
+  reportsInsights(@Param("projectId") projectId: string) {
+    return this.legacy.reportsInsights(projectId);
+  }
+
+  @Get("/api/projects/:projectId/reports/trends")
+  reportsTrends(@Param("projectId") projectId: string) {
+    return this.legacy.reportsTrends(projectId);
   }
 
   @Post("/api/projects/:projectId/ai/generate-testcases")
@@ -636,6 +679,24 @@ export class LegacyController {
     return this.legacy.sendZyraChatMessage(projectId, req.userId, sessionId, body);
   }
 
+  @Post("/api/projects/:projectId/agents/zyra/chat/sessions/:sessionId/stop-plan")
+  stopZyraChatPlan(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("sessionId") sessionId: string
+  ) {
+    return this.legacy.stopZyraChatPlan(projectId, req.userId, sessionId);
+  }
+
+  @Post("/api/projects/:projectId/agents/zyra/chat/sessions/:sessionId/resume-plan")
+  resumeZyraChatPlan(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("sessionId") sessionId: string
+  ) {
+    return this.legacy.resumeZyraChatPlan(projectId, req.userId, sessionId);
+  }
+
   @Post("/api/projects/:projectId/agents/zyra/tasks")
   createZyraTask(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.aiGenerate(projectId, req.userId, body);
@@ -667,8 +728,8 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/agents/zyra/tasks/:taskId/save")
-  saveZyraTask(@Param("projectId") projectId: string, @Param("taskId") taskId: string, @Body() body: Record<string, any>) {
-    return this.legacy.zyraSave(projectId, taskId, body);
+  saveZyraTask(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("taskId") taskId: string, @Body() body: Record<string, any>) {
+    return this.legacy.zyraSave(projectId, req.userId, taskId, body);
   }
 
   // ─── Knowledge Base v2 (folders / documents / files) ────────────────────────
@@ -684,6 +745,24 @@ export class LegacyController {
   @Get("/api/projects/:projectId/knowledge-base/folders/tree")
   getKnowledgeFolderTree(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
     return this.legacy.getKnowledgeFolderTree(projectId, req.userId);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/summary")
+  getKnowledgeBaseSummary(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.knowledgeBaseSummary(projectId, req.userId);
+  }
+
+  @Get("/api/projects/:projectId/knowledge-base/folders/:folderId/export")
+  async exportKnowledgeFolder(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+    @Param("projectId") projectId: string,
+    @Param("folderId") folderId: string
+  ) {
+    const { buffer, filename } = await this.legacy.exportKnowledgeFolder(projectId, req.userId, folderId);
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.send(buffer);
   }
 
   @Get("/api/projects/:projectId/knowledge-base/folders/:folderId")
@@ -946,6 +1025,11 @@ export class LegacyController {
     return this.legacy.integrationCallback(req.userId, provider, body);
   }
 
+  @Post("/api/workspace/integrations/:provider/connect-token")
+  connectIntegrationToken(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
+    return this.legacy.connectIntegrationWithToken(req.userId, provider, body);
+  }
+
   @Delete("/api/workspace/integrations/:provider/disconnect")
   integrationDisconnect(@Req() req: AuthenticatedRequest, @Param("provider") provider: string) {
     return this.legacy.integrationDisconnect(req.userId, provider);
@@ -1030,9 +1114,26 @@ export class LegacyController {
     return this.legacy.linearSearchIssues(projectId, query);
   }
 
+  // ── Requirements page: cross-source (Jira + Linear) aggregates ──
+
+  @Get("/api/projects/:projectId/tickets/summary")
+  requirementsSummary(@Param("projectId") projectId: string) {
+    return this.legacy.requirementsSummary(projectId);
+  }
+
+  @Get("/api/projects/:projectId/tickets")
+  allTickets(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.allTickets(projectId, query);
+  }
+
   @Get("/api/projects/:projectId/activity")
   activity(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
     return this.legacy.listActivity(projectId, query);
+  }
+
+  @Get("/api/projects/:projectId/activity/summary")
+  activitySummary(@Param("projectId") projectId: string) {
+    return this.legacy.activitySummary(projectId);
   }
 
   @Get("/api/notifications")
@@ -1044,13 +1145,13 @@ export class LegacyController {
   readNotification() {}
 
   @Get("/api/admin/customers")
-  customers() {
-    return this.legacy.adminCustomers();
+  customers(@Req() req: AuthenticatedRequest) {
+    return this.legacy.adminCustomers(req.userId);
   }
 
   @Get("/api/admin/admins")
-  admins() {
-    return this.legacy.adminList();
+  admins(@Req() req: AuthenticatedRequest) {
+    return this.legacy.adminList(req.userId);
   }
 
   @Get("/api/branding")
@@ -1070,12 +1171,12 @@ export class LegacyController {
 
   @Post("/api/admin/admins")
   addAdmin(@Req() req: AuthenticatedRequest, @Body() body: Record<string, any>) {
-    return this.legacy.addAdmin(body, req.userId);
+    return this.legacy.addAdmin(req.userId, body);
   }
 
   @Delete("/api/admin/admins/:adminId")
-  removeAdmin(@Param("adminId") adminId: string) {
-    return this.legacy.deleteAdmin(adminId);
+  removeAdmin(@Req() req: AuthenticatedRequest, @Param("adminId") adminId: string) {
+    return this.legacy.deleteAdmin(req.userId, adminId);
   }
 
   @Get("/api/projects/:projectId/tesbo-reports/runs")

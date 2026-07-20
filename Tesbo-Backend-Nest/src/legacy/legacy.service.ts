@@ -1,12 +1,22 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { createHash, randomBytes, randomUUID } from "crypto";
+import * as fs from "fs";
 import * as path from "path";
+import * as XLSX from "xlsx";
+import archiver from "archiver";
+import pdfParse from "pdf-parse";
+import * as mammoth from "mammoth";
+import { createWorker } from "tesseract.js";
 import type { PoolClient, QueryResultRow } from "pg";
 import { EmailService } from "../auth/email.service";
 import { PasswordService } from "../auth/password.service";
 import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
 import { StorageService } from "../storage/storage.service";
+import { encryptSecret, decryptSecret } from "../common/crypto.util";
+import { ApiTokenService } from "../auth/api-token.service";
+import { RagIngestionService } from "../rag/rag-ingestion.service";
+import { RagRetrievalService } from "../rag/rag-retrieval.service";
 
 type Body = Record<string, any>;
 
@@ -52,6 +62,7 @@ type ZyraGenerationInput = {
   feedback: string;
   knowledge: Array<{ title: string; content: string }>;
   jira: Array<{ key: string; summary: string; description: string }>;
+  linear: Array<{ key: string; summary: string; description: string }>;
   existingTestcases: Array<{ externalId: string; title: string; description: string; priority: string; status: string; stepsSummary: string }>;
   requestedCount: number;
   testcaseRange?: string; // "minimum" | "1-10" | "10-30" | "all"
@@ -82,6 +93,10 @@ type ZyraChatDecision = {
     externalIds?: string[];
     testcaseIds?: string[];
     allExisting?: boolean;
+    // move_to_suite: every testcase from the most recently generated batch (see
+    // "Most recently generated batch" in the prompt) — use instead of externalIds when the
+    // user refers to "all"/"the N cases" from a recent generation rather than naming specific ones.
+    fromLastPlan?: boolean;
     // create_suite / move_to_suite target (suite is created by name when it does not exist yet)
     suiteName?: string;
     suiteId?: string;
@@ -129,7 +144,7 @@ function slugify(value: string): string {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
+    .replace(/(?:^-)|(?:-$)/g, "")
     .slice(0, 64) || "workspace";
 }
 
@@ -159,6 +174,13 @@ function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Strips path separators/control characters from a folder or document/file name so it's safe
+// to use as a zip entry path segment (used only by exportKnowledgeFolder).
+function sanitizeZipEntryName(value: string): string {
+  const cleaned = value.replace(/[/\\]+/g, "-").replace(/[\x00-\x1f]/g, "").trim();
+  return cleaned || "Untitled";
+}
+
 function escapeJql(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
@@ -183,6 +205,19 @@ function assertIntegrationProvider(provider: string): IntegrationProvider {
     throw new BadRequestException({ error: "Unsupported integration provider." });
   }
   return provider;
+}
+
+// Which providers support connecting via a Personal Access Token instead of OAuth. A future
+// provider that only supports OAuth simply omits itself (or sets `false`) here — the frontend's
+// per-provider PAT field map mirrors this and hides the tab accordingly.
+const INTEGRATION_PAT_SUPPORTED: Record<IntegrationProvider, boolean> = { jira: true, linear: true };
+
+function normalizeJiraSiteUrl(raw: string): string {
+  const value = raw.trim().replace(/\/+$/, "");
+  if (!/^https:\/\/[^/]+$/i.test(value)) {
+    throw new BadRequestException({ error: "Jira site URL must look like https://yourcompany.atlassian.net" });
+  }
+  return value;
 }
 
 const JIRA_OAUTH_SCOPE = "read:jira-work read:jira-user write:jira-work offline_access";
@@ -218,26 +253,41 @@ function anthropicModelCandidates(model?: string | null): string[] {
   ].filter(Boolean)));
 }
 
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
+}
+
 function normalizeChatCompletionsUrl(baseUrl?: string | null): string {
   const value = String(baseUrl || "").trim();
   if (!value) return "https://api.openai.com/v1/chat/completions";
-  const trimmed = value.replace(/\/+$/, "");
+  const trimmed = trimTrailingSlashes(value);
   if (trimmed.endsWith("/chat/completions")) return trimmed;
   if (trimmed.endsWith("/v1")) return `${trimmed}/chat/completions`;
   return `${trimmed}/v1/chat/completions`;
 }
 
+function normalizeAudioTranscriptionsUrl(baseUrl?: string | null): string {
+  const value = String(baseUrl || "").trim();
+  if (!value) return "https://api.openai.com/v1/audio/transcriptions";
+  const trimmed = trimTrailingSlashes(value);
+  if (trimmed.endsWith("/audio/transcriptions")) return trimmed;
+  if (trimmed.endsWith("/v1")) return `${trimmed}/audio/transcriptions`;
+  return `${trimmed}/v1/audio/transcriptions`;
+}
+
 function normalizeAnthropicMessagesUrl(baseUrl?: string | null): string {
   const value = String(baseUrl || "").trim();
   if (!value) return "https://api.anthropic.com/v1/messages";
-  const trimmed = value.replace(/\/+$/, "");
+  const trimmed = trimTrailingSlashes(value);
   if (trimmed.endsWith("/messages")) return trimmed;
   if (trimmed.endsWith("/v1")) return `${trimmed}/messages`;
   return `${trimmed}/v1/messages`;
 }
 
 @Injectable()
-export class LegacyService {
+export class LegacyService implements OnModuleInit {
   private readonly logger = new Logger(LegacyService.name);
 
   constructor(
@@ -245,8 +295,65 @@ export class LegacyService {
     private readonly email: EmailService,
     private readonly password: PasswordService,
     private readonly config: AppConfigService,
-    private readonly storage: StorageService
+    private readonly storage: StorageService,
+    private readonly ragIngestion: RagIngestionService,
+    private readonly ragRetrieval: RagRetrievalService,
+    private readonly apiTokens: ApiTokenService
   ) {}
+
+  // --- API tokens (project-scoped machine credentials) -------------------
+  // Backs GET/POST/DELETE /api/projects/:id/apikeys. Access is gated by the
+  // same project-membership check used across the rest of the API.
+
+  async listApiKeys(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.apiTokens.listTokens(projectId);
+  }
+
+  async createApiKey(userId: string | null | undefined, projectId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const name = String(body?.name || "").trim();
+    if (!name) throw new BadRequestException({ error: "name is required" });
+    return this.apiTokens.issueToken(uid, projectId, name, body?.scopes);
+  }
+
+  async revokeApiKey(userId: string | null | undefined, projectId: string, keyId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    const removed = await this.apiTokens.revokeToken(projectId, keyId);
+    if (!removed) throw new NotFoundException({ error: "API key not found" });
+    return { ok: true };
+  }
+
+  private enqueueEmbedding(organizationId: string, projectId: string, sourceType: "document" | "file", sourceId: string, reason: "created" | "updated" | "transcribed"): void {
+    void this.ragIngestion.enqueueEmbedding({ organizationId, projectId, sourceType, sourceId, reason }).catch(() => undefined);
+  }
+
+  async onModuleInit(): Promise<void> {
+    this.resumeInterruptedZyraChatPlans().catch((err) => {
+      this.logger.warn(`Failed to resume Zyra chat plans on startup: ${err instanceof Error ? err.message : err}`);
+    });
+  }
+
+  // A backend restart kills any in-flight continueZyraChatPlan loop instantly — it's an
+  // in-memory fire-and-forget task, not a durable job — leaving the session's active_plan
+  // set with no further batches ever posting and no error message, until the user happens
+  // to send an unrelated message (which just cancels it as a side effect). Resume every
+  // plan that was genuinely still running (not one a user or a graceful error already
+  // paused — those wait for an explicit "continue") once at boot so a deploy/crash mid-plan
+  // self-heals instead of stalling silently.
+  private async resumeInterruptedZyraChatPlans(): Promise<void> {
+    const res = await this.db.query(
+      "SELECT id, project_id, user_id, active_plan FROM zyra_chat_sessions WHERE active_plan IS NOT NULL AND active_plan->>'status' = 'running'"
+    ).catch(() => ({ rows: [] as Body[] }));
+    for (const row of res.rows) {
+      const plan = row.active_plan as Body | null;
+      const planId = plan?.planId ? String(plan.planId) : "";
+      if (!planId) continue;
+      this.logger.log(`Resuming interrupted Zyra chat plan for session ${row.id} (${Number(plan?.doneCount) || 0}/${Number(plan?.totalCount) || 0} done)`);
+      void this.continueZyraChatPlan(String(row.project_id), row.user_id ? String(row.user_id) : null, String(row.id), planId).catch(() => undefined);
+    }
+  }
 
   private requireUser(userId?: string | null): string {
     if (!userId) throw new BadRequestException({ error: "Authentication required" });
@@ -266,6 +373,26 @@ export class LegacyService {
        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
       [projectId, actorId, action, entityType, entityId, entityName, JSON.stringify(diff)]
     ).catch(() => undefined);
+  }
+
+  // Cached lookup for the well-known Zyra agent's actor id — resolved once and reused, since
+  // this never changes at runtime. Used to attribute testcase mutations to Zyra itself on any
+  // code path that has no originating human request in scope (e.g. a resumed background plan).
+  private zyraActorIdPromise: Promise<string | null> | null = null;
+  private async getZyraActorId(): Promise<string | null> {
+    if (!this.zyraActorIdPromise) {
+      this.zyraActorIdPromise = this.db
+        .query<{ id: string }>("SELECT a.id FROM actors a JOIN agents g ON g.id = a.id WHERE g.slug = 'zyra'")
+        .then((res) => res.rows[0]?.id || null)
+        .catch(() => null);
+    }
+    return this.zyraActorIdPromise;
+  }
+
+  // Resolves the actor to attribute a Zyra-driven mutation to: the real human user when one
+  // originated the request, otherwise Zyra's own agent actor id.
+  private async resolveZyraActor(userId: string | null): Promise<string | null> {
+    return userId || (await this.getZyraActorId());
   }
 
   private async zyraAiAllocation(projectId: string): Promise<{ key: Body | null; reason: string }> {
@@ -916,6 +1043,7 @@ export class LegacyService {
 
   async createAiKey(userId: string | null | undefined, body: Body) {
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     const name = String(body.name || "").trim();
     const apiKey = String(body.apiKey || "").trim();
     const provider = String(body.provider || "openai").trim().toLowerCase();
@@ -950,6 +1078,7 @@ export class LegacyService {
 
   async deleteAiKey(userId: string | null | undefined, keyId: string) {
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     await this.db.query("DELETE FROM workspace_ai_keys WHERE id = $1 AND organization_id = $2", [keyId, workspace.id]);
     return { ok: true };
   }
@@ -958,6 +1087,7 @@ export class LegacyService {
     const projectId = String(body.projectId || "");
     if (!projectId) throw new BadRequestException({ error: "projectId is required" });
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     const project = await this.db.query("SELECT id FROM projects WHERE id = $1 AND organization_id = $2", [projectId, workspace.id]);
     if (!project.rows[0]) throw new NotFoundException({ error: "Project not found" });
     const keyId = body.workspaceAiKeyId || null;
@@ -1132,7 +1262,7 @@ export class LegacyService {
   async listTestCases(projectId: string, query: Body) {
     const limit = Math.min(Number(query.limit || 100), 500);
     const offset = Number(query.offset || 0);
-    const filters: string[] = ["project_id = $1"];
+    const filters: string[] = ["project_id = $1", "deleted_at IS NULL"];
     const values: any[] = [projectId];
     for (const [param, column] of [
       ["suiteId", "suite_id"],
@@ -1140,7 +1270,8 @@ export class LegacyService {
       ["priority", "priority"],
       ["type", "type"],
       ["automationStatus", "automation_status"],
-      ["jiraIssueKey", "jira_issue_key"]
+      ["jiraIssueKey", "jira_issue_key"],
+      ["linearIssueKey", "linear_issue_key"]
     ] as const) {
       if (query[param]) {
         values.push(query[param]);
@@ -1149,14 +1280,17 @@ export class LegacyService {
     }
     if (query.search) {
       values.push(`%${String(query.search).toLowerCase()}%`);
-      filters.push("(lower(title) LIKE $" + values.length + " OR lower(coalesce(description, '')) LIKE $" + values.length + ")");
+      const p = values.length;
+      filters.push(
+        `(lower(title) LIKE $${p} OR lower(coalesce(description, '')) LIKE $${p} OR lower(coalesce(external_id, '')) LIKE $${p} OR lower(coalesce(type, '')) LIKE $${p})`
+      );
     }
     const where = filters.join(" AND ");
     const total = await this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases WHERE ${where}`, values);
     values.push(limit, offset);
     const res = await this.db.query(
       `SELECT id, external_id, title, priority, type, automation_status, automation_tags, status,
-              suite_id, owner_id, updated_at, jira_issue_key, jira_url
+              suite_id, owner_id, updated_at, jira_issue_key, jira_url, linear_issue_key, linear_url
        FROM testcases WHERE ${where}
        ORDER BY updated_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values
@@ -1174,7 +1308,7 @@ export class LegacyService {
               COALESCE(s.name, '') AS suite, COALESCE(t.component, '') AS component
        FROM testcases t
        LEFT JOIN suites s ON s.id = t.suite_id
-       WHERE t.project_id = $1
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
        ORDER BY t.updated_at DESC`,
       [projectId]
     );
@@ -1206,20 +1340,22 @@ export class LegacyService {
   }
 
   async getTestCase(id: string) {
-    const res = await this.db.query("SELECT * FROM testcases WHERE id = $1", [id]);
+    const res = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     return toCamel(res.rows[0]);
   }
 
-  async createTestCase(projectId: string, body: Body) {
+  async createTestCase(projectId: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
     const externalId = body.externalId || (await this.nextExternalId(projectId, body.testcaseIdPrefix));
     const res = await this.db.query(
       `INSERT INTO testcases
        (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
         priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
-        automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
-       RETURNING id, external_id, title, created_at`,
+        automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
+        linear_issue_key, linear_url, attachments, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
+       RETURNING *`,
       [
         projectId,
         body.suiteId || null,
@@ -1243,14 +1379,23 @@ export class LegacyService {
         body.component || null,
         body.status || "Draft",
         body.jiraIssueKey || null,
-        body.jiraUrl || null
+        body.jiraUrl || null,
+        body.linearIssueKey || null,
+        body.linearUrl || null,
+        body.attachments || null,
+        uid
       ]
     );
-    return toCamel(res.rows[0]);
+    const created = res.rows[0];
+    await this.logProjectActivity(projectId, uid, "testcase_created", "testcase", created.id, `${created.external_id} - ${created.title}`, { after: toCamel(created) });
+    return toCamel(created);
   }
 
-  async updateTestCase(id: string, body: Body) {
-    await this.db.query(
+  async updateTestCase(id: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
+    const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
+    if (!before.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+    const res = await this.db.query(
       `UPDATE testcases SET
        suite_id=$2, title=COALESCE($3,title), description=COALESCE($4,description),
        preconditions=COALESCE($5,preconditions), postconditions=COALESCE($6,postconditions),
@@ -1259,8 +1404,11 @@ export class LegacyService {
        automation_repo=COALESCE($13,automation_repo), automation_path=COALESCE($14,automation_path),
        automation_test_name=COALESCE($15,automation_test_name), automation_framework=COALESCE($16,automation_framework),
        automation_tags=COALESCE($17,automation_tags), owner_id=$18, component=COALESCE($19,component),
-       status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url), updated_at=now()
-       WHERE id=$1`,
+       status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url),
+       linear_issue_key=COALESCE($23,linear_issue_key), linear_url=COALESCE($24,linear_url),
+       attachments=COALESCE($25,attachments), updated_by=$26, updated_at=now()
+       WHERE id=$1 AND deleted_at IS NULL
+       RETURNING *`,
       [
         id,
         body.suiteId ?? null,
@@ -1283,41 +1431,111 @@ export class LegacyService {
         body.component ?? null,
         body.status ?? null,
         body.jiraIssueKey ?? null,
-        body.jiraUrl ?? null
+        body.jiraUrl ?? null,
+        body.linearIssueKey ?? null,
+        body.linearUrl ?? null,
+        body.attachments ?? null,
+        uid
       ]
     );
+    const after = res.rows[0];
+    await this.logProjectActivity(before.rows[0].project_id, uid, "testcase_updated", "testcase", id, `${after?.external_id} - ${after?.title}`, {
+      before: toCamel(before.rows[0]),
+      after: toCamel(after)
+    });
   }
 
-  async deleteTestCase(id: string) {
-    await this.db.query("DELETE FROM testcases WHERE id = $1", [id]);
+  async deleteTestCase(id: string, actorId: string | null | undefined) {
+    const uid = this.requireUser(actorId);
+    const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
+    if (!before.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+    await this.db.query(
+      "UPDATE testcases SET deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
+      [id, uid]
+    );
+    await this.logProjectActivity(before.rows[0].project_id, uid, "testcase_deleted", "testcase", id, `${before.rows[0].external_id} - ${before.rows[0].title}`, {
+      before: toCamel(before.rows[0])
+    });
   }
 
-  async bulkUpdateTestCases(body: Body) {
+  async bulkUpdateTestCases(projectId: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
     const ids = Array.isArray(body.testcaseIds) ? body.testcaseIds : [];
     if (!ids.length) return;
     await this.db.query(
       `UPDATE testcases SET priority=COALESCE($2,priority), suite_id=COALESCE($3,suite_id),
-       status=COALESCE($4,status), owner_id=COALESCE($5,owner_id), updated_at=now() WHERE id = ANY($1::uuid[])`,
-      [ids, body.priority || null, body.suiteId || null, body.status || null, body.ownerId || null]
+       status=COALESCE($4,status), owner_id=COALESCE($5,owner_id), updated_by=$6, updated_at=now()
+       WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+      [ids, body.priority || null, body.suiteId || null, body.status || null, body.ownerId || null, uid]
     );
+    await this.logProjectActivity(projectId, uid, "testcase_bulk_updated", "testcase", null, null, {
+      testcaseIds: ids,
+      fields: { priority: body.priority || null, suiteId: body.suiteId || null, status: body.status || null, ownerId: body.ownerId || null }
+    });
   }
 
-  async bulkDeleteTestCases(ids: string[]) {
+  async bulkDeleteTestCases(projectId: string, actorId: string | null | undefined, ids: string[]) {
+    const uid = this.requireUser(actorId);
     if (!ids.length) return;
-    await this.db.query("DELETE FROM testcases WHERE id = ANY($1::uuid[])", [ids]);
+    await this.db.query(
+      "UPDATE testcases SET deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now() WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL",
+      [ids, uid]
+    );
+    await this.logProjectActivity(projectId, uid, "testcase_bulk_deleted", "testcase", null, null, { testcaseIds: ids });
   }
 
   async linkedJiraKeys(projectId: string) {
     const res = await this.db.query(
-      "SELECT jira_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND jira_issue_key IS NOT NULL GROUP BY jira_issue_key",
+      "SELECT jira_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND jira_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY jira_issue_key",
       [projectId]
     );
     const keys = res.rows.map((r) => r.jira_issue_key);
     return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.jira_issue_key, r.count])) };
   }
 
+  async linkedLinearKeys(projectId: string) {
+    const res = await this.db.query(
+      "SELECT linear_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND linear_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY linear_issue_key",
+      [projectId]
+    );
+    const keys = res.rows.map((r) => r.linear_issue_key);
+    return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.linear_issue_key, r.count])) };
+  }
+
   async listPlans(projectId: string) {
-    const res = await this.db.query("SELECT * FROM plans WHERE project_id = $1 ORDER BY created_at DESC", [projectId]);
+    const res = await this.db.query(
+      `SELECT p.*,
+              COALESCE(pi.case_count, 0)::int AS case_count,
+              COALESCE(runs.run_count, 0)::int AS run_count,
+              COALESCE(runs.passed, 0)::int AS passed,
+              COALESCE(runs.failed, 0)::int AS failed,
+              COALESCE(runs.blocked, 0)::int AS blocked,
+              COALESCE(runs.skipped, 0)::int AS skipped,
+              runs.last_run_at
+       FROM plans p
+       LEFT JOIN (
+         SELECT plan_id, COUNT(*)::int AS case_count
+         FROM plan_items
+         GROUP BY plan_id
+       ) pi ON pi.plan_id = p.id
+       LEFT JOIN (
+         SELECT c.plan_id,
+                COUNT(DISTINCT c.id)::int AS run_count,
+                COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+                COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
+                COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+                COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+                MAX(COALESCE(c.started_at, c.created_at)) AS last_run_at
+         FROM cycles c
+         LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
+         LEFT JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE c.plan_id IS NOT NULL
+         GROUP BY c.plan_id
+       ) runs ON runs.plan_id = p.id
+       WHERE p.project_id = $1
+       ORDER BY p.created_at DESC`,
+      [projectId]
+    );
     return res.rows.map(toCamel);
   }
 
@@ -1347,7 +1565,27 @@ export class LegacyService {
   }
 
   async planItems(planId: string) {
-    const res = await this.db.query("SELECT * FROM plan_items WHERE plan_id = $1 ORDER BY position, created_at", [planId]);
+    const res = await this.db.query(
+      `SELECT pi.*,
+              t.external_id AS tc_external_id, t.title AS tc_title, t.priority AS tc_priority,
+              s.name AS suite_name,
+              lastex.status AS last_status
+       FROM plan_items pi
+       LEFT JOIN testcases t ON t.id = pi.testcase_id
+       LEFT JOIN suites s ON s.id = pi.suite_id
+       LEFT JOIN LATERAL (
+         SELECT e.status
+         FROM cycles c
+         JOIN cycle_items ci ON ci.cycle_id = c.id AND ci.testcase_id = pi.testcase_id
+         JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE c.plan_id = pi.plan_id
+         ORDER BY e.executed_at DESC NULLS LAST, e.created_at DESC
+         LIMIT 1
+       ) lastex ON pi.testcase_id IS NOT NULL
+       WHERE pi.plan_id = $1
+       ORDER BY pi.position, pi.created_at`,
+      [planId]
+    );
     return res.rows.map(toCamel);
   }
 
@@ -1436,7 +1674,22 @@ export class LegacyService {
   }
 
   async listCycles(projectId: string) {
-    const res = await this.db.query("SELECT * FROM cycles WHERE project_id = $1 ORDER BY created_at DESC", [projectId]);
+    const res = await this.db.query(
+      `SELECT c.*,
+              COUNT(ci.id)::int AS total_cases,
+              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
+              COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+              COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+       FROM cycles c
+       LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       WHERE c.project_id = $1
+       GROUP BY c.id
+       ORDER BY c.created_at DESC`,
+      [projectId]
+    );
     return res.rows.map(toCamel);
   }
 
@@ -1520,7 +1773,7 @@ export class LegacyService {
   async addCycleTestCases(cycleId: string, body: Body) {
     const ids = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
     for (const testcaseId of ids) {
-      const tc = await this.db.query<{ title: string }>("SELECT title FROM testcases WHERE id = $1", [testcaseId]);
+      const tc = await this.db.query<{ title: string }>("SELECT title FROM testcases WHERE id = $1 AND deleted_at IS NULL", [testcaseId]);
       if (!tc.rows[0]) continue;
       const item = await this.db.query<{ id: string }>(
         "INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id",
@@ -1544,19 +1797,41 @@ export class LegacyService {
               t.external_id, t.priority, t.type, t.suite_id, t.description, t.preconditions, t.postconditions,
               t.steps, t.test_data, t.automation_status, t.automation_tags
        FROM cycle_items ci JOIN executions e ON e.cycle_item_id = ci.id
-       LEFT JOIN testcases t ON t.id = ci.testcase_id
-       WHERE ci.cycle_id = $1 ORDER BY ci.position, ci.created_at`,
+       LEFT JOIN testcases t ON t.id = ci.testcase_id AND t.deleted_at IS NULL
+       WHERE ci.cycle_id = $1 AND e.deleted_at IS NULL ORDER BY ci.position, ci.created_at`,
       [cycleId]
     );
     return res.rows.map(toCamel);
   }
 
-  async updateExecution(executionId: string, body: Body) {
-    await this.db.query(
+  async updateExecution(executionId: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
+    const before = await this.db.query(
+      `SELECT e.*, c.project_id, COALESCE(NULLIF(ci.snapshot_title, ''), NULLIF(t.title, ''), 'Untitled test case') AS testcase_title
+       FROM executions e
+       JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       JOIN cycles c ON c.id = ci.cycle_id
+       LEFT JOIN testcases t ON t.id = ci.testcase_id
+       WHERE e.id = $1 AND e.deleted_at IS NULL`,
+      [executionId]
+    );
+    if (!before.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    const res = await this.db.query(
       `UPDATE executions SET status=COALESCE($2,status), assignee_id=$3, actual_result=COALESCE($4,actual_result),
        executed_at=CASE WHEN $2 IS NULL THEN executed_at ELSE now() END, defect_key=COALESCE($5,defect_key),
-       defect_url=COALESCE($6,defect_url), updated_at=now() WHERE id=$1`,
-      [executionId, body.status || null, body.assigneeId ?? null, body.actualResult || null, body.defectKey || null, body.defectUrl || null]
+       defect_url=COALESCE($6,defect_url), executed_by=$7, updated_at=now()
+       WHERE id=$1 AND deleted_at IS NULL
+       RETURNING *`,
+      [executionId, body.status || null, body.assigneeId ?? null, body.actualResult || null, body.defectKey || null, body.defectUrl || null, uid]
+    );
+    await this.logProjectActivity(
+      before.rows[0].project_id,
+      uid,
+      "execution_updated",
+      "execution",
+      executionId,
+      before.rows[0].testcase_title,
+      { before: toCamel(before.rows[0]), after: toCamel(res.rows[0]) }
     );
   }
 
@@ -1633,8 +1908,8 @@ export class LegacyService {
 
     const bugId = await this.db.transaction(async (client) => {
       const res = await client.query(
-        `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, reported_by, integration_provider, integration_issue_key, betterbugs_url)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, severity, reported_by, integration_provider, integration_issue_key, betterbugs_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
         [
           projectId,
           links[0]?.executionId || null,
@@ -1644,6 +1919,7 @@ export class LegacyService {
           body.description || "",
           body.externalUrl || null,
           body.status || "Open",
+          body.severity || "Medium",
           userId || null,
           body.integrationProvider || null,
           body.integrationIssueKey || null,
@@ -1667,14 +1943,15 @@ export class LegacyService {
   async updateBug(bugId: string, body: Body) {
     await this.db.query(
       `UPDATE bugs SET title=COALESCE($2,title), description=COALESCE($3,description), external_url=COALESCE($4,external_url),
-       status=COALESCE($5,status), integration_provider=COALESCE($6,integration_provider), integration_issue_key=COALESCE($7,integration_issue_key),
-       betterbugs_url=COALESCE($8,betterbugs_url), updated_at=now() WHERE id=$1`,
+       status=COALESCE($5,status), severity=COALESCE($6,severity), integration_provider=COALESCE($7,integration_provider), integration_issue_key=COALESCE($8,integration_issue_key),
+       betterbugs_url=COALESCE($9,betterbugs_url), updated_at=now() WHERE id=$1`,
       [
         bugId,
         body.title || null,
         body.description || null,
         body.externalUrl || null,
         body.status || null,
+        body.severity || null,
         body.integrationProvider || null,
         body.integrationIssueKey || null,
         body.betterbugsUrl || null
@@ -1754,6 +2031,54 @@ export class LegacyService {
     await this.storage.delete(file.storage_path);
     await this.db.query("DELETE FROM attachments WHERE id = $1", [attachmentId]);
     return { ok: true };
+  }
+
+  // Execution evidence uploads — same generic `attachments` table as bug evidence
+  // (entity_type='execution'), mirroring uploadBugAttachments. The execution routes are
+  // nested under /api/cycles/:cycleId/executions/:executionId (no projectId in the path),
+  // so the project is resolved via the cycle/cycle_item join instead of being passed in.
+  async uploadExecutionAttachments(
+    cycleId: string,
+    actorId: string | null | undefined,
+    executionId: string,
+    files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
+  ) {
+    const uid = this.requireUser(actorId);
+    if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
+    const execution = await this.db.query(
+      `SELECT e.id, c.project_id FROM executions e
+       JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       JOIN cycles c ON c.id = ci.cycle_id
+       WHERE e.id = $1 AND c.id = $2 AND e.deleted_at IS NULL`,
+      [executionId, cycleId]
+    );
+    if (!execution.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    const projectId = execution.rows[0].project_id;
+
+    const created: Body[] = [];
+    for (const file of files) {
+      const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase();
+      const storageKey = `executions/${projectId}/${executionId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
+      await this.storage.put(storageKey, file.buffer, file.mimetype);
+      const res = await this.db.query(
+        `INSERT INTO attachments (project_id, entity_type, entity_id, file_name, content_type, file_size, storage_path, uploaded_by)
+         VALUES ($1, 'execution', $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [projectId, executionId, file.originalname, file.mimetype, file.size, storageKey, uid]
+      );
+      created.push(toCamel(res.rows[0]));
+    }
+    await this.logProjectActivity(projectId, uid, "execution_evidence_uploaded", "execution", executionId, null, {
+      files: created.map((file) => ({ id: file.id, fileName: file.fileName }))
+    });
+    return { list: created, total: created.length };
+  }
+
+  async listExecutionAttachments(executionId: string) {
+    const res = await this.db.query(
+      "SELECT * FROM attachments WHERE entity_type = 'execution' AND entity_id = $1 ORDER BY created_at",
+      [executionId]
+    );
+    return { list: res.rows.map(toCamel), total: res.rowCount };
   }
 
   async executionReport(projectId: string, query: Body) {
@@ -1863,9 +2188,9 @@ export class LegacyService {
        LEFT JOIN suites s ON s.id = t.suite_id
        LEFT JOIN cycle_items ci ON ci.testcase_id = t.id
        LEFT JOIN cycles c ON c.id = ci.cycle_id
-       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
        LEFT JOIN bugs b ON b.execution_id = e.id
-       WHERE t.project_id = $1
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
        ORDER BY t.external_id, c.created_at DESC NULLS LAST`,
       [projectId]
     );
@@ -1883,12 +2208,12 @@ export class LegacyService {
     const values = scopeValue ? [scopeValue] : [];
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM projects${projectsWhere}`, values),
-      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases${childWhere}`, values),
+      this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases_active${childWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM suites${childWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM plans${childWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM cycles${childWhere}`, values),
       this.db.query<{ status: string; count: string }>(
-        `SELECT e.status, COUNT(*) AS count FROM executions e JOIN cycle_items ci ON ci.id = e.cycle_item_id JOIN cycles c ON c.id = ci.cycle_id${
+        `SELECT e.status, COUNT(*) AS count FROM executions_active e JOIN cycle_items ci ON ci.id = e.cycle_item_id JOIN cycles c ON c.id = ci.cycle_id${
           projectId
             ? " WHERE c.project_id = $1"
             : organizationId
@@ -1912,13 +2237,32 @@ export class LegacyService {
   }
 
   async repositorySummary(projectId: string) {
-    const total = await this.db.query<{ count: string }>("SELECT COUNT(*) AS count FROM testcases WHERE project_id = $1", [projectId]);
+    const total = await this.db.query<{ count: string }>("SELECT COUNT(*) AS count FROM testcases_active WHERE project_id = $1", [projectId]);
     const byStatus = await this.groupTestcases(projectId, "status");
     const byPriority = await this.groupTestcases(projectId, "priority");
     const bySuite = await this.db.query<{ name: string; count: string }>(
       `SELECT COALESCE(s.name, 'Unassigned') AS name, COUNT(t.id) AS count
-       FROM testcases t LEFT JOIN suites s ON s.id = t.suite_id
+       FROM testcases_active t LEFT JOIN suites s ON s.id = t.suite_id
        WHERE t.project_id = $1 GROUP BY s.name ORDER BY s.name`,
+      [projectId]
+    );
+    const updatedCounts = await this.db.query<{ today: string; this_week: string; this_month: string }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE updated_at >= now() - interval '1 day')::int AS today,
+         COUNT(*) FILTER (WHERE updated_at >= date_trunc('week', now()))::int AS this_week,
+         COUNT(*) FILTER (WHERE updated_at >= date_trunc('month', now()))::int AS this_month
+       FROM testcases_active WHERE project_id = $1`,
+      [projectId]
+    );
+    const addedByDate = await this.db.query<{ date: string; count: string }>(
+      `SELECT to_char(d::date, 'YYYY-MM-DD') AS date, COALESCE(t.cnt, 0)::int AS count
+       FROM generate_series((now()::date - interval '29 days'), now()::date, interval '1 day') AS d
+       LEFT JOIN (
+         SELECT date_trunc('day', created_at) AS day, COUNT(*) AS cnt
+         FROM testcases_active WHERE project_id = $1 AND created_at >= now() - interval '30 days'
+         GROUP BY 1
+       ) t ON t.day = d
+       ORDER BY d`,
       [projectId]
     );
     return {
@@ -1926,10 +2270,314 @@ export class LegacyService {
       bySuite: bySuite.rows.map((r) => ({ name: r.name, count: Number(r.count) })),
       byStatus,
       byPriority,
-      addedByDate: [],
-      updatedToday: 0,
-      updatedThisWeek: 0,
-      updatedThisMonth: 0
+      addedByDate: addedByDate.rows.map((r) => ({ date: r.date, count: Number(r.count) })),
+      updatedToday: Number(updatedCounts.rows[0]?.today || 0),
+      updatedThisWeek: Number(updatedCounts.rows[0]?.this_week || 0),
+      updatedThisMonth: Number(updatedCounts.rows[0]?.this_month || 0)
+    };
+  }
+
+  private async cyclePassRateSeries(projectId: string, limit: number) {
+    const res = await this.db.query<{ id: string; name: string; created_at: string; total: number; passed: number; executed: number }>(
+      `SELECT c.id, c.name, c.created_at,
+              COUNT(ci.id)::int AS total,
+              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested')::int AS executed
+       FROM cycles c
+       LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       WHERE c.project_id = $1
+       GROUP BY c.id
+       ORDER BY c.created_at ASC`,
+      [projectId]
+    );
+    const rows = res.rows.slice(-limit);
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      createdAt: r.created_at,
+      total: Number(r.total) || 0,
+      executed: Number(r.executed) || 0,
+      passRate: Number(r.executed) > 0 ? Math.round((Number(r.passed) / Number(r.executed)) * 100) : null
+    }));
+  }
+
+  private async suiteHealth(projectId: string) {
+    const res = await this.db.query<{ suite_name: string; passed: string; failed: string; blocked: string; skipped: string; executed: string }>(
+      `SELECT COALESCE(s.name, 'Unassigned') AS suite_name,
+              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
+              COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+              COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+              COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested')::int AS executed
+       FROM testcases t
+       LEFT JOIN suites s ON s.id = t.suite_id
+       LEFT JOIN cycle_items ci ON ci.testcase_id = t.id
+       LEFT JOIN cycles c ON c.id = ci.cycle_id AND c.project_id = t.project_id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
+       GROUP BY s.name
+       ORDER BY s.name`,
+      [projectId]
+    );
+    return res.rows.map((r) => {
+      const executed = Number(r.executed) || 0;
+      const pct = (n: number) => (executed > 0 ? Math.round((n / executed) * 100) : 0);
+      return {
+        suiteName: r.suite_name,
+        executed,
+        passedPct: pct(Number(r.passed) || 0),
+        failedPct: pct(Number(r.failed) || 0),
+        blockedPct: pct(Number(r.blocked) || 0)
+      };
+    });
+  }
+
+  private async coverageBySuite(projectId: string) {
+    const res = await this.db.query<{ suite_name: string; total_cases: string; covered_cases: string }>(
+      `SELECT COALESCE(s.name, 'Unassigned') AS suite_name,
+              COUNT(DISTINCT t.id)::int AS total_cases,
+              COUNT(DISTINCT covered.testcase_id)::int AS covered_cases
+       FROM testcases t
+       LEFT JOIN suites s ON s.id = t.suite_id
+       LEFT JOIN LATERAL (
+         SELECT ci.testcase_id
+         FROM cycle_items ci
+         JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE ci.testcase_id = t.id AND e.status IS NOT NULL AND e.status <> 'Untested'
+         LIMIT 1
+       ) covered ON true
+       WHERE t.project_id = $1 AND t.deleted_at IS NULL
+       GROUP BY s.name
+       ORDER BY s.name`,
+      [projectId]
+    );
+    return res.rows.map((r) => {
+      const total = Number(r.total_cases) || 0;
+      const covered = Number(r.covered_cases) || 0;
+      const pct = total > 0 ? Math.round((covered / total) * 100) : 0;
+      return { suiteName: r.suite_name, total, covered, pct };
+    });
+  }
+
+  private async untestedP1Count(projectId: string) {
+    const res = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*)::int AS count FROM (
+         SELECT t.id
+         FROM testcases t
+         LEFT JOIN cycle_items ci ON ci.testcase_id = t.id
+         LEFT JOIN executions e ON e.cycle_item_id = ci.id
+         WHERE t.project_id = $1 AND t.deleted_at IS NULL AND t.priority = 'P1'
+         GROUP BY t.id
+         HAVING COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested') = 0
+       ) sub`,
+      [projectId]
+    );
+    return Number(res.rows[0]?.count || 0);
+  }
+
+  private async detectFlakyTests(projectId: string) {
+    const res = await this.db.query<{
+      testcase_id: string;
+      external_id: string;
+      title: string;
+      suite_name: string;
+      status: string;
+      run_name: string;
+      run_created_at: string;
+    }>(
+      `SELECT ci.testcase_id, COALESCE(t.external_id, '') AS external_id,
+              COALESCE(t.title, ci.snapshot_title, 'Untitled test case') AS title,
+              COALESCE(s.name, 'Unassigned') AS suite_name,
+              e.status, c.name AS run_name, c.created_at AS run_created_at
+       FROM cycle_items ci
+       JOIN executions e ON e.cycle_item_id = ci.id
+       JOIN cycles c ON c.id = ci.cycle_id
+       LEFT JOIN testcases t ON t.id = ci.testcase_id
+       LEFT JOIN suites s ON s.id = t.suite_id
+       WHERE c.project_id = $1 AND e.status IS NOT NULL AND e.status <> 'Untested'
+       ORDER BY ci.testcase_id, c.created_at ASC`,
+      [projectId]
+    );
+    const byTestcase = new Map<string, typeof res.rows>();
+    for (const row of res.rows) {
+      const list = byTestcase.get(row.testcase_id) || [];
+      list.push(row);
+      byTestcase.set(row.testcase_id, list);
+    }
+    const flaky: Body[] = [];
+    for (const [testcaseId, rows] of byTestcase) {
+      if (rows.length < 2) continue;
+      const distinctStatuses = new Set(rows.map((r) => r.status));
+      if (distinctStatuses.size < 2) continue;
+      let flips = 0;
+      for (let i = 1; i < rows.length; i++) {
+        if (rows[i].status !== rows[i - 1].status) flips++;
+      }
+      const flipRate = flips / (rows.length - 1);
+      flaky.push({
+        testcaseId,
+        externalId: rows[0].external_id,
+        title: rows[0].title,
+        suiteName: rows[0].suite_name,
+        runs: rows.map((r) => ({ runName: r.run_name, status: r.status })),
+        flipCount: flips,
+        flakinessLabel: flipRate >= 0.5 ? "High" : flipRate >= 0.25 ? "Medium" : "Low"
+      });
+    }
+    flaky.sort((a, b) => (b.flipCount as number) - (a.flipCount as number));
+    return flaky.slice(0, 20);
+  }
+
+  async reportsOverview(projectId: string) {
+    const [passRateSeries, suiteHealth, coverage, untestedP1, flaky] = await Promise.all([
+      this.cyclePassRateSeries(projectId, 10),
+      this.suiteHealth(projectId),
+      this.coverageBySuite(projectId),
+      this.untestedP1Count(projectId),
+      this.detectFlakyTests(projectId)
+    ]);
+    const withRate = passRateSeries.filter((p) => p.passRate !== null);
+    const trendDelta = withRate.length >= 2 ? withRate[withRate.length - 1].passRate! - withRate[0].passRate! : 0;
+    const coverageGaps = coverage.filter((c) => c.pct < 70);
+
+    const summaryParts: string[] = [];
+    if (flaky.length > 0) {
+      const top = flaky[0] as { suiteName: string; externalId: string };
+      summaryParts.push(`${top.suiteName} suite has a flaky test (${top.externalId}) with inconsistent results across runs.`);
+    }
+    if (coverageGaps.length > 0) {
+      const worst = coverageGaps[0];
+      summaryParts.push(`${worst.suiteName} suite shows low coverage — only ${worst.covered} of ${worst.total} cases executed.`);
+    }
+    if (withRate.length >= 2) {
+      summaryParts.push(`Overall pass rate ${trendDelta >= 0 ? "improved" : "declined"} ${Math.abs(trendDelta)}% over the last ${withRate.length} runs.`);
+    }
+    if (summaryParts.length === 0) summaryParts.push("Not enough execution history yet to generate insights.");
+
+    return {
+      passRateTrend: passRateSeries,
+      trendDelta,
+      suiteHealth,
+      aiSummary: summaryParts.join(" "),
+      flakyCount: flaky.length,
+      coverageGapCount: coverageGaps.length,
+      untestedP1Count: untestedP1
+    };
+  }
+
+  async reportsInsights(projectId: string) {
+    const [coverage, untestedP1, flaky, passRateSeries] = await Promise.all([
+      this.coverageBySuite(projectId),
+      this.untestedP1Count(projectId),
+      this.detectFlakyTests(projectId),
+      this.cyclePassRateSeries(projectId, 10)
+    ]);
+    const withRate = passRateSeries.filter((p) => p.passRate !== null);
+    const avgPassRate = withRate.length > 0 ? withRate.reduce((sum, p) => sum + (p.passRate as number), 0) / withRate.length : 0;
+    const avgCoverage = coverage.length > 0 ? coverage.reduce((sum, c) => sum + c.pct, 0) / coverage.length : 0;
+    const untestedPenalty = untestedP1 === 0 ? 10 : Math.max(0, 10 - untestedP1);
+    // v1 heuristic: 60% weight on recent pass rate, 30% on average suite coverage, up to
+    // 10 bonus points for having no untested P1s, minus 5 points per detected flaky test.
+    // Tunable — no historical baseline exists yet to calibrate weights against.
+    const rawScore = avgPassRate * 0.6 + avgCoverage * 0.3 + untestedPenalty - flaky.length * 5;
+    const healthScore = Math.max(0, Math.min(100, Math.round(rawScore)));
+    const healthLabel = healthScore >= 70 ? "Healthy" : healthScore >= 40 ? "Needs attention" : "At risk";
+
+    return {
+      healthScore,
+      healthLabel,
+      flakyTests: flaky,
+      coverageGaps: coverage.filter((c) => c.pct < 70),
+      coverageBySuite: coverage,
+      untestedP1Count: untestedP1
+    };
+  }
+
+  async reportsTrends(projectId: string) {
+    const [passRateSeries, bugRate] = await Promise.all([
+      this.cyclePassRateSeries(projectId, 12),
+      this.db.query<{ week: string; count: string }>(
+        `SELECT to_char(d::date, 'YYYY-MM-DD') AS week, COALESCE(b.cnt, 0)::int AS count
+         FROM generate_series(date_trunc('week', now() - interval '6 weeks'), date_trunc('week', now()), interval '1 week') AS d
+         LEFT JOIN (
+           SELECT date_trunc('week', created_at) AS week, COUNT(*) AS cnt
+           FROM bugs WHERE project_id = $1
+           GROUP BY 1
+         ) b ON b.week = d
+         ORDER BY d`,
+        [projectId]
+      )
+    ]);
+    const withRate = passRateSeries.filter((p) => p.passRate !== null);
+    const trendDelta = withRate.length >= 2 ? withRate[withRate.length - 1].passRate! - withRate[0].passRate! : 0;
+    return {
+      passRateTrend: passRateSeries,
+      trendDelta,
+      executionVelocity: passRateSeries.map((p) => ({ name: p.name, count: p.executed })),
+      bugDiscoveryRate: bugRate.rows.map((r) => ({ week: r.week, count: Number(r.count) }))
+    };
+  }
+
+  async projectDashboardSummary(projectId: string) {
+    const [counts, requirements, bugSeverity, activeRuns, addedThisWeek, passRateWindows] = await Promise.all([
+      this.analytics(projectId),
+      this.requirementsSummary(projectId),
+      this.db.query<{ severity: string; count: string }>(
+        `SELECT severity, COUNT(*)::int AS count FROM bugs WHERE project_id = $1 AND status IN ('Open', 'Reopened') GROUP BY severity`,
+        [projectId]
+      ),
+      this.db.query<{ count: string }>(`SELECT COUNT(*)::int AS count FROM cycles WHERE project_id = $1 AND status = 'In Progress'`, [projectId]),
+      this.db.query<{ count: string }>(
+        `SELECT COUNT(*)::int AS count FROM testcases_active WHERE project_id = $1 AND created_at >= now() - interval '7 days'`,
+        [projectId]
+      ),
+      // Compares the pass rate of executions recorded in the last 7 days against the 7 days
+      // before that, so the dashboard's "+N% this week" badge reflects real execution activity
+      // rather than an all-time trend.
+      this.db.query<{ passed_recent: string; executed_recent: string; passed_prior: string; executed_prior: string }>(
+        `SELECT
+           COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '7 days')::int AS passed_recent,
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '7 days')::int AS executed_recent,
+           COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS passed_prior,
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS executed_prior
+         FROM executions e
+         JOIN cycle_items ci ON ci.id = e.cycle_item_id
+         JOIN cycles c ON c.id = ci.cycle_id
+         WHERE c.project_id = $1`,
+        [projectId]
+      )
+    ]);
+
+    const bySeverity = { Critical: 0, High: 0, Medium: 0, Low: 0 } as Record<string, number>;
+    for (const row of bugSeverity.rows) {
+      if (row.severity in bySeverity) bySeverity[row.severity] = Number(row.count);
+    }
+    const openBugsTotal = Object.values(bySeverity).reduce((a, b) => a + b, 0);
+
+    const untested = counts.executionStatus.Untested || 0;
+    const executed = counts.executionTotal - untested;
+    const passRateValue = executed > 0 ? Math.round(((counts.executionStatus.Passed || 0) / executed) * 100) : null;
+
+    const w = passRateWindows.rows[0];
+    const recentExecuted = Number(w?.executed_recent || 0);
+    const priorExecuted = Number(w?.executed_prior || 0);
+    const recentRate = recentExecuted > 0 ? (Number(w!.passed_recent) / recentExecuted) * 100 : null;
+    const priorRate = priorExecuted > 0 ? (Number(w!.passed_prior) / priorExecuted) * 100 : null;
+    const passRateDeltaThisWeek = recentRate !== null && priorRate !== null ? Math.round(recentRate - priorRate) : null;
+
+    const totalRequirements = requirements.all.total;
+    const coveredRequirements = requirements.all.covered;
+    const coveragePct = totalRequirements > 0 ? Math.round((coveredRequirements / totalRequirements) * 100) : null;
+
+    return {
+      testCases: { total: counts.testCaseCount, addedThisWeek: Number(addedThisWeek.rows[0]?.count || 0) },
+      passRate: { value: passRateValue, deltaThisWeek: passRateDeltaThisWeek },
+      openBugs: { total: openBugsTotal, bySeverity },
+      coverage: { pct: coveragePct, totalRequirements },
+      plans: counts.planCount,
+      suites: counts.suiteCount,
+      activeRuns: Number(activeRuns.rows[0]?.count || 0)
     };
   }
 
@@ -1937,108 +2585,30 @@ export class LegacyService {
     const limit = Math.min(Math.max(Number(query.limit || 30), 1), 100);
     const offset = Math.max(Number(query.offset || 0), 0);
     const entityType = String(query.entityType || "").trim();
+    const actorId = String(query.actorId || "").trim();
+    const search = String(query.search || "").trim();
+    const since = String(query.since || "").trim();
     const values: any[] = [projectId];
     const filters = ["project_id = $1"];
     if (entityType) {
-      values.push(entityType);
-      filters.push(`entity_type = $${values.length}`);
+      values.push(entityType.split(",").map((t) => t.trim()).filter(Boolean));
+      filters.push(`entity_type = ANY($${values.length}::text[])`);
+    }
+    if (actorId) {
+      values.push(actorId);
+      filters.push(`actor_id = $${values.length}`);
+    }
+    if (since) {
+      values.push(since);
+      filters.push(`created_at >= $${values.length}::timestamptz`);
+    }
+    if (search) {
+      values.push(`%${search.toLowerCase()}%`);
+      filters.push(`(lower(coalesce(entity_name,'')) LIKE $${values.length} OR lower(coalesce(actor_name,'')) LIKE $${values.length} OR lower(action) LIKE $${values.length})`);
     }
     const where = filters.join(" AND ");
 
-    const eventsSql = `
-      WITH activity_events AS (
-        SELECT
-          project_id,
-          ('testcase-created-' || id::text) AS id,
-          NULL::uuid AS actor_id,
-          NULL::text AS actor_email,
-          NULL::text AS actor_name,
-          'created'::text AS action,
-          'testcase'::text AS entity_type,
-          id::text AS entity_id,
-          COALESCE(external_id || ' - ' || title, title) AS entity_name,
-          NULL::text AS diff,
-          created_at
-        FROM testcases
-        WHERE project_id = $1
-
-        UNION ALL
-        SELECT
-          project_id, ('testcase-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'testcase'::text, id::text, COALESCE(external_id || ' - ' || title, title), NULL::text, updated_at
-        FROM testcases
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          project_id, ('suite-created-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'created'::text, 'suite'::text, id::text, name, NULL::text, created_at
-        FROM suites
-        WHERE project_id = $1
-
-        UNION ALL
-        SELECT
-          project_id, ('suite-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'suite'::text, id::text, name, NULL::text, updated_at
-        FROM suites
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          project_id, ('plan-created-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'created'::text, 'plan'::text, id::text, name, NULL::text, created_at
-        FROM plans
-        WHERE project_id = $1
-
-        UNION ALL
-        SELECT
-          project_id, ('plan-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'plan'::text, id::text, name, NULL::text, updated_at
-        FROM plans
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          project_id, ('cycle-created-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'created'::text, 'cycle'::text, id::text, name, NULL::text, created_at
-        FROM cycles
-        WHERE project_id = $1
-
-        UNION ALL
-        SELECT
-          project_id, ('cycle-updated-' || id::text), NULL::uuid, NULL::text, NULL::text,
-          'updated'::text, 'cycle'::text, id::text, name, NULL::text, updated_at
-        FROM cycles
-        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          b.project_id, ('bug-created-' || b.id::text), b.reported_by, u.email, u.name,
-          'created'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.created_at
-        FROM bugs b
-        LEFT JOIN users u ON u.id = b.reported_by
-        WHERE b.project_id = $1
-
-        UNION ALL
-        SELECT
-          b.project_id, ('bug-updated-' || b.id::text), b.reported_by, u.email, u.name,
-          'updated'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.updated_at
-        FROM bugs b
-        LEFT JOIN users u ON u.id = b.reported_by
-        WHERE b.project_id = $1 AND b.updated_at > b.created_at + interval '1 second'
-
-        UNION ALL
-        SELECT
-          a.project_id, a.id::text, a.actor_id, u.email, u.name,
-          a.action::text, a.entity_type::text, a.entity_id::text, a.entity_name::text, a.diff::text, a.created_at
-        FROM audit_logs a
-        LEFT JOIN users u ON u.id = a.actor_id
-        WHERE a.project_id = $1
-      )
-      SELECT *
-      FROM activity_events
-      WHERE ${where}
-    `;
+    const eventsSql = this.activityEventsSql(where);
 
     const total = await this.db.query<{ count: string }>(
       `SELECT COUNT(*) AS count FROM (${eventsSql}) counted`,
@@ -2050,6 +2620,174 @@ export class LegacyService {
       values
     );
     return { list: res.rows.map(toCamel), total: Number(total.rows[0]?.count || 0) };
+  }
+
+  // Testcase created/updated/deleted are intentionally NOT synthesized from the `testcases`
+  // table here — logProjectActivity already records testcase_created/testcase_updated/
+  // testcase_deleted (with real actor attribution) on every mutation, so a timestamp-derived
+  // row here would double-count them. Suites/plans/cycles/bugs have no equivalent audit trail,
+  // so those still derive synthetic created/updated rows from the base tables.
+  private activityEventsSql(outerWhere: string): string {
+    return `
+      WITH activity_events AS (
+        SELECT
+          project_id,
+          ('suite-created-' || id::text) AS id,
+          NULL::uuid AS actor_id,
+          NULL::text AS actor_email,
+          NULL::text AS actor_name,
+          NULL::text AS actor_kind,
+          'created'::text AS action,
+          'suite'::text AS entity_type,
+          id::text AS entity_id,
+          name AS entity_name,
+          NULL::text AS diff,
+          created_at
+        FROM suites
+        WHERE project_id = $1
+
+        UNION ALL
+        SELECT
+          project_id, ('suite-updated-' || id::text), NULL::uuid, NULL::text, NULL::text, NULL::text,
+          'updated'::text, 'suite'::text, id::text, name, NULL::text, updated_at
+        FROM suites
+        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          p.project_id, ('plan-created-' || p.id::text), p.owner_id, u.email, u.name,
+          CASE WHEN p.owner_id IS NOT NULL THEN 'user' END,
+          'created'::text, 'plan'::text, p.id::text, p.name, NULL::text, p.created_at
+        FROM plans p
+        LEFT JOIN users u ON u.id = p.owner_id
+        WHERE p.project_id = $1
+
+        UNION ALL
+        SELECT
+          project_id, ('plan-updated-' || id::text), NULL::uuid, NULL::text, NULL::text, NULL::text,
+          'updated'::text, 'plan'::text, id::text, name, NULL::text, updated_at
+        FROM plans
+        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          c.project_id, ('cycle-created-' || c.id::text), c.owner_id, u.email, u.name,
+          CASE WHEN c.owner_id IS NOT NULL THEN 'user' END,
+          'created'::text, 'cycle'::text, c.id::text, c.name, NULL::text, c.created_at
+        FROM cycles c
+        LEFT JOIN users u ON u.id = c.owner_id
+        WHERE c.project_id = $1
+
+        UNION ALL
+        SELECT
+          project_id, ('cycle-updated-' || id::text), NULL::uuid, NULL::text, NULL::text, NULL::text,
+          'updated'::text, 'cycle'::text, id::text, name, NULL::text, updated_at
+        FROM cycles
+        WHERE project_id = $1 AND updated_at > created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          b.project_id, ('bug-created-' || b.id::text), b.reported_by, u.email, u.name,
+          CASE WHEN b.reported_by IS NOT NULL THEN 'user' END,
+          'created'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.created_at
+        FROM bugs b
+        LEFT JOIN users u ON u.id = b.reported_by
+        WHERE b.project_id = $1
+
+        UNION ALL
+        SELECT
+          b.project_id, ('bug-updated-' || b.id::text), b.reported_by, u.email, u.name,
+          CASE WHEN b.reported_by IS NOT NULL THEN 'user' END,
+          'updated'::text, 'bug'::text, b.id::text, b.title, NULL::text, b.updated_at
+        FROM bugs b
+        LEFT JOIN users u ON u.id = b.reported_by
+        WHERE b.project_id = $1 AND b.updated_at > b.created_at + interval '1 second'
+
+        UNION ALL
+        SELECT
+          a.project_id, a.id::text, a.actor_id, u.email, COALESCE(u.name, g.display_name),
+          CASE WHEN g.id IS NOT NULL THEN 'agent' WHEN u.id IS NOT NULL THEN 'user' END,
+          a.action::text, a.entity_type::text, a.entity_id::text, a.entity_name::text, a.diff::text, a.created_at
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a.actor_id
+        LEFT JOIN agents g ON g.id = a.actor_id
+        WHERE a.project_id = $1
+      )
+      -- The Zyra chat flow calls the shared createTestCase/patchTestCaseFromZyra helpers (which
+      -- already log testcase_created/testcase_updated) and then logs a second zyra_created/
+      -- zyra_updated/zyra_archived row for the same entity a moment later, so both would render
+      -- as duplicate feed rows for the same mutation. Drop the plain testcase_* row whenever a
+      -- zyra_* sibling exists for the same entity within a few seconds; the zyra_* row carries
+      -- the AI-specific action label and reason, and actor attribution already says who/what did it.
+      SELECT ae.*
+      FROM activity_events ae
+      WHERE ${outerWhere}
+        AND NOT (
+          ae.action IN ('testcase_created', 'testcase_updated')
+          AND EXISTS (
+            SELECT 1 FROM activity_events z
+            WHERE z.entity_id = ae.entity_id
+              AND z.action IN ('zyra_created', 'zyra_updated', 'zyra_archived')
+              AND abs(extract(epoch FROM z.created_at - ae.created_at)) < 5
+          )
+        )
+    `;
+  }
+
+  // Powers the Activity screen's right-hand summary panel: this-week action-category counts,
+  // an actor leaderboard, and a per-entity-type breakdown — all scoped to the same trailing
+  // 7-day window so the three widgets read as one consistent "this week" snapshot.
+  async activitySummary(projectId: string) {
+    const eventsSql = this.activityEventsSql(
+      "ae.project_id = $1 AND ae.created_at >= now() - interval '7 days'"
+    );
+    const [weekly, leaderboard, byEntityType] = await Promise.all([
+      this.db.query(
+        `
+        SELECT
+          COUNT(*) FILTER (WHERE action ILIKE 'zyra%')::int AS ai_actions,
+          COUNT(*) FILTER (WHERE action NOT ILIKE 'zyra%' AND action ILIKE '%creat%')::int AS created,
+          COUNT(*) FILTER (WHERE action NOT ILIKE 'zyra%' AND action ILIKE '%updat%')::int AS updated,
+          COUNT(*) FILTER (WHERE action NOT ILIKE 'zyra%' AND action ILIKE '%delet%')::int AS deleted,
+          COUNT(*)::int AS total
+        FROM (${eventsSql}) e
+        `,
+        [projectId]
+      ),
+      this.db.query(
+        `
+        SELECT actor_id, actor_name, actor_email, actor_kind, COUNT(*)::int AS count
+        FROM (${eventsSql}) e
+        WHERE actor_id IS NOT NULL
+        GROUP BY actor_id, actor_name, actor_email, actor_kind
+        ORDER BY count DESC
+        LIMIT 6
+        `,
+        [projectId]
+      ),
+      this.db.query(
+        `
+        SELECT entity_type, COUNT(*)::int AS count
+        FROM (${eventsSql}) e
+        GROUP BY entity_type
+        ORDER BY count DESC
+        `,
+        [projectId]
+      )
+    ]);
+
+    const w = weekly.rows[0] || {};
+    return {
+      weekly: {
+        created: Number(w.created || 0),
+        updated: Number(w.updated || 0),
+        aiActions: Number(w.ai_actions || 0),
+        deleted: Number(w.deleted || 0),
+        total: Number(w.total || 0)
+      },
+      activeMembers: leaderboard.rows.map(toCamel),
+      byEntityType: byEntityType.rows.map(toCamel)
+    };
   }
 
   async listKnowledge(projectId: string, query: Body) {
@@ -2200,6 +2938,31 @@ export class LegacyService {
     return { ...toCamel(folder), breadcrumb };
   }
 
+  // Project-wide counts (not just the folder currently in view) for the listing screen's
+  // stat tiles. Root folder is excluded from the folder count / total since it's a
+  // container, not a listable item — mirrors how the folder tree itself hides the root row.
+  async knowledgeBaseSummary(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const [folders, documents, files] = await Promise.all([
+      this.db.query<{ count: string }>(
+        "SELECT COUNT(*)::int AS count FROM knowledge_folders WHERE project_id = $1 AND is_root = false AND is_deleted = false",
+        [projectId]
+      ),
+      this.db.query<{ count: string }>(
+        "SELECT COUNT(*)::int AS count FROM knowledge_documents WHERE project_id = $1 AND is_deleted = false",
+        [projectId]
+      ),
+      this.db.query<{ count: string }>(
+        "SELECT COUNT(*)::int AS count FROM knowledge_files WHERE project_id = $1 AND is_deleted = false",
+        [projectId]
+      )
+    ]);
+    const folderCount = Number(folders.rows[0]?.count || 0);
+    const documentCount = Number(documents.rows[0]?.count || 0);
+    const fileCount = Number(files.rows[0]?.count || 0);
+    return { folders: folderCount, documents: documentCount, files: fileCount, total: documentCount + fileCount };
+  }
+
   async updateKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string, body: Body) {
     const uid = this.requireUser(userId);
     await this.requireProjectAccess(uid, projectId);
@@ -2325,6 +3088,81 @@ export class LegacyService {
     return toCamel(res.rows[0]);
   }
 
+  // Bundles a folder (and every non-deleted subfolder beneath it) into a zip: documents as
+  // self-contained .html files (contentHtml, no external CSS dependency), files re-read from
+  // storage under their original names. Folder structure is preserved as directories in the zip.
+  async exportKnowledgeFolder(projectId: string, userId: string | null | undefined, folderId: string): Promise<{ buffer: Buffer; filename: string }> {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const folder = await this.kbFolder(projectId, folderId);
+
+    const descendants = await this.db.query<{ id: string; parent_folder_id: string | null; name: string }>(
+      `WITH RECURSIVE descendants AS (
+         SELECT id, parent_folder_id, name, 0 AS depth FROM knowledge_folders WHERE id = $1 AND is_deleted = false
+         UNION ALL
+         SELECT kf.id, kf.parent_folder_id, kf.name, d.depth + 1
+         FROM knowledge_folders kf JOIN descendants d ON kf.parent_folder_id = d.id
+         WHERE kf.is_deleted = false
+       )
+       SELECT id, parent_folder_id, name FROM descendants ORDER BY depth`,
+      [folderId]
+    );
+    const folderIds = descendants.rows.map((row) => row.id);
+
+    // Rows arrive parent-before-child (ORDER BY depth), so each parent's zip path is always
+    // already resolved by the time its children are processed.
+    const zipPathByFolderId = new Map<string, string>([[folderId, ""]]);
+    for (const row of descendants.rows) {
+      if (row.id === folderId) continue;
+      const parentPath = zipPathByFolderId.get(row.parent_folder_id || "") ?? "";
+      const segment = sanitizeZipEntryName(row.name);
+      zipPathByFolderId.set(row.id, parentPath ? `${parentPath}/${segment}` : segment);
+    }
+
+    const [documents, files] = await Promise.all([
+      this.db.query<{ folder_id: string; title: string; content_html: string | null }>(
+        "SELECT folder_id, title, content_html FROM knowledge_documents WHERE folder_id = ANY($1::uuid[]) AND is_deleted = false",
+        [folderIds]
+      ),
+      this.db.query<{ folder_id: string; original_file_name: string; storage_key: string }>(
+        "SELECT folder_id, original_file_name, storage_key FROM knowledge_files WHERE folder_id = ANY($1::uuid[]) AND is_deleted = false",
+        [folderIds]
+      )
+    ]);
+
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    const chunks: Buffer[] = [];
+    archive.on("data", (chunk: Buffer) => chunks.push(chunk));
+    const finished = new Promise<void>((resolve, reject) => {
+      archive.on("end", () => resolve());
+      archive.on("error", reject);
+    });
+
+    for (const doc of documents.rows) {
+      const folderPath = zipPathByFolderId.get(doc.folder_id) || "";
+      const entryName = `${sanitizeZipEntryName(doc.title || "Untitled")}.html`;
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(doc.title || "Untitled")}</title></head><body>${doc.content_html || ""}</body></html>`;
+      archive.append(Buffer.from(html, "utf-8"), { name: folderPath ? `${folderPath}/${entryName}` : entryName });
+    }
+    for (const file of files.rows) {
+      const folderPath = zipPathByFolderId.get(file.folder_id) || "";
+      const entryName = sanitizeZipEntryName(file.original_file_name);
+      // Best-effort per file: a storage object that's missing/unreachable (e.g. deleted out of
+      // band from the DB row) shouldn't fail the whole export — skip just that file.
+      try {
+        const buffer = await this.storage.getBuffer(file.storage_key);
+        archive.append(buffer, { name: folderPath ? `${folderPath}/${entryName}` : entryName });
+      } catch (error) {
+        this.logger.warn(`Skipping file in knowledge-base export, storage object unreadable (${file.storage_key}): ${error}`);
+      }
+    }
+
+    await archive.finalize();
+    await finished;
+
+    return { buffer: Buffer.concat(chunks), filename: `${sanitizeZipEntryName(folder.is_root ? "Knowledge base" : folder.name)}.zip` };
+  }
+
   async listKnowledgeFolderItems(projectId: string, userId: string | null | undefined, folderId: string, query: Body) {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
     const folder = await this.kbFolder(projectId, folderId);
@@ -2412,6 +3250,7 @@ export class LegacyService {
       ]
     );
     await this.logProjectActivity(projectId, uid, "created", "knowledge_document", res.rows[0].id, title, {});
+    this.enqueueEmbedding(project.organization_id, projectId, "document", res.rows[0].id, "created");
     return toCamel(res.rows[0]);
   }
 
@@ -2490,6 +3329,7 @@ export class LegacyService {
       [documentId, nextTitle, nextJson, nextHtml, nextText, body.documentType || null, nextStatus, reviewedBy, reviewedAt, uid]
     );
     await this.logProjectActivity(projectId, uid, "updated", "knowledge_document", documentId, nextTitle, {});
+    if (contentChanged) this.enqueueEmbedding(res.rows[0].organization_id, projectId, "document", documentId, "updated");
     return toCamel(res.rows[0]);
   }
 
@@ -2532,6 +3372,7 @@ export class LegacyService {
       ]
     );
     await this.logProjectActivity(projectId, uid, "duplicated", "knowledge_document", res.rows[0].id, res.rows[0].title, {});
+    this.enqueueEmbedding(project.organization_id, projectId, "document", res.rows[0].id, "created");
     return toCamel(res.rows[0]);
   }
 
@@ -2577,6 +3418,117 @@ export class LegacyService {
     "mp4", "mov", "webm",
     "zip"
   ]);
+  // Extensions we can read as plain UTF-8 text without any parsing library.
+  static readonly KB_PLAINTEXT_EXTENSIONS = new Set([
+    "txt", "md", "csv", "json", "xml", "yaml", "yml", "sql", "html", "css", "js", "ts", "java", "py"
+  ]);
+  static readonly KB_SPREADSHEET_EXTENSIONS = new Set(["xls", "xlsx"]);
+  static readonly KB_PDF_EXTENSIONS = new Set(["pdf"]);
+  // mammoth only reads the Open XML .docx format — legacy binary .doc is not supported.
+  static readonly KB_DOCX_EXTENSIONS = new Set(["docx"]);
+  // webp/svg are excluded: the underlying OCR engine's image decoder reliably supports
+  // only png/jpg/bmp, so webp would silently produce no text.
+  static readonly KB_IMAGE_OCR_EXTENSIONS = new Set(["png", "jpg", "jpeg"]);
+  // Whisper accepts these containers directly (audio track only, no ffmpeg needed for the
+  // video ones) — .mov is intentionally excluded, OpenAI's endpoint doesn't accept it.
+  static readonly KB_AUDIO_EXTENSIONS = new Set(["mp3", "wav", "m4a"]);
+  static readonly KB_TRANSCRIBABLE_VIDEO_EXTENSIONS = new Set(["mp4", "webm"]);
+  static readonly KB_EXTRACTED_TEXT_LIMIT = 20000;
+  static readonly KB_TESSDATA_PATH = process.env.TESSDATA_PATH || "/app/tessdata";
+
+  // Best-effort text extraction so Zyra's knowledge-base context can include file contents,
+  // not just file names. Runs synchronously in the upload request — everything here is local
+  // CPU/WASM work with no network call. Audio/video transcription is handled separately
+  // (transcribeKnowledgeFile) since it calls out to an AI provider and can take a while.
+  private async extractKnowledgeFileText(buffer: Buffer, ext: string): Promise<string | null> {
+    try {
+      if (LegacyService.KB_PLAINTEXT_EXTENSIONS.has(ext)) {
+        return buffer.toString("utf8").slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_SPREADSHEET_EXTENSIONS.has(ext)) {
+        const workbook = XLSX.read(buffer, { type: "buffer" });
+        const text = workbook.SheetNames
+          .map((name) => `Sheet: ${name}\n${XLSX.utils.sheet_to_csv(workbook.Sheets[name])}`)
+          .join("\n\n");
+        return text.slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_PDF_EXTENSIONS.has(ext)) {
+        const data = await pdfParse(buffer);
+        return String(data.text || "").slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_DOCX_EXTENSIONS.has(ext)) {
+        const result = await mammoth.extractRawText({ buffer });
+        return String(result.value || "").slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      }
+      if (LegacyService.KB_IMAGE_OCR_EXTENSIONS.has(ext)) {
+        return await this.ocrImageText(buffer);
+      }
+    } catch (err) {
+      this.logger.warn(`Knowledge-base text extraction failed for .${ext} file: ${err instanceof Error ? err.message : err}`);
+    }
+    return null;
+  }
+
+  // OCR reads the English language model baked into the image at build time (see Dockerfile)
+  // so it works fully offline. Falls back to null (no extractable text) if that data isn't
+  // present — e.g. running outside the built container image.
+  private async ocrImageText(buffer: Buffer): Promise<string | null> {
+    if (!fs.existsSync(path.join(LegacyService.KB_TESSDATA_PATH, "eng.traineddata.gz"))) {
+      this.logger.warn(`OCR skipped — no tessdata found at ${LegacyService.KB_TESSDATA_PATH}`);
+      return null;
+    }
+    const worker = await createWorker("eng", 1, {
+      langPath: LegacyService.KB_TESSDATA_PATH,
+      cachePath: LegacyService.KB_TESSDATA_PATH,
+      gzip: true
+    });
+    try {
+      const { data } = await worker.recognize(buffer);
+      return String(data.text || "").trim().slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT) || null;
+    } finally {
+      await worker.terminate();
+    }
+  }
+
+  // Async speech-to-text for uploaded audio/video files, fired-and-forgotten from
+  // uploadKnowledgeFiles (mirrors the processZyraTask pattern used for AI task generation)
+  // so a multi-minute meeting recording doesn't block the upload HTTP response. Only attempted
+  // when the project has an OpenAI key allocated — no other provider offers a compatible
+  // transcription endpoint we can safely assume the shape of.
+  private async transcribeKnowledgeFile(projectId: string, fileId: string, buffer: Buffer, ext: string, mimeType: string, fileName: string): Promise<void> {
+    try {
+      const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
+      const allocation = await this.zyraAiAllocation(projectId);
+      const key = allocation.key;
+      if (!key || String(key.provider || "").toLowerCase() !== "openai") {
+        await this.db.query("UPDATE knowledge_files SET extraction_status = 'unsupported' WHERE id = $1", [fileId]);
+        return;
+      }
+      const form = new FormData();
+      form.append("file", new Blob([new Uint8Array(buffer)], { type: mimeType || "application/octet-stream" }), fileName);
+      form.append("model", "whisper-1");
+      const authHeader = String(key.auth_header_name || "Authorization");
+      const scheme = String(key.auth_scheme || "Bearer").trim();
+      const headers: Record<string, string> = {};
+      headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
+      const res = await fetch(normalizeAudioTranscriptionsUrl(key.base_url), { method: "POST", headers, body: form });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({} as Body)) as Body;
+        const rawMessage = String(errBody.error?.message || errBody.error || res.status);
+        throw new Error(rawMessage);
+      }
+      const data = await res.json() as Body;
+      const text = String(data.text || "").trim().slice(0, LegacyService.KB_EXTRACTED_TEXT_LIMIT);
+      await this.db.query(
+        "UPDATE knowledge_files SET extracted_text = $2, extraction_status = 'ready', updated_at = now() WHERE id = $1",
+        [fileId, text || null]
+      );
+      if (text) this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "file", fileId, "transcribed");
+    } catch (err) {
+      this.logger.warn(`Knowledge-base transcription failed for file ${fileId}: ${err instanceof Error ? err.message : err}`);
+      await this.db.query("UPDATE knowledge_files SET extraction_status = 'failed', updated_at = now() WHERE id = $1", [fileId]).catch(() => undefined);
+    }
+  }
 
   private async kbFile(projectId: string, fileId: string): Promise<Body> {
     const res = await this.db.query(
@@ -2627,13 +3579,26 @@ export class LegacyService {
       const originalFileName = await this.kbUniqueFileName(folderId, file.originalname);
       const storageKey = `knowledge-base/${project.organization_id}/${projectId}/${randomUUID()}${ext ? `.${ext}` : ""}`;
       await this.storage.put(storageKey, file.buffer, file.mimetype);
+      // Audio/video transcription is slow (calls an external AI provider) and shouldn't block
+      // the upload response — it's kicked off after insert, below, and fills in extracted_text
+      // asynchronously. Everything else extracts synchronously (local CPU/WASM work only).
+      const isTranscribable = LegacyService.KB_AUDIO_EXTENSIONS.has(ext) || LegacyService.KB_TRANSCRIBABLE_VIDEO_EXTENSIONS.has(ext);
+      const extractedText = isTranscribable ? null : await this.extractKnowledgeFileText(file.buffer, ext);
+      const extractionStatus = isTranscribable ? "pending" : null;
       const res = await this.db.query(
-        `INSERT INTO knowledge_files (organization_id, project_id, folder_id, file_name, original_file_name, mime_type, file_extension, file_size, storage_key, uploaded_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [project.organization_id, projectId, folderId, path.basename(storageKey), originalFileName, file.mimetype, ext, file.size, storageKey, uid]
+        `INSERT INTO knowledge_files (organization_id, project_id, folder_id, file_name, original_file_name, mime_type, file_extension, file_size, storage_key, uploaded_by, extracted_text, extraction_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
+        [project.organization_id, projectId, folderId, path.basename(storageKey), originalFileName, file.mimetype, ext, file.size, storageKey, uid, extractedText, extractionStatus]
       );
       created.push(toCamel(res.rows[0]));
       await this.logProjectActivity(projectId, uid, "uploaded", "knowledge_file", res.rows[0].id, originalFileName, {});
+      if (isTranscribable) {
+        // Embedding is enqueued once the transcript lands (transcribeKnowledgeFile), not here —
+        // there's no content yet for audio/video at upload time.
+        void this.transcribeKnowledgeFile(projectId, res.rows[0].id, file.buffer, ext, file.mimetype, originalFileName).catch(() => undefined);
+      } else {
+        this.enqueueEmbedding(project.organization_id, projectId, "file", res.rows[0].id, "created");
+      }
     }
     return { list: created, total: created.length };
   }
@@ -2868,7 +3833,8 @@ export class LegacyService {
     return toCamel(res.rows[0]);
   }
 
-  async adminCustomers() {
+  async adminCustomers(userId: string | null | undefined) {
+    await this.requirePlatformAdmin(userId);
     const summary = await this.analytics();
     const customers = await this.db.query(
       `SELECT o.id, o.name, o.slug, o.created_at,
@@ -2901,12 +3867,25 @@ export class LegacyService {
     };
   }
 
-  async adminList() {
+  async adminList(userId: string | null | undefined) {
+    await this.requirePlatformAdmin(userId);
     const res = await this.db.query(
-      `SELECT pa.id, pa.user_id, pa.role, u.email, u.name, u.avatar_url, pa.created_at
-       FROM platform_admins pa JOIN users u ON u.id = pa.user_id ORDER BY pa.created_at`
+      `SELECT pa.id, pa.user_id, pa.role, u.email, u.name, u.avatar_url, pa.granted_by,
+              gb.email AS granted_by_email, gb.name AS granted_by_name, pa.created_at
+       FROM platform_admins pa
+       JOIN users u ON u.id = pa.user_id
+       LEFT JOIN users gb ON gb.id = pa.granted_by
+       ORDER BY pa.created_at`
     );
-    return res.rows.map(toCamel);
+    return res.rows.map((row) => {
+      const item = toCamel(row);
+      if (row.granted_by) {
+        item.grantedBy = { email: row.granted_by_email, name: row.granted_by_name };
+      }
+      delete item.grantedByEmail;
+      delete item.grantedByName;
+      return item;
+    });
   }
 
   async publicBranding() {
@@ -2946,18 +3925,20 @@ export class LegacyService {
     return value;
   }
 
-  async addAdmin(body: Body, grantedBy?: string | null) {
+  async addAdmin(userId: string | null | undefined, body: Body) {
+    const grantedBy = await this.requirePlatformAdmin(userId);
     const email = String(body.email || "").trim().toLowerCase();
     if (!email) throw new BadRequestException({ error: "email is required" });
     const uid = await this.upsertUser(email);
     const res = await this.db.query(
       "INSERT INTO platform_admins (user_id, role, granted_by) VALUES ($1, 'admin', $2) ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role RETURNING id, user_id, role",
-      [uid, grantedBy || null]
+      [uid, grantedBy]
     );
     return { ...toCamel(res.rows[0]), email };
   }
 
-  async deleteAdmin(adminId: string) {
+  async deleteAdmin(userId: string | null | undefined, adminId: string) {
+    await this.requirePlatformAdmin(userId);
     await this.db.query("DELETE FROM platform_admins WHERE id = $1 AND role <> 'owner'", [adminId]);
   }
 
@@ -2994,7 +3975,7 @@ export class LegacyService {
     if (row?.client_id && row?.client_secret && row?.redirect_uri) {
       return {
         clientId: String(row.client_id),
-        clientSecret: String(row.client_secret),
+        clientSecret: decryptSecret(String(row.client_secret)),
         redirectUri: String(row.redirect_uri)
       };
     }
@@ -3042,6 +4023,7 @@ export class LegacyService {
   async updateIntegrationConfig(userId: string | null | undefined, provider: string, body: Body) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     const clientId = String(body.clientId || "").trim();
     const requestedClientSecret = String(body.clientSecret || "").trim();
     const redirectUri = String(body.redirectUri || "").trim();
@@ -3049,7 +4031,7 @@ export class LegacyService {
       "SELECT client_secret FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
       [workspace.id, p]
     ).catch(() => ({ rows: [] as Body[] }));
-    const clientSecret = requestedClientSecret || String(existing.rows[0]?.client_secret || "");
+    const clientSecret = requestedClientSecret ? encryptSecret(requestedClientSecret) : String(existing.rows[0]?.client_secret || "");
     if (!clientId || !clientSecret || !redirectUri) {
       throw new BadRequestException({ error: "Client ID, Client Secret, and Redirect URI are required." });
     }
@@ -3100,6 +4082,7 @@ export class LegacyService {
   async integrationCallback(userId: string | null | undefined, provider: string, body: Body) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     const code = String(body.code || "");
     if (!code) throw new BadRequestException({ error: "Authorization code is required." });
     const { clientId, clientSecret, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
@@ -3128,8 +4111,8 @@ export class LegacyService {
 
       const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
       const res = await this.db.query(
-        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by)
-         VALUES ($1, 'jira', $2, $3, $4, $5, $6, $7)
+        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+         VALUES ($1, 'jira', $2, $3, $4, $5, $6, $7, 'oauth', NULL)
          ON CONFLICT (organization_id, provider) DO UPDATE SET
            external_id = EXCLUDED.external_id,
            site_url = EXCLUDED.site_url,
@@ -3137,9 +4120,11 @@ export class LegacyService {
            refresh_token = EXCLUDED.refresh_token,
            token_expires_at = EXCLUDED.token_expires_at,
            connected_by = EXCLUDED.connected_by,
+           auth_method = 'oauth',
+           personal_token_identifier = NULL,
            updated_at = now()
          RETURNING id, external_id, site_url`,
-        [workspace.id, String(resource.id), String(resource.url), accessToken, refreshToken, expiresAt, userId || null]
+        [workspace.id, String(resource.id), String(resource.url), encryptSecret(accessToken), encryptSecret(refreshToken), expiresAt, userId || null]
       );
       return { connectionId: res.rows[0].id, cloudId: res.rows[0].external_id, siteUrl: res.rows[0].site_url };
     }
@@ -3158,13 +4143,13 @@ export class LegacyService {
     });
     const accessToken = String(token.access_token || "");
     if (!accessToken) throw new BadRequestException({ error: "Linear did not return an OAuth token." });
-    const viewer = await this.linearGraphQL<Body>(accessToken, "query { organization { id urlKey } }");
+    const viewer = await this.linearGraphQL<Body>(`Bearer ${accessToken}`, "query { organization { id urlKey } }");
     const org = viewer?.organization;
     if (!org?.urlKey) throw new BadRequestException({ error: "Could not read the connected Linear workspace." });
     const expiresAt = new Date(Date.now() + Number(token.expires_in || 315360000) * 1000).toISOString();
     const res = await this.db.query(
-      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by)
-       VALUES ($1, 'linear', $2, $3, $4, $5, $6, $7)
+      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+       VALUES ($1, 'linear', $2, $3, $4, $5, $6, $7, 'oauth', NULL)
        ON CONFLICT (organization_id, provider) DO UPDATE SET
          external_id = EXCLUDED.external_id,
          site_url = EXCLUDED.site_url,
@@ -3172,16 +4157,81 @@ export class LegacyService {
          refresh_token = EXCLUDED.refresh_token,
          token_expires_at = EXCLUDED.token_expires_at,
          connected_by = EXCLUDED.connected_by,
+         auth_method = 'oauth',
+         personal_token_identifier = NULL,
          updated_at = now()
        RETURNING id, site_url`,
-      [workspace.id, String(org.id || ""), `https://linear.app/${org.urlKey}`, accessToken, String(token.refresh_token || ""), expiresAt, userId || null]
+      [workspace.id, String(org.id || ""), `https://linear.app/${org.urlKey}`, encryptSecret(accessToken), encryptSecret(String(token.refresh_token || "")), expiresAt, userId || null]
     );
     return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url };
+  }
+
+  async connectIntegrationWithToken(userId: string | null | undefined, provider: string, body: Body) {
+    const p = assertIntegrationProvider(provider);
+    if (!INTEGRATION_PAT_SUPPORTED[p]) {
+      throw new BadRequestException({ error: `${p} does not support Personal Access Token authentication.` });
+    }
+    const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
+
+    if (p === "jira") {
+      const siteUrl = normalizeJiraSiteUrl(String(body.siteUrl || ""));
+      const email = String(body.email || "").trim();
+      const apiToken = String(body.apiToken || "").trim();
+      if (!email || !apiToken) throw new BadRequestException({ error: "Email and API token are required." });
+
+      const authHeader = `Basic ${Buffer.from(`${email}:${apiToken}`).toString("base64")}`;
+      await this.jiraFetch<Body>(`${siteUrl}/rest/api/3/myself`, { headers: { Authorization: authHeader, Accept: "application/json" } });
+
+      const res = await this.db.query(
+        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+         VALUES ($1, 'jira', NULL, $2, $3, '', now() + interval '100 years', $4, 'personal_token', $5)
+         ON CONFLICT (organization_id, provider) DO UPDATE SET
+           external_id = NULL,
+           site_url = EXCLUDED.site_url,
+           access_token = EXCLUDED.access_token,
+           refresh_token = '',
+           token_expires_at = EXCLUDED.token_expires_at,
+           connected_by = EXCLUDED.connected_by,
+           auth_method = 'personal_token',
+           personal_token_identifier = EXCLUDED.personal_token_identifier,
+           updated_at = now()
+         RETURNING id, site_url`,
+        [workspace.id, siteUrl, encryptSecret(apiToken), userId || null, email]
+      );
+      return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url, authMethod: "personal_token" };
+    }
+
+    // Linear
+    const apiKey = String(body.apiKey || "").trim();
+    if (!apiKey) throw new BadRequestException({ error: "API key is required." });
+    const viewer = await this.linearGraphQL<Body>(apiKey, "query { viewer { id } organization { id urlKey } }");
+    if (!viewer?.viewer?.id) throw new BadRequestException({ error: "Could not verify the Linear API key." });
+    const org = viewer.organization;
+
+    const res = await this.db.query(
+      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
+       VALUES ($1, 'linear', $2, $3, $4, '', now() + interval '100 years', $5, 'personal_token', NULL)
+       ON CONFLICT (organization_id, provider) DO UPDATE SET
+         external_id = EXCLUDED.external_id,
+         site_url = EXCLUDED.site_url,
+         access_token = EXCLUDED.access_token,
+         refresh_token = '',
+         token_expires_at = EXCLUDED.token_expires_at,
+         connected_by = EXCLUDED.connected_by,
+         auth_method = 'personal_token',
+         personal_token_identifier = NULL,
+         updated_at = now()
+       RETURNING id, site_url`,
+      [workspace.id, String(org?.id || ""), org?.urlKey ? `https://linear.app/${org.urlKey}` : "", encryptSecret(apiKey), userId || null]
+    );
+    return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url, authMethod: "personal_token" };
   }
 
   async integrationDisconnect(userId: string | null | undefined, provider: string) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     await this.db.query("DELETE FROM integration_connections WHERE organization_id = $1 AND provider = $2", [workspace.id, p]);
     return { disconnected: true };
   }
@@ -3206,7 +4256,9 @@ export class LegacyService {
       connected: true,
       id: connection.id,
       siteUrl: connection.site_url,
-      tokenExpiresAt: connection.token_expires_at,
+      authMethod: connection.auth_method,
+      personalTokenIdentifier: connection.auth_method === "personal_token" ? connection.personal_token_identifier : undefined,
+      tokenExpiresAt: connection.auth_method === "personal_token" ? null : connection.token_expires_at,
       connectedBy: connection.connected_by,
       createdAt: connection.created_at,
       connectedProjects: projects.rows.map(toCamel)
@@ -3238,10 +4290,8 @@ export class LegacyService {
   async jiraProjects(projectId: string) {
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
-    const data = await this.jiraFetch<Body>(
-      `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/project/search?maxResults=100`,
-      { headers: { Authorization: `Bearer ${connection.access_token}` } }
-    );
+    const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
+    const data = await this.jiraFetch<Body>(`${baseUrl}/rest/api/3/project/search?maxResults=100`, { headers });
     const connected = await this.db.query(
       "SELECT jira_project_id FROM jira_project_mappings WHERE project_id = $1 AND enabled = true",
       [projectId]
@@ -3311,14 +4361,15 @@ export class LegacyService {
       mirrorFolderId = root.rows[0]?.id || null;
     }
 
+    const { baseUrl: jiraBaseUrl, headers: jiraAuthHeaders } = this.jiraBaseUrlAndAuth(connection);
     let synced = 0;
     for (const key of keys) {
       const jql = `project = "${key}" ORDER BY updated DESC`;
       const data = await this.jiraFetch<Body>(
-        `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/search/jql`,
+        `${jiraBaseUrl}/rest/api/3/search/jql`,
         {
           method: "POST",
-          headers: { Authorization: `Bearer ${connection.access_token}`, "Content-Type": "application/json" },
+          headers: { ...jiraAuthHeaders, "Content-Type": "application/json" },
           body: JSON.stringify({
             jql,
             maxResults: 100,
@@ -3372,12 +4423,13 @@ export class LegacyService {
           const summary = String(fields.summary || "");
           const description = jiraDescriptionToText(fields.description);
           const url = `${connection.site_url}/browse/${issue.key}`;
-          await this.db.query(
+          const mirrorRes = await this.db.query<{ id: string }>(
             `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
              VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'jira', $7, $8)
              ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
                title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
-               source_url = EXCLUDED.source_url, updated_at = now()`,
+               source_url = EXCLUDED.source_url, updated_at = now()
+             RETURNING id`,
             [
               project.rows[0]?.organization_id,
               projectId,
@@ -3389,6 +4441,7 @@ export class LegacyService {
               url
             ]
           );
+          if (mirrorRes.rows[0]?.id) this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "document", mirrorRes.rows[0].id, "updated");
         }
       }
     }
@@ -3404,6 +4457,18 @@ export class LegacyService {
     if (search) {
       values.push(`%${search}%`);
       filters.push(`(jira_issue_key ILIKE $${values.length} OR summary ILIKE $${values.length})`);
+    }
+    if (query.issueType) {
+      values.push(String(query.issueType));
+      filters.push(`issue_type = $${values.length}`);
+    }
+    if (query.status) {
+      values.push(String(query.status));
+      filters.push(`status = $${values.length}`);
+    }
+    if (query.coverage === "covered" || query.coverage === "uncovered") {
+      const exists = `EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = jira_tickets.project_id AND t.jira_issue_key = jira_tickets.jira_issue_key AND t.deleted_at IS NULL)`;
+      filters.push(query.coverage === "covered" ? exists : `NOT ${exists}`);
     }
     const count = await this.db.query(`SELECT COUNT(*)::int AS count FROM jira_tickets WHERE ${filters.join(" AND ")}`, values);
     values.push(limit, offset);
@@ -3423,11 +4488,12 @@ export class LegacyService {
     const issueKey = String(body.issueKey || body.jiraIssueKey || "").trim();
     const comment = String(body.comment || body.body || "").trim();
     if (!issueKey || !comment) throw new BadRequestException({ error: "Jira issue key and comment are required." });
+    const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
     await this.jiraFetch(
-      `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
+      `${baseUrl}/rest/api/3/issue/${encodeURIComponent(issueKey)}/comment`,
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${connection.access_token}`, "Content-Type": "application/json" },
+        headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({
           body: {
             type: "doc",
@@ -3457,11 +4523,12 @@ export class LegacyService {
     const jql = search
       ? `${projectClause} AND (summary ~ "${escapeJql(search)}*" OR key = "${escapeJql(search.toUpperCase())}") ORDER BY updated DESC`
       : `${projectClause} ORDER BY updated DESC`;
+    const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
     const data = await this.jiraFetch<Body>(
-      `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/search/jql`,
+      `${baseUrl}/rest/api/3/search/jql`,
       {
         method: "POST",
-        headers: { Authorization: `Bearer ${connection.access_token}`, "Content-Type": "application/json" },
+        headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ jql, maxResults: 20, fields: ["summary", "status"] })
       }
     );
@@ -3487,6 +4554,7 @@ export class LegacyService {
     const res = await this.db.query("SELECT * FROM integration_connections WHERE organization_id = $1 AND provider = $2", [organizationId, provider]);
     const connection = res.rows[0] as Body | undefined;
     if (!connection) return null;
+    if (connection.auth_method === "personal_token") return connection; // Personal tokens don't expire; nothing to refresh.
     if (!refresh || new Date(connection.token_expires_at).getTime() > Date.now() + 60_000) return connection;
     if (provider === "linear" || !connection.refresh_token) return connection; // Linear OAuth tokens are long-lived; no refresh flow needed today.
 
@@ -3498,17 +4566,43 @@ export class LegacyService {
         grant_type: "refresh_token",
         client_id: clientId,
         client_secret: clientSecret,
-        refresh_token: connection.refresh_token
+        refresh_token: decryptSecret(String(connection.refresh_token || ""))
       })
     });
     const accessToken = String(token.access_token || "");
-    const refreshToken = String(token.refresh_token || connection.refresh_token);
+    const refreshToken = String(token.refresh_token || decryptSecret(String(connection.refresh_token || "")));
     const expiresAt = new Date(Date.now() + Number(token.expires_in || 3600) * 1000).toISOString();
+    const encryptedAccessToken = encryptSecret(accessToken);
+    const encryptedRefreshToken = encryptSecret(refreshToken);
     await this.db.query(
       "UPDATE integration_connections SET access_token = $2, refresh_token = $3, token_expires_at = $4, updated_at = now() WHERE id = $1",
-      [connection.id, accessToken, refreshToken, expiresAt]
+      [connection.id, encryptedAccessToken, encryptedRefreshToken, expiresAt]
     );
-    return { ...connection, access_token: accessToken, refresh_token: refreshToken, token_expires_at: expiresAt };
+    return { ...connection, access_token: encryptedAccessToken, refresh_token: encryptedRefreshToken, token_expires_at: expiresAt };
+  }
+
+  // Centralizes the Bearer-vs-Basic and gateway-vs-direct-site-URL branching for Jira so call
+  // sites don't repeat the auth_method check: OAuth goes through the api.atlassian.com/ex/jira
+  // gateway with a Bearer token; a personal token calls the customer's own site directly with
+  // HTTP Basic (email:apiToken).
+  private jiraBaseUrlAndAuth(connection: Body): { baseUrl: string; headers: Record<string, string> } {
+    if (connection.auth_method === "personal_token") {
+      const email = String(connection.personal_token_identifier || "");
+      const apiToken = decryptSecret(String(connection.access_token || ""));
+      const basic = Buffer.from(`${email}:${apiToken}`).toString("base64");
+      return { baseUrl: String(connection.site_url || "").replace(/\/$/, ""), headers: { Authorization: `Basic ${basic}` } };
+    }
+    return {
+      baseUrl: `https://api.atlassian.com/ex/jira/${connection.cloud_id}`,
+      headers: { Authorization: `Bearer ${decryptSecret(String(connection.access_token || ""))}` }
+    };
+  }
+
+  // Linear personal keys are passed as-is in the Authorization header; OAuth tokens need a
+  // "Bearer " prefix. Both hit the same api.linear.app/graphql endpoint.
+  private linearAuthHeader(connection: Body): string {
+    const secret = decryptSecret(String(connection.access_token || ""));
+    return connection.auth_method === "personal_token" ? secret : `Bearer ${secret}`;
   }
 
   private async jiraFetch<T = unknown>(url: string, init: RequestInit = {}): Promise<T> {
@@ -3520,10 +4614,10 @@ export class LegacyService {
     return (await res.json()) as T;
   }
 
-  private async linearGraphQL<T = unknown>(accessToken: string, query: string, variables?: Body): Promise<T> {
+  private async linearGraphQL<T = unknown>(authHeader: string, query: string, variables?: Body): Promise<T> {
     const res = await fetch("https://api.linear.app/graphql", {
       method: "POST",
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+      headers: { Authorization: authHeader, "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables })
     });
     if (!res.ok) {
@@ -3565,7 +4659,7 @@ export class LegacyService {
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
-    const data = await this.linearGraphQL<Body>(connection.access_token, "query { teams { nodes { id key name } } }");
+    const data = await this.linearGraphQL<Body>(this.linearAuthHeader(connection), "query { teams { nodes { id key name } } }");
     const connected = await this.db.query(
       "SELECT linear_team_id FROM linear_project_mappings WHERE project_id = $1 AND enabled = true",
       [projectId]
@@ -3635,10 +4729,11 @@ export class LegacyService {
       mirrorFolderId = root.rows[0]?.id || null;
     }
 
+    const linearAuthHeader = this.linearAuthHeader(connection);
     let synced = 0;
     for (const teamId of teamIds) {
       const data = await this.linearGraphQL<Body>(
-        connection.access_token,
+        linearAuthHeader,
         `query TeamIssues($teamId: String!) {
            team(id: $teamId) {
              issues(first: 100, orderBy: updatedAt) {
@@ -3700,12 +4795,13 @@ export class LegacyService {
         synced += 1;
 
         if (mirrorFolderId) {
-          await this.db.query(
+          const mirrorRes = await this.db.query<{ id: string }>(
             `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
              VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'linear', $7, $8)
              ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
                title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
-               source_url = EXCLUDED.source_url, updated_at = now()`,
+               source_url = EXCLUDED.source_url, updated_at = now()
+             RETURNING id`,
             [
               organizationId,
               projectId,
@@ -3717,6 +4813,7 @@ export class LegacyService {
               String(issue.url || "")
             ]
           );
+          if (mirrorRes.rows[0]?.id) this.enqueueEmbedding(organizationId, projectId, "document", mirrorRes.rows[0].id, "updated");
         }
       }
     }
@@ -3733,6 +4830,18 @@ export class LegacyService {
       values.push(`%${search}%`);
       filters.push(`(linear_issue_key ILIKE $${values.length} OR summary ILIKE $${values.length})`);
     }
+    if (query.issueType) {
+      values.push(String(query.issueType));
+      filters.push(`issue_type = $${values.length}`);
+    }
+    if (query.status) {
+      values.push(String(query.status));
+      filters.push(`status = $${values.length}`);
+    }
+    if (query.coverage === "covered" || query.coverage === "uncovered") {
+      const exists = `EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = linear_tickets.project_id AND t.linear_issue_key = linear_tickets.linear_issue_key AND t.deleted_at IS NULL)`;
+      filters.push(query.coverage === "covered" ? exists : `NOT ${exists}`);
+    }
     const count = await this.db.query(`SELECT COUNT(*)::int AS count FROM linear_tickets WHERE ${filters.join(" AND ")}`, values);
     values.push(limit, offset);
     const res = await this.db.query(
@@ -3745,6 +4854,95 @@ export class LegacyService {
     return { list: res.rows.map(toCamel), total: count.rows[0]?.count ?? 0 };
   }
 
+  // Merged view for the Requirements page's "All Sources" tab — UNION ALL over jira_tickets and
+  // linear_tickets into one shape (source discriminator + shared coverage flag), sharing one
+  // pagination/search/filter pass instead of stitching two independently-paginated lists client-side.
+  async allTickets(projectId: string, query: Body) {
+    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
+    const offset = Math.max(0, Number(query.offset || 0));
+    const search = String(query.search || "").trim();
+    const combined = `
+      SELECT id, 'jira' AS source, jira_issue_key AS key, summary, description, issue_type, status, priority,
+             assignee, reporter, labels, jira_created_at AS created_at, jira_updated_at AS updated_at,
+             jira_url AS url, synced_at,
+             EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = jira_tickets.project_id AND t.jira_issue_key = jira_tickets.jira_issue_key AND t.deleted_at IS NULL) AS has_coverage
+      FROM jira_tickets WHERE project_id = $1
+      UNION ALL
+      SELECT id, 'linear' AS source, linear_issue_key AS key, summary, description, issue_type, status, priority,
+             assignee, reporter, labels, linear_created_at AS created_at, linear_updated_at AS updated_at,
+             linear_url AS url, synced_at,
+             EXISTS (SELECT 1 FROM testcases t WHERE t.project_id = linear_tickets.project_id AND t.linear_issue_key = linear_tickets.linear_issue_key AND t.deleted_at IS NULL) AS has_coverage
+      FROM linear_tickets WHERE project_id = $1
+    `;
+    const filters: string[] = [];
+    const values: any[] = [projectId];
+    if (search) {
+      values.push(`%${search}%`);
+      filters.push(`(key ILIKE $${values.length} OR summary ILIKE $${values.length})`);
+    }
+    if (query.issueType) {
+      values.push(String(query.issueType));
+      filters.push(`issue_type = $${values.length}`);
+    }
+    if (query.status) {
+      values.push(String(query.status));
+      filters.push(`status = $${values.length}`);
+    }
+    if (query.coverage === "covered" || query.coverage === "uncovered") {
+      filters.push(`has_coverage = ${query.coverage === "covered"}`);
+    }
+    const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const count = await this.db.query(`SELECT COUNT(*)::int AS count FROM (${combined}) combined ${where}`, values);
+    values.push(limit, offset);
+    const res = await this.db.query(
+      `SELECT * FROM (${combined}) combined
+       ${where}
+       ORDER BY updated_at DESC NULLS LAST, synced_at DESC
+       LIMIT $${values.length - 1} OFFSET $${values.length}`,
+      values
+    );
+    return { list: res.rows.map(toCamel), total: count.rows[0]?.count ?? 0 };
+  }
+
+  // Coverage/type/status aggregates for the Requirements page's stat strip + filter dropdown
+  // options. Type/status are free-text synced verbatim from Jira/Linear (no fixed enum), so option
+  // lists are derived from what's actually in the project rather than a hardcoded set.
+  async requirementsSummary(projectId: string) {
+    const bySource = async (table: "jira_tickets" | "linear_tickets", keyColumn: "jira_issue_key" | "linear_issue_key") => {
+      const stats = await this.db.query(
+        `SELECT COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE EXISTS (
+                  SELECT 1 FROM testcases t WHERE t.project_id = src.project_id AND t.${keyColumn} = src.${keyColumn} AND t.deleted_at IS NULL
+                ))::int AS covered
+         FROM ${table} src WHERE project_id = $1`,
+        [projectId]
+      );
+      const types = await this.db.query(`SELECT DISTINCT issue_type FROM ${table} WHERE project_id = $1 AND issue_type <> '' ORDER BY issue_type`, [projectId]);
+      const statuses = await this.db.query(`SELECT DISTINCT status FROM ${table} WHERE project_id = $1 AND status <> '' ORDER BY status`, [projectId]);
+      const total = stats.rows[0]?.total ?? 0;
+      const covered = stats.rows[0]?.covered ?? 0;
+      return {
+        total,
+        covered,
+        uncovered: total - covered,
+        types: types.rows.map((r) => r.issue_type as string),
+        statuses: statuses.rows.map((r) => r.status as string)
+      };
+    };
+    const [jira, linear] = await Promise.all([
+      bySource("jira_tickets", "jira_issue_key"),
+      bySource("linear_tickets", "linear_issue_key")
+    ]);
+    const all = {
+      total: jira.total + linear.total,
+      covered: jira.covered + linear.covered,
+      uncovered: jira.uncovered + linear.uncovered,
+      types: Array.from(new Set([...jira.types, ...linear.types])).sort(),
+      statuses: Array.from(new Set([...jira.statuses, ...linear.statuses])).sort()
+    };
+    return { all, jira, linear };
+  }
+
   async linearComment(projectId: string, body: Body) {
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
@@ -3752,10 +4950,11 @@ export class LegacyService {
     const issueKey = String(body.issueKey || body.linearIssueKey || "").trim();
     const comment = String(body.comment || body.body || "").trim();
     if (!issueKey || !comment) throw new BadRequestException({ error: "Linear issue key and comment are required." });
-    const lookup = await this.linearGraphQL<Body>(connection.access_token, "query Issue($id: String!) { issue(id: $id) { id } }", { id: issueKey });
+    const linearAuthHeader = this.linearAuthHeader(connection);
+    const lookup = await this.linearGraphQL<Body>(linearAuthHeader, "query Issue($id: String!) { issue(id: $id) { id } }", { id: issueKey });
     const issueId = lookup?.issue?.id || issueKey;
     await this.linearGraphQL(
-      connection.access_token,
+      linearAuthHeader,
       "mutation CreateComment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success } }",
       { issueId, body: comment }
     );
@@ -3775,10 +4974,11 @@ export class LegacyService {
     if (!teamIds.length) return { list: [] };
 
     const search = String(query.search || query.q || "").trim();
+    const linearAuthHeader = this.linearAuthHeader(connection);
     const results: Body[] = [];
     for (const teamId of teamIds) {
       const data = await this.linearGraphQL<Body>(
-        connection.access_token,
+        linearAuthHeader,
         `query TeamIssues($teamId: String!, $filter: IssueFilter) {
            team(id: $teamId) {
              issues(first: 20, orderBy: updatedAt, filter: $filter) {
@@ -3936,7 +5136,7 @@ export class LegacyService {
 
   async zyraChatSessions(projectId: string) {
     const res = await this.db.query(
-      `SELECT id, project_id, user_id, title, created_at, updated_at
+      `SELECT id, project_id, user_id, title, created_at, updated_at, active_plan
        FROM zyra_chat_sessions
        WHERE project_id = $1
        ORDER BY updated_at DESC
@@ -3948,7 +5148,7 @@ export class LegacyService {
 
   async zyraChatSession(projectId: string, sessionId: string) {
     const session = await this.db.query(
-      "SELECT id, project_id, user_id, title, created_at, updated_at FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2",
+      "SELECT id, project_id, user_id, title, created_at, updated_at, active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2",
       [sessionId, projectId]
     );
     if (!session.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
@@ -3995,13 +5195,36 @@ export class LegacyService {
       [sessionId, projectId, uid, message]
     );
 
+    // A paused plan (stopped by the user, or paused after a batch failure) can be picked
+    // back up with a plain "continue" — resolved before any other decision-making so it
+    // doesn't get treated as a normal analytical question.
+    const existingPlan = sessionRes.rows[0].active_plan as Body | undefined;
+    if (existingPlan?.status === "paused" && this.isZyraResumeIntent(message)) {
+      const resumed = await this.resumeZyraChatPlan(projectId, uid, sessionId);
+      const lastMessage = resumed.messages[resumed.messages.length - 1];
+      return { message: lastMessage, session: resumed };
+    }
+    // Any other new message supersedes an in-flight or paused plan — the background loop
+    // checks the plan id before each batch and stops once it no longer matches (see
+    // continueZyraChatPlan).
+    if (existingPlan) {
+      await this.db.query("UPDATE zyra_chat_sessions SET active_plan = NULL WHERE id = $1", [sessionId]);
+    }
+
     const decision = await this.buildZyraChatDecision(projectId, uid, sessionId, message);
-    const applied = await this.applyZyraChatOperations(projectId, uid, decision.operations);
+    const applied = await this.applyZyraChatOperations(projectId, uid, sessionId, decision.operations);
     const activity = [
       { actor: "user", title: "Asked Zyra", detail: message.slice(0, 320), createdAt: new Date().toISOString() },
       ...applied.activity
     ];
     const testcases = applied.testcases.length ? applied.testcases : decision.testcases;
+    if (decision.actionType === "create" && applied.testcases.length) {
+      const ids = applied.testcases.map((tc) => tc.id).filter(Boolean);
+      await this.db.query(
+        "UPDATE zyra_chat_sessions SET last_completed_plan = $2::jsonb WHERE id = $1",
+        [sessionId, JSON.stringify({ testcaseIds: ids, totalCount: ids.length })]
+      );
+    }
     const assistant = await this.db.query(
       `INSERT INTO zyra_chat_messages
        (session_id, project_id, user_id, role, content, reasoning_summary, action_type, status, testcases, activity)
@@ -4029,10 +5252,74 @@ export class LegacyService {
     return { message: item, session: await this.zyraChatSession(projectId, sessionId) };
   }
 
+  // Lets the user cut short a batched "all possible cases" plan. A batch already in flight
+  // when this is called can't be aborted mid-request — it still finishes and posts its own
+  // message — but continueZyraChatPlan checks active_plan before starting the next batch.
+  // This pauses (rather than discards) the plan, preserving remainingScenarios/doneCount so
+  // resumeZyraChatPlan — or just typing "continue" — can pick it back up later.
+  async stopZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
+    const uid = this.requireUser(userId);
+    const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
+    if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
+    const plan = sessionRes.rows[0].active_plan as Body | undefined;
+    if (plan && plan.status !== "paused") {
+      const doneCount = Number(plan.doneCount || 0);
+      const totalCount = Number(plan.totalCount || 0);
+      await this.db.query(
+        "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb WHERE id = $1",
+        [sessionId, JSON.stringify({ ...plan, status: "paused" })]
+      );
+      await this.postZyraPlanMessage(
+        projectId,
+        sessionId,
+        uid,
+        `Stopped at your request — ${doneCount}/${totalCount} scenarios covered. Say "continue" any time and I'll pick back up with the remaining ${totalCount - doneCount}.`,
+        [],
+        []
+      );
+    }
+    return this.zyraChatSession(projectId, sessionId);
+  }
+
+  private isZyraResumeIntent(message: string): boolean {
+    return /\b(continue|resume|keep going|carry on|go ahead|proceed|pick up where)\b/i.test(message);
+  }
+
+  // Reactivates a paused plan under a fresh planId (so any stale in-flight batch from before
+  // the pause can never collide with the resumed loop) and hands it back to
+  // continueZyraChatPlan. No-ops quietly if there's nothing paused to resume.
+  async resumeZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
+    const uid = this.requireUser(userId);
+    const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
+    if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
+    const plan = sessionRes.rows[0].active_plan as Body | undefined;
+    const remainingScenarios = normalizeJsonArray(plan?.remainingScenarios).map(String);
+    if (!plan || plan.status !== "paused" || !remainingScenarios.length) {
+      return this.zyraChatSession(projectId, sessionId);
+    }
+    const planId = randomUUID();
+    const doneCount = Number(plan.doneCount || 0);
+    const totalCount = Number(plan.totalCount || 0);
+    await this.db.query(
+      "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb, updated_at = now() WHERE id = $1",
+      [sessionId, JSON.stringify({ ...plan, planId, status: "running" })]
+    );
+    await this.postZyraPlanMessage(
+      projectId,
+      sessionId,
+      uid,
+      `Resuming — ${doneCount}/${totalCount} scenarios covered so far, continuing with the remaining ${remainingScenarios.length}.`,
+      [],
+      []
+    );
+    void this.continueZyraChatPlan(projectId, uid, sessionId, planId).catch(() => undefined);
+    return this.zyraChatSession(projectId, sessionId);
+  }
+
   private async buildZyraChatDecision(projectId: string, userId: string, sessionId: string, message: string): Promise<ZyraChatDecision> {
     const intent = this.detectZyraChatIntent(message);
     const mentionedJiraKeys = this.extractJiraIssueKeys(message);
-    const [history, knowledge, existingTestcases, allocation, projectSnapshot, mentionedJira] = await Promise.all([
+    const [history, knowledgeFallback, ragKnowledge, existingTestcases, allocation, projectSnapshot, mentionedJira, lastCompletedPlanRes] = await Promise.all([
       this.db.query(
         `SELECT role, content, reasoning_summary, testcases
          FROM zyra_chat_messages
@@ -4042,11 +5329,19 @@ export class LegacyService {
         [sessionId, projectId]
       ),
       this.knowledgeSnapshot(projectId),
+      // Semantic (embeddings) retrieval, run in parallel with the always-cheap recency
+      // fallback above so a project with nothing embedded yet (or an Anthropic-only key)
+      // pays no extra latency — retrieveKnowledgeContext never throws, resolves to [] on
+      // any failure.
+      this.ragRetrieval.retrieveKnowledgeContext(projectId, message),
       this.existingTestcaseSnapshot(projectId, message, ""),
       this.zyraAiAllocation(projectId),
       this.zyraChatProjectSnapshot(projectId),
-      this.jiraSnapshot(projectId, mentionedJiraKeys)
+      this.jiraSnapshot(projectId, mentionedJiraKeys),
+      this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }))
     ]);
+    const knowledge = ragKnowledge.length ? ragKnowledge : knowledgeFallback;
+    const lastCompletedPlanCount = normalizeJsonArray((lastCompletedPlanRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).length;
     const key = allocation.key;
     if (!key) {
       return this.aiUnavailableForZyraChat(existingTestcases.length, allocation.reason);
@@ -4054,7 +5349,9 @@ export class LegacyService {
 
     const provider = String(key.provider || "openai").toLowerCase();
     const model = normalizeProviderModel(provider, key.default_model);
-    const capabilities = await this.zyraProjectCapabilities(projectId);
+    const zyraAgentSettings = await this.zyraAgentSettings(projectId);
+    const capabilities = this.normalizeZyraCapabilities(zyraAgentSettings.capabilities);
+    const projectTestcaseRange = String(zyraAgentSettings.testcaseRange || "1-10");
     const knowledgeForChat = capabilities.knowledgeBase ? knowledge : [];
 
     // Hard capability gates — Zyra declines an action whose capability is disabled in settings.
@@ -4067,9 +5364,10 @@ export class LegacyService {
     if (intent === "create") {
       if (!capabilities.generation) return this.zyraCapabilityDisabled("generation", existingTestcases.length);
       try {
-        const decision = await this.generateZyraChatTestcasesWithAi({
+        const decision = await this.generateZyraChatCreateDecision({
           projectId,
           userId,
+          sessionId,
           provider,
           model,
           key,
@@ -4077,7 +5375,7 @@ export class LegacyService {
           knowledge: knowledgeForChat,
           existingTestcases,
           jiraIssueKeys: mentionedJiraKeys,
-          requestedCount: this.requestedTestcaseCount(message)
+          projectTestcaseRange
         });
         return this.applyStorageGateToGenerated(decision, capabilities);
       } catch (err) {
@@ -4105,7 +5403,7 @@ export class LegacyService {
       "- update: update an existing testcase only when the user clearly asks to update/edit/mark/revise a testcase.",
       "- archive: archive an existing testcase when the user asks to remove/delete/archive testcase coverage. IMPORTANT: before archiving, always describe which testcases will be archived and explicitly ask the user to confirm (e.g. 'I found TC-5 Login Test. Should I archive it? Reply yes to confirm.'). Only include archive operations if the user's current message is a clear confirmation (yes, confirm, go ahead, proceed) after you already proposed what would be archived in the prior assistant turn.",
       "- create_suite: create a new test suite (a folder/group for testcases) when the user asks to create/add a suite, folder, or group. Put the suite name in operation.suiteName.",
-      "- move_to_suite: move/assign EXISTING testcases into a suite when the user asks to move/assign/organize/group/put existing testcases into a suite. The target suite goes in operation.suiteName (it is created automatically if it does not already exist, so you do not need a separate create_suite op for the same suite). List the testcases to move in operation.externalIds (use the external IDs shown under 'Existing suites' / 'Existing testcases'), or set operation.allExisting=true when the user means every existing testcase.",
+      "- move_to_suite: move/assign EXISTING testcases into a suite when the user asks to move/assign/organize/group/put existing testcases into a suite. The target suite goes in operation.suiteName (it is created automatically if it does not already exist, so you do not need a separate create_suite op for the same suite). List the testcases to move in operation.externalIds (use the external IDs shown under 'Existing suites' / 'Existing testcases'), set operation.allExisting=true when the user means every existing testcase, or set operation.fromLastPlan=true when the user refers to 'all'/'the N cases' from a recent generation batch (see 'Most recently generated batch' below) — fromLastPlan is exact and does not depend on you correctly recalling every external ID from earlier in the conversation, so prefer it over externalIds whenever the user is clearly referring to a just-generated batch rather than naming specific unrelated testcases.",
       "CRITICAL: moving or assigning existing testcases into a suite is NEVER a create action. Do not generate, draft, or duplicate testcases for a move/assign/organize request — only emit move_to_suite operations that reference the existing testcases. Use create only when the user explicitly asks to author brand-new testcases.",
       "When the user asks to create a suite AND move existing testcases into it in one message, return a single move_to_suite operation with the suiteName (the suite is auto-created) — or a create_suite plus move_to_suite — but never any create operations.",
       "Use the project snapshot to choose the action. If the query asks for numbers from Jira/testcase links, choose jira_pending_testcases instead of guessing.",
@@ -4116,7 +5414,7 @@ export class LegacyService {
       "Treat remove/delete requests as archive operations unless the user clearly names an existing app delete control.",
       `Detected local intent hint: ${intent}. Follow the user's actual wording if it is clearer than this hint.`,
       "Return ONLY a single valid JSON object — no markdown fences, no text before or after the JSON:",
-      "{\"reply\":\"\",\"reasoningSummary\":\"\",\"action\":\"answer|list|jira_pending_testcases|create|update|archive|create_suite|move_to_suite\",\"actionType\":\"answer|create|update|archive|suite|mixed\",\"operations\":[{\"type\":\"create|update|archive|create_suite|move_to_suite\",\"testcaseId\":\"\",\"externalId\":\"\",\"externalIds\":[],\"allExisting\":false,\"suiteName\":\"\",\"suiteId\":\"\",\"draft\":{},\"fields\":{},\"reason\":\"\"}],\"testcases\":[{}]}",
+      "{\"reply\":\"\",\"reasoningSummary\":\"\",\"action\":\"answer|list|jira_pending_testcases|create|update|archive|create_suite|move_to_suite\",\"actionType\":\"answer|create|update|archive|suite|mixed\",\"operations\":[{\"type\":\"create|update|archive|create_suite|move_to_suite\",\"testcaseId\":\"\",\"externalId\":\"\",\"externalIds\":[],\"allExisting\":false,\"fromLastPlan\":false,\"suiteName\":\"\",\"suiteId\":\"\",\"draft\":{},\"fields\":{},\"reason\":\"\"}],\"testcases\":[{}]}",
       "REPLY FIELD RULES — reply is rendered as markdown in a chat UI, must be human-readable:",
       "  - Use ## for main headings, ### for subsections, **bold** for emphasis, - for bullets, 1. for numbered steps.",
       "  - For comparisons or tabular data use markdown table syntax: | Heading | Heading |\\n|---|---|\\n| value | value |",
@@ -4127,6 +5425,9 @@ export class LegacyService {
       "",
       "Existing suites (use these names/ids for move_to_suite; reuse an existing suite instead of duplicating it):",
       projectSnapshot.suites.length ? projectSnapshot.suites.map((s) => `${s.name} (id: ${s.id}, ${s.testCaseCount} testcase(s))`).join("\n") : "No suites yet.",
+      "",
+      "Most recently generated batch (use move_to_suite with fromLastPlan=true to reference all of these together):",
+      lastCompletedPlanCount ? `${lastCompletedPlanCount} testcase(s) tracked from the last generation batch in this session.` : "No tracked batch yet in this session.",
       "",
       "Project snapshot:",
       JSON.stringify(projectSnapshot),
@@ -4181,9 +5482,10 @@ export class LegacyService {
       }
       if (modelIntent === "create") {
         if (!capabilities.generation) return this.zyraCapabilityDisabled("generation", existingTestcases.length);
-        const decision = await this.generateZyraChatTestcasesWithAi({
+        const decision = await this.generateZyraChatCreateDecision({
           projectId,
           userId,
+          sessionId,
           provider,
           model,
           key,
@@ -4191,7 +5493,7 @@ export class LegacyService {
           knowledge: knowledgeForChat,
           existingTestcases,
           jiraIssueKeys: mentionedJiraKeys,
-          requestedCount: this.requestedTestcaseCount(message)
+          projectTestcaseRange
         });
         return this.applyStorageGateToGenerated(decision, capabilities);
       }
@@ -4203,9 +5505,12 @@ export class LegacyService {
     }
   }
 
-  private async applyZyraChatOperations(projectId: string, userId: string, operations: ZyraChatDecision["operations"]) {
+  private async applyZyraChatOperations(projectId: string, userId: string | null, sessionId: string, operations: ZyraChatDecision["operations"]) {
     const testcases: Body[] = [];
     const activity: Body[] = [];
+    // No originating human request in scope on some paths (e.g. a resumed background plan) —
+    // attribute the mutation to Zyra's own agent actor id in that case instead of leaving it null.
+    const actorId = await this.resolveZyraActor(userId);
     // Final hard gate: never persist an operation whose capability is disabled, regardless of what the model emitted.
     const capabilities = await this.zyraProjectCapabilities(projectId);
     const allowed = operations.filter((op) => {
@@ -4217,7 +5522,7 @@ export class LegacyService {
       if (op.type === "create" && op.draft) {
         let created: Body | null = null;
         try {
-          created = await this.createTestCase(projectId, {
+          created = await this.createTestCase(projectId, actorId, {
             title: op.draft.title,
             description: op.draft.description || op.draft.expectedSummary || "",
             preconditions: op.draft.preconditions || "",
@@ -4237,41 +5542,41 @@ export class LegacyService {
         const row = await this.getTestCase(created.id);
         testcases.push(this.chatTestcaseRow(row, "created", op.reason));
         activity.push({ actor: "agent", title: "Created testcase", detail: `${created.externalId} ${created.title}`, createdAt: new Date().toISOString() });
-        await this.logProjectActivity(projectId, userId, "zyra_created", "testcase", created.id, `${created.externalId} - ${created.title}`, { source: "zyra_chat", reason: op.reason || null });
+        await this.logProjectActivity(projectId, actorId, "zyra_created", "testcase", created.id, `${created.externalId} - ${created.title}`, { source: "zyra_chat", reason: op.reason || null });
       } else if ((op.type === "update" || op.type === "archive") && (op.testcaseId || op.externalId)) {
         const found = await this.findProjectTestcase(projectId, op.testcaseId, op.externalId);
         if (!found) continue;
         const fields = op.type === "archive" ? { status: "Archived" } : this.sanitizeZyraUpdateFields(op.fields || {});
-        await this.patchTestCaseFromZyra(found.id, fields);
+        await this.patchTestCaseFromZyra(found.id, actorId, fields);
         const row = await this.getTestCase(found.id);
         const action = op.type === "archive" ? "archived" : "updated";
         testcases.push(this.chatTestcaseRow(row, action, op.reason));
         activity.push({ actor: "agent", title: `${action[0].toUpperCase()}${action.slice(1)} testcase`, detail: `${row.externalId} ${row.title}`, createdAt: new Date().toISOString() });
-        await this.logProjectActivity(projectId, userId, `zyra_${action}`, "testcase", found.id, `${row.externalId} - ${row.title}`, { source: "zyra_chat", fields, reason: op.reason || null });
+        await this.logProjectActivity(projectId, actorId, `zyra_${action}`, "testcase", found.id, `${row.externalId} - ${row.title}`, { source: "zyra_chat", fields, reason: op.reason || null });
       } else if (op.type === "create_suite" && op.suiteName) {
         const suite = await this.resolveOrCreateSuiteByName(projectId, op.suiteName);
         activity.push({ actor: "agent", title: suite.created ? "Created suite" : "Suite already exists", detail: suite.name, createdAt: new Date().toISOString() });
         if (suite.created) {
-          await this.logProjectActivity(projectId, userId, "zyra_suite_created", "suite", suite.id, suite.name, { source: "zyra_chat", reason: op.reason || null });
+          await this.logProjectActivity(projectId, actorId, "zyra_suite_created", "suite", suite.id, suite.name, { source: "zyra_chat", reason: op.reason || null });
         }
       } else if (op.type === "move_to_suite" && (op.suiteName || op.suiteId)) {
         const suite = op.suiteId
           ? await this.getProjectSuite(projectId, op.suiteId)
           : await this.resolveOrCreateSuiteByName(projectId, String(op.suiteName));
         if (!suite) continue;
-        const targets = await this.resolveZyraMoveTargets(projectId, op, suite.id);
+        const targets = await this.resolveZyraMoveTargets(projectId, sessionId, op, suite.id);
         if (!targets.length) continue;
         const movedIds = targets.map((target) => target.id);
         await this.db.query(
-          "UPDATE testcases SET suite_id = $2, updated_at = now() WHERE project_id = $1 AND id = ANY($3::uuid[])",
-          [projectId, suite.id, movedIds]
+          "UPDATE testcases SET suite_id = $2, updated_by = $4, updated_at = now() WHERE project_id = $1 AND id = ANY($3::uuid[]) AND deleted_at IS NULL",
+          [projectId, suite.id, movedIds, actorId]
         );
         for (const target of targets.slice(0, 25)) {
           const row = await this.getTestCase(target.id);
           testcases.push(this.chatTestcaseRow(row, "moved", op.reason || `Moved to suite ${suite.name}`));
         }
         activity.push({ actor: "agent", title: `Moved ${movedIds.length} testcase(s) to suite`, detail: `${suite.name}${"created" in suite && suite.created ? " (created)" : ""}`, createdAt: new Date().toISOString() });
-        await this.logProjectActivity(projectId, userId, "zyra_moved_to_suite", "suite", suite.id, suite.name, { source: "zyra_chat", movedCount: movedIds.length, testcaseIds: movedIds, reason: op.reason || null });
+        await this.logProjectActivity(projectId, actorId, "zyra_moved_to_suite", "suite", suite.id, suite.name, { source: "zyra_chat", movedCount: movedIds.length, testcaseIds: movedIds, reason: op.reason || null });
       }
     }
     return { testcases, activity };
@@ -4297,12 +5602,28 @@ export class LegacyService {
   }
 
   // Resolve which existing testcases a move_to_suite op should affect: every non-archived testcase
-  // (allExisting), or the ones named by external id / internal id. Never creates testcases.
-  private async resolveZyraMoveTargets(projectId: string, op: ZyraChatDecision["operations"][number], targetSuiteId: string): Promise<Array<{ id: string }>> {
+  // (allExisting), the ones named by external id / internal id, or — when the model set
+  // fromLastPlan (see the move_to_suite prompt instructions) — every testcase tracked in
+  // last_completed_plan. That tracking exists because the model's own view of "which
+  // testcases did we just generate" is limited to the last 12 chat messages, which a
+  // multi-batch plan can easily outgrow; last_completed_plan is a durable, exact record
+  // instead of something the model has to re-enumerate from a possibly-truncated history.
+  // Never creates testcases.
+  private async resolveZyraMoveTargets(projectId: string, sessionId: string, op: ZyraChatDecision["operations"][number], targetSuiteId: string): Promise<Array<{ id: string }>> {
     if (op.allExisting) {
       const res = await this.db.query(
-        "SELECT id FROM testcases WHERE project_id = $1 AND COALESCE(status,'') <> 'Archived' AND suite_id IS DISTINCT FROM $2::uuid",
+        "SELECT id FROM testcases WHERE project_id = $1 AND COALESCE(status,'') <> 'Archived' AND suite_id IS DISTINCT FROM $2::uuid AND deleted_at IS NULL",
         [projectId, targetSuiteId]
+      ).catch(() => ({ rows: [] as Body[] }));
+      return res.rows.map((row) => ({ id: String(row.id) }));
+    }
+    if (op.fromLastPlan) {
+      const planRes = await this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }));
+      const ids = normalizeJsonArray((planRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).map(String);
+      if (!ids.length) return [];
+      const res = await this.db.query(
+        "SELECT id FROM testcases WHERE project_id = $1 AND id = ANY($2::uuid[]) AND deleted_at IS NULL",
+        [projectId, ids]
       ).catch(() => ({ rows: [] as Body[] }));
       return res.rows.map((row) => ({ id: String(row.id) }));
     }
@@ -4311,7 +5632,7 @@ export class LegacyService {
     const internalIds = [...(op.testcaseIds || []), ...(op.testcaseId ? [op.testcaseId] : [])].map((value) => String(value).trim()).filter((value) => uuidPattern.test(value));
     if (!externalIds.length && !internalIds.length) return [];
     const res = await this.db.query(
-      "SELECT id FROM testcases WHERE project_id = $1 AND (external_id = ANY($2::text[]) OR id = ANY($3::uuid[]))",
+      "SELECT id FROM testcases WHERE project_id = $1 AND (external_id = ANY($2::text[]) OR id = ANY($3::uuid[])) AND deleted_at IS NULL",
       [projectId, externalIds, internalIds]
     ).catch(() => ({ rows: [] as Body[] }));
     return res.rows.map((row) => ({ id: String(row.id) }));
@@ -4319,7 +5640,7 @@ export class LegacyService {
 
   private async generateZyraChatTestcasesWithAi(params: {
     projectId: string;
-    userId: string;
+    userId: string | null;
     provider: string;
     model: string;
     key: Body;
@@ -4328,6 +5649,7 @@ export class LegacyService {
     existingTestcases: ZyraGenerationInput["existingTestcases"];
     jiraIssueKeys: string[];
     requestedCount: number;
+    testcaseRange?: string;
   }): Promise<ZyraChatDecision> {
     const jira = await this.jiraSnapshot(params.projectId, params.jiraIssueKeys);
     const aiResult = await this.generateZyraWithProvider({
@@ -4345,8 +5667,10 @@ export class LegacyService {
         feedback: "",
         knowledge: params.knowledge,
         jira,
+        linear: [],
         existingTestcases: params.existingTestcases,
-        requestedCount: params.requestedCount
+        requestedCount: params.requestedCount,
+        testcaseRange: params.testcaseRange
       }
     });
     await this.rememberZyraTurn({
@@ -4376,6 +5700,221 @@ export class LegacyService {
       })),
       testcases: aiResult.drafts.map((draft) => this.chatDraftRow(draft, "suggested", "Generated by AI from Zyra chat context."))
     };
+  }
+
+  private static readonly ZYRA_PLAN_BATCH_SIZE = 5;
+  private static readonly ZYRA_PLAN_MAX_SCENARIOS = 40;
+
+  private zyraBatchMessage(originalMessage: string, batch: string[]): string {
+    return [
+      originalMessage,
+      "",
+      "Generate exactly one distinct testcase for each of these scenarios (do not add extras, do not skip any):",
+      ...batch.map((scenario, index) => `${index + 1}. ${scenario}`)
+    ].join("\n");
+  }
+
+  // "All possible cases" no longer asks the model for everything in one shot (that instruction
+  // was truncating past the provider's output token ceiling and returning invalid JSON). Instead
+  // Zyra first plans a todo list of distinct scenarios, generates the first small batch inline,
+  // and hands the rest to a fire-and-forget loop that posts each remaining batch as its own chat
+  // message — mirroring a todo-list-then-execute-one-by-one workflow.
+  private async startZyraChatPlan(params: {
+    projectId: string;
+    userId: string;
+    sessionId: string;
+    provider: string;
+    model: string;
+    key: Body;
+    message: string;
+    knowledge: Array<{ title: string; content: string }>;
+    existingTestcases: ZyraGenerationInput["existingTestcases"];
+    jiraIssueKeys: string[];
+  }): Promise<ZyraChatDecision> {
+    let scenarios: string[] = [];
+    try {
+      scenarios = await this.planZyraChatScenarios({
+        provider: params.provider,
+        model: params.model,
+        key: params.key,
+        message: params.message,
+        knowledge: params.knowledge,
+        existingTestcases: params.existingTestcases,
+        maxScenarios: LegacyService.ZYRA_PLAN_MAX_SCENARIOS
+      });
+    } catch {
+      scenarios = [];
+    }
+
+    if (scenarios.length < 2) {
+      // Planning failed or found too little to plan around — fall back to one bounded batch
+      // rather than risk the same truncation the "generate as many as possible" prompt caused.
+      return this.generateZyraChatTestcasesWithAi({
+        projectId: params.projectId,
+        userId: params.userId,
+        provider: params.provider,
+        model: params.model,
+        key: params.key,
+        message: params.message,
+        knowledge: params.knowledge,
+        existingTestcases: params.existingTestcases,
+        jiraIssueKeys: params.jiraIssueKeys,
+        requestedCount: 10
+      });
+    }
+
+    const firstBatch = scenarios.slice(0, LegacyService.ZYRA_PLAN_BATCH_SIZE);
+    const remaining = scenarios.slice(LegacyService.ZYRA_PLAN_BATCH_SIZE);
+    const decision = await this.generateZyraChatTestcasesWithAi({
+      projectId: params.projectId,
+      userId: params.userId,
+      provider: params.provider,
+      model: params.model,
+      key: params.key,
+      message: this.zyraBatchMessage(params.message, firstBatch),
+      knowledge: params.knowledge,
+      existingTestcases: params.existingTestcases,
+      jiraIssueKeys: params.jiraIssueKeys,
+      requestedCount: firstBatch.length
+    });
+
+    if (!remaining.length) return decision;
+
+    const planId = randomUUID();
+    await this.db.query(
+      "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb, updated_at = now() WHERE id = $1",
+      [params.sessionId, JSON.stringify({
+        planId,
+        status: "running",
+        originalMessage: params.message,
+        jiraIssueKeys: params.jiraIssueKeys,
+        remainingScenarios: remaining,
+        batchSize: LegacyService.ZYRA_PLAN_BATCH_SIZE,
+        doneCount: firstBatch.length,
+        totalCount: scenarios.length
+      })]
+    );
+    void this.continueZyraChatPlan(params.projectId, params.userId, params.sessionId, planId).catch(() => undefined);
+
+    return {
+      ...decision,
+      reply: `I identified ${scenarios.length} distinct scenarios to cover. Here are the first ${firstBatch.length} — I'll keep generating the rest (${remaining.length} more) and post them here as they're ready; feel free to review these in the meantime.\n\n${decision.reply}`
+    };
+  }
+
+  private async postZyraPlanMessage(projectId: string, sessionId: string, userId: string | null, reply: string, testcases: Body[], activity: Body[]): Promise<void> {
+    await this.db.query(
+      `INSERT INTO zyra_chat_messages
+       (session_id, project_id, user_id, role, content, reasoning_summary, action_type, status, testcases, activity)
+       VALUES ($1,$2,$3,'assistant',$4,$5,'create','completed',$6::jsonb,$7::jsonb)`,
+      [sessionId, projectId, userId, reply, "Continuing a batched 'all possible cases' generation plan.", JSON.stringify(testcases), JSON.stringify(activity)]
+    );
+    await this.db.query("UPDATE zyra_chat_sessions SET updated_at = now() WHERE id = $1", [sessionId]);
+  }
+
+  private async clearZyraChatPlan(sessionId: string): Promise<void> {
+    await this.db.query("UPDATE zyra_chat_sessions SET active_plan = NULL WHERE id = $1", [sessionId]);
+  }
+
+  // Fire-and-forget continuation (mirrors processZyraTask's pattern): re-checks the plan id
+  // before every batch so a new user message — which clears active_plan in sendZyraChatMessage —
+  // stops this loop cleanly instead of racing further messages into the session.
+  private async continueZyraChatPlan(projectId: string, userId: string | null, sessionId: string, planId: string): Promise<void> {
+    for (;;) {
+      const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
+      const plan = sessionRes.rows[0]?.active_plan as Body | undefined;
+      if (!plan || plan.planId !== planId) return;
+
+      const remainingScenarios = normalizeJsonArray(plan.remainingScenarios).map(String);
+      const batchSize = Number(plan.batchSize) || LegacyService.ZYRA_PLAN_BATCH_SIZE;
+      const batch = remainingScenarios.slice(0, batchSize);
+      if (!batch.length) {
+        await this.clearZyraChatPlan(sessionId);
+        return;
+      }
+
+      const doneCount = Number(plan.doneCount || 0);
+      const totalCount = Number(plan.totalCount || 0);
+      try {
+        const allocation = await this.zyraAiAllocation(projectId);
+        if (!allocation.key) {
+          await this.postZyraPlanMessage(projectId, sessionId, userId, `I couldn't continue generating more test cases — ${allocation.reason}`, [], []);
+          await this.clearZyraChatPlan(sessionId);
+          return;
+        }
+        const capabilities = await this.zyraProjectCapabilities(projectId);
+        if (!capabilities.generation) {
+          await this.postZyraPlanMessage(projectId, sessionId, userId, "Test case generation was disabled for Zyra in this project, so I stopped generating the remaining scenarios. Enable it under Zyra → Settings → Capabilities to continue.", [], []);
+          await this.clearZyraChatPlan(sessionId);
+          return;
+        }
+        const provider = String(allocation.key.provider || "openai").toLowerCase();
+        const model = normalizeProviderModel(provider, allocation.key.default_model);
+        const originalMessage = String(plan.originalMessage || "");
+        const [knowledge, existingTestcases] = await Promise.all([
+          this.knowledgeSnapshot(projectId),
+          this.existingTestcaseSnapshot(projectId, originalMessage, "")
+        ]);
+        const decision = await this.generateZyraChatTestcasesWithAi({
+          projectId,
+          userId,
+          provider,
+          model,
+          key: allocation.key,
+          message: this.zyraBatchMessage(originalMessage, batch),
+          knowledge,
+          existingTestcases,
+          jiraIssueKeys: normalizeJsonArray(plan.jiraIssueKeys).map(String),
+          requestedCount: batch.length
+        });
+        const gated = this.applyStorageGateToGenerated(decision, capabilities);
+        const applied = await this.applyZyraChatOperations(projectId, userId, sessionId, gated.operations);
+        const testcases = applied.testcases.length ? applied.testcases : gated.testcases;
+        await this.recordZyraLastCompletedPlanIds(sessionId, testcases.map((tc) => tc.id).filter(Boolean));
+
+        const newDoneCount = doneCount + batch.length;
+        const remaining = remainingScenarios.slice(batch.length);
+        const reply = remaining.length
+          ? `Here are ${testcases.length} more test case(s) — ${newDoneCount}/${totalCount} scenarios covered so far. Still working on the remaining ${remaining.length}; I'll post the next batch shortly.`
+          : `Here are the final ${testcases.length} test case(s) — all ${totalCount} scenarios are now covered. Feel free to review and let me know if you'd like any changes.`;
+        await this.postZyraPlanMessage(projectId, sessionId, userId, reply, testcases, applied.activity);
+
+        if (!remaining.length) {
+          await this.clearZyraChatPlan(sessionId);
+          return;
+        }
+        // Re-check we're still the active plan before writing progress — the user may have
+        // sent a new message (which clears active_plan) while this batch was generating.
+        const stillActiveRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]);
+        const stillActive = stillActiveRes.rows[0]?.active_plan as Body | undefined;
+        if (!stillActive || stillActive.planId !== planId) return;
+        await this.db.query(
+          "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb, updated_at = now() WHERE id = $1",
+          [sessionId, JSON.stringify({ ...plan, remainingScenarios: remaining, doneCount: newDoneCount })]
+        );
+      } catch (err) {
+        const detail = this.extractAiErrorMessage(err);
+        // Pause rather than discard: remainingScenarios/doneCount are unchanged (this batch
+        // never succeeded), so "continue" — or resumeZyraChatPlan — can retry from here later.
+        await this.postZyraPlanMessage(projectId, sessionId, userId, `I ran into an issue generating more test cases (${detail}). Pausing here — ${doneCount}/${totalCount} scenarios covered. Say "continue" and I'll retry the rest.`, [], []);
+        await this.db.query(
+          "UPDATE zyra_chat_sessions SET active_plan = $2::jsonb WHERE id = $1",
+          [sessionId, JSON.stringify({ ...plan, status: "paused" })]
+        );
+        return;
+      }
+    }
+  }
+
+  private async recordZyraLastCompletedPlanIds(sessionId: string, newIds: string[]): Promise<void> {
+    if (!newIds.length) return;
+    const res = await this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }));
+    const existingIds = normalizeJsonArray((res.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).map(String);
+    const mergedIds = Array.from(new Set([...existingIds, ...newIds]));
+    await this.db.query(
+      "UPDATE zyra_chat_sessions SET last_completed_plan = $2::jsonb WHERE id = $1",
+      [sessionId, JSON.stringify({ testcaseIds: mergedIds, totalCount: mergedIds.length })]
+    );
   }
 
   private async finalizeZyraToolDecisionWithAi(params: {
@@ -4436,6 +5975,7 @@ export class LegacyService {
     const acceptanceCriteria = String(body.acceptanceCriteria || "").trim();
     if (!story) throw new BadRequestException({ error: "story is required" });
     const jiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String);
+    const linearIssueKeys = normalizeJsonArray(body.linearIssueKeys).map(String);
     const knowledgeItemIds = normalizeJsonArray(body.knowledgeItemIds).map(String).filter(Boolean);
     const feedback = String(body.feedback || "").trim();
     const now = new Date().toISOString();
@@ -4446,14 +5986,15 @@ export class LegacyService {
     const sourceSummary = [
       { type: "story", title: "User story", detail: story.slice(0, 320) },
       ...(context ? [{ type: "context", title: "User context", detail: context.slice(0, 320) }] : []),
-      ...jiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Selected Jira ticket queued for Zyra." }))
+      ...jiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Selected Jira ticket queued for Zyra." })),
+      ...linearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Selected Linear ticket queued for Zyra." }))
     ];
     const res = await this.db.query(
       `INSERT INTO ai_generation_requests
        (project_id, requested_by, provider, model, user_story, acceptance_criteria, custom_prompt, requested_count,
-        generated_count, generated_payload, agent_name, task_status, feedback, context, jira_issue_keys,
+        generated_count, generated_payload, agent_name, task_status, feedback, context, jira_issue_keys, linear_issue_keys,
         token_input, token_output, token_total, source_summary, activity_log)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,'[]'::jsonb,$9,'todo',$10,$11,$12::jsonb,0,0,0,$13::jsonb,$14::jsonb)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,'[]'::jsonb,$9,'todo',$10,$11,$12::jsonb,$13::jsonb,0,0,0,$14::jsonb,$15::jsonb)
        RETURNING *`,
       [
         projectId,
@@ -4468,6 +6009,7 @@ export class LegacyService {
         feedback,
         context,
         JSON.stringify(jiraIssueKeys),
+        JSON.stringify(linearIssueKeys),
         JSON.stringify(sourceSummary),
         JSON.stringify(activityLog)
       ]
@@ -4514,6 +6056,7 @@ export class LegacyService {
       const acceptanceCriteria = String(task.acceptance_criteria || "");
       const feedback = String(task.feedback || "");
       const jiraIssueKeys = normalizeJsonArray(task.jira_issue_keys).map(String);
+      const linearIssueKeys = normalizeJsonArray(task.linear_issue_keys).map(String);
       const projectSettings = this.parseProjectSettings((await this.getProject(projectId)).settings).zyraAgent || {};
       const testcaseRange = String((projectSettings as Body).testcaseRange || "1-10");
       const { requestedCount } = this.testcaseRangeConfig(testcaseRange);
@@ -4521,6 +6064,7 @@ export class LegacyService {
       const model = normalizeProviderModel(provider, task.model || allocation.rows[0].default_model);
       const knowledge = await this.knowledgeSnapshot(projectId, options.knowledgeItemIds || []);
       const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
+      const linear = await this.linearSnapshot(projectId, linearIssueKeys);
       const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
       const aiResult = await this.generateZyraWithProvider({
         provider,
@@ -4530,7 +6074,7 @@ export class LegacyService {
         authHeaderName: allocation.rows[0].auth_header_name,
         authScheme: allocation.rows[0].auth_scheme,
         projectId,
-        input: { story, context, acceptanceCriteria, feedback, knowledge, jira, existingTestcases, requestedCount, testcaseRange }
+        input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
       });
       const drafts = aiResult.drafts;
       const inputText = [
@@ -4540,6 +6084,7 @@ export class LegacyService {
         feedback,
         knowledge.map((item) => `${item.title}\n${item.content}`).join("\n"),
         jira.map((t) => `${t.key} ${t.summary}`).join("\n"),
+        linear.map((t) => `${t.key} ${t.summary}`).join("\n"),
         existingTestcases.map((tc) => `${tc.externalId} ${tc.title} ${tc.description}`).join("\n")
       ].join("\n");
       const tokenInput = aiResult.usage.input || estimateTokens(inputText);
@@ -4549,12 +6094,13 @@ export class LegacyService {
         ...(context ? [{ type: "context", title: "User context", detail: context.slice(0, 320) }] : []),
         ...knowledge.map((item) => ({ type: "knowledge_base", title: item.title, detail: item.content.slice(0, 320) })),
         ...jira.map((item) => ({ type: "jira", title: item.key, detail: `${item.summary} ${item.description}`.trim().slice(0, 320) })),
+        ...linear.map((item) => ({ type: "linear", title: item.key, detail: `${item.summary} ${item.description}`.trim().slice(0, 320) })),
         ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
       ];
       const finishedAt = new Date().toISOString();
       const activity = [
-        { actor: "agent", stage: "in_progress", title: "Read available sources", detail: `Considered ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and the supplied story/context.`, createdAt: finishedAt },
-        { actor: "agent", stage: "in_progress", title: "Generation plan", detail: this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length }), createdAt: finishedAt },
+        { actor: "agent", stage: "in_progress", title: "Read available sources", detail: `Considered ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and the supplied story/context.`, createdAt: finishedAt },
+        { actor: "agent", stage: "in_progress", title: "Generation plan", detail: this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length }), createdAt: finishedAt },
         { actor: "agent", stage: "in_review", title: "Generated testcase drafts", detail: `Generated ${drafts.length} testcase draft(s) with ${provider}${aiResult.requestId ? ` request ${aiResult.requestId}` : ""}. Cached input tokens: ${aiResult.usage.cached}.`, createdAt: finishedAt }
       ];
       await this.db.query(
@@ -4573,7 +6119,7 @@ export class LegacyService {
         model,
         key: allocation.rows[0],
         userMessage: story,
-        outcome: `Generated ${drafts.length} testcase draft(s) using ${knowledge.length} knowledge-base item(s) and ${jira.length} Jira ticket(s). Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length })}`
+        outcome: `Generated ${drafts.length} testcase draft(s) using ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), and ${linear.length} Linear ticket(s). Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length })}`
       });
     } catch (error) {
       const failedAt = new Date().toISOString();
@@ -4622,6 +6168,7 @@ export class LegacyService {
     const feedbackText = String(body.feedback || "").trim();
     const referenceNote = String(body.referenceNote || "").trim();
     const additionalJiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String).filter(Boolean);
+    const additionalLinearIssueKeys = normalizeJsonArray(body.linearIssueKeys).map(String).filter(Boolean);
     const feedback = [
       feedbackText,
       referenceNote ? `Referenced docs or tickets for knowledge base:\n${referenceNote}` : ""
@@ -4642,7 +6189,8 @@ export class LegacyService {
       detail: [
         feedbackText,
         referenceNote ? `References: ${referenceNote}` : "",
-        additionalJiraIssueKeys.length ? `Jira tickets: ${additionalJiraIssueKeys.join(", ")}` : ""
+        additionalJiraIssueKeys.length ? `Jira tickets: ${additionalJiraIssueKeys.join(", ")}` : "",
+        additionalLinearIssueKeys.length ? `Linear tickets: ${additionalLinearIssueKeys.join(", ")}` : ""
       ].filter(Boolean).join("\n"),
       createdAt: new Date().toISOString()
     }];
@@ -4654,11 +6202,19 @@ export class LegacyService {
     const context = existing.rows[0].context || existing.rows[0].custom_prompt || "";
     const acceptanceCriteria = existing.rows[0].acceptance_criteria || "";
     const jiraIssueKeys = Array.from(new Set([...normalizeJsonArray(existing.rows[0].jira_issue_keys).map(String), ...additionalJiraIssueKeys]));
-    const requestedCount = Number(existing.rows[0].requested_count || 5);
+    const linearIssueKeys = Array.from(new Set([...normalizeJsonArray(existing.rows[0].linear_issue_keys).map(String), ...additionalLinearIssueKeys]));
+    // Re-read the project's current range (rather than trusting the stored requested_count alone)
+    // so a regenerate keeps the same "generate exhaustively" instruction the initial run used —
+    // otherwise this falls back to the generic "generate exactly N" phrasing, which reads very
+    // differently to the model than "all possible cases".
+    const zyraAgentSettings = await this.zyraAgentSettings(projectId);
+    const testcaseRange = String(zyraAgentSettings.testcaseRange || "1-10");
+    const requestedCount = Number(existing.rows[0].requested_count) || this.testcaseRangeConfig(testcaseRange).requestedCount;
     const provider = String(existing.rows[0].provider || allocation.rows[0].provider || "openai").toLowerCase();
     const model = normalizeProviderModel(provider, existing.rows[0].model || allocation.rows[0].default_model);
     const knowledge = await this.knowledgeSnapshot(projectId);
     const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
+    const linear = await this.linearSnapshot(projectId, linearIssueKeys);
     const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
     const aiResult = await this.generateZyraWithProvider({
       provider,
@@ -4668,12 +6224,12 @@ export class LegacyService {
       authHeaderName: allocation.rows[0].auth_header_name,
       authScheme: allocation.rows[0].auth_scheme,
       projectId,
-      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, existingTestcases, requestedCount }
+      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
     });
     const now = new Date().toISOString();
     const activity = [
       { actor: "agent", stage: "in_progress", title: "Moved task back to Todo", detail: "Zyra queued the task again after reviewer feedback.", createdAt: now },
-      { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
+      { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
       { actor: "agent", stage: "in_review", title: "Regenerated testcase drafts", detail: `Updated this task with ${aiResult.drafts.length} regenerated draft(s). Cached input tokens: ${aiResult.usage.cached}.`, createdAt: now }
     ];
     const previousSources = normalizeJsonArray(existing.rows[0].source_summary);
@@ -4681,6 +6237,7 @@ export class LegacyService {
       ...previousSources,
       ...(referenceNote ? [{ type: "feedback_reference", title: "Reviewer reference", detail: referenceNote.slice(0, 320) }] : []),
       ...additionalJiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Referenced by reviewer feedback." })),
+      ...additionalLinearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Referenced by reviewer feedback." })),
       ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
     ];
     const res = await this.db.query(
@@ -4688,7 +6245,7 @@ export class LegacyService {
        SET generated_count = $3, generated_payload = $4::jsonb, feedback = $5,
            token_input = token_input + $6, token_output = token_output + $7, token_total = token_total + $8,
            activity_log = activity_log || $9::jsonb, source_summary = $10::jsonb, jira_issue_keys = $11::jsonb,
-           task_status = 'in_review', updated_at = now()
+           linear_issue_keys = $12::jsonb, task_status = 'in_review', updated_at = now()
        WHERE id = $1 AND project_id = $2
        RETURNING *`,
       [
@@ -4702,7 +6259,8 @@ export class LegacyService {
         aiResult.usage.total,
         JSON.stringify(activity),
         JSON.stringify(nextSources),
-        JSON.stringify(jiraIssueKeys)
+        JSON.stringify(jiraIssueKeys),
+        JSON.stringify(linearIssueKeys)
       ]
     );
     await this.rememberZyraTurn({
@@ -4715,7 +6273,8 @@ export class LegacyService {
       outcome: [
         `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
         referenceNote ? `Reviewer references: ${referenceNote}` : "",
-        additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : ""
+        additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
+        additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
       ].filter(Boolean).join(" ")
     });
     return {
@@ -4776,7 +6335,7 @@ export class LegacyService {
     return this.formatAiTask(res.rows[0]);
   }
 
-  async zyraSave(projectId: string, taskId: string, body: Body) {
+  async zyraSave(projectId: string, userId: string | null | undefined, taskId: string, body: Body) {
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     let suiteId = body.suiteId || null;
@@ -4788,15 +6347,29 @@ export class LegacyService {
     const selectedIndexes = normalizeJsonArray(body.selectedDraftIndexes).map(Number);
     const selected = selectedIndexes.length ? selectedIndexes.map((index) => drafts[index]).filter(Boolean) : drafts;
     const jiraKeys = normalizeJsonArray(existing.rows[0].jira_issue_keys).map(String).filter(Boolean);
+    const linearKeys = normalizeJsonArray(existing.rows[0].linear_issue_keys).map(String).filter(Boolean);
     const jiraIssueKey = jiraKeys[0] || null;
+    const linearIssueKey = linearKeys[0] || null;
     const jiraTicket = jiraIssueKey
       ? await this.db.query("SELECT jira_url FROM jira_tickets WHERE project_id = $1 AND jira_issue_key = $2 LIMIT 1", [projectId, jiraIssueKey]).catch(() => ({ rows: [] as Body[] }))
       : { rows: [] as Body[] };
     const jiraUrl = jiraTicket.rows[0]?.jira_url || null;
+    const linearTicket = linearIssueKey
+      ? await this.db.query("SELECT linear_url FROM linear_tickets WHERE project_id = $1 AND linear_issue_key = $2 LIMIT 1", [projectId, linearIssueKey]).catch(() => ({ rows: [] as Body[] }))
+      : { rows: [] as Body[] };
+    const linearUrl = linearTicket.rows[0]?.linear_url || null;
+    // A task carries either Jira or Linear keys, never both (the Requirements page creates one
+    // task per ticket) — this just resolves whichever one applies for the "already linked, update
+    // in place" lookup below.
     const existingLinked = jiraIssueKey
       ? await this.db.query(
-          "SELECT id FROM testcases WHERE project_id = $1 AND jira_issue_key = $2 ORDER BY updated_at ASC",
+          "SELECT id FROM testcases WHERE project_id = $1 AND jira_issue_key = $2 AND deleted_at IS NULL ORDER BY updated_at ASC",
           [projectId, jiraIssueKey]
+        )
+      : linearIssueKey
+      ? await this.db.query(
+          "SELECT id FROM testcases WHERE project_id = $1 AND linear_issue_key = $2 AND deleted_at IS NULL ORDER BY updated_at ASC",
+          [projectId, linearIssueKey]
         )
       : { rows: [] as Body[] };
     const created = [];
@@ -4807,6 +6380,7 @@ export class LegacyService {
         ...baseTags,
         "zyra",
         ...(jiraIssueKey ? [`jira:${jiraIssueKey}`] : []),
+        ...(linearIssueKey ? [`linear:${linearIssueKey}`] : []),
         existingLinked.rows[index]?.id ? "zyra-regenerated" : "zyra-generated"
       ])).join(",");
       const payload = {
@@ -4820,13 +6394,15 @@ export class LegacyService {
         status: "Draft",
         automationTags: tags,
         jiraIssueKey,
-        jiraUrl
+        jiraUrl,
+        linearIssueKey,
+        linearUrl
       };
       if (existingLinked.rows[index]?.id) {
-        await this.updateTestCase(existingLinked.rows[index].id, payload);
+        await this.updateTestCase(existingLinked.rows[index].id, userId, payload);
         touched.push({ id: existingLinked.rows[index].id, title: draft.title, updated: true });
       } else {
-        const testcase = await this.createTestCase(projectId, payload);
+        const testcase = await this.createTestCase(projectId, userId, payload);
         created.push(testcase);
         touched.push(testcase);
       }
@@ -4953,20 +6529,22 @@ export class LegacyService {
       [projectId, title]
     );
     const stampedEntry = `## ${new Date().toISOString()}\n${entry.trim()}`.slice(0, 2500);
+    const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
     if (existing.rows[0]) {
       const content = [stampedEntry, String(existing.rows[0].content_text || "")].filter(Boolean).join("\n\n").slice(0, 20000);
       await this.db.query(
         "UPDATE knowledge_documents SET content_text = $2, content_html = $3, updated_at = now() WHERE id = $1",
         [existing.rows[0].id, content, `<pre>${escapeHtml(content)}</pre>`]
       );
+      this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "document", existing.rows[0].id, "updated");
       return;
     }
-    const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
-    await this.db.query(
+    const inserted = await this.db.query<{ id: string }>(
       `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, is_ai_generated, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, 'general', 'published', true, $7, $7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, 'general', 'published', true, $7, $7) RETURNING id`,
       [project.rows[0]?.organization_id, projectId, folderId, title, stampedEntry, `<pre>${escapeHtml(stampedEntry)}</pre>`, userId]
     );
+    if (inserted.rows[0]?.id) this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "document", inserted.rows[0].id, "created");
   }
 
   private async knowledgeSnapshot(projectId: string, selectedItemIds: string[] = []): Promise<Array<{ title: string; content: string }>> {
@@ -4986,10 +6564,40 @@ export class LegacyService {
        LIMIT 12`,
       values
     );
-    return res.rows.map((row) => ({
+    const documents = res.rows.map((row) => ({
       title: row.title || "Knowledge base item",
       content: String(row.content_text || "").slice(0, 1500)
     }));
+    // knowledgeItemIds selection (task generation) only ever names documents (see the frontend
+    // picker), so an explicit selection should stay document-only rather than pulling in files.
+    if (selected.length) return documents;
+
+    const filesRes = await this.db.query(
+      `SELECT original_file_name, file_extension, extracted_text, extraction_status FROM knowledge_files
+       WHERE project_id = $1 AND is_deleted = false
+       ORDER BY updated_at DESC
+       LIMIT 8`,
+      [projectId]
+    );
+    const files = filesRes.rows.map((row) => ({
+      title: row.original_file_name || "Uploaded file",
+      content: row.extracted_text ? String(row.extracted_text).slice(0, 1500) : this.knowledgeFileFallbackContent(row.file_extension, row.extraction_status)
+    }));
+    return [...documents, ...files];
+  }
+
+  private knowledgeFileFallbackContent(fileExtension: string | null, extractionStatus: string | null): string {
+    const ext = fileExtension || "file";
+    if (extractionStatus === "pending") {
+      return `Uploaded file (.${ext}) — transcription is still in progress; mention it exists but do not invent its contents yet.`;
+    }
+    if (extractionStatus === "failed") {
+      return `Uploaded file (.${ext}) — automatic transcription failed for this file; mention it exists but do not invent its contents.`;
+    }
+    if (extractionStatus === "unsupported") {
+      return `Uploaded file (.${ext}) — transcription requires an OpenAI key allocated to this project (Workspace → AI Providers); mention it exists but do not invent its contents.`;
+    }
+    return `Uploaded file (.${ext}) — no extractable text is available for this file type; mention that it exists but do not invent its contents.`;
   }
 
   private async existingTestcaseSnapshot(
@@ -5008,7 +6616,7 @@ export class LegacyService {
     const res = await this.db.query(
       `SELECT external_id, title, description, priority, status, steps
        FROM testcases
-       WHERE project_id = $1
+       WHERE project_id = $1 AND deleted_at IS NULL
        ORDER BY ${orderBy}
        LIMIT 25`,
       values
@@ -5046,10 +6654,11 @@ export class LegacyService {
     if (missingKeys.length) {
       const connection = await this.getJiraConnection(projectId, true).catch(() => null);
       if (connection) {
+        const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
         for (const key of missingKeys) {
           const issue = await this.jiraFetch<Body>(
-            `https://api.atlassian.com/ex/jira/${connection.cloud_id}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,issuetype,status,priority,assignee,reporter,labels,created,updated`,
-            { headers: { Authorization: `Bearer ${connection.access_token}` } }
+            `${baseUrl}/rest/api/3/issue/${encodeURIComponent(key)}?fields=summary,description,issuetype,status,priority,assignee,reporter,labels,created,updated`,
+            { headers }
           ).catch(() => null);
           if (!issue) continue;
           const fields = (issue.fields || {}) as Body;
@@ -5105,6 +6714,34 @@ export class LegacyService {
     });
   }
 
+  // Only reads the linear_tickets sync cache, unlike jiraSnapshot's live-API fallback for missing
+  // keys — the Requirements page only ever selects keys it just listed from that same cache, so a
+  // cache miss here would mean the ticket was deleted/unsynced, not "not synced yet".
+  private async linearSnapshot(projectId: string, keys: string[]): Promise<Array<{ key: string; summary: string; description: string }>> {
+    const selectedKeys = Array.from(new Set(keys.map((key) => key.trim()).filter(Boolean)));
+    if (!selectedKeys.length) return [];
+    const res = await this.db.query(
+      `SELECT linear_issue_key, summary, description FROM linear_tickets
+       WHERE project_id = $1 AND linear_issue_key = ANY($2::text[])`,
+      [projectId, selectedKeys]
+    ).catch(() => ({ rows: [] as any[] }));
+    const byKey = new Map<string, { key: string; summary: string; description: string }>(
+      res.rows.map((row) => [
+        String(row.linear_issue_key),
+        {
+          key: String(row.linear_issue_key),
+          summary: String(row.summary || ""),
+          description: String(row.description || "")
+        }
+      ])
+    );
+    return selectedKeys.map((key) => byKey.get(key) || {
+      key,
+      summary: "Selected Linear ticket",
+      description: "Ticket details were not available from the local cache, but the selected key was included for Zyra context."
+    });
+  }
+
   private async generateZyraWithProvider(params: {
     provider: string;
     model: string;
@@ -5123,7 +6760,7 @@ export class LegacyService {
   private zyraSystemPrompt(): string {
     return [
       "You are Zyra the Test Generator, an AI testcase generation agent.",
-      "Generate practical, detailed QA testcases from the supplied product story, user context, Jira tickets, knowledge-base sources, Zyra memory, and existing testcase repository context.",
+      "Generate practical, detailed QA testcases from the supplied product story, user context, Jira/Linear tickets, knowledge-base sources, Zyra memory, and existing testcase repository context.",
       "Review existing testcases before generating. Do not duplicate existing coverage; instead fill gaps, deepen weak coverage, or create clearly distinct edge cases.",
       "Prioritize edge cases, boundary values, negative paths, permissions, data integrity, state transitions, and traceability.",
       "Return only valid JSON matching this shape: {\"drafts\":[{\"title\":\"\",\"preconditions\":\"\",\"stepsJson\":\"[]\",\"expectedSummary\":\"\",\"priority\":\"P1|P2|P3\",\"tags\":[\"\"]}]}",
@@ -5139,6 +6776,9 @@ export class LegacyService {
     const jira = input.jira.length
       ? input.jira.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n")
       : "No Jira tickets were selected.";
+    const linear = input.linear.length
+      ? input.linear.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n")
+      : "No Linear tickets were selected.";
     const existingTestcases = input.existingTestcases.length
       ? input.existingTestcases.map((item) => `${item.externalId}: ${item.title}\nPriority: ${item.priority}; Status: ${item.status}\n${item.description}\nSteps: ${item.stepsSummary}`).join("\n\n")
       : "No existing testcases were available.";
@@ -5148,6 +6788,8 @@ export class LegacyService {
       knowledge,
       "Jira tickets:",
       jira,
+      "Linear tickets:",
+      linear,
       "Existing testcases to review for context and duplicate avoidance:",
       existingTestcases
     ].join("\n\n");
@@ -5250,6 +6892,87 @@ export class LegacyService {
     return null;
   }
 
+  // Plain JSON-mode completion for internal tool calls that need a small, arbitrary JSON
+  // shape (not the fixed Zyra chat decision schema) — used to plan the scenario todo list
+  // for "all possible cases" generation without pulling in the full chat-decision prompt.
+  private async zyraJsonCompletion(provider: string, model: string, key: Body, systemPrompt: string, userPrompt: string): Promise<Body> {
+    if (provider === "anthropic") {
+      const res = await fetch(normalizeAnthropicMessagesUrl(key.base_url), {
+        method: "POST",
+        headers: this.buildAnthropicAuthHeaders(key.api_key, key.auth_header_name, key.auth_scheme),
+        body: JSON.stringify({
+          model: anthropicModelCandidates(model)[0],
+          max_tokens: 2000,
+          system: [{ type: "text", text: systemPrompt }],
+          messages: [{ role: "user", content: userPrompt }]
+        })
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({} as Body)) as Body;
+        const rawMessage = String(errBody.error?.message || errBody.error || res.status);
+        throw new Error(this.describeProviderError("anthropic", res.status, rawMessage) || `Anthropic request failed: ${rawMessage}`);
+      }
+      const data = await res.json() as Body;
+      const text = normalizeJsonArray(data.content).map((item: Body) => item?.text || "").join("\n");
+      return JSON.parse(this.extractJsonPayload(text));
+    }
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const authHeader = String(key.auth_header_name || "Authorization");
+    const scheme = String(key.auth_scheme || "Bearer").trim();
+    headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
+    const res = await fetch(normalizeChatCompletionsUrl(key.base_url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ]
+      })
+    });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({} as Body)) as Body;
+      const rawMessage = String(errBody.error?.message || errBody.error || res.status);
+      throw new Error(this.describeProviderError(String(key.provider || "openai"), res.status, rawMessage) || `OpenAI request failed: ${rawMessage}`);
+    }
+    const data = await res.json() as Body;
+    const content = String(data.choices?.[0]?.message?.content || "{}");
+    return JSON.parse(this.extractJsonPayload(content));
+  }
+
+  // Plans a todo list of distinct scenarios to cover for an exhaustive ("all possible cases")
+  // generation request. This call is cheap and safe from truncation — it only asks for short
+  // labels, never full testcase detail — so it can never hit the same output-token ceiling
+  // that a single "generate 50 full testcases" call did.
+  private async planZyraChatScenarios(params: {
+    provider: string;
+    model: string;
+    key: Body;
+    message: string;
+    knowledge: Array<{ title: string; content: string }>;
+    existingTestcases: ZyraGenerationInput["existingTestcases"];
+    maxScenarios: number;
+  }): Promise<string[]> {
+    const systemPrompt = "You are Zyra, an expert test engineer planning exhaustive test coverage. Break the request into a todo list of distinct, non-overlapping testable scenarios (happy paths, edge cases, negative paths, boundary values). Each scenario becomes exactly one testcase later, so keep each one narrow and specific — do not write full testcase detail here, only short labels.";
+    const userPrompt = [
+      `Request: ${params.message}`,
+      "",
+      "Knowledge base:",
+      params.knowledge.map((item) => `${item.title}\n${item.content}`).join("\n\n") || "None.",
+      "",
+      "Existing testcases (avoid proposing scenarios that already have coverage):",
+      params.existingTestcases.map((tc) => `${tc.externalId} | ${tc.title}`).join("\n") || "None.",
+      "",
+      `Return ONLY JSON: {"scenarios": ["short scenario label", ...]}. List up to ${params.maxScenarios} scenarios, ordered from most to least important. No markdown, no commentary.`
+    ].join("\n");
+    const parsed = await this.zyraJsonCompletion(params.provider, params.model, params.key, systemPrompt, userPrompt);
+    const scenarios = normalizeJsonArray(parsed.scenarios).map((item) => String(item || "").trim()).filter(Boolean);
+    return scenarios.slice(0, params.maxScenarios);
+  }
+
   private async generateZyraWithOpenAi(params: {
     provider: string;
     model: string;
@@ -5328,7 +7051,11 @@ export class LegacyService {
         headers: anthropicHeaders,
         body: JSON.stringify({
           model,
-          max_tokens: 4000,
+          // 4000 was a fixed ceiling regardless of how many testcases were requested — a
+          // batch of just 5 detailed drafts could already exceed it, truncating the JSON
+          // mid-array and failing to parse. Scale with requestedCount instead, capped at
+          // 16000 (the threshold above which the SDK guidance calls for streaming).
+          max_tokens: Math.min(16000, 2000 + params.input.requestedCount * 1500),
           temperature: 0.2,
           system: [
             {
@@ -5422,12 +7149,14 @@ export class LegacyService {
     feedback: string;
     knowledgeCount: number;
     jiraCount: number;
+    linearCount?: number;
   }): string {
     const signals = [
       input.context ? "project context" : null,
       input.acceptanceCriteria ? "acceptance criteria" : null,
       input.knowledgeCount ? `${input.knowledgeCount} knowledge-base source(s)` : null,
       input.jiraCount ? `${input.jiraCount} Jira ticket(s)` : null,
+      input.linearCount ? `${input.linearCount} Linear ticket(s)` : null,
       input.feedback ? "review feedback" : null
     ].filter(Boolean).join(", ");
     return `I checked ${signals || "the submitted story"} and planned coverage across happy path, negative, boundary, permission, data-state, and traceability risks before drafting the testcases.`;
@@ -5649,9 +7378,13 @@ export class LegacyService {
     };
   }
 
-  private async zyraProjectCapabilities(projectId: string): Promise<ZyraCapabilities> {
+  private async zyraAgentSettings(projectId: string): Promise<Body> {
     const project = await this.getProject(projectId).catch(() => ({} as Body));
-    const zyraAgent = (this.parseProjectSettings((project as Body).settings).zyraAgent || {}) as Body;
+    return (this.parseProjectSettings((project as Body).settings).zyraAgent || {}) as Body;
+  }
+
+  private async zyraProjectCapabilities(projectId: string): Promise<ZyraCapabilities> {
+    const zyraAgent = await this.zyraAgentSettings(projectId);
     return this.normalizeZyraCapabilities(zyraAgent.capabilities);
   }
 
@@ -5708,12 +7441,62 @@ export class LegacyService {
     return Array.from(keys);
   }
 
-  private requestedTestcaseCount(message: string): number {
+  // Decides how many testcases Zyra chat should generate. An explicit number in the message
+  // always wins; otherwise an "all possible" / "exhaustive" style ask in the message maps to
+  // the "all" range; otherwise this falls back to whatever range the user configured in
+  // Zyra → Settings → Test case range, instead of a fixed small default that ignores it.
+  private chatTestcasePlan(message: string, projectTestcaseRange: string): { requestedCount: number; testcaseRange?: string } {
     const explicit = message.match(/\b(\d{1,2})\s+(?:testcases|test cases|tests|cases)\b/i);
-    if (explicit) return Math.max(1, Math.min(25, Number(explicit[1])));
+    if (explicit) return { requestedCount: Math.max(1, Math.min(25, Number(explicit[1]))) };
     const lower = message.toLowerCase();
-    if (lower.includes("all type") || lower.includes("all types") || lower.includes("full coverage")) return 8;
-    return 5;
+    const wantsExhaustive = /\ball( the)? possible\b|as many as possible|\bexhaustive\b|every (scenario|edge case|flow|case)|full coverage|\ball types?\b/.test(lower);
+    const range = wantsExhaustive ? "all" : projectTestcaseRange;
+    return { testcaseRange: range, requestedCount: this.testcaseRangeConfig(range).requestedCount };
+  }
+
+  // Routes "all possible cases" through the plan-then-batch flow (startZyraChatPlan) and
+  // everything else through the normal single-shot generation — shared by both create-intent
+  // branches in buildZyraChatDecision (local intent detection and model-decided intent).
+  private async generateZyraChatCreateDecision(params: {
+    projectId: string;
+    userId: string;
+    sessionId: string;
+    provider: string;
+    model: string;
+    key: Body;
+    message: string;
+    knowledge: Array<{ title: string; content: string }>;
+    existingTestcases: ZyraGenerationInput["existingTestcases"];
+    jiraIssueKeys: string[];
+    projectTestcaseRange: string;
+  }): Promise<ZyraChatDecision> {
+    const plan = this.chatTestcasePlan(params.message, params.projectTestcaseRange);
+    if (plan.testcaseRange === "all") {
+      return this.startZyraChatPlan({
+        projectId: params.projectId,
+        userId: params.userId,
+        sessionId: params.sessionId,
+        provider: params.provider,
+        model: params.model,
+        key: params.key,
+        message: params.message,
+        knowledge: params.knowledge,
+        existingTestcases: params.existingTestcases,
+        jiraIssueKeys: params.jiraIssueKeys
+      });
+    }
+    return this.generateZyraChatTestcasesWithAi({
+      projectId: params.projectId,
+      userId: params.userId,
+      provider: params.provider,
+      model: params.model,
+      key: params.key,
+      message: params.message,
+      knowledge: params.knowledge,
+      existingTestcases: params.existingTestcases,
+      jiraIssueKeys: params.jiraIssueKeys,
+      ...plan
+    });
   }
 
   private intentFromZyraModelAction(action: unknown, fallback: ZyraChatIntent): ZyraChatIntent {
@@ -5729,7 +7512,7 @@ export class LegacyService {
   }
 
   private async zyraChatProjectSnapshot(projectId: string): Promise<ZyraChatProjectSnapshot> {
-    const [knowledge, suites, testcases, jira, pending, status] = await Promise.all([
+    const [knowledge, files, suites, testcases, jira, pending, status] = await Promise.all([
       this.db.query(
         `SELECT title
          FROM knowledge_documents
@@ -5739,8 +7522,16 @@ export class LegacyService {
         [projectId]
       ).catch(() => ({ rows: [] as Body[] })),
       this.db.query(
+        `SELECT original_file_name
+         FROM knowledge_files
+         WHERE project_id = $1 AND is_deleted = false
+         ORDER BY updated_at DESC
+         LIMIT 12`,
+        [projectId]
+      ).catch(() => ({ rows: [] as Body[] })),
+      this.db.query(
         `SELECT s.id, s.name, COUNT(t.id)::int AS test_case_count
-         FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id
+         FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id AND t.deleted_at IS NULL
          WHERE s.project_id = $1
          GROUP BY s.id, s.name
          ORDER BY s.position, s.name
@@ -5752,7 +7543,7 @@ export class LegacyService {
            COUNT(*)::int AS testcase_count,
            COUNT(*) FILTER (WHERE jira_issue_key IS NOT NULL AND COALESCE(status, '') <> 'Archived')::int AS linked_jira_testcase_count
          FROM testcases
-         WHERE project_id = $1`,
+         WHERE project_id = $1 AND deleted_at IS NULL`,
         [projectId]
       ).catch(() => ({ rows: [{}] as Body[] })),
       this.db.query(
@@ -5779,8 +7570,11 @@ export class LegacyService {
       this.jiraStatus(projectId).catch(() => ({ connected: false, connectedProjects: [] }))
     ]);
     return {
-      knowledgeCount: knowledge.rows.length,
-      knowledgeTitles: knowledge.rows.map((row) => String(row.title || "")).filter(Boolean),
+      knowledgeCount: knowledge.rows.length + files.rows.length,
+      knowledgeTitles: [
+        ...knowledge.rows.map((row) => String(row.title || "")),
+        ...files.rows.map((row) => String(row.original_file_name || ""))
+      ].filter(Boolean),
       suites: suites.rows.map((row) => ({ id: String(row.id), name: String(row.name || ""), testCaseCount: Number(row.test_case_count || 0) })),
       testcaseCount: Number(testcases.rows[0]?.testcase_count || 0),
       linkedJiraTestcaseCount: Number(testcases.rows[0]?.linked_jira_testcase_count || 0),
@@ -5800,6 +7594,7 @@ export class LegacyService {
            SELECT jira_issue_key, COUNT(*)::int AS testcase_count
            FROM testcases
            WHERE project_id = $1
+             AND deleted_at IS NULL
              AND jira_issue_key IS NOT NULL
              AND COALESCE(status, '') <> 'Archived'
            GROUP BY jira_issue_key
@@ -5820,6 +7615,7 @@ export class LegacyService {
            SELECT jira_issue_key, COUNT(*)::int AS testcase_count
            FROM testcases
            WHERE project_id = $1
+             AND deleted_at IS NULL
              AND jira_issue_key IS NOT NULL
              AND COALESCE(status, '') <> 'Archived'
            GROUP BY jira_issue_key
@@ -5896,7 +7692,7 @@ export class LegacyService {
   private async findProjectTestcase(projectId: string, testcaseId?: string, externalId?: string) {
     const res = await this.db.query(
       `SELECT id FROM testcases
-       WHERE project_id = $1 AND (($2::uuid IS NOT NULL AND id = $2::uuid) OR ($3::text IS NOT NULL AND external_id = $3::text))
+       WHERE project_id = $1 AND deleted_at IS NULL AND (($2::uuid IS NOT NULL AND id = $2::uuid) OR ($3::text IS NOT NULL AND external_id = $3::text))
        LIMIT 1`,
       [projectId, testcaseId || null, externalId || null]
     ).catch(() => ({ rows: [] as Body[] }));
@@ -5913,7 +7709,7 @@ export class LegacyService {
     return cleaned;
   }
 
-  private async patchTestCaseFromZyra(testcaseId: string, fields: Body) {
+  private async patchTestCaseFromZyra(testcaseId: string, actorId: string | null, fields: Body) {
     const keys = [
       ["title", "title"],
       ["description", "description"],
@@ -5939,7 +7735,8 @@ export class LegacyService {
       sets.push(`${column} = $${values.length}${column === "steps" ? "::jsonb" : ""}`);
     }
     if (!sets.length) return;
-    await this.db.query(`UPDATE testcases SET ${sets.join(", ")}, updated_at = now() WHERE id = $1`, values);
+    values.push(actorId);
+    await this.db.query(`UPDATE testcases SET ${sets.join(", ")}, updated_by = $${values.length}, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, values);
   }
 
   private chatDraftRow(value: Body, action: string, reason?: string): Body {
@@ -5976,6 +7773,7 @@ export class LegacyService {
     const item = toCamel(row as QueryResultRow);
     item.drafts = normalizeJsonArray(row.generated_payload);
     item.jiraIssueKeys = normalizeJsonArray(row.jira_issue_keys);
+    item.linearIssueKeys = normalizeJsonArray(row.linear_issue_keys);
     item.sources = normalizeJsonArray(row.source_summary);
     item.activities = normalizeJsonArray(row.activity_log);
     item.tokenUsage = {
@@ -6026,7 +7824,7 @@ export class LegacyService {
 
   private async groupTestcases(projectId: string, column: string) {
     const res = await this.db.query<{ name: string; count: string }>(
-      `SELECT COALESCE(${column}, 'Unspecified') AS name, COUNT(*) AS count FROM testcases WHERE project_id = $1 GROUP BY ${column}`,
+      `SELECT COALESCE(${column}, 'Unspecified') AS name, COUNT(*) AS count FROM testcases_active WHERE project_id = $1 GROUP BY ${column}`,
       [projectId]
     );
     return res.rows.map((r) => ({ name: r.name, count: Number(r.count) }));

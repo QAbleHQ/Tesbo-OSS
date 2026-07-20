@@ -5,9 +5,9 @@ type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "destructive
 type ButtonSize = "sm" | "md" | "lg";
 
 const variantClasses: Record<ButtonVariant, string> = {
-  // Denim primary — main action buttons
+  // Violet CTA — main action buttons
   primary:
-    "border-0 bg-[var(--denim)] text-white shadow-sm hover:bg-[var(--denim-400)] active:opacity-90",
+    "border-0 bg-[var(--cta-primary)] text-white shadow-sm hover:bg-[var(--cta-hover)] active:opacity-90",
   // Transparent with subtle border — supporting actions
   secondary:
     "border border-[var(--ink-200)] bg-transparent text-[var(--ink-600)] hover:bg-[var(--ink-100)] active:bg-[var(--ink-200)]",

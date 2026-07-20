@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, StatusChip } from "@/components/ui";
+import { createPortal } from "react-dom";
+import { IconColumns } from "@tabler/icons-react";
+import { StatusChip } from "@/components/ui";
 import type { TestCaseListItem } from "@/lib/api";
 
 export type RepoTcColumnId =
@@ -57,31 +59,24 @@ const DEFAULT_DATA_ORDER: RepoDataColumnId[] = [
   "suite",
   "jira",
   "priority",
+  "type",
   "status",
   "updated",
-  "type",
 ];
-
-/** Default data columns shown first; remainder off until the user enables them (saved in localStorage). */
-const DEFAULT_ON_DATA_COLUMNS: ReadonlySet<RepoDataColumnId> = new Set([
-  "id",
-  "title",
-  "suite",
-]);
 
 const DEFAULT_VISIBLE: Record<RepoDataColumnId, boolean> = {
   id: true,
   title: true,
-  suite: true,
+  suite: false,
   jira: false,
   priority: true,
   status: true,
-  updated: false,
-  type: false,
+  updated: true,
+  type: true,
 };
 
 const DEFAULT_WIDTHS: Record<RepoTcColumnId, number> = {
-  select: 44,
+  select: 36,
   id: 112,
   title: 360,
   suite: 160,
@@ -93,7 +88,7 @@ const DEFAULT_WIDTHS: Record<RepoTcColumnId, number> = {
 };
 
 const MIN_WIDTHS: Record<RepoTcColumnId, number> = {
-  select: 40,
+  select: 32,
   id: 72,
   title: 180,
   suite: 96,
@@ -109,7 +104,8 @@ const MAX_WIDTH = 560;
 function repoStatusTone(status: string) {
   if (status === "Approved") return "success" as const;
   if (status === "In Review") return "warning" as const;
-  if (status === "Deprecated" || status === "Archived") return "neutral" as const;
+  if (status === "Deprecated") return "error" as const;
+  if (status === "Archived") return "neutral" as const;
   return "brand" as const;
 }
 
@@ -193,6 +189,13 @@ export type RepositoryTestCaseTableProps = {
   onToggleSelectAll: () => void;
   onToggleCase: (id: string) => void;
   onOpenRow: (id: string) => void;
+  /** Suite column shows automatically when the suite panel is collapsed, matching the design spec. */
+  suitePanelOpen: boolean;
+  /**
+   * When provided, the "Columns" control is portaled into this element (e.g. the
+   * filter bar, beside the other dropdowns) instead of its own strip above the table.
+   */
+  columnsSlot?: HTMLElement | null;
 };
 
 export function RepositoryTestCaseTable({
@@ -205,6 +208,8 @@ export function RepositoryTestCaseTable({
   onToggleSelectAll,
   onToggleCase,
   onOpenRow,
+  suitePanelOpen,
+  columnsSlot,
 }: RepositoryTestCaseTableProps) {
   const [dataOrder, setDataOrder] = useState<RepoDataColumnId[]>(DEFAULT_DATA_ORDER);
   const [visible, setVisible] = useState<Record<RepoDataColumnId, boolean>>(DEFAULT_VISIBLE);
@@ -283,8 +288,8 @@ export function RepositoryTestCaseTable({
   }, [widths]);
 
   const visibleDataColumns = useMemo(
-    () => dataOrder.filter((id) => visible[id]),
-    [dataOrder, visible],
+    () => dataOrder.filter((id) => (id === "suite" ? !suitePanelOpen || visible.suite : visible[id])),
+    [dataOrder, visible, suitePanelOpen],
   );
 
   const orderedColumns: RepoTcColumnId[] = useMemo(
@@ -431,13 +436,17 @@ export function RepositoryTestCaseTable({
             <button
               type="button"
               onClick={() => void onOpenRow(tc.id)}
-              className={`${innerTruncate} text-left font-mono text-sm text-[var(--brand-primary)] hover:underline`}
+              className={`${innerTruncate} text-left font-mono text-[12px] font-medium text-[var(--accent-light)] hover:underline`}
             >
               {tc.externalId}
             </button>
           </td>
         );
-      case "title":
+      case "title": {
+        const tags = (tc.automationTags ?? "")
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean);
         return (
           <td key={col} style={tdStyle} className={cellClass}>
             <button
@@ -453,8 +462,21 @@ export function RepositoryTestCaseTable({
             >
               {tc.title}
             </button>
+            {tags.length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-[4px] bg-[var(--surface-secondary)] px-1.5 py-px font-mono text-[10px] text-[var(--muted-soft)]"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
           </td>
         );
+      }
       case "suite":
         return (
           <td key={col} style={tdStyle} className={`${cellClass} text-[var(--muted)]`}>
@@ -487,7 +509,10 @@ export function RepositoryTestCaseTable({
       case "priority":
         return (
           <td key={col} style={tdStyle} className={cellClass}>
-            <StatusChip tone={repoPriorityTone(tc.priority)} className="max-w-full">
+            <StatusChip
+              tone={repoPriorityTone(tc.priority)}
+              className="max-w-full !rounded-[5px] !px-[7px] !py-[2px] !font-mono !text-[11px] !font-semibold"
+            >
               <span className={innerTruncate}>{tc.priority}</span>
             </StatusChip>
           </td>
@@ -495,20 +520,23 @@ export function RepositoryTestCaseTable({
       case "status":
         return (
           <td key={col} style={tdStyle} className={cellClass}>
-            <StatusChip tone={repoStatusTone(tc.status)} className="max-w-full">
+            <StatusChip
+              tone={repoStatusTone(tc.status)}
+              className="max-w-full !px-[9px] !py-[2px] !text-[11px] !font-medium"
+            >
               <span className={innerTruncate}>{tc.status}</span>
             </StatusChip>
           </td>
         );
       case "updated":
         return (
-          <td key={col} style={tdStyle} className={`${cellClass} text-[var(--muted)]`}>
+          <td key={col} style={tdStyle} className={`${cellClass} text-[11px] font-mono text-[var(--muted)]`}>
             <span className={innerTruncate}>{new Date(tc.updatedAt).toLocaleDateString()}</span>
           </td>
         );
       case "type":
         return (
-          <td key={col} style={tdStyle} className={cellClass}>
+          <td key={col} style={tdStyle} className={`${cellClass} text-[11px] text-[var(--muted)]`}>
             <span className={innerTruncate}>{tc.type}</span>
           </td>
         );
@@ -517,56 +545,63 @@ export function RepositoryTestCaseTable({
     }
   }
 
-  return (
-    <div className="space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <StatusChip tone="neutral">
-            {visibleDataColumns.length} of {DATA_COLUMN_IDS.length} fields shown
-          </StatusChip>
-          <p className="text-xs text-[var(--muted)]">
-            Drag headers to reorder. Drag header edges to resize columns.
+  const columnsControl = (
+    <div ref={columnsMenuRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setColumnsMenuOpen((o) => !o)}
+        className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+      >
+        <IconColumns size={13} stroke={1.75} />
+        Columns
+      </button>
+      {columnsMenuOpen && (
+        <div className="absolute right-0 top-full z-30 mt-1 w-72 max-h-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
+          <p className="px-3 pb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted-soft)]">
+            Show fields · {visibleDataColumns.length} of {DATA_COLUMN_IDS.length}
+          </p>
+          {DATA_COLUMN_IDS.map((id) => (
+            <label
+              key={id}
+              className="flex cursor-pointer items-start gap-2 px-3 py-1.5 text-sm hover:bg-[var(--surface-secondary)]"
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={visible[id]}
+                onChange={() => toggleColumnVisible(id)}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="text-[var(--foreground)]">{COLUMN_LABELS[id]}</span>
+                <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted)]">{FIELD_IDS[id]}</span>
+              </span>
+            </label>
+          ))}
+          <p className="mt-2 border-t border-[var(--border-subtle)] px-3 pt-2 text-[11px] text-[var(--muted)]">
+            {
+              "The selection column stays first. Drag headers to reorder data fields, and drag header edges to resize columns."
+            }
           </p>
         </div>
-        <div ref={columnsMenuRef} className="relative">
-          <Button variant="secondary" size="sm" type="button" onClick={() => setColumnsMenuOpen((o) => !o)}>
-            Customize table
-          </Button>
-          {columnsMenuOpen && (
-            <div className="absolute right-0 top-full z-30 mt-1 w-72 max-h-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] py-2 shadow-lg">
-              <p className="px-3 pb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted-soft)]">
-                Show fields (field id)
-              </p>
-              {DATA_COLUMN_IDS.map((id) => (
-                <label
-                  key={id}
-                  className="flex cursor-pointer items-start gap-2 px-3 py-1.5 text-sm hover:bg-[var(--surface-secondary)]"
-                >
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={visible[id]}
-                    onChange={() => toggleColumnVisible(id)}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="text-[var(--foreground)]">{COLUMN_LABELS[id]}</span>
-                    <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted)]">{FIELD_IDS[id]}</span>
-                  </span>
-                </label>
-              ))}
-              <p className="mt-2 border-t border-[var(--border-subtle)] px-3 pt-2 text-[11px] text-[var(--muted)]">
-                {
-                  "The selection column stays first. Drag headers to reorder data fields, and drag header edges to resize columns."
-                }
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
+      )}
+    </div>
+  );
 
-      <div className="w-full min-w-0 overflow-x-auto rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* Columns control lives beside the filter dropdowns via a portal; falls back to
+          a thin strip only if no slot was provided. */}
+      {columnsSlot
+        ? createPortal(columnsControl, columnsSlot)
+        : (
+          <div className="flex h-10 shrink-0 items-center justify-end border-b border-[var(--border)] bg-[var(--background)] px-4">
+            {columnsControl}
+          </div>
+        )}
+
+      <div className="min-h-0 w-full min-w-0 flex-1 overflow-auto bg-[var(--background)]">
         <table
-          className="tesbo-table max-w-full text-sm"
+          className="tesbo-table tc-repo-table max-w-full"
           style={{
             width: totalWidth,
             minWidth: "100%",
@@ -581,7 +616,7 @@ export function RepositoryTestCaseTable({
               />
             ))}
           </colgroup>
-          <thead>
+          <thead className="sticky top-0 z-[2]">
             <tr>{orderedColumns.map((col) => renderHeaderCell(col))}</tr>
           </thead>
           <tbody>

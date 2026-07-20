@@ -3,26 +3,28 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  /* ── Tesbo Denim brand scale (v2) ─────────────────────────────────── */
-  --denim: #1D3F6E;
-  --denim-400: #2A5A9E;
-  --denim-200: #4A7AB5;
-  --denim-50: #E8EFF8;
+  /* ── Tesbo Violet brand scale — accent/text-safe violet + bright CTA violet ── */
+  --denim: #4A2FA0;
+  --denim-400: #3D2585;
+  --denim-200: #7C5FCC;
+  --denim-50: #EDE8FB;
   --raisin: #1E1B2E;
 
-  /* CTA accent — orange for primary action buttons and links only */
-  --cta-primary: #E8600A;
-  --cta-hover: #CC5208;
-  --cta-soft: #FFF0E8;
+  /* CTA accent — bright violet, used on both light and dark themes */
+  --cta-primary: #7C5FCC;
+  --cta-hover: #6B4FBB;
+  --cta-soft: #EDE8FB;
 
-  /* Legacy brand alias → now points to Tesbo Denim */
-  --primary: #1D3F6E;
-  --brand-primary: #1D3F6E;
-  --brand-hover: #2A5A9E;
-  --brand-pressed: #1A3660;
-  --brand-soft: #E8EFF8;
-  --brand-surface: #F0F5FB;
-  --brand-border: rgba(29, 63, 110, 0.18);
+  /* Legacy brand alias → now points to Tesbo Violet (text-safe shade) */
+  --primary: #4A2FA0;
+  --brand-primary: #4A2FA0;
+  /* Text-optimized accent (mockup "accentLight"): deep violet on light, pale violet on dark */
+  --accent-light: #4A2FA0;
+  --brand-hover: #3D2585;
+  --brand-pressed: #2F1D66;
+  --brand-soft: #EDE8FB;
+  --brand-surface: #F5F2FF;
+  --brand-border: rgba(124, 95, 204, 0.2);
 
   --ai-primary: #4f46e5;
   --ai-hover: #4338ca;
@@ -41,32 +43,32 @@
   --ink-100: #ECEEF4;
   --ink-50: #F8F9FC;
 
-  /* ── Surfaces ────────────────────────────────────────────────────── */
-  --background: #F8F9FC;
-  --app-shell: #F0F4F8;
+  /* ── Surfaces — Violet Light theme ──────────────────────────────── */
+  --background: #F5F2FF;
+  --app-shell: #F5F2FF;
   --surface: #ffffff;
-  --surface-secondary: #F8F9FC;
-  --surface-tertiary: #ECEEF4;
+  --surface-secondary: #EDE8FB;
+  --surface-tertiary: #E4DFF5;
   --surface-overlay: #ffffff;
   --glass-surface: rgba(255, 255, 255, 0.72);
   --glass-surface-strong: rgba(255, 255, 255, 0.88);
-  --glass-surface-muted: rgba(248, 249, 252, 0.64);
-  --glass-border: rgba(255, 255, 255, 0.68);
+  --glass-surface-muted: rgba(245, 242, 255, 0.64);
+  --glass-border: rgba(124, 95, 204, 0.16);
   --glass-highlight: rgba(255, 255, 255, 0.92);
-  --glass-shadow: 0 18px 50px rgba(29, 63, 110, 0.1);
-  --glass-ring: rgba(29, 63, 110, 0.18);
+  --glass-shadow: 0 18px 50px rgba(124, 95, 204, 0.12);
+  --glass-ring: rgba(124, 95, 204, 0.2);
   --shell-gradient:
-    linear-gradient(135deg, rgba(29, 63, 110, 0.06), transparent 34%),
-    linear-gradient(45deg, rgba(74, 122, 181, 0.05), transparent 32%),
-    linear-gradient(180deg, #f8f9fc 0%, #eef2f8 100%);
+    linear-gradient(135deg, rgba(124, 95, 204, 0.08), transparent 34%),
+    linear-gradient(45deg, rgba(196, 181, 253, 0.06), transparent 32%),
+    linear-gradient(180deg, #f5f2ff 0%, #ede8fb 100%);
 
   /* ── Foreground / text ───────────────────────────────────────────── */
   --foreground: #0D0E14;
   --muted: #3A3D4E;
   --muted-soft: #6B7280;
-  --border: #D4D8E4;
-  --border-subtle: #ECEEF4;
-  --border-strong: #A8ABBE;
+  --border: #E4DFF5;
+  --border-subtle: #EDE8FB;
+  --border-strong: #C4B5FD;
   --overlay-backdrop: rgba(13, 14, 20, 0.4);
 
   /* ── Semantic status colors (test execution states) ──────────────── */
@@ -143,24 +145,25 @@
 }
 
 .dark {
-  /* Brand stays denim in dark mode, lighter weight for readability */
-  --denim: #4A7AB5;
-  --denim-400: #2A5A9E;
-  --denim-200: #1D3F6E;
-  --denim-50: rgba(29, 63, 110, 0.2);
+  /* ── Tesbo Dark Violet theme — brand accent becomes violet, no orange in dark mode ── */
+  --denim: #7C5FCC;
+  --denim-400: #6B4FBB;
+  --denim-200: #C4B5FD;
+  --denim-50: rgba(124, 95, 204, 0.18);
   --raisin: #1E1B2E;
 
-  --cta-primary: #F07030;
-  --cta-hover: #E8600A;
-  --cta-soft: rgba(232, 96, 10, 0.16);
+  --cta-primary: #7C5FCC;
+  --cta-hover: #6B4FBB;
+  --cta-soft: rgba(124, 95, 204, 0.16);
 
-  --primary: #4A7AB5;
-  --brand-primary: #4A7AB5;
-  --brand-hover: #5A8DC8;
-  --brand-pressed: #2A5A9E;
-  --brand-soft: rgba(74, 122, 181, 0.18);
-  --brand-surface: rgba(74, 122, 181, 0.1);
-  --brand-border: rgba(74, 122, 181, 0.26);
+  --primary: #7C5FCC;
+  --brand-primary: #7C5FCC;
+  --accent-light: #C4B5FD;
+  --brand-hover: #6B4FBB;
+  --brand-pressed: #5A3FA8;
+  --brand-soft: rgba(124, 95, 204, 0.18);
+  --brand-surface: rgba(124, 95, 204, 0.1);
+  --brand-border: rgba(124, 95, 204, 0.26);
 
   --ai-primary: #818cf8;
   --ai-hover: #a5b4fc;
@@ -169,100 +172,100 @@
   --ai-surface: rgba(129, 140, 248, 0.1);
   --ai-border: rgba(129, 140, 248, 0.26);
 
-  /* Ink scale dark overrides */
-  --ink-900: #F3F4F6;
-  --ink-800: #E5E7EB;
-  --ink-600: #C7CDD8;
-  --ink-400: #94A3B8;
-  --ink-300: #64748B;
-  --ink-200: #334155;
-  --ink-100: #1E293B;
-  --ink-50: #0F172A;
+  /* Ink scale dark overrides → Dark Violet text/surface scale */
+  --ink-900: #F0EEFF;
+  --ink-800: #F0EEFF;
+  --ink-600: #C8C6E0;
+  --ink-400: #9896B8;
+  --ink-300: #5C5A80;
+  --ink-200: #2D2945;
+  --ink-100: #272440;
+  --ink-50: #12101E;
 
-  --background: #0d1117;
-  --app-shell: #0f1720;
-  --surface: #1E1B2E;
-  --surface-secondary: #1d2633;
-  --surface-tertiary: #243041;
-  --surface-overlay: #1E1B2E;
-  --glass-surface: rgba(30, 27, 46, 0.66);
-  --glass-surface-strong: rgba(30, 27, 46, 0.84);
-  --glass-surface-muted: rgba(29, 38, 51, 0.58);
-  --glass-border: rgba(74, 122, 181, 0.18);
-  --glass-highlight: rgba(255, 255, 255, 0.06);
-  --glass-shadow: 0 24px 60px rgba(2, 6, 23, 0.46);
-  --glass-ring: rgba(74, 122, 181, 0.24);
+  --background: #12101E;
+  --app-shell: #12101E;
+  --surface: #1A1728;
+  --surface-secondary: #2D2945;
+  --surface-tertiary: #272440;
+  --surface-overlay: #1A1728;
+  --glass-surface: rgba(26, 23, 40, 0.66);
+  --glass-surface-strong: rgba(26, 23, 40, 0.86);
+  --glass-surface-muted: rgba(30, 27, 46, 0.58);
+  --glass-border: rgba(124, 95, 204, 0.2);
+  --glass-highlight: rgba(255, 255, 255, 0.05);
+  --glass-shadow: 0 24px 60px rgba(8, 6, 14, 0.5);
+  --glass-ring: rgba(124, 95, 204, 0.28);
   --shell-gradient:
-    linear-gradient(135deg, rgba(29, 63, 110, 0.22), transparent 36%),
-    linear-gradient(45deg, rgba(74, 122, 181, 0.12), transparent 30%),
-    linear-gradient(180deg, #0d1117 0%, #1E1B2E 100%);
+    linear-gradient(135deg, rgba(124, 95, 204, 0.18), transparent 36%),
+    linear-gradient(45deg, rgba(196, 181, 253, 0.1), transparent 30%),
+    linear-gradient(180deg, #12101E 0%, #1A1728 100%);
 
-  --foreground: #F3F4F6;
-  --muted: #C7CDD8;
-  --muted-soft: #94A3B8;
-  --border: #334155;
-  --border-subtle: #243244;
-  --border-strong: #475569;
-  --overlay-backdrop: rgba(2, 6, 23, 0.6);
+  --foreground: #F0EEFF;
+  --muted: #C8C6E0;
+  --muted-soft: #9896B8;
+  --border: #2D2945;
+  --border-subtle: #221E36;
+  --border-strong: #3D3960;
+  --overlay-backdrop: rgba(8, 6, 14, 0.65);
 
-  /* Status colors — lightened for dark bg readability */
-  --status-pass-text: #6EE098;
-  --status-pass-dot: #4ade80;
-  --status-pass-fill: rgba(45, 154, 82, 0.18);
-  --status-fail-text: #FCA5A5;
-  --status-fail-dot: #f87171;
-  --status-fail-fill: rgba(216, 58, 58, 0.18);
-  --status-blocked-text: #FCD34D;
-  --status-blocked-dot: #FBBF24;
-  --status-blocked-fill: rgba(217, 124, 10, 0.18);
-  --status-skipped-text: #94A3B8;
-  --status-skipped-dot: #64748B;
-  --status-skipped-fill: rgba(139, 145, 168, 0.18);
+  /* Status colors — Dark Violet badge tokens (text/dot/fill) */
+  --status-pass-text: #34D399;
+  --status-pass-dot: #2D9A52;
+  --status-pass-fill: #1A3020;
+  --status-fail-text: #D83A3A;
+  --status-fail-dot: #D83A3A;
+  --status-fail-fill: #2A1010;
+  --status-blocked-text: #D97C0A;
+  --status-blocked-dot: #D97C0A;
+  --status-blocked-fill: #2A2010;
+  --status-skipped-text: #9896B8;
+  --status-skipped-dot: #5C5A80;
+  --status-skipped-fill: rgba(92, 90, 128, 0.18);
   --status-inreview-text: #A5B4FC;
   --status-inreview-dot: #818CF8;
   --status-inreview-fill: rgba(76, 95, 213, 0.18);
   --status-draft-text: #C4B5FD;
   --status-draft-dot: #A78BFA;
   --status-draft-fill: rgba(124, 95, 204, 0.18);
-  --status-running-text: #FDB585;
-  --status-running-dot: #F07030;
-  --status-running-fill: rgba(232, 96, 10, 0.18);
-  --status-notrun-text: #7DD3EF;
-  --status-notrun-dot: #38BDF8;
-  --status-notrun-fill: rgba(29, 127, 168, 0.18);
+  --status-running-text: #D97C0A;
+  --status-running-dot: #D97C0A;
+  --status-running-fill: #2A1F10;
+  --status-notrun-text: #38BDF8;
+  --status-notrun-dot: #1D7FA8;
+  --status-notrun-fill: #102030;
 
-  --success: #4ade80;
-  --success-foreground: #86efac;
+  --success: #2D9A52;
+  --success-foreground: #34D399;
   --success-soft: rgba(45, 154, 82, 0.18);
-  --success-border: rgba(74, 222, 128, 0.24);
-  --warning: #FBBF24;
-  --warning-foreground: #FDE68A;
+  --success-border: rgba(45, 154, 82, 0.28);
+  --warning: #D97C0A;
+  --warning-foreground: #FBBF24;
   --warning-soft: rgba(217, 124, 10, 0.18);
-  --warning-border: rgba(251, 191, 36, 0.24);
-  --error: #f87171;
-  --error-foreground: #fecaca;
+  --warning-border: rgba(217, 124, 10, 0.28);
+  --error: #D83A3A;
+  --error-foreground: #F87171;
   --error-soft: rgba(216, 58, 58, 0.18);
-  --error-border: rgba(248, 113, 113, 0.24);
-  --info: #818CF8;
-  --info-foreground: #A5B4FC;
-  --info-soft: rgba(76, 95, 213, 0.18);
-  --info-border: rgba(129, 140, 248, 0.24);
+  --error-border: rgba(216, 58, 58, 0.28);
+  --info: #1D7FA8;
+  --info-foreground: #38BDF8;
+  --info-soft: rgba(29, 127, 168, 0.18);
+  --info-border: rgba(29, 127, 168, 0.28);
 
-  --confidence-high: #818CF8;
-  --confidence-high-foreground: #A5B4FC;
-  --confidence-high-soft: rgba(76, 95, 213, 0.18);
-  --confidence-high-border: rgba(129, 140, 248, 0.24);
-  --confidence-medium: #FBBF24;
-  --confidence-medium-foreground: #FDE68A;
+  --confidence-high: #1D7FA8;
+  --confidence-high-foreground: #38BDF8;
+  --confidence-high-soft: rgba(29, 127, 168, 0.18);
+  --confidence-high-border: rgba(29, 127, 168, 0.28);
+  --confidence-medium: #D97C0A;
+  --confidence-medium-foreground: #FBBF24;
   --confidence-medium-soft: rgba(217, 124, 10, 0.18);
-  --confidence-medium-border: rgba(251, 191, 36, 0.24);
-  --confidence-low: #f87171;
-  --confidence-low-foreground: #fecaca;
+  --confidence-medium-border: rgba(217, 124, 10, 0.28);
+  --confidence-low: #D83A3A;
+  --confidence-low-foreground: #F87171;
   --confidence-low-soft: rgba(216, 58, 58, 0.18);
-  --confidence-low-border: rgba(248, 113, 113, 0.24);
+  --confidence-low-border: rgba(216, 58, 58, 0.28);
 
-  --shadow-card: 0 1px 2px rgba(2, 6, 23, 0.28), 0 10px 30px rgba(2, 6, 23, 0.2);
-  --shadow-elevated: 0 18px 40px rgba(2, 6, 23, 0.42);
+  --shadow-card: 0 1px 2px rgba(8, 6, 14, 0.35), 0 10px 30px rgba(8, 6, 14, 0.28);
+  --shadow-elevated: 0 18px 40px rgba(8, 6, 14, 0.5);
 }
 
 @theme inline {
@@ -339,6 +342,60 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   }
 }
 
+@keyframes tesbo-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in {
+  animation: tesbo-fade-in 180ms ease both;
+}
+
+@keyframes tesbo-slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+.slide-in-right {
+  animation: tesbo-slide-in-right 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+/* ── Auth branding-panel decorations (login/signup split shell) ───── */
+@keyframes tesbo-auth-orb-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(30px, -20px) scale(1.1); }
+}
+@keyframes tesbo-auth-orb-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-20px, 30px) scale(0.9); }
+}
+@keyframes tesbo-auth-fade-slide {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.auth-orb-1 { animation: tesbo-auth-orb-1 8s ease-in-out infinite; }
+.auth-orb-2 { animation: tesbo-auth-orb-2 10s ease-in-out infinite; }
+.auth-fade-slide { animation: tesbo-auth-fade-slide 0.3s ease both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-orb-1, .auth-orb-2, .auth-fade-slide { animation: none; }
+}
+
+/* Full-bleed override: a page whose root carries `.tc-fullbleed` fills the whole
+   content region (no centered 1280px column, no wrapper padding) — used by the
+   test-case repository's edge-to-edge IDE workspace. Scoped via :has() so every
+   other route keeps the default centered page. */
+.tesbo-page:has(> .tc-fullbleed) {
+  max-width: none;
+  padding: 0;
+}
+
+/* Same escape hatch as .tc-fullbleed above, for pages that still want their own
+   padding (not edge-to-edge) but need to fill the full content width instead of
+   the centered 1280px column — e.g. the Test Run Detail screen's stat/table layout. */
+.tesbo-page:has(> .tr-detail-fullwidth) {
+  max-width: none;
+  padding: 0;
+}
+
 .tesbo-section {
   margin-bottom: 1.25rem;
 }
@@ -395,18 +452,30 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   border-left: 2px solid transparent;
 }
 
+/*
+ * Plain (unlayered) rule, deliberately not a Tailwind utility class: the global
+ * `a { color: var(--brand-primary); }` rule below is also unlayered, and unlayered
+ * CSS always wins over Tailwind's @layer utilities regardless of specificity — so a
+ * `text-[var(--foreground)]` class on a <Link> (which renders an <a>) is silently
+ * ignored. Matching it here with an equally-unlayered, higher-specificity class rule
+ * is what actually wins.
+ */
+.tesbo-nav-item-idle {
+  color: var(--foreground);
+}
+
 .tesbo-nav-item-active {
   background: var(--denim-50);
   border-color: transparent;
-  border-left-color: transparent;
+  border-left-color: var(--denim-200);
   color: var(--denim);
   font-weight: 500;
 }
 
 .dark .tesbo-nav-item-active {
-  background: rgba(74, 122, 181, 0.15);
-  border-left-color: transparent;
-  color: var(--denim);
+  background: var(--surface-secondary);
+  border-left-color: var(--denim);
+  color: var(--denim-200);
 }
 
 .tesbo-nav-item-idle:hover {
@@ -449,6 +518,23 @@ button[class*="bg-[var(--surface-tertiary)]"] {
 .tesbo-table tbody tr.selected {
   background: var(--denim-50);
   border-left: 2px solid var(--denim);
+}
+
+/* Test case repository table — tighter density matching the Claude-Design mockup */
+.tesbo-table.tc-repo-table th {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  padding: 10px 12px;
+  color: var(--muted-soft);
+  /* Opaque fill matching the recessed table body so the sticky header stays legible while rows scroll under it */
+  background: var(--background);
+}
+.tesbo-table.tc-repo-table td {
+  height: auto;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 400;
 }
 
 /* Legacy Tailwind class remaps to CSS vars */
@@ -769,7 +855,7 @@ textarea:focus-visible {
   color: var(--foreground);
 }
 
-.zyra-md-table-wrap { overflow-x: auto; margin: 0.6rem 0; border-radius: 8px; border: 1px solid var(--border); }
+.zyra-md-table-wrap { overflow-x: auto; margin: 0.6rem 0; border-radius: 8px; border: 1px solid var(--border-strong); }
 .zyra-md-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
 .zyra-md-table th {
   text-align: left;
@@ -780,17 +866,17 @@ textarea:focus-visible {
   color: var(--muted);
   background: var(--surface-secondary);
   padding: 0.4rem 0.75rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--border-strong);
   white-space: nowrap;
 }
 .zyra-md-table td {
   padding: 0.375rem 0.75rem;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-strong);
   color: var(--foreground);
   vertical-align: top;
 }
 .zyra-md-table tbody tr:last-child td { border-bottom: none; }
-.zyra-md-table tbody tr:hover { background: var(--surface-secondary); }
+.zyra-md-table tbody tr:hover { background: var(--surface-tertiary); }
 
 /* Knowledge Base rich text editor (TipTap) */
 .tiptap-editor { outline: none; }

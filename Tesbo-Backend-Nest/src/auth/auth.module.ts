@@ -1,4 +1,5 @@
 import { MiddlewareConsumer, Module, NestModule } from "@nestjs/common";
+import { ApiTokenService } from "./api-token.service";
 import { AuthController } from "./auth.controller";
 import { AuthMiddleware } from "./auth.middleware";
 import { AuthService } from "./auth.service";
@@ -10,8 +11,8 @@ import { AdminModule } from "../admin/admin.module";
 @Module({
   imports: [AdminModule],
   controllers: [AuthController],
-  providers: [AuthService, AuthMiddleware, EmailService, OtpService, PasswordService],
-  exports: [AuthService, OtpService, PasswordService, AuthMiddleware, EmailService]
+  providers: [AuthService, AuthMiddleware, EmailService, OtpService, PasswordService, ApiTokenService],
+  exports: [AuthService, OtpService, PasswordService, AuthMiddleware, EmailService, ApiTokenService]
 })
 export class AuthModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

@@ -3,6 +3,8 @@
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
+import { IconChevronRight } from "@tabler/icons-react";
 import {
   authMe,
   getProject,
@@ -18,7 +20,7 @@ import {
   type LinearConnection,
   type TestEnvironmentSetting,
 } from "@/lib/api";
-import ThemeToggle from "@/components/ThemeToggle";
+import { useTopBarSlots } from "@/components/TopBarSlots";
 import {
   Button,
   Input,
@@ -29,7 +31,6 @@ import {
   Field,
   FieldLabel,
 } from "@/components/ui";
-import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
 type ProjectSettingsPayload = {
   ai?: {
@@ -101,6 +102,7 @@ export default function ProjectSettingsPage() {
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteProjectModalOpen, setDeleteProjectModalOpen] = useState(false);
   const [deleteProjectTypedName, setDeleteProjectTypedName] = useState("");
+  const { startEl: topBarStartEl, setFilled: setTopBarFilled } = useTopBarSlots();
   const jiraTabEnabled = jiraStatus?.connected === true;
   const visibleTabs = useMemo<Array<{ key: SettingsTab; label: string }>>(
     () => [
@@ -134,6 +136,11 @@ export default function ProjectSettingsPage() {
       setActiveTab("integrations");
     }
   }, [activeTab, jiraTabEnabled]);
+
+  useEffect(() => {
+    setTopBarFilled(true);
+    return () => setTopBarFilled(false);
+  }, [setTopBarFilled]);
 
   function parseProjectSettings(raw: unknown): ProjectSettingsPayload {
     if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as ProjectSettingsPayload;
@@ -380,43 +387,76 @@ export default function ProjectSettingsPage() {
 
   if (!project) {
     return (
-      <StandardPageLayout header={<PageHeader title="Project settings" />}>
-        <div className="flex min-h-[200px] items-center justify-center">
-          <p className="text-[var(--muted)]">Loading…</p>
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
+          <p className="text-sm text-[var(--muted)]">Loading project settings…</p>
         </div>
-      </StandardPageLayout>
+      </div>
     );
   }
 
-  return (
-    <StandardPageLayout
-      header={
-        <PageHeader
-          title="Project settings"
-          subtitle="Settings are grouped into tabs so you can edit one area at a time without long scrolling."
-          actions={<ThemeToggle />}
-        />
-      }
-    >
-      <div className="border-b border-[var(--border)]">
-        <div className="flex flex-wrap gap-0">
-          {visibleTabs.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              onClick={() => handleTabChange(tab.key)}
-              className={`px-3 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
-                activeTab === tab.key
-                  ? "border-[var(--brand-primary)] text-[var(--brand-primary)]"
-                  : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      </div>
+  const projectName = typeof project.name === "string" ? project.name : "";
 
+  return (
+    <main className="tc-fullbleed flex flex-col pb-4 pr-4 pt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {topBarStartEl &&
+          createPortal(
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
+              {projectName && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                  >
+                    {projectName}
+                  </button>
+                  <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
+                </>
+              )}
+              <span className="truncate font-medium text-[var(--brand-primary)]">Settings</span>
+            </nav>,
+            topBarStartEl,
+          )}
+
+        <div className="mb-3 shrink-0 pl-4">
+          <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">
+            Project settings
+          </h1>
+          <p className="mt-1 text-[13px] text-[var(--muted-soft)]">
+            Settings are grouped by section. Select a category from the left to configure.
+          </p>
+        </div>
+
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
+          {/* ── Settings nav rail ── */}
+          <aside className="flex w-[200px] shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] p-2">
+            <div className="mb-1 px-2.5 pt-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--muted)]">
+              Project settings
+            </div>
+            <nav className="flex flex-col gap-0.5">
+              {visibleTabs.map((tab) => (
+                <button
+                  key={tab.key}
+                  type="button"
+                  onClick={() => handleTabChange(tab.key)}
+                  className={`rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
+                    activeTab === tab.key
+                      ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
+                      : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </nav>
+          </aside>
+
+          {/* ── Tab content ── */}
+          <div className="min-w-0 flex-1 overflow-y-auto p-6">
+            <div className="max-w-3xl space-y-5">
       {(activeTab === "general" || activeTab === "testRuns" || activeTab === "jira") && (
         <form onSubmit={handleSubmit} className="space-y-5">
           {activeTab === "general" && (
@@ -462,9 +502,9 @@ export default function ProjectSettingsPage() {
                   {saving ? "Saving…" : "Save"}
                 </Button>
               </Card>
-              <div className="rounded-xl border border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] p-4 space-y-2">
+              <div className="rounded-xl border border-[var(--error-border)] bg-[var(--error-soft)] p-4 space-y-2">
                 <h3 className="text-sm font-semibold text-[var(--error)]">Danger zone</h3>
-                <p className="text-sm text-[var(--error)]/90">
+                <p className="text-sm text-[var(--error-foreground)]">
                   Deleting a project permanently removes its test cases, runs, reports, and integrations.
                 </p>
                 <Button
@@ -860,6 +900,10 @@ export default function ProjectSettingsPage() {
           {message}
         </p>
       )}
+            </div>
+          </div>
+        </div>
+      </div>
       <Modal
         open={deleteProjectModalOpen}
         onClose={() => {
@@ -905,6 +949,6 @@ export default function ProjectSettingsPage() {
           </div>
         </div>
       </Modal>
-    </StandardPageLayout>
+    </main>
   );
 }

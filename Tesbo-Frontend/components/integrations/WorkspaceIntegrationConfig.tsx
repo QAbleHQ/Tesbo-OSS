@@ -10,6 +10,7 @@ import {
   getIntegrationStatus,
   getIntegrationAuthUrl,
   updateIntegrationConfig,
+  connectIntegrationToken,
   disconnectIntegration,
   type IntegrationOAuthConfig,
   type IntegrationConnectionStatus,
@@ -17,6 +18,39 @@ import {
 } from "@/lib/api";
 import { Button, Card, Field, FieldLabel, Input } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
+
+type PatField = {
+  key: "siteUrl" | "email" | "apiToken" | "apiKey";
+  label: string;
+  type?: "text" | "email" | "password" | "url";
+  placeholder?: string;
+  help?: string;
+};
+
+// Providers that don't support a Personal Access Token yet simply set `null` here — the tab
+// disappears automatically, no other file needs to change.
+const PROVIDER_PAT_FIELDS: Record<IntegrationProvider, PatField[] | null> = {
+  jira: [
+    { key: "siteUrl", label: "Jira site URL", type: "url", placeholder: "https://yourcompany.atlassian.net" },
+    { key: "email", label: "Atlassian account email", type: "email", placeholder: "you@yourcompany.com" },
+    {
+      key: "apiToken",
+      label: "API token",
+      type: "password",
+      placeholder: "Paste your Atlassian API token",
+      help: "Create one at id.atlassian.com/manage-profile/security/api-tokens.",
+    },
+  ],
+  linear: [
+    {
+      key: "apiKey",
+      label: "Personal API key",
+      type: "password",
+      placeholder: "lin_api_...",
+      help: "Create one from Linear Settings → Security & access → Personal API keys.",
+    },
+  ],
+};
 
 export function WorkspaceIntegrationConfig({
   provider,
@@ -44,6 +78,11 @@ export function WorkspaceIntegrationConfig({
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [redirectUri, setRedirectUri] = useState("");
+
+  const patFields = PROVIDER_PAT_FIELDS[provider];
+  const [authTab, setAuthTab] = useState<"oauth" | "personal_token">("oauth");
+  const [patValues, setPatValues] = useState<Record<string, string>>({});
+  const [connectingToken, setConnectingToken] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -108,6 +147,22 @@ export function WorkspaceIntegrationConfig({
     }
   }
 
+  async function handleConnectToken(e: FormEvent) {
+    e.preventDefault();
+    setConnectingToken(true);
+    setMessage(null);
+    try {
+      await connectIntegrationToken(provider, patValues);
+      setPatValues({});
+      await loadData();
+      setMessage({ type: "success", text: `${label} connected.` });
+    } catch (err) {
+      setMessage({ type: "error", text: err instanceof Error ? err.message : `Failed to connect ${label}.` });
+    } finally {
+      setConnectingToken(false);
+    }
+  }
+
   async function handleDisconnect() {
     setDisconnecting(true);
     setMessage(null);
@@ -133,7 +188,7 @@ export function WorkspaceIntegrationConfig({
   }
 
   const breadcrumb = (
-    <Link href="/settings/integrations" className="text-[var(--brand-primary)] hover:underline">
+    <Link href="/settings?tab=integrations" className="text-[var(--brand-primary)] hover:underline">
       &larr; Back to Integrations
     </Link>
   );
@@ -182,6 +237,10 @@ export function WorkspaceIntegrationConfig({
           <div>
             <h2 className="text-base font-semibold text-[var(--foreground)]">Connected</h2>
             <p className="mt-1 text-sm text-[var(--muted)]">
+              Connected via {status.authMethod === "personal_token" ? "Personal Access Token" : "OAuth"}
+              {status.authMethod === "personal_token" && status.personalTokenIdentifier ? ` (${status.personalTokenIdentifier})` : ""}.
+            </p>
+            <p className="mt-1 text-sm text-[var(--muted)]">
               {status.connectedProjects && status.connectedProjects.length > 0
                 ? `${status.connectedProjects.length} project(s) currently map to this ${label} connection.`
                 : `No Tesbo project is mapped to this ${label} connection yet.`}
@@ -214,75 +273,128 @@ export function WorkspaceIntegrationConfig({
         </Card>
       ) : (
         canManage && (
-          <Card className="p-4">
-            <h2 className="text-base font-semibold text-[var(--foreground)]">Configure {label} OAuth</h2>
-            <p className="mt-1 text-sm text-[var(--muted)]">
-              Add the OAuth app values from the {consoleName}. These values apply to this entire workspace.
-            </p>
-
-            <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 text-sm text-[var(--foreground)]">
-              <p className="font-medium">In the {consoleName}:</p>
-              <ol className="mt-2 list-decimal space-y-1 pl-5 text-[var(--muted)]">
-                {consoleSteps.map((step, i) => (
-                  <li key={i}>{step}</li>
-                ))}
-                <li>
-                  Enable scopes: {scopes.map((scope, i) => (
-                    <span key={scope}>
-                      <span className="font-mono text-[var(--foreground)]">{scope}</span>
-                      {i < scopes.length - 1 ? ", " : ""}
-                    </span>
-                  ))}.
-                </li>
-                <li>Copy the Client ID and Client Secret into the form below.</li>
-              </ol>
-            </div>
-
-            <form onSubmit={handleSaveConfig} className="mt-4 space-y-4">
-              <Field>
-                <FieldLabel>Authorization callback URL</FieldLabel>
-                <Input
-                  type="url"
-                  value={redirectUri}
-                  onChange={(event) => setRedirectUri(event.target.value)}
-                  placeholder="http://localhost:1010/integrations/callback"
-                />
-                <p className="mt-1 text-xs text-[var(--muted)]">
-                  Paste this exact value into the {consoleName}. For this app, the callback page is <span className="font-mono text-[var(--foreground)]">/integrations/callback</span>.
-                </p>
-              </Field>
-              <Field>
-                <FieldLabel>Client ID</FieldLabel>
-                <Input
-                  value={clientId}
-                  onChange={(event) => setClientId(event.target.value)}
-                  placeholder={`Paste ${label} OAuth client ID`}
-                />
-              </Field>
-              <Field>
-                <FieldLabel>Client Secret</FieldLabel>
-                <Input
-                  type="password"
-                  value={clientSecret}
-                  onChange={(event) => setClientSecret(event.target.value)}
-                  placeholder={config?.hasClientSecret ? "Saved. Enter a new secret only to replace it." : `Paste ${label} OAuth client secret`}
-                />
-              </Field>
-              <div className="flex flex-wrap items-center gap-3">
-                <Button type="submit" disabled={saving}>
-                  {saving ? "Saving..." : `Save ${label} Configuration`}
-                </Button>
-                <Button type="button" variant="secondary" onClick={handleConnect} disabled={connecting || !config?.configured}>
-                  {connecting ? "Connecting..." : `Connect ${label}`}
-                </Button>
-                {config?.configured && (
-                  <span className="text-xs text-[var(--success)]">
-                    Configuration saved from {config.source === "environment" ? "environment variables" : "workspace settings"}.
-                  </span>
-                )}
+          <div className="space-y-4">
+            {patFields && (
+              <div className="flex gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-1 text-sm">
+                <button
+                  type="button"
+                  onClick={() => setAuthTab("oauth")}
+                  className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                    authTab === "oauth" ? "bg-[var(--surface)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted)]"
+                  }`}
+                >
+                  OAuth 2.0
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAuthTab("personal_token")}
+                  className={`flex-1 rounded-md px-3 py-1.5 font-medium transition-colors ${
+                    authTab === "personal_token" ? "bg-[var(--surface)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted)]"
+                  }`}
+                >
+                  Personal Access Token
+                </button>
               </div>
-            </form>
-          </Card>
+            )}
+
+            {authTab === "oauth" ? (
+              <Card className="p-4">
+                <h2 className="text-base font-semibold text-[var(--foreground)]">Configure {label} OAuth</h2>
+                <p className="mt-1 text-sm text-[var(--muted)]">
+                  Add the OAuth app values from the {consoleName}. These values apply to this entire workspace.
+                </p>
+
+                <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 text-sm text-[var(--foreground)]">
+                  <p className="font-medium">In the {consoleName}:</p>
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[var(--muted)]">
+                    {consoleSteps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                    <li>
+                      Enable scopes: {scopes.map((scope, i) => (
+                        <span key={scope}>
+                          <span className="font-mono text-[var(--foreground)]">{scope}</span>
+                          {i < scopes.length - 1 ? ", " : ""}
+                        </span>
+                      ))}.
+                    </li>
+                    <li>Copy the Client ID and Client Secret into the form below.</li>
+                  </ol>
+                </div>
+
+                <form onSubmit={handleSaveConfig} className="mt-4 space-y-4">
+                  <Field>
+                    <FieldLabel>Authorization callback URL</FieldLabel>
+                    <Input
+                      type="url"
+                      value={redirectUri}
+                      onChange={(event) => setRedirectUri(event.target.value)}
+                      placeholder="http://localhost:1010/integrations/callback"
+                    />
+                    <p className="mt-1 text-xs text-[var(--muted)]">
+                      Paste this exact value into the {consoleName}. For this app, the callback page is <span className="font-mono text-[var(--foreground)]">/integrations/callback</span>.
+                    </p>
+                  </Field>
+                  <Field>
+                    <FieldLabel>Client ID</FieldLabel>
+                    <Input
+                      value={clientId}
+                      onChange={(event) => setClientId(event.target.value)}
+                      placeholder={`Paste ${label} OAuth client ID`}
+                    />
+                  </Field>
+                  <Field>
+                    <FieldLabel>Client Secret</FieldLabel>
+                    <Input
+                      type="password"
+                      value={clientSecret}
+                      onChange={(event) => setClientSecret(event.target.value)}
+                      placeholder={config?.hasClientSecret ? "Saved. Enter a new secret only to replace it." : `Paste ${label} OAuth client secret`}
+                    />
+                  </Field>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button type="submit" disabled={saving}>
+                      {saving ? "Saving..." : `Save ${label} Configuration`}
+                    </Button>
+                    <Button type="button" variant="secondary" onClick={handleConnect} disabled={connecting || !config?.configured}>
+                      {connecting ? "Connecting..." : `Connect ${label}`}
+                    </Button>
+                    {config?.configured && (
+                      <span className="text-xs text-[var(--success)]">
+                        Configuration saved from {config.source === "environment" ? "environment variables" : "workspace settings"}.
+                      </span>
+                    )}
+                  </div>
+                </form>
+              </Card>
+            ) : (
+              patFields && (
+                <Card className="p-4">
+                  <h2 className="text-base font-semibold text-[var(--foreground)]">Connect {label} with a Personal Access Token</h2>
+                  <p className="mt-1 text-sm text-[var(--muted)]">
+                    No OAuth app required — paste a personal token below to connect this workspace directly.
+                  </p>
+                  <form onSubmit={handleConnectToken} className="mt-4 space-y-4">
+                    {patFields.map((field) => (
+                      <Field key={field.key}>
+                        <FieldLabel>{field.label}</FieldLabel>
+                        <Input
+                          type={field.type || "text"}
+                          value={patValues[field.key] || ""}
+                          onChange={(event) => setPatValues((prev) => ({ ...prev, [field.key]: event.target.value }))}
+                          placeholder={field.placeholder}
+                        />
+                        {field.help && <p className="mt-1 text-xs text-[var(--muted)]">{field.help}</p>}
+                      </Field>
+                    ))}
+                    <Button type="submit" disabled={connectingToken}>
+                      {connectingToken ? "Connecting..." : `Connect ${label}`}
+                    </Button>
+                  </form>
+                </Card>
+              )
+            )}
+          </div>
         )
       )}
     </StandardPageLayout>

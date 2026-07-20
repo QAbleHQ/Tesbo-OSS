@@ -22,6 +22,8 @@ import {
   IconShield,
   IconKey,
   IconList,
+  IconLayoutDashboard,
+  IconFolders,
 } from "@tabler/icons-react";
 import { authMe, logout } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -73,6 +75,7 @@ const projectNavSections: Array<{ section: string; items: NavItemConfig[] }> = [
         children: [
           { href: "agents/tasks", label: "Tasks", icon: "clipboard" },
           { href: "agents", label: "Agent list", icon: "settings" },
+          { href: "agents/zyra/settings", label: "Zyra settings", icon: "key" },
         ],
       },
       { href: "knowledge-base", label: "Knowledge base", icon: "book" },
@@ -83,7 +86,8 @@ const projectNavSections: Array<{ section: string; items: NavItemConfig[] }> = [
 type MenuIconName =
   | "home" | "sparkles" | "book" | "list" | "fileText" | "clipboard"
   | "play" | "bug" | "chart" | "activity" | "settings" | "users" | "plug"
-  | "logout" | "chevronLeft" | "chevronRight" | "adminPanel" | "key";
+  | "logout" | "chevronLeft" | "chevronRight" | "adminPanel" | "key"
+  | "dashboard" | "folders";
 
 function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconName; className?: string }) {
   const props = { className, size: 20, stroke: 1.75 } as const;
@@ -106,6 +110,8 @@ function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconNam
     case "chevronRight": return <IconChevronRight {...props} />;
     case "adminPanel":   return <IconShield {...props} />;
     case "key":          return <IconKey {...props} />;
+    case "dashboard":    return <IconLayoutDashboard {...props} />;
+    case "folders":      return <IconFolders {...props} />;
     default:             return null;
   }
 }
@@ -139,13 +145,13 @@ function NavLink({
       } ${
         active
           ? "tesbo-nav-item tesbo-nav-item-active"
-          : "tesbo-nav-item tesbo-nav-item-idle text-[var(--ink-400)] hover:text-[var(--ink-800)]"
+          : "tesbo-nav-item tesbo-nav-item-idle"
       }`}
     >
       <MenuIcon
         name={icon}
         className={`h-[18px] w-[18px] shrink-0 ${
-          active ? "text-[var(--denim)]" : "text-[var(--ink-300)]"
+          active ? "text-[var(--denim)]" : "text-[var(--ink-400)]"
         }`}
       />
       {collapsed ? <span className="sr-only">{label}</span> : <span className="truncate">{label}</span>}
@@ -157,7 +163,7 @@ function BackToProjects({ collapsed }: { collapsed: boolean }) {
   return (
     <Link
       href="/projects"
-      className={`group flex items-center rounded-[6px] py-2 text-[13px] transition-colors duration-150 tesbo-nav-item tesbo-nav-item-idle text-[var(--ink-400)] hover:text-[var(--ink-800)] ${
+      className={`group flex items-center rounded-[6px] py-2 text-[13px] transition-colors duration-150 tesbo-nav-item tesbo-nav-item-idle ${
         collapsed ? "justify-center px-2" : "gap-2 pl-3 pr-3"
       }`}
     >
@@ -225,6 +231,7 @@ function SidebarContent() {
 
   const showProjectNav = !isInSettings && isInProject && Boolean(projectId);
   const showSettingsNav = isInSettings;
+  const showWorkspaceNav = !isInSettings && !isInProject;
 
   return (
     <aside
@@ -265,17 +272,6 @@ function SidebarContent() {
               <BackToProjects collapsed={isCollapsed} />
             </div>
 
-            <div>
-              {!isCollapsed && (
-                <p className="mb-1 px-3 text-[11px] font-medium uppercase tracking-[0.06em] text-[var(--ink-300)]">Workspace</p>
-              )}
-              <div className="space-y-0.5">
-                <NavLink href="/settings/members" label="Members" icon="users" active={isPathActive("/settings/members")} collapsed={isCollapsed} />
-                <NavLink href="/settings/integrations" label="Integrations" icon="plug" active={isPathActive("/settings/integrations")} collapsed={isCollapsed} />
-                <NavLink href="/settings/ai-providers" label="AI Providers" icon="sparkles" active={isPathActive("/settings/ai-providers")} collapsed={isCollapsed} />
-              </div>
-            </div>
-
             {isPlatformAdmin && (
               <div>
                 {!isCollapsed && (
@@ -283,10 +279,24 @@ function SidebarContent() {
                 )}
                 <div className="space-y-0.5">
                   <NavLink href="/admin" label="System Health" icon="activity" active={pathname === "/admin"} collapsed={isCollapsed} />
-                  <NavLink href="/admin/admins" label="Manage Admins" icon="users" active={isPathActive("/admin/admins")} collapsed={isCollapsed} />
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Workspace top-level mode */}
+        {showWorkspaceNav && (
+          <div className="space-y-3">
+            <div>
+              {!isCollapsed && (
+                <p className="mb-1 px-3 text-[11px] font-medium uppercase tracking-[0.06em] text-[var(--ink-300)]">Overview</p>
+              )}
+              <div className="space-y-0.5">
+                <NavLink href="/dashboard" label="Dashboard" icon="dashboard" active={pathname === "/dashboard"} collapsed={isCollapsed} />
+                <NavLink href="/projects" label="Projects" icon="folders" active={pathname === "/projects"} collapsed={isCollapsed} />
+              </div>
+            </div>
           </div>
         )}
 
@@ -341,25 +351,26 @@ function SidebarContent() {
                 </div>
               </div>
             ))}
-
-            <NavLink
-              href={`${projectPathPrefix}/settings`}
-              label="Settings"
-              icon="settings"
-              active={pathname === `${projectPathPrefix}/settings` || (pathname?.startsWith(`${projectPathPrefix}/settings/`) ?? false)}
-              collapsed={isCollapsed}
-            />
           </div>
         )}
       </nav>
 
       {/* Footer */}
       <div className="space-y-1 border-t border-[var(--glass-border)] p-2.5">
-        {!isInSettings && (
+        {!isInSettings && !isInProject && (
           <NavLink
-            href="/settings/members"
+            href="/settings"
             label="Workspace settings"
             icon="settings"
+            collapsed={isCollapsed}
+          />
+        )}
+        {!isInSettings && isInProject && (
+          <NavLink
+            href={`${projectPathPrefix}/settings`}
+            label="Project settings"
+            icon="settings"
+            active={pathname === `${projectPathPrefix}/settings` || (pathname?.startsWith(`${projectPathPrefix}/settings/`) ?? false)}
             collapsed={isCollapsed}
           />
         )}

@@ -1,10 +1,22 @@
 "use client";
 
-import { useState, Suspense } from "react";
+import { Suspense, useState } from "react";
+import type { FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { verifyOtp } from "@/lib/api";
-import { Button, Field, FieldError, FieldHint, FieldLabel, Input } from "@/components/ui";
+import { IconMailOpened } from "@tabler/icons-react";
+import { requestOtp, verifyOtp } from "@/lib/api";
+import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
+import { OtpBoxInput } from "@/components/auth/OtpBoxInput";
+import { Button, FieldError } from "@/components/ui";
+
+function AuthLoadingScreen() {
+  return (
+    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
+      <p className="text-sm text-white/40">Loading…</p>
+    </div>
+  );
+}
 
 function VerifyOtpForm() {
   const router = useRouter();
@@ -13,22 +25,22 @@ function VerifyOtpForm() {
   const inviteEmail = searchParams.get("inviteEmail")?.trim().toLowerCase() || "";
   const isInviteEmailLocked = searchParams.get("lockEmail") === "1" && Boolean(inviteEmail);
   const redirectParam = searchParams.get("redirect");
-  const [email, setEmail] = useState(inviteEmail || emailParam);
+  const email = isInviteEmailLocked ? inviteEmail : emailParam;
   const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [resendState, setResendState] = useState<"idle" | "sending" | "sent">("idle");
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
-    const emailToUse = (isInviteEmailLocked ? inviteEmail : email).trim().toLowerCase();
-    if (!emailToUse || !code.trim()) {
-      setError("Email and code are required");
+    if (!email || code.trim().length < 6) {
+      setError("Enter the 6-digit code");
       return;
     }
     setLoading(true);
     try {
-      await verifyOtp(emailToUse, code.trim());
+      await verifyOtp(email, code.trim());
       router.push(redirectParam || "/onboarding");
       router.refresh();
     } catch (err) {
@@ -38,64 +50,73 @@ function VerifyOtpForm() {
     }
   }
 
+  async function handleResend() {
+    if (!email || resendState === "sending") return;
+    setResendState("sending");
+    setError("");
+    try {
+      await requestOtp(email);
+      setResendState("sent");
+      setTimeout(() => setResendState("idle"), 4000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to resend code");
+      setResendState("idle");
+    }
+  }
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[var(--background)] px-4">
-      <div className="w-full max-w-sm space-y-8">
-        <div className="text-center">
-          <h1 className="text-2xl font-semibold text-[var(--foreground)]">Check your email</h1>
-          <p className="mt-1 text-sm text-[var(--muted)]">Enter the code we sent to your inbox</p>
+    <AuthSplitShell>
+      <div className="auth-fade-slide text-center">
+        <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full border border-[rgba(123,110,224,.3)] bg-[rgba(123,110,224,.15)]">
+          <IconMailOpened size={26} stroke={1.5} className="text-[var(--brand-primary)]" />
         </div>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <Field>
-            <FieldLabel htmlFor="email">Email</FieldLabel>
-            <Input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              disabled={loading || isInviteEmailLocked}
-            />
-            {isInviteEmailLocked && (
-              <FieldHint>
-                This invitation can only be accepted with this email address.
-              </FieldHint>
-            )}
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="code">Code</FieldLabel>
-            <Input
-              id="code"
-              type="text"
-              inputMode="numeric"
-              autoComplete="one-time-code"
-              value={code}
-              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-              placeholder="000000"
-              className="text-center text-lg tracking-widest"
-              maxLength={6}
-              disabled={loading}
-            />
-          </Field>
+        <div className="mb-2 text-[20px] font-bold tracking-tight text-[var(--foreground)]">Check your email</div>
+        <p className="mb-7 text-[13px] leading-relaxed text-[var(--muted)]">
+          We sent a login code to
+          <br />
+          <span className="font-medium text-[var(--foreground)]">{email || "your email"}</span>
+        </p>
+
+        <form onSubmit={handleSubmit} className="space-y-5">
+          <OtpBoxInput value={code} onChange={setCode} disabled={loading} autoFocus />
           {error && <FieldError>{error}</FieldError>}
           <Button
             type="submit"
             disabled={loading}
             fullWidth
+            style={{ background: "linear-gradient(135deg, var(--cta-primary), var(--denim-200))" }}
           >
-            {loading ? "Verifying…" : "Verify and sign in"}
+            {loading ? "Verifying..." : "Verify and sign in"}
           </Button>
         </form>
-        <p className="text-center text-sm text-[var(--muted)]">
-          <Link href="/login" className="text-[var(--brand-primary)] hover:underline">Use a different email</Link>
+
+        <p className="mt-5 text-[13px] text-[var(--muted)]">
+          Didn&apos;t get it?{" "}
+          <button
+            type="button"
+            onClick={handleResend}
+            disabled={resendState === "sending"}
+            className="font-medium text-[var(--brand-primary)] hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {resendState === "sent" ? "Code sent" : resendState === "sending" ? "Sending..." : "Resend code"}
+          </button>
         </p>
+
+        {!isInviteEmailLocked && (
+          <p className="mt-4 text-sm">
+            <Link href="/login" className="text-[var(--brand-primary)] hover:underline">
+              Use a different email
+            </Link>
+          </p>
+        )}
       </div>
-    </div>
+    </AuthSplitShell>
   );
 }
 
 export default function VerifyOtpPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center">Loading…</div>}>
+    <Suspense fallback={<AuthLoadingScreen />}>
       <VerifyOtpForm />
     </Suspense>
   );

@@ -2,7 +2,22 @@
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { IconFolders } from "@tabler/icons-react";
+import { createPortal } from "react-dom";
+import {
+  IconChevronDown,
+  IconChevronRight,
+  IconDownload,
+  IconFileText,
+  IconFolders,
+  IconLayoutSidebarLeftCollapse,
+  IconLayoutSidebarLeftExpand,
+  IconPencil,
+  IconPlus,
+  IconSearch,
+  IconTrash,
+  IconUpload,
+  IconX,
+} from "@tabler/icons-react";
 import {
   authMe,
   getProject,
@@ -19,23 +34,24 @@ import {
   bulkDeleteTestCases,
   getExportUrl,
   getTemplateUrl,
+  getRepositorySummary,
   type TestCaseListItem,
   type SuiteNode,
+  type RepositorySummary,
 } from "@/lib/api";
 import { RepositoryTestCaseTable } from "@/components/testcases/RepositoryTestCaseTable";
+import { useTopBarSlots } from "@/components/TopBarSlots";
 import {
   Button,
   Input,
   Select,
   Textarea,
-  Card,
   Modal,
   EmptyStateBlock,
   StatusChip,
   Field,
   FieldLabel,
 } from "@/components/ui";
-import { PageHeader } from "@/components/workflows";
 import ImportTestCasesModal from "@/components/ImportTestCasesModal";
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
@@ -88,8 +104,24 @@ export default function TestCasesPage() {
   const projectId = params.id as string;
   const activeSuiteId = searchParams.get("suiteId");
   const activeJiraIssueKey = searchParams.get("jiraIssueKey") || "";
+  const activeLinearIssueKey = searchParams.get("linearIssueKey") || "";
+
+  // Take over the shared TopBar with this page's breadcrumb + actions (portaled below),
+  // and hide the default global "Search projects" search while this page is mounted.
+  const { startEl: topBarStartEl, endEl: topBarEndEl, setFilled: setTopBarFilled } = useTopBarSlots();
+  useEffect(() => {
+    setTopBarFilled(true);
+    return () => setTopBarFilled(false);
+  }, [setTopBarFilled]);
+
+  // Filter-bar slot that the table portals its "Columns" control into, so it sits
+  // inline beside the type/status/priority dropdowns instead of in its own strip.
+  const [columnsSlotEl, setColumnsSlotEl] = useState<HTMLElement | null>(null);
 
   const [suites, setSuites] = useState<SuiteNode[]>([]);
+  const [projectName, setProjectName] = useState("");
+  const [repoSummary, setRepoSummary] = useState<RepositorySummary | null>(null);
+  const [suitePanelOpen, setSuitePanelOpen] = useState(true);
   const [suiteCases, setSuiteCases] = useState<TestCaseListItem[]>([]);
   const [suiteCasesTotal, setSuiteCasesTotal] = useState(0);
   const [suiteCasesLoading, setSuiteCasesLoading] = useState(false);
@@ -100,7 +132,9 @@ export default function TestCasesPage() {
 
   const [isAddSuiteModalOpen, setIsAddSuiteModalOpen] = useState(false);
   const [newSuiteName, setNewSuiteName] = useState("");
+  const [newSuiteParentId, setNewSuiteParentId] = useState("");
   const [isCreatingSuite, setIsCreatingSuite] = useState(false);
+  const [expandedSuiteIds, setExpandedSuiteIds] = useState<Set<string>>(new Set());
 
   const [panelMode, setPanelMode] = useState<PanelMode>("closed");
   const [panelTab, setPanelTab] = useState<PanelTab>("overview");
@@ -155,18 +189,23 @@ export default function TestCasesPage() {
   const importExportMenuRef = useRef<HTMLDivElement>(null);
 
   const loadData = useCallback(async () => {
-    const [suiteList, project] = await Promise.all([
+    const [suiteList, project, summary] = await Promise.all([
       listSuites(projectId),
       getProject(projectId),
+      getRepositorySummary(projectId).catch(() => null),
     ]);
     const settings = parseProjectSettings(project.settings);
     const prefix = normalizeTestcaseIdPrefix(String(settings.testcaseIdPrefix || project.key || "TC")) || "TC";
     setSuites(suiteList);
+    setProjectName(String(project.name || ""));
+    setRepoSummary(summary);
     setDefaultTestcaseIdPrefix(prefix);
     setTestcaseIdPrefix(prefix);
   }, [projectId]);
 
   useEffect(() => {
+    const saved = localStorage.getItem("tesbo_tc_suite_panel");
+    if (saved === "closed") setSuitePanelOpen(false);
     authMe().then((me) => {
       if (!me) {
         router.replace("/login");
@@ -176,25 +215,50 @@ export default function TestCasesPage() {
     });
   }, [router, loadData, projectId]);
 
-  const visibleSuites = useMemo(
-    () => [...suites].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name)),
+  function toggleSuitePanel() {
+    setSuitePanelOpen((prev) => {
+      const next = !prev;
+      localStorage.setItem("tesbo_tc_suite_panel", next ? "open" : "closed");
+      return next;
+    });
+  }
+
+  function sortSuites(list: SuiteNode[]) {
+    return [...list].sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
+  }
+  const rootSuites = useMemo(
+    () => sortSuites(suites.filter((s) => !s.parentId)),
     [suites]
   );
+  const childrenBySuiteId = useMemo(() => {
+    const map = new Map<string, SuiteNode[]>();
+    for (const s of suites) {
+      if (!s.parentId) continue;
+      map.set(s.parentId, [...(map.get(s.parentId) ?? []), s]);
+    }
+    for (const [key, list] of map) map.set(key, sortSuites(list));
+    return map;
+  }, [suites]);
   const selectedSuite = useMemo(
     () => suites.find((suite) => suite.id === activeSuiteId) ?? null,
     [suites, activeSuiteId]
   );
-  const suiteNameMap = useMemo(
-    () => new Map(suites.map((s) => [s.id, s.name])),
-    [suites]
-  );
+  const suiteNameMap = useMemo(() => {
+    const byId = new Map(suites.map((s) => [s.id, s]));
+    return new Map(
+      suites.map((s) => {
+        const parent = s.parentId ? byId.get(s.parentId) : undefined;
+        return [s.id, parent ? `${parent.name} / ${s.name}` : s.name];
+      })
+    );
+  }, [suites]);
   const selectedSuiteCases = suiteCases;
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const areAllCasesSelected =
     selectedSuiteCases.length > 0 && selectedSuiteCases.every((tc) => selectedCaseIdSet.has(tc.id));
   const repositoryCaseCount = useMemo(
-    () => visibleSuites.reduce((sum, suite) => sum + suite.testCaseCount, 0),
-    [visibleSuites]
+    () => suites.reduce((sum, suite) => sum + suite.testCaseCount, 0),
+    [suites]
   );
   const activeFilterCount = [
     suiteSearch.trim() !== "",
@@ -204,6 +268,20 @@ export default function TestCasesPage() {
     activeJiraIssueKey !== "",
   ].filter(Boolean).length;
   const totalPages = Math.max(1, Math.ceil(suiteCasesTotal / pageSize));
+
+  const statusCount = useCallback(
+    (name: string) => repoSummary?.byStatus.find((s) => s.name === name)?.count ?? 0,
+    [repoSummary]
+  );
+  const repoStats = repoSummary
+    ? {
+        total: repoSummary.totalTestCases,
+        draft: statusCount("Draft"),
+        inReview: statusCount("In Review"),
+        approved: statusCount("Approved"),
+        deprecated: statusCount("Deprecated") + statusCount("Archived"),
+      }
+    : null;
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -247,6 +325,7 @@ export default function TestCasesPage() {
         priority: suitePriorityFilter === "all" ? undefined : suitePriorityFilter,
         type: suiteTypeFilter === "all" ? undefined : suiteTypeFilter,
         jiraIssueKey: activeJiraIssueKey || undefined,
+        linearIssueKey: activeLinearIssueKey || undefined,
         search: debouncedSuiteSearch || undefined,
       });
       setSuiteCases(list);
@@ -268,6 +347,7 @@ export default function TestCasesPage() {
     suiteStatusFilter,
     suiteTypeFilter,
     activeJiraIssueKey,
+    activeLinearIssueKey,
     pageSize,
   ]);
 
@@ -462,13 +542,30 @@ export default function TestCasesPage() {
     }
   }
 
-  async function handleCreateRootSuite() {
+  function openAddSuiteModal(parentId?: string) {
+    setNewSuiteName("");
+    setNewSuiteParentId(parentId ?? "");
+    setIsAddSuiteModalOpen(true);
+  }
+
+  function toggleSuiteExpanded(id: string) {
+    setExpandedSuiteIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function handleCreateSuite() {
     const name = newSuiteName.trim();
     if (!name || isCreatingSuite) return;
     setIsCreatingSuite(true);
     try {
-      await createSuite(projectId, { name });
+      const created = await createSuite(projectId, { name, parentId: newSuiteParentId || undefined });
+      if (created.parentId) setExpandedSuiteIds((prev) => new Set(prev).add(created.parentId as string));
       setNewSuiteName("");
+      setNewSuiteParentId("");
       setIsAddSuiteModalOpen(false);
       await refreshData();
     } finally {
@@ -546,6 +643,22 @@ export default function TestCasesPage() {
     }
   }
 
+  async function handleUnarchivePanelTestCase() {
+    if (!panelTestcaseId || panelSaving) return;
+    setPanelSaving(true);
+    setPanelError(null);
+    try {
+      await updateTestCase(projectId, panelTestcaseId, { status: "Draft" });
+      await refreshData();
+      await openViewPanel(panelTestcaseId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to unarchive test case.";
+      setPanelError(message);
+    } finally {
+      setPanelSaving(false);
+    }
+  }
+
   async function handlePanelSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (panelMode !== "create" && panelMode !== "edit") return;
@@ -613,38 +726,54 @@ export default function TestCasesPage() {
   }
 
   return (
-    <main className="px-6 py-6">
-      <div className="w-full">
-        {/* Page header */}
-        <PageHeader
-          title="Test case repository"
-          subtitle="Organize suites, curate test cases, and move from review into execution."
-          actions={
+    // Full-bleed, full-height IDE-style workspace. `tc-fullbleed` makes the wrapping
+    // .tesbo-page drop its centered 1280px cap + padding, so this fills the whole
+    // content region below the 3.5rem TopBar and the table scrolls internally.
+    <main className="tc-fullbleed flex flex-col pb-4 pr-4 pt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* This page takes over the shared TopBar: breadcrumb (start slot) + actions (end slot). */}
+        {topBarStartEl &&
+          createPortal(
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
+              {projectName && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                  >
+                    {projectName}
+                  </button>
+                  <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
+                </>
+              )}
+              <span className="font-medium text-[var(--brand-primary)]">Test cases</span>
+            </nav>,
+            topBarStartEl,
+          )}
+        {topBarEndEl &&
+          createPortal(
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsImportModalOpen(true)}
+                className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
+              >
+                <IconUpload size={13} stroke={1.75} />
+                Import
+              </button>
               <div ref={importExportMenuRef} className="relative">
-                <Button
-                  variant="secondary"
+                <button
+                  type="button"
                   onClick={() => setIsImportExportMenuOpen((v) => !v)}
-                  className="flex items-center gap-1.5"
+                  className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
                 >
-                  Import / Export
-                  <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                  </svg>
-                </Button>
+                  <IconDownload size={13} stroke={1.75} />
+                  Export
+                  <IconChevronDown size={12} stroke={1.75} className="text-[var(--muted-soft)]" />
+                </button>
                 {isImportExportMenuOpen && (
-                  <div className="absolute right-0 top-full z-20 mt-1 w-60 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsImportModalOpen(true);
-                        setIsImportExportMenuOpen(false);
-                      }}
-                      className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
-                    >
-                      Import test cases
-                    </button>
-                    <div className="my-1 border-t border-[var(--border)]" />
+                  <div className="absolute right-0 top-full z-20 mt-1 w-56 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
                     <a
                       href={getExportUrl(projectId, "csv")}
                       target="_blank"
@@ -652,6 +781,7 @@ export default function TestCasesPage() {
                       onClick={() => setIsImportExportMenuOpen(false)}
                       className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
                     >
+                      <IconDownload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
                       Export as CSV
                     </a>
                     <a
@@ -661,6 +791,7 @@ export default function TestCasesPage() {
                       onClick={() => setIsImportExportMenuOpen(false)}
                       className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
                     >
+                      <IconDownload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
                       Export as Excel
                     </a>
                     <div className="my-1 border-t border-[var(--border)]" />
@@ -685,120 +816,195 @@ export default function TestCasesPage() {
                   </div>
                 )}
               </div>
+              <button
+                type="button"
+                onClick={() => { void openCreatePanel(); }}
+                className="flex h-[30px] items-center gap-1.5 rounded-[6px] border-0 bg-[var(--cta-primary)] px-3.5 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-[var(--cta-hover)]"
+              >
+                <IconPlus size={14} stroke={2} />
+                Add test case
+              </button>
+            </div>,
+            topBarEndEl,
+          )}
+
+        {/* Title + stats row */}
+        <div className="mb-3 flex shrink-0 flex-wrap items-start justify-between gap-4 pl-4">
+          <div>
+            <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">
+              Test case repository
+            </h1>
+            <p className="mt-[3px] text-[13px] text-[var(--muted-soft)]">
+              {repoStats?.total ?? repositoryCaseCount} test case{(repoStats?.total ?? repositoryCaseCount) === 1 ? "" : "s"} across {rootSuites.length} suite{rootSuites.length === 1 ? "" : "s"}
+            </p>
+          </div>
+          {!loading && repoStats && (
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--foreground)]">{repoStats.total}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-draft-text)]">{repoStats.draft}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Draft</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-pass-text)]">{repoStats.approved}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Approved</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-fail-text)]">{repoStats.deprecated}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Deprecated</div>
+              </div>
             </div>
-          }
-        />
+          )}
+        </div>
 
         {loading ? (
-          <p className="mt-5 text-[var(--muted)]">Loading...</p>
+          <div className="flex min-h-0 flex-1 items-center justify-center rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--muted)]">
+            Loading…
+          </div>
         ) : (
-          <div className="mt-5 flex items-start gap-4">
-            {/* ── Suite sidebar ── */}
-            <aside className="w-60 shrink-0 sticky top-6">
-              <nav className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
-                {/* Header: label + add-suite button */}
-                <div className="flex items-center justify-between border-b border-[var(--border)] px-3 py-2.5">
-                  <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">
-                    Suites
-                    {visibleSuites.length > 0 && (
-                      <span className="ml-1.5 font-normal normal-case text-[var(--muted)]">
-                        ({visibleSuites.length})
-                      </span>
+          <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
+            {/* ── Suite panel ── */}
+            <aside className={`flex shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] transition-[width] duration-150 ${suitePanelOpen ? "w-[260px]" : "w-[38px]"}`}>
+              <nav className="flex min-h-0 flex-1 flex-col">
+                {/* Header: label + add-suite + collapse toggle */}
+                <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${suitePanelOpen ? "justify-between" : "justify-center"}`}>
+                  {suitePanelOpen && (
+                    <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
+                      <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                      Suites
+                      {rootSuites.length > 0 && (
+                        <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                          {rootSuites.length}
+                        </span>
+                      )}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-0.5">
+                    {suitePanelOpen && (
+                      <button
+                        type="button"
+                        title="Add suite"
+                        onClick={() => openAddSuiteModal()}
+                        className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                      >
+                        <IconPlus size={14} stroke={2.5} />
+                      </button>
                     )}
-                  </p>
-                  <button
-                    type="button"
-                    title="Add suite"
-                    onClick={() => setIsAddSuiteModalOpen(true)}
-                    className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--brand-primary)]"
-                  >
-                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
-                    </svg>
-                  </button>
+                    <button
+                      type="button"
+                      title={suitePanelOpen ? "Collapse suites" : "Show suites"}
+                      onClick={toggleSuitePanel}
+                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                    >
+                      {suitePanelOpen ? (
+                        <IconLayoutSidebarLeftCollapse size={14} stroke={1.75} />
+                      ) : (
+                        <IconLayoutSidebarLeftExpand size={14} stroke={1.75} />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
-                {/* All test cases */}
-                <div className="p-1.5">
+                {!suitePanelOpen ? null : (
+                <>
+                {/* Suite list — scrollable, all test cases + tree share one scroll region */}
+                <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                  {/* All test cases */}
                   <button
                     type="button"
                     onClick={() => router.push(`/projects/${projectId}/testcases`)}
-                    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition-colors ${
+                    className={`mb-1 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] transition-colors ${
                       !activeSuiteId
-                        ? "bg-[var(--brand-soft)] font-medium text-[var(--brand-primary)]"
-                        : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
+                        ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
+                        : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)]"
                     }`}
                   >
                     <span>All test cases</span>
-                    <span className={`text-xs ${!activeSuiteId ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                    <span className={`font-mono text-[11px] ${!activeSuiteId ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
                       {repositoryCaseCount}
                     </span>
                   </button>
-                </div>
 
-                <div className="border-t border-[var(--border)]" />
-
-                {/* Suite list — scrollable */}
-                <div className="max-h-[calc(100vh-280px)] overflow-y-auto p-1.5">
-                  {visibleSuites.length === 0 ? (
+                  <div className="my-1.5 mx-1 h-px bg-[var(--border)]" />
+                  {rootSuites.length === 0 ? (
                     <div className="px-3 py-4 text-center">
                       <p className="text-xs text-[var(--muted)]">No suites yet</p>
                       <button
                         type="button"
-                        onClick={() => setIsAddSuiteModalOpen(true)}
+                        onClick={() => openAddSuiteModal()}
                         className="mt-2 text-xs text-[var(--brand-primary)] hover:underline"
                       >
                         Create your first suite
                       </button>
                     </div>
                   ) : (
-                    visibleSuites.map((suite) => {
+                    rootSuites.map((suite) => {
                       const isActive = activeSuiteId === suite.id;
+                      const children = childrenBySuiteId.get(suite.id) ?? [];
+                      const hasChildren = children.length > 0;
+                      const isExpanded = expandedSuiteIds.has(suite.id);
+                      const rollupCount =
+                        suite.testCaseCount + children.reduce((sum, c) => sum + c.testCaseCount, 0);
                       return (
-                        <div
-                          key={suite.id}
-                          className={`group rounded-lg transition-colors ${
-                            isActive
-                              ? "bg-[var(--brand-soft)]"
-                              : "hover:bg-[var(--surface-secondary)]"
-                          }`}
-                        >
-                          {/* Name row */}
-                          <div className="flex items-start gap-2 px-2 pt-2 pb-1">
+                        <div key={suite.id} className="mb-0.5">
+                          <div
+                            className={`group flex h-8 items-center gap-1 rounded-[6px] pl-1 pr-1 transition-colors ${
+                              isActive ? "bg-[var(--brand-soft)]" : "hover:bg-[var(--surface-secondary)]"
+                            }`}
+                          >
+                            {hasChildren ? (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleSuiteExpanded(suite.id);
+                                }}
+                                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
+                              >
+                                {isExpanded ? (
+                                  <IconChevronDown size={13} stroke={1.75} />
+                                ) : (
+                                  <IconChevronRight size={13} stroke={1.75} />
+                                )}
+                              </button>
+                            ) : (
+                              <span className="w-5 shrink-0" />
+                            )}
                             <IconFolders
                               size={14}
                               stroke={1.75}
-                              className={`mt-0.5 shrink-0 ${isActive ? "text-[var(--brand-primary)]" : "text-[var(--muted)]"}`}
+                              className={`shrink-0 ${isActive ? "text-[var(--brand-primary)]" : "text-[var(--muted)]"}`}
                             />
                             <button
                               type="button"
                               onClick={() =>
                                 router.push(`/projects/${projectId}/testcases?suiteId=${suite.id}`)
                               }
-                              className={`min-w-0 flex-1 break-words text-left text-sm font-medium leading-snug ${
-                                isActive ? "text-[var(--brand-primary)]" : "text-[var(--foreground)]"
+                              className={`ml-1 min-w-0 flex-1 truncate text-left text-[12.5px] font-medium ${
+                                isActive ? "text-[var(--accent-light)]" : "text-[var(--ink-600)]"
                               }`}
                             >
                               {suite.name}
                             </button>
                             {/* Count → hidden on hover, replaced by actions */}
-                            <span className={`shrink-0 text-xs group-hover:hidden ${isActive ? "text-[var(--brand-primary)] opacity-60" : "text-[var(--muted)]"}`}>
-                              {suite.testCaseCount}
+                            <span className={`mx-1 shrink-0 font-mono text-[11px] group-hover:hidden ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                              {rollupCount}
                             </span>
                             {/* Actions — shown on hover instead of count */}
-                            <div className="hidden shrink-0 items-center group-hover:flex">
+                            <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
                               <button
                                 type="button"
-                                title="Add test case"
+                                title="Add sub-suite"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  void openCreatePanelForSuite(suite.id);
+                                  openAddSuiteModal(suite.id);
                                 }}
-                                className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--brand-primary)]"
+                                className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--brand-primary)]"
                               >
-                                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
-                                </svg>
+                                <IconPlus size={12} stroke={2.5} />
                               </button>
                               <button
                                 type="button"
@@ -807,11 +1013,9 @@ export default function TestCasesPage() {
                                   e.stopPropagation();
                                   handleRenameSuite(suite.id, suite.name);
                                 }}
-                                className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
+                                className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
                               >
-                                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                                </svg>
+                                <IconPencil size={12} stroke={1.75} />
                               </button>
                               <button
                                 type="button"
@@ -820,246 +1024,335 @@ export default function TestCasesPage() {
                                   e.stopPropagation();
                                   setDeleteSuiteId(suite.id);
                                 }}
-                                className="flex h-6 w-6 items-center justify-center rounded text-[var(--error)] hover:bg-[var(--surface)] hover:opacity-80"
+                                className="mr-1 flex h-5 w-5 items-center justify-center rounded text-[var(--error)] hover:bg-[var(--surface)] hover:opacity-80"
                               >
-                                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                </svg>
+                                <IconTrash size={12} stroke={1.75} />
                               </button>
                             </div>
                           </div>
-                          {/* Bottom padding to keep rows from feeling cramped */}
-                          <div className="pb-1.5" />
+
+                          {hasChildren && isExpanded && (
+                            <div className="relative ml-[19px] mt-0.5 border-l border-[var(--border)] pl-2">
+                              {children.map((child) => {
+                                const childActive = activeSuiteId === child.id;
+                                return (
+                                  <div
+                                    key={child.id}
+                                    className={`group flex h-[30px] items-center gap-1.5 rounded-[6px] px-1.5 transition-colors ${
+                                      childActive ? "bg-[var(--brand-soft)]" : "hover:bg-[var(--surface-secondary)]"
+                                    }`}
+                                  >
+                                    <IconFileText
+                                      size={13}
+                                      stroke={1.75}
+                                      className={`shrink-0 ${childActive ? "text-[var(--brand-primary)]" : "text-[var(--muted)]"}`}
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        router.push(`/projects/${projectId}/testcases?suiteId=${child.id}`)
+                                      }
+                                      className={`min-w-0 flex-1 truncate text-left text-[12px] font-medium ${
+                                        childActive ? "text-[var(--accent-light)]" : "text-[var(--ink-600)]"
+                                      }`}
+                                    >
+                                      {child.name}
+                                    </button>
+                                    <span className={`shrink-0 font-mono text-[10px] group-hover:hidden ${childActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                                      {child.testCaseCount}
+                                    </span>
+                                    <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+                                      <button
+                                        type="button"
+                                        title="Add test case"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          void openCreatePanelForSuite(child.id);
+                                        }}
+                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--brand-primary)]"
+                                      >
+                                        <IconPlus size={11} stroke={2.5} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title="Rename suite"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleRenameSuite(child.id, child.name);
+                                        }}
+                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--foreground)]"
+                                      >
+                                        <IconPencil size={11} stroke={1.75} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title="Delete suite"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setDeleteSuiteId(child.id);
+                                        }}
+                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--error)] hover:bg-[var(--surface)] hover:opacity-80"
+                                      >
+                                        <IconTrash size={11} stroke={1.75} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
                         </div>
                       );
                     })
                   )}
+
+                  <button
+                    type="button"
+                    onClick={() => openAddSuiteModal()}
+                    className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                  >
+                    <IconPlus size={13} stroke={1.75} />
+                    New suite
+                  </button>
                 </div>
+                </>
+                )}
               </nav>
             </aside>
 
             {/* ── Main content ── */}
-            <div className="min-w-0 flex-1 space-y-3">
-              {/* Toolbar */}
-              <Card className="overflow-hidden p-0">
-                {/* Action row */}
-                <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {selectedCaseIds.length > 0 ? (
-                      <>
-                        <span className="text-sm font-medium text-[var(--foreground)]">
-                          {selectedCaseIds.length} selected
-                        </span>
-                        <Button size="sm" variant="secondary" onClick={openBulkActionModal}>
-                          Bulk actions
-                        </Button>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedCaseIds([])}
-                          className="text-xs text-[var(--muted)] hover:text-[var(--foreground)]"
-                        >
-                          Clear selection
-                        </button>
-                      </>
-                    ) : (
-                      <p className="text-sm font-medium text-[var(--foreground)]">
-                        {activeSuiteId
-                          ? (selectedSuite?.name ?? "Suite")
-                          : "All test cases"}
-                      </p>
-                    )}
-                  </div>
-                  <Button size="sm" onClick={() => { void openCreatePanel(); }}>
-                    + Add test case
-                  </Button>
-                </div>
-
-                {/* Filter row */}
-                <div className="flex flex-wrap items-center gap-2 border-t border-[var(--border)] bg-[var(--background)] px-4 py-2.5">
-                  <div className="min-w-[180px] flex-[2]">
-                    <Input
+            <div className="flex min-w-0 flex-1 flex-col bg-[var(--surface)]">
+              {/* Filter bar */}
+              <div className="flex min-h-[48px] shrink-0 flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2">
+                  <label className="flex h-[30px] min-w-[200px] max-w-[280px] flex-1 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--muted-soft)] transition-colors focus-within:border-[var(--brand-primary)]">
+                    <IconSearch size={13} stroke={1.75} className="shrink-0" />
+                    <input
                       type="text"
                       value={suiteSearch}
                       onChange={(e) => setSuiteSearch(e.target.value)}
                       placeholder="Search by ID, title, or type"
-                      className="h-8 text-sm"
+                      className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
                     />
-                  </div>
-                  <Select
-                    value={suiteTypeFilter}
-                    onChange={(e) => setSuiteTypeFilter(e.target.value)}
-                    className="h-8 min-w-[110px] flex-1 text-sm"
-                  >
-                    <option value="all">All types</option>
-                    {TESTCASE_TYPES.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </Select>
-                  <Select
-                    value={suiteStatusFilter}
-                    onChange={(e) => setSuiteStatusFilter(e.target.value)}
-                    className="h-8 min-w-[120px] flex-1 text-sm"
-                  >
-                    <option value="all">All statuses</option>
-                    {TESTCASE_STATUSES.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </Select>
-                  <Select
-                    value={suitePriorityFilter}
-                    onChange={(e) => setSuitePriorityFilter(e.target.value)}
-                    className="h-8 min-w-[110px] flex-1 text-sm"
-                  >
-                    <option value="all">All priorities</option>
-                    {TESTCASE_PRIORITIES.map((option) => (
-                      <option key={option} value={option}>{option}</option>
-                    ))}
-                  </Select>
-                  {suiteStatusFilter !== "all" && (
-                    <button
-                      type="button"
-                      onClick={() => setSuiteStatusFilter("all")}
-                      className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-xs font-medium text-[var(--brand-primary)] hover:opacity-80"
-                    >
-                      {suiteStatusFilter}
-                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                  {suitePriorityFilter !== "all" && (
-                    <button
-                      type="button"
-                      onClick={() => setSuitePriorityFilter("all")}
-                      className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-xs font-medium text-[var(--brand-primary)] hover:opacity-80"
-                    >
-                      {suitePriorityFilter}
-                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                  {suiteTypeFilter !== "all" && (
-                    <button
-                      type="button"
-                      onClick={() => setSuiteTypeFilter("all")}
-                      className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-xs font-medium text-[var(--brand-primary)] hover:opacity-80"
-                    >
-                      {suiteTypeFilter}
-                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                  {activeJiraIssueKey && (
-                    <button
-                      type="button"
-                      onClick={() => router.replace(`/projects/${projectId}/testcases`)}
-                      className="inline-flex items-center gap-1 rounded-full bg-[var(--info-soft,#EEF2FF)] px-2.5 py-0.5 text-xs font-medium text-[var(--info-foreground,#2D3DB0)] hover:opacity-80"
-                    >
-                      Jira: {activeJiraIssueKey}
-                      <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                  {activeFilterCount > 0 && (
-                    <Button variant="secondary" size="sm" onClick={clearSuiteFilters} className="h-8 shrink-0">
-                      Clear all
-                    </Button>
-                  )}
-                </div>
-              </Card>
-
-              {/* Content */}
-              {suiteCasesError ? (
-                <p className="rounded-xl border border-[var(--error-border)] bg-[var(--error-soft)] p-4 text-sm text-[var(--error-foreground)]">
-                  {suiteCasesError}
-                </p>
-              ) : suiteCasesLoading ? (
-                <Card className="border-dashed p-4 text-sm text-[var(--muted)]">
-                  Loading test cases...
-                </Card>
-              ) : suiteCasesTotal === 0 ? (
-                <EmptyStateBlock
-                  title="No test cases found"
-                  description={
-                    activeFilterCount > 0
-                      ? "No test cases match your current filters."
-                      : activeSuiteId
-                        ? "This suite has no test cases yet."
-                        : "No test cases in this project yet."
-                  }
-                  action={
-                    <Button size="sm" onClick={() => { void openCreatePanel(); }}>
-                      + Add test case
-                    </Button>
-                  }
-                />
-              ) : (
-                <>
-                  <RepositoryTestCaseTable
-                    key={projectId}
-                    projectId={projectId}
-                    suiteNameMap={suiteNameMap}
-                    cases={selectedSuiteCases}
-                    rowHighlightId={panelTestcaseId}
-                    selectedCaseIdSet={selectedCaseIdSet}
-                    areAllCasesSelected={areAllCasesSelected}
-                    onToggleSelectAll={toggleSelectAllCases}
-                    onToggleCase={toggleCaseSelection}
-                    onOpenRow={openViewPanel}
-                  />
-
-                  {/* Pagination */}
-                  <Card className="flex items-center justify-between px-4 py-3 text-sm">
-                    <span className="text-[var(--muted)]">
-                      <span className="font-medium text-[var(--foreground)]">{suiteCasesTotal}</span>{" "}
-                      {suiteCasesTotal === 1 ? "result" : "results"}
-                      {totalPages > 1 && (
-                        <>
-                          {" · "}page{" "}
-                          <span className="font-medium text-[var(--foreground)]">{suiteCasesPage}</span>{" "}
-                          of{" "}
-                          <span className="font-medium text-[var(--foreground)]">{totalPages}</span>
-                        </>
-                      )}
+                  </label>
+                  {activeSuiteId && (
+                    <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--brand-primary)]">
+                      {selectedSuite?.name ?? "Suite"}
                     </span>
-                    <div className="flex items-center gap-2">
-                      <Select
-                        value={pageSize}
-                        onChange={(e) => {
-                          setPageSize(Number(e.target.value));
-                          setSuiteCasesPage(1);
-                        }}
-                        className="h-8 text-sm"
+                  )}
+                  <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                    {suiteStatusFilter !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => setSuiteStatusFilter("all")}
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
                       >
-                        {PAGE_SIZE_OPTIONS.map((n) => (
-                          <option key={n} value={n}>{n} / page</option>
-                        ))}
-                      </Select>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() => setSuiteCasesPage((prev) => Math.max(1, prev - 1))}
-                        disabled={suiteCasesPage === 1 || suiteCasesLoading}
+                        <span className="text-[var(--muted)]">Status:</span> {suiteStatusFilter}
+                        <IconX size={11} stroke={2.5} />
+                      </button>
+                    )}
+                    {suitePriorityFilter !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => setSuitePriorityFilter("all")}
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
                       >
-                        Previous
-                      </Button>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() =>
-                          setSuiteCasesPage((prev) => (prev >= totalPages ? prev : prev + 1))
-                        }
-                        disabled={suiteCasesPage >= totalPages || suiteCasesLoading}
+                        <span className="text-[var(--muted)]">Priority:</span> {suitePriorityFilter}
+                        <IconX size={11} stroke={2.5} />
+                      </button>
+                    )}
+                    {suiteTypeFilter !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => setSuiteTypeFilter("all")}
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
                       >
-                        Next
-                      </Button>
+                        <span className="text-[var(--muted)]">Type:</span> {suiteTypeFilter}
+                        <IconX size={11} stroke={2.5} />
+                      </button>
+                    )}
+                    {activeJiraIssueKey && (
+                      <button
+                        type="button"
+                        onClick={() => router.replace(`/projects/${projectId}/testcases`)}
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--info-soft,#EEF2FF)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--info-foreground,#2D3DB0)] hover:opacity-80"
+                      >
+                        <span className="opacity-70">Jira:</span> {activeJiraIssueKey}
+                        <IconX size={11} stroke={2.5} />
+                      </button>
+                    )}
+                    {activeLinearIssueKey && (
+                      <button
+                        type="button"
+                        onClick={() => router.replace(`/projects/${projectId}/testcases`)}
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--info-soft,#EEF2FF)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--info-foreground,#2D3DB0)] hover:opacity-80"
+                      >
+                        <span className="opacity-70">Linear:</span> {activeLinearIssueKey}
+                        <IconX size={11} stroke={2.5} />
+                      </button>
+                    )}
+                    <select
+                      value={suiteTypeFilter}
+                      onChange={(e) => setSuiteTypeFilter(e.target.value)}
+                      className="h-[30px] rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--ink-600)] outline-none"
+                    >
+                      <option value="all">All types</option>
+                      {TESTCASE_TYPES.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={suiteStatusFilter}
+                      onChange={(e) => setSuiteStatusFilter(e.target.value)}
+                      className="h-[30px] rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--ink-600)] outline-none"
+                    >
+                      <option value="all">All statuses</option>
+                      {TESTCASE_STATUSES.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={suitePriorityFilter}
+                      onChange={(e) => setSuitePriorityFilter(e.target.value)}
+                      className="h-[30px] rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--ink-600)] outline-none"
+                    >
+                      <option value="all">All priorities</option>
+                      {TESTCASE_PRIORITIES.map((option) => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                    {/* Columns control renders here (portaled from the table), as the 4th dropdown. */}
+                    <div ref={setColumnsSlotEl} className="flex items-center empty:hidden" />
+                    {activeFilterCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={clearSuiteFilters}
+                        className="flex h-[30px] shrink-0 items-center rounded-[6px] border border-[var(--ink-200)] px-3 text-[12px] font-medium text-[var(--ink-600)] hover:bg-[var(--ink-100)]"
+                      >
+                        Clear all
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Bulk action bar (when rows selected) */}
+                {selectedCaseIds.length > 0 && (
+                  <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--brand-soft)] px-4 text-[12px]">
+                    <span className="font-medium text-[var(--brand-primary)]">
+                      {selectedCaseIds.length} selected
+                    </span>
+                    <div className="h-4 w-px bg-[var(--border-strong)]" />
+                    <button
+                      type="button"
+                      onClick={openBulkActionModal}
+                      className="font-medium text-[var(--brand-primary)] hover:underline"
+                    >
+                      Bulk actions
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedCaseIds([])}
+                      className="ml-auto flex items-center gap-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+                    >
+                      <IconX size={12} stroke={2} />
+                      Clear selection
+                    </button>
+                  </div>
+                )}
+
+                {/* Content */}
+                {suiteCasesError ? (
+                  <p className="flex min-h-0 flex-1 items-center justify-center p-4 text-sm text-[var(--error-foreground)]">
+                    {suiteCasesError}
+                  </p>
+                ) : suiteCasesLoading ? (
+                  <p className="flex min-h-0 flex-1 items-center justify-center p-4 text-sm text-[var(--muted)]">
+                    Loading test cases...
+                  </p>
+                ) : suiteCasesTotal === 0 ? (
+                  <div className="flex min-h-0 flex-1 flex-col items-center justify-center p-10 text-center">
+                    <p className="text-[15px] font-semibold text-[var(--foreground)]">No test cases found</p>
+                    <p className="mt-2 text-[13px] text-[var(--muted)]">
+                      {activeFilterCount > 0
+                        ? "No test cases match your current filters."
+                        : activeSuiteId
+                          ? "This suite has no test cases yet."
+                          : "No test cases in this project yet."}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => { void openCreatePanel(); }}
+                      className="mt-5 inline-flex h-[30px] items-center gap-1.5 rounded-[6px] border-0 bg-[var(--cta-primary)] px-3.5 text-[12px] font-medium text-white hover:bg-[var(--cta-hover)]"
+                    >
+                      <IconPlus size={14} stroke={2} />
+                      Add test case
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <RepositoryTestCaseTable
+                      key={projectId}
+                      projectId={projectId}
+                      suiteNameMap={suiteNameMap}
+                      cases={selectedSuiteCases}
+                      rowHighlightId={panelTestcaseId}
+                      selectedCaseIdSet={selectedCaseIdSet}
+                      areAllCasesSelected={areAllCasesSelected}
+                      onToggleSelectAll={toggleSelectAllCases}
+                      onToggleCase={toggleCaseSelection}
+                      onOpenRow={openViewPanel}
+                      suitePanelOpen={suitePanelOpen}
+                      columnsSlot={columnsSlotEl}
+                    />
+
+                    {/* Pagination */}
+                    <div className="flex h-11 shrink-0 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-4 text-[12px]">
+                      <span className="text-[var(--muted)]">
+                        <span className="font-medium text-[var(--foreground)]">{suiteCasesTotal}</span>{" "}
+                        {suiteCasesTotal === 1 ? "result" : "results"}
+                        {totalPages > 1 && (
+                          <>
+                            {" · "}page{" "}
+                            <span className="font-medium text-[var(--foreground)]">{suiteCasesPage}</span>{" "}
+                            of{" "}
+                            <span className="font-medium text-[var(--foreground)]">{totalPages}</span>
+                          </>
+                        )}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={pageSize}
+                          onChange={(e) => {
+                            setPageSize(Number(e.target.value));
+                            setSuiteCasesPage(1);
+                          }}
+                          className="h-7 rounded-[5px] border border-[var(--border)] bg-[var(--background)] px-2 text-[12px] text-[var(--ink-600)] outline-none"
+                        >
+                          {PAGE_SIZE_OPTIONS.map((n) => (
+                            <option key={n} value={n}>{n} / page</option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => setSuiteCasesPage((prev) => Math.max(1, prev - 1))}
+                          disabled={suiteCasesPage === 1 || suiteCasesLoading}
+                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                        >
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSuiteCasesPage((prev) => (prev >= totalPages ? prev : prev + 1))
+                          }
+                          disabled={suiteCasesPage >= totalPages || suiteCasesLoading}
+                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                        >
+                          Next
+                        </button>
+                      </div>
                     </div>
-                  </Card>
-                </>
-              )}
+                  </div>
+                )}
             </div>
           </div>
         )}
@@ -1192,7 +1485,7 @@ export default function TestCasesPage() {
                           <FieldLabel>Suite</FieldLabel>
                           <Select value={suiteId} onChange={(e) => setSuiteId(e.target.value)}>
                             <option value="">No suite</option>
-                            {suites.map((suite) => <option key={suite.id} value={suite.id}>{suite.name}</option>)}
+                            {suites.map((suite) => <option key={suite.id} value={suite.id}>{suiteNameMap.get(suite.id) ?? suite.name}</option>)}
                           </Select>
                         </Field>
                         <Field>
@@ -1258,8 +1551,8 @@ export default function TestCasesPage() {
                         </div>
                       </div>
                       <Field>
-                        <FieldLabel>Attachments</FieldLabel>
-                        <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Links/paths to screenshots, logs, or reference docs" />
+                        <FieldLabel>Notes</FieldLabel>
+                        <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Add notes, links to screenshots, logs, or reference docs" />
                       </Field>
                     </div>
                   )}
@@ -1290,7 +1583,7 @@ export default function TestCasesPage() {
                               <FieldLabel>Suite</FieldLabel>
                               <Select value={suiteId} onChange={(e) => setSuiteId(e.target.value)}>
                                 <option value="">No suite</option>
-                                {suites.map((suite) => <option key={suite.id} value={suite.id}>{suite.name}</option>)}
+                                {suites.map((suite) => <option key={suite.id} value={suite.id}>{suiteNameMap.get(suite.id) ?? suite.name}</option>)}
                               </Select>
                             </Field>
                             <Field>
@@ -1317,8 +1610,8 @@ export default function TestCasesPage() {
                             </Field>
                           </div>
                           <Field>
-                            <FieldLabel>Attachments</FieldLabel>
-                            <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Links/paths to screenshots, logs, or reference docs" />
+                            <FieldLabel>Notes</FieldLabel>
+                            <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Add notes, links to screenshots, logs, or reference docs" />
                           </Field>
                         </div>
                       )}
@@ -1382,7 +1675,11 @@ export default function TestCasesPage() {
                   </div>
                   {panelMode === "edit" && panelTestcaseId && (
                     <div className="flex items-center gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning)]">Archive</Button>
+                      {status === "Archived" ? (
+                        <Button variant="secondary" size="sm" onClick={() => void handleUnarchivePanelTestCase()} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">Unarchive</Button>
+                      ) : (
+                        <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning)]">Archive</Button>
+                      )}
                       <Button variant="destructive" size="sm" onClick={() => void handleDeletePanelTestCase()} disabled={panelSaving}>Delete</Button>
                     </div>
                   )}
@@ -1412,10 +1709,19 @@ export default function TestCasesPage() {
             onChange={(e) => setNewSuiteName(e.target.value)}
             placeholder="Enter suite name"
             onKeyDown={(e) => {
-              if (e.key === "Enter") void handleCreateRootSuite();
+              if (e.key === "Enter") void handleCreateSuite();
             }}
             autoFocus
           />
+        </Field>
+        <Field className="mt-4">
+          <FieldLabel>Parent suite</FieldLabel>
+          <Select value={newSuiteParentId} onChange={(e) => setNewSuiteParentId(e.target.value)}>
+            <option value="">No parent (top-level suite)</option>
+            {rootSuites.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </Select>
         </Field>
         <div className="mt-5 flex justify-end gap-2">
           <Button
@@ -1430,7 +1736,7 @@ export default function TestCasesPage() {
           </Button>
           <Button
             variant="primary"
-            onClick={() => void handleCreateRootSuite()}
+            onClick={() => void handleCreateSuite()}
             disabled={!newSuiteName.trim() || isCreatingSuite}
           >
             {isCreatingSuite ? "Creating..." : "Create"}
@@ -1447,6 +1753,12 @@ export default function TestCasesPage() {
         <p className="text-sm text-[var(--muted)]">
           This suite contains test cases. What would you like to do with them?
         </p>
+        {deleteSuiteId && (childrenBySuiteId.get(deleteSuiteId)?.length ?? 0) > 0 && (
+          <p className="mt-2 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--warning)]">
+            This suite has {childrenBySuiteId.get(deleteSuiteId)?.length} sub-suite
+            {childrenBySuiteId.get(deleteSuiteId)?.length === 1 ? "" : "s"}. Deleting it may affect those too.
+          </p>
+        )}
         <div className="mt-5 flex flex-col gap-3">
           <button
             type="button"
@@ -1515,7 +1827,7 @@ export default function TestCasesPage() {
             >
               <option value="">Unassigned (no suite)</option>
               {suites.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
+                <option key={s.id} value={s.id}>{suiteNameMap.get(s.id) ?? s.name}</option>
               ))}
             </Select>
           </Field>

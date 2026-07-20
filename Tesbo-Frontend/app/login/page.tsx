@@ -4,8 +4,17 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { getSetupStatus, loginWithPassword, requestOtp } from "@/lib/api";
-import { BrandLogo } from "@/components/BrandLogo";
-import { Button, Field, FieldError, FieldHint, FieldLabel, Input } from "@/components/ui";
+import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
+import { AuthModeToggle } from "@/components/auth/AuthModeToggle";
+import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
+
+function AuthLoadingScreen() {
+  return (
+    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
+      <p className="text-sm text-white/40">Loading...</p>
+    </div>
+  );
+}
 
 function LoginForm() {
   const router = useRouter();
@@ -69,22 +78,25 @@ function LoginForm() {
   }
 
   if (checkingSetup) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[var(--background)]">
-        <p className="text-[var(--muted)]">Loading...</p>
-      </div>
-    );
+    return <AuthLoadingScreen />;
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[var(--background)] px-4">
-      <div className="w-full max-w-sm space-y-8">
-        <div className="text-center">
-          <BrandLogo className="mx-auto h-14 max-w-[280px] object-contain" />
-          <p className="mt-1 text-sm text-[var(--muted)]">
-            {otpMode ? "Sign in with a one-time code" : "Sign in with your admin password"}
-          </p>
-        </div>
+    <AuthSplitShell>
+      <div className="auth-fade-slide">
+        <div className="mb-1 text-[22px] font-bold tracking-tight text-[var(--foreground)]">Welcome back</div>
+        <p className="mb-7 text-[13px] text-[var(--muted)]">
+          {otpMode ? "Sign in with a one-time code" : "Sign in to your workspace"}
+        </p>
+
+        {!isInviteEmailLocked && (
+          <AuthModeToggle
+            mode={otpMode ? "otp" : "password"}
+            onChange={(mode) => setOtpMode(mode === "otp")}
+            disabled={loading}
+          />
+        )}
+
         <form onSubmit={handleSubmit} className="space-y-4">
           <Field>
             <FieldLabel htmlFor="email">Email</FieldLabel>
@@ -94,58 +106,53 @@ function LoginForm() {
               autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
+              placeholder="you@company.com"
               disabled={loading || isInviteEmailLocked}
             />
             {isInviteEmailLocked && (
-              <FieldHint>
-                This invitation can only be accepted with this email address.
-              </FieldHint>
+              <FieldHint>This invitation can only be accepted with this email address.</FieldHint>
             )}
           </Field>
+
           {!otpMode && (
             <Field>
               <FieldLabel htmlFor="password">Password</FieldLabel>
-              <Input
+              <PasswordInput
                 id="password"
-                type="password"
                 autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Your password"
                 disabled={loading}
               />
+              <FieldHint>Use the password created during initial setup.</FieldHint>
             </Field>
           )}
+
+          {otpMode && <FieldHint>We&apos;ll send a one-time code to your email address.</FieldHint>}
+
           {error && <FieldError>{error}</FieldError>}
-          <Button type="submit" disabled={loading} fullWidth>
-            {loading ? (otpMode ? "Sending..." : "Signing in...") : (otpMode ? "Send login code" : "Sign in")}
+
+          <Button
+            type="submit"
+            disabled={loading}
+            fullWidth
+            style={{ background: "linear-gradient(135deg, var(--cta-primary), var(--denim-200))" }}
+          >
+            {loading ? (otpMode ? "Sending..." : "Signing in...") : otpMode ? "Send login code" : "Sign in"}
           </Button>
         </form>
+
         {!isInviteEmailLocked && (
-          <button
-            type="button"
-            onClick={() => {
-              setError("");
-              setOtpMode((value) => !value);
-            }}
-            className="w-full text-center text-sm font-medium text-[var(--brand-primary)] hover:underline"
-          >
-            {otpMode ? "Sign in with password" : "Use email code instead"}
-          </button>
-        )}
-        <p className="text-center text-sm text-[var(--muted)]">
-          {otpMode ? "We will send a one-time code to your email." : "Use the password created during initial setup."}
-        </p>
-        {!isInviteEmailLocked && (
-          <p className="text-center text-sm text-[var(--muted)]">
+          <p className="mt-6 text-center text-[13px] text-[var(--muted)]">
             Don&apos;t have an account?{" "}
-            <Link href="/signup" className="text-[var(--brand-primary)] hover:underline">
+            <Link href="/signup" className="font-medium text-[var(--brand-primary)] hover:underline">
               Sign up
             </Link>
           </p>
         )}
-        <p className="text-center text-xs text-[var(--muted-soft)]">
+
+        <p className="mt-6 text-center text-xs text-[var(--muted-soft)]">
           <Link href="/privacy-policy" className="hover:underline">
             Privacy Policy
           </Link>{" "}
@@ -155,13 +162,13 @@ function LoginForm() {
           </Link>
         </p>
       </div>
-    </div>
+    </AuthSplitShell>
   );
 }
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center">Loading...</div>}>
+    <Suspense fallback={<AuthLoadingScreen />}>
       <LoginForm />
     </Suspense>
   );

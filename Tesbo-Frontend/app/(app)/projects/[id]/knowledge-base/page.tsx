@@ -3,27 +3,28 @@
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import Link from "next/link";
 import {
   IconFolder,
   IconFileText,
   IconFile,
   IconChevronRight,
-  IconChevronDown,
   IconDots,
   IconPlus,
   IconSearch,
   IconUpload,
   IconTrash,
-  IconPencil,
   IconFolderPlus,
   IconArrowRight,
   IconCopy,
   IconDownload,
   IconX,
+  IconFolders,
+  IconLayoutSidebarLeftCollapse,
+  IconLayoutSidebarLeftExpand,
 } from "@tabler/icons-react";
 import {
   authMe,
+  getProject,
   getKnowledgeFolderTree,
   listKnowledgeFolderItems,
   createKnowledgeFolder,
@@ -39,12 +40,24 @@ import {
   deleteKnowledgeFile,
   getKnowledgeFileDownloadUrl,
   searchKnowledgeBase,
+  getKnowledgeBaseSummary,
+  getKnowledgeFolderExportUrl,
   type KnowledgeFolderTreeNode,
   type KnowledgeItem,
   type KnowledgeBreadcrumbEntry,
+  type KnowledgeFile,
+  type KnowledgeBaseSummary,
 } from "@/lib/api";
 import { Button, Input, Modal, Field, FieldLabel, StatusChip, EmptyStateBlock } from "@/components/ui";
-import { PageHeader, StandardPageLayout } from "@/components/workflows";
+import { useTopBarSlots } from "@/components/TopBarSlots";
+import FileViewerModal from "@/components/knowledge-base/FileViewerModal";
+import { Menu, MenuItem } from "@/components/knowledge-base/Menu";
+import { FolderTreeNodeRow, flattenFolders, findAncestorIds, type FolderAction } from "@/components/knowledge-base/FolderTree";
+
+const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
+const DEFAULT_PAGE_SIZE = 25;
+type TypeFilter = "all" | "folder" | "document" | "file";
+type SortOption = "updated" | "name" | "size";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DocNode = any;
@@ -63,6 +76,36 @@ function bulletList(items: string[]): DocNode {
 }
 function doc(...content: DocNode[]): DocNode {
   return { type: "doc", content };
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// Mirrors what TipTap's getText()/getHTML() would produce for the small set of node types
+// used by DOCUMENT_TEMPLATES below, so a freshly created document has real contentHtml/contentText
+// (searchable, and visible to Zyra) instead of relying on the user to type something first.
+function docNodeToText(node: DocNode | null | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return node.text || "";
+  const parts: string[] = (node.content || []).map(docNodeToText);
+  if (node.type === "listItem") return parts.join(" ");
+  return parts.join(node.type === "doc" || node.type === "bulletList" ? "\n" : "");
+}
+
+function docNodeToHtml(node: DocNode | null | undefined): string {
+  if (!node) return "";
+  if (node.type === "text") return escapeHtml(node.text || "");
+  const inner = (node.content || []).map(docNodeToHtml).join("");
+  const level = node.attrs?.level || 1;
+  switch (node.type) {
+    case "doc": return inner;
+    case "heading": return `<h${level}>${inner}</h${level}>`;
+    case "paragraph": return `<p>${inner}</p>`;
+    case "bulletList": return `<ul>${inner}</ul>`;
+    case "listItem": return `<li>${inner}</li>`;
+    default: return inner;
+  }
 }
 
 type DocumentTemplate = {
@@ -178,201 +221,6 @@ function aiMemoryTone(status: string): "draft" | "success" | "error" {
   if (status === "approved") return "success";
   if (status === "rejected") return "error";
   return "draft";
-}
-
-// ─── Dropdown menu (generic) ────────────────────────────────────────────────
-// Renders through a portal at a fixed (viewport-relative) position computed from the
-// trigger's bounding rect, so the menu is never clipped by an ancestor with `overflow-x`
-// set (e.g. the content table's horizontal scroll wrapper).
-
-function Menu({
-  trigger,
-  children,
-  align = "left",
-}: {
-  trigger: React.ReactNode;
-  children: (close: () => void) => React.ReactNode;
-  align?: "left" | "right";
-}) {
-  const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
-  const triggerRef = useRef<HTMLDivElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    function updatePosition() {
-      if (!triggerRef.current) return;
-      const rect = triggerRef.current.getBoundingClientRect();
-      setPosition({ top: rect.bottom + 4, left: align === "right" ? rect.right : rect.left });
-    }
-    updatePosition();
-    window.addEventListener("scroll", updatePosition, true);
-    window.addEventListener("resize", updatePosition);
-    return () => {
-      window.removeEventListener("scroll", updatePosition, true);
-      window.removeEventListener("resize", updatePosition);
-    };
-  }, [open, align]);
-
-  useEffect(() => {
-    function onClick(e: MouseEvent) {
-      const target = e.target as Node;
-      if (triggerRef.current?.contains(target)) return;
-      if (menuRef.current?.contains(target)) return;
-      setOpen(false);
-    }
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, []);
-
-  return (
-    <div className="inline-block" ref={triggerRef}>
-      <div onClick={() => setOpen((v) => !v)}>{trigger}</div>
-      {open && position && typeof document !== "undefined"
-        ? createPortal(
-            <div
-              ref={menuRef}
-              style={{
-                position: "fixed",
-                top: position.top,
-                left: position.left,
-                transform: align === "right" ? "translateX(-100%)" : undefined,
-              }}
-              className="z-50 min-w-[180px] rounded-[8px] border border-[var(--border)] bg-[var(--surface-overlay)] py-1 shadow-[var(--shadow-elevated)]"
-            >
-              {children(() => setOpen(false))}
-            </div>,
-            document.body
-          )
-        : null}
-    </div>
-  );
-}
-
-function MenuItem({ onClick, danger, children }: { onClick: () => void; danger?: boolean; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] transition-colors ${
-        danger ? "text-[var(--error)] hover:bg-[var(--error-soft)]" : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-// ─── Folder tree (left panel) ───────────────────────────────────────────────
-
-function FolderTreeNodeRow({
-  node,
-  depth,
-  selectedId,
-  onSelect,
-  onAction,
-  expanded,
-  toggleExpanded,
-}: {
-  node: KnowledgeFolderTreeNode;
-  depth: number;
-  selectedId: string | null;
-  onSelect: (id: string) => void;
-  onAction: (action: "create-subfolder" | "rename" | "move" | "delete", folder: KnowledgeFolderTreeNode) => void;
-  expanded: Set<string>;
-  toggleExpanded: (id: string) => void;
-}) {
-  const isOpen = expanded.has(node.id) || node.isRoot;
-  const hasChildren = node.children.length > 0;
-
-  return (
-    <div>
-      <div
-        className={`group flex items-center gap-1 rounded-[6px] py-1.5 pr-1.5 text-[13px] cursor-pointer ${
-          selectedId === node.id ? "bg-[var(--brand-soft)] text-[var(--brand-primary)] font-medium" : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
-        }`}
-        style={{ paddingLeft: `${depth * 14 + 6}px` }}
-        onClick={() => onSelect(node.id)}
-      >
-        {hasChildren ? (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleExpanded(node.id);
-            }}
-            className="shrink-0 text-[var(--muted-soft)]"
-          >
-            {isOpen ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}
-          </button>
-        ) : (
-          <span className="w-[14px] shrink-0" />
-        )}
-        <IconFolder size={15} stroke={1.75} className="shrink-0 text-[var(--muted)]" />
-        <span className="truncate flex-1">{node.name}</span>
-        {!node.isRoot && (
-          <Menu
-            align="right"
-            trigger={
-              <button type="button" onClick={(e) => e.stopPropagation()} className="shrink-0 rounded p-0.5 opacity-0 group-hover:opacity-100 hover:bg-[var(--surface-tertiary)]">
-                <IconDots size={14} />
-              </button>
-            }
-          >
-            {(close) => (
-              <>
-                <MenuItem onClick={() => { onAction("create-subfolder", node); close(); }}>
-                  <IconFolderPlus size={14} /> Create subfolder
-                </MenuItem>
-                <MenuItem onClick={() => { onAction("rename", node); close(); }}>
-                  <IconPencil size={14} /> Rename
-                </MenuItem>
-                <MenuItem onClick={() => { onAction("move", node); close(); }}>
-                  <IconArrowRight size={14} /> Move
-                </MenuItem>
-                <MenuItem danger onClick={() => { onAction("delete", node); close(); }}>
-                  <IconTrash size={14} /> Delete
-                </MenuItem>
-              </>
-            )}
-          </Menu>
-        )}
-      </div>
-      {isOpen && hasChildren && (
-        <div>
-          {node.children.map((child) => (
-            <FolderTreeNodeRow
-              key={child.id}
-              node={child}
-              depth={depth + 1}
-              selectedId={selectedId}
-              onSelect={onSelect}
-              onAction={onAction}
-              expanded={expanded}
-              toggleExpanded={toggleExpanded}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Folder picker (used by Move modals) ────────────────────────────────────
-
-function flattenFolders(node: KnowledgeFolderTreeNode, depth = 0): Array<{ id: string; label: string }> {
-  const label = `${"— ".repeat(depth)}${node.isRoot ? "Knowledge base" : node.name}`;
-  return [{ id: node.id, label }, ...node.children.flatMap((child) => flattenFolders(child, depth + 1))];
-}
-
-function findAncestorIds(node: KnowledgeFolderTreeNode, targetId: string, trail: string[] = []): string[] | null {
-  if (node.id === targetId) return trail;
-  for (const child of node.children) {
-    const found = findAncestorIds(child, targetId, [...trail, node.id]);
-    if (found) return found;
-  }
-  return null;
 }
 
 // ─── Modals ─────────────────────────────────────────────────────────────────
@@ -584,6 +432,14 @@ function UploadModal({
             setFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
           }}
           onClick={() => inputRef.current?.click()}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              inputRef.current?.click();
+            }
+          }}
           className={`cursor-pointer rounded-[10px] border-2 border-dashed p-8 text-center transition-colors ${
             dragOver ? "border-[var(--brand-primary)] bg-[var(--brand-soft)]" : "border-[var(--border)]"
           }`}
@@ -631,7 +487,17 @@ function KnowledgeBasePageInner() {
   const folderParam = searchParams.get("folder");
   const appliedFolderParam = useRef<string | null>(null);
 
+  // Take over the shared TopBar with this page's breadcrumb + actions (portaled below),
+  // and hide the default global "Search projects" search while this page is mounted.
+  const { startEl: topBarStartEl, endEl: topBarEndEl, setFilled: setTopBarFilled } = useTopBarSlots();
+  useEffect(() => {
+    setTopBarFilled(true);
+    return () => setTopBarFilled(false);
+  }, [setTopBarFilled]);
+
   const [loading, setLoading] = useState(true);
+  const [projectName, setProjectName] = useState("");
+  const [summary, setSummary] = useState<KnowledgeBaseSummary | null>(null);
   const [tree, setTree] = useState<KnowledgeFolderTreeNode | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -644,6 +510,12 @@ function KnowledgeBasePageInner() {
   const [searchInput, setSearchInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<KnowledgeItem[] | null>(null);
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
+  const [sortBy, setSortBy] = useState<SortOption>("updated");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(DEFAULT_PAGE_SIZE);
+
+  const [treePanelOpen, setTreePanelOpen] = useState(true);
 
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
   const [createFolderParent, setCreateFolderParent] = useState<string | null>(null);
@@ -651,6 +523,7 @@ function KnowledgeBasePageInner() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<KnowledgeFolderTreeNode | null>(null);
   const [moveTarget, setMoveTarget] = useState<{ kind: "folder" | "document" | "file"; id: string; excludeId?: string } | null>(null);
+  const [viewerFile, setViewerFile] = useState<KnowledgeItem | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -658,6 +531,11 @@ function KnowledgeBasePageInner() {
     const root = await getKnowledgeFolderTree(projectId);
     setTree(root);
     return root;
+  }, [projectId]);
+
+  const loadSummary = useCallback(async () => {
+    const data = await getKnowledgeBaseSummary(projectId).catch(() => null);
+    setSummary(data);
   }, [projectId]);
 
   const loadFolder = useCallback(
@@ -668,6 +546,7 @@ function KnowledgeBasePageInner() {
         setItems(data.items);
         setBreadcrumb(data.folder.breadcrumb);
         setFolderName(data.folder.isRoot ? "Knowledge base" : data.folder.name);
+        setPage(1);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load folder contents.");
       } finally {
@@ -678,6 +557,8 @@ function KnowledgeBasePageInner() {
   );
 
   useEffect(() => {
+    const savedPanel = localStorage.getItem("tesbo_kb_tree_panel");
+    if (savedPanel === "closed") setTreePanelOpen(false);
     (async () => {
       const me = await authMe();
       if (!me) {
@@ -685,7 +566,9 @@ function KnowledgeBasePageInner() {
         return;
       }
       try {
-        const root = await loadTree();
+        const [project, root] = await Promise.all([getProject(projectId), loadTree()]);
+        setProjectName(String(project.name || ""));
+        void loadSummary();
         const initialFolderId = folderParam || root.id;
         appliedFolderParam.current = folderParam;
         setSelectedFolderId(initialFolderId);
@@ -725,6 +608,7 @@ function KnowledgeBasePageInner() {
     (async () => {
       const data = await searchKnowledgeBase(projectId, { q: searchQuery }).catch(() => ({ list: [], total: 0 }));
       setSearchResults(data.list);
+      setPage(1);
     })();
   }, [searchQuery, projectId]);
 
@@ -733,6 +617,14 @@ function KnowledgeBasePageInner() {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleTreePanel() {
+    setTreePanelOpen((prev) => {
+      const next = !prev;
+      localStorage.setItem("tesbo_kb_tree_panel", next ? "open" : "closed");
       return next;
     });
   }
@@ -747,8 +639,7 @@ function KnowledgeBasePageInner() {
   }
 
   async function refresh() {
-    await loadTree();
-    if (selectedFolderId) await loadFolder(selectedFolderId);
+    await Promise.all([loadTree(), selectedFolderId ? loadFolder(selectedFolderId) : Promise.resolve(), loadSummary()]);
   }
 
   async function handleCreateFolder(name: string, description: string) {
@@ -780,7 +671,7 @@ function KnowledgeBasePageInner() {
     }
   }
 
-  async function handleFolderAction(action: "create-subfolder" | "rename" | "move" | "delete", folder: KnowledgeFolderTreeNode) {
+  async function handleFolderAction(action: FolderAction, folder: KnowledgeFolderTreeNode) {
     if (action === "create-subfolder") {
       setCreateFolderParent(folder.id);
       setCreateFolderOpen(true);
@@ -832,6 +723,8 @@ function KnowledgeBasePageInner() {
         title,
         documentType: template.documentType,
         contentJson: template.content || undefined,
+        contentHtml: template.content ? docNodeToHtml(template.content) : undefined,
+        contentText: template.content ? docNodeToText(template.content) : undefined,
       });
       setCreateDocOpen(false);
       router.push(`/projects/${projectId}/knowledge-base/documents/${created.id}`);
@@ -883,7 +776,7 @@ function KnowledgeBasePageInner() {
   function openItem(item: KnowledgeItem) {
     if (item.type === "folder") selectFolder(item.id);
     else if (item.type === "document") router.push(`/projects/${projectId}/knowledge-base/documents/${item.id}`);
-    else window.open(getKnowledgeFileDownloadUrl(projectId, item.id), "_blank");
+    else setViewerFile(item);
   }
 
   if (loading) {
@@ -894,93 +787,216 @@ function KnowledgeBasePageInner() {
     );
   }
 
-  const displayItems = searchResults ?? items;
+  const baseItems = searchResults ?? items;
+  const typeFilteredItems = typeFilter === "all" ? baseItems : baseItems.filter((item) => item.type === typeFilter);
+  const sortedItems = [...typeFilteredItems].sort((a, b) => {
+    if (sortBy === "name") return itemLabel(a).localeCompare(itemLabel(b));
+    if (sortBy === "size") {
+      const sizeOf = (item: KnowledgeItem) => (item.type === "file" ? Number((item as { fileSize?: number }).fileSize || 0) : -1);
+      return sizeOf(b) - sizeOf(a);
+    }
+    return new Date((b as { updatedAt: string }).updatedAt).getTime() - new Date((a as { updatedAt: string }).updatedAt).getTime();
+  });
+  const totalItems = sortedItems.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedItems = sortedItems.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   return (
-    <StandardPageLayout
-      header={
-        <PageHeader
-          title="Knowledge base"
-          subtitle="Manage project documents, folders, files, and AI memory."
-          breadcrumb={
-            <div className="flex items-center gap-1.5 text-[13px]">
-              <Link href={`/projects/${projectId}`} className="text-[var(--ink-400)] hover:text-[var(--ink-800)]">Projects</Link>
-              <span className="text-[var(--ink-300)]">/</span>
-              <span>Knowledge base</span>
-            </div>
-          }
-          actions={
-            <Menu
-              trigger={
-                <Button>
-                  <IconPlus size={16} /> New
-                </Button>
-              }
-            >
-              {(close) => (
+    // Full-bleed, full-height IDE-style workspace, same convention as the Test Case
+    // repository / Plan Details / Project Settings screens (`tc-fullbleed` makes the
+    // wrapping .tesbo-page drop its centered 1280px cap + padding).
+    <main className="tc-fullbleed flex flex-col pb-4 pr-4 pt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {topBarStartEl &&
+          createPortal(
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
+              {projectName && (
                 <>
-                  <MenuItem onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); close(); }}>
-                    <IconFolderPlus size={14} /> Create folder
-                  </MenuItem>
-                  <MenuItem onClick={() => { setCreateDocOpen(true); close(); }}>
-                    <IconFileText size={14} /> Create document
-                  </MenuItem>
-                  <MenuItem onClick={() => { setUploadOpen(true); close(); }}>
-                    <IconUpload size={14} /> Upload file
-                  </MenuItem>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                  >
+                    {projectName}
+                  </button>
+                  <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-            </Menu>
-          }
+              <span className="font-medium text-[var(--brand-primary)]">Knowledge base</span>
+            </nav>,
+            topBarStartEl
+          )}
+        {topBarEndEl &&
+          createPortal(
+            <div className="flex flex-wrap items-center gap-2">
+              {selectedFolderId && (
+                <a
+                  href={getKnowledgeFolderExportUrl(projectId, selectedFolderId)}
+                  className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
+                >
+                  <IconDownload size={13} stroke={1.75} />
+                  Export
+                </a>
+              )}
+              <Menu
+                trigger={
+                  <Button>
+                    <IconPlus size={16} /> New
+                  </Button>
+                }
+              >
+                {(close) => (
+                  <>
+                    <MenuItem onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); close(); }}>
+                      <IconFolderPlus size={14} /> Create folder
+                    </MenuItem>
+                    <MenuItem onClick={() => { setCreateDocOpen(true); close(); }}>
+                      <IconFileText size={14} /> Create document
+                    </MenuItem>
+                    <MenuItem onClick={() => { setUploadOpen(true); close(); }}>
+                      <IconUpload size={14} /> Upload file
+                    </MenuItem>
+                  </>
+                )}
+              </Menu>
+            </div>,
+            topBarEndEl
+          )}
+
+        <CreateFolderModal open={createFolderOpen} onClose={() => setCreateFolderOpen(false)} onCreate={handleCreateFolder} saving={saving} />
+        <CreateDocumentModal open={createDocOpen} onClose={() => setCreateDocOpen(false)} onCreate={handleCreateDocument} saving={saving} />
+        <UploadModal open={uploadOpen} onClose={() => setUploadOpen(false)} onUpload={handleUpload} uploading={uploading} />
+        <RenameFolderModal
+          open={!!renameTarget}
+          initialName={renameTarget?.name || ""}
+          onClose={() => setRenameTarget(null)}
+          onSave={handleRenameFolder}
+          saving={saving}
         />
-      }
-    >
-      <CreateFolderModal open={createFolderOpen} onClose={() => setCreateFolderOpen(false)} onCreate={handleCreateFolder} saving={saving} />
-      <CreateDocumentModal open={createDocOpen} onClose={() => setCreateDocOpen(false)} onCreate={handleCreateDocument} saving={saving} />
-      <UploadModal open={uploadOpen} onClose={() => setUploadOpen(false)} onUpload={handleUpload} uploading={uploading} />
-      <RenameFolderModal
-        open={!!renameTarget}
-        initialName={renameTarget?.name || ""}
-        onClose={() => setRenameTarget(null)}
-        onSave={handleRenameFolder}
-        saving={saving}
-      />
-      <MoveModal
-        open={!!moveTarget}
-        tree={tree}
-        excludeId={moveTarget?.excludeId}
-        onClose={() => setMoveTarget(null)}
-        onMove={handleMove}
-        saving={saving}
-      />
+        <MoveModal
+          open={!!moveTarget}
+          tree={tree}
+          excludeId={moveTarget?.excludeId}
+          onClose={() => setMoveTarget(null)}
+          onMove={handleMove}
+          saving={saving}
+        />
+        <FileViewerModal
+          projectId={projectId}
+          file={viewerFile && viewerFile.type === "file" ? (viewerFile as unknown as KnowledgeFile) : null}
+          onClose={() => setViewerFile(null)}
+        />
 
-      {error && (
-        <div className="flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
-          <span>{error}</span>
-          <button onClick={() => setError(null)}><IconX size={16} /></button>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[240px_1fr]">
-        {/* Left panel: folder tree */}
-        <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] p-2">
-          {tree && (
-            <FolderTreeNodeRow
-              node={tree}
-              depth={0}
-              selectedId={selectedFolderId}
-              onSelect={selectFolder}
-              onAction={handleFolderAction}
-              expanded={expanded}
-              toggleExpanded={toggleExpanded}
-            />
+        {/* Title + stats row */}
+        <div className="mb-3 flex shrink-0 flex-wrap items-start justify-between gap-4 pl-4">
+          <div>
+            <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">
+              Knowledge base
+            </h1>
+            <p className="mt-[3px] text-[13px] text-[var(--muted-soft)]">
+              {summary ? `${summary.total} item${summary.total === 1 ? "" : "s"} across ${summary.folders} folder${summary.folders === 1 ? "" : "s"}` : "Manage project documents, folders, files, and AI memory."}
+            </p>
+          </div>
+          {summary && (
+            <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--foreground)]">{summary.total}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--brand-primary)]">{summary.folders}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Folders</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--info)]">{summary.documents}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Docs</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--muted)]">{summary.files}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Files</div>
+              </div>
+            </div>
           )}
         </div>
 
-        {/* Center panel: content table */}
-        <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] p-4">
-            <div>
+        {error && (
+          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
+            <span>{error}</span>
+            <button onClick={() => setError(null)}><IconX size={16} /></button>
+          </div>
+        )}
+
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
+          {/* ── Folder tree panel ── */}
+          <aside className={`flex shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] transition-[width] duration-150 ${treePanelOpen ? "w-[260px]" : "w-[38px]"}`}>
+            <nav className="flex min-h-0 flex-1 flex-col">
+              <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${treePanelOpen ? "justify-between" : "justify-center"}`}>
+                {treePanelOpen && (
+                  <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
+                    <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                    Folders
+                    {summary && (
+                      <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                        {summary.folders}
+                      </span>
+                    )}
+                  </p>
+                )}
+                <div className="flex items-center gap-0.5">
+                  {treePanelOpen && (
+                    <button
+                      type="button"
+                      title="New folder"
+                      onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
+                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    >
+                      <IconPlus size={14} stroke={2.5} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    title={treePanelOpen ? "Collapse folders" : "Show folders"}
+                    onClick={toggleTreePanel}
+                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                  >
+                    {treePanelOpen ? (
+                      <IconLayoutSidebarLeftCollapse size={14} stroke={1.75} />
+                    ) : (
+                      <IconLayoutSidebarLeftExpand size={14} stroke={1.75} />
+                    )}
+                  </button>
+                </div>
+              </div>
+              {treePanelOpen && (
+                <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                  {tree && (
+                    <FolderTreeNodeRow
+                      node={tree}
+                      depth={0}
+                      selectedId={selectedFolderId}
+                      onSelect={selectFolder}
+                      onAction={handleFolderAction}
+                      expanded={expanded}
+                      toggleExpanded={toggleExpanded}
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
+                    className="mt-2 flex w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                  >
+                    <IconPlus size={13} stroke={2} /> New folder
+                  </button>
+                </div>
+              )}
+            </nav>
+          </aside>
+
+          {/* ── Content panel ── */}
+          <div className="flex min-h-0 flex-1 flex-col">
+            {/* Folder breadcrumb + name + count */}
+            <div className="shrink-0 border-b border-[var(--border)] px-4 py-3">
               <div className="flex items-center gap-1 text-[12px] text-[var(--muted)]">
                 {breadcrumb.map((b, i) => (
                   <span key={b.id} className="flex items-center gap-1">
@@ -989,145 +1005,219 @@ function KnowledgeBasePageInner() {
                   </span>
                 ))}
               </div>
-              <h2 className="text-[16px] font-semibold text-[var(--foreground)]">{folderName}</h2>
+              <h2 className="text-[15px] font-semibold text-[var(--foreground)]">{folderName}</h2>
               <p className="text-[12px] text-[var(--muted)]">{items.length} item{items.length !== 1 ? "s" : ""}</p>
             </div>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                setSearchQuery(searchInput.trim());
-              }}
-              className="flex items-center gap-2"
-            >
-              <div className="relative">
-                <IconSearch size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted-soft)]" />
-                <Input
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  placeholder="Search knowledge base…"
-                  className="w-64 pl-8"
+
+            {/* Filter bar */}
+            <div className="flex min-h-[48px] shrink-0 flex-wrap items-center gap-2 border-b border-[var(--border)] px-4 py-2">
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setSearchQuery(searchInput.trim());
+                }}
+                className="flex min-w-[200px] max-w-[300px] flex-1 items-center gap-2"
+              >
+                <div className="relative w-full">
+                  <IconSearch size={15} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--muted-soft)]" />
+                  <Input
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                    placeholder="Search knowledge base…"
+                    className="w-full pl-8"
+                  />
+                </div>
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => { setSearchQuery(""); setSearchInput(""); }}
+                    className="shrink-0 text-[12px] text-[var(--brand-primary)] hover:underline"
+                  >
+                    Clear
+                  </button>
+                )}
+              </form>
+              <div className="ml-auto flex items-center gap-1.5">
+                <select
+                  value={typeFilter}
+                  onChange={(e) => { setTypeFilter(e.target.value as TypeFilter); setPage(1); }}
+                  className="h-[30px] rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--ink-600)] outline-none"
+                >
+                  <option value="all">All types</option>
+                  <option value="folder">Folder</option>
+                  <option value="document">Document</option>
+                  <option value="file">File</option>
+                </select>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SortOption)}
+                  className="h-[30px] rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] text-[var(--ink-600)] outline-none"
+                >
+                  <option value="updated">Sort: Updated</option>
+                  <option value="name">Sort: Name</option>
+                  <option value="size">Sort: Size</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Table */}
+            {itemsLoading ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-[var(--muted)]">Loading…</div>
+            ) : pagedItems.length === 0 ? (
+              <div className="flex min-h-0 flex-1 items-center justify-center p-6">
+                <EmptyStateBlock
+                  title={searchQuery ? "No results found" : totalItems === 0 && typeFilter === "all" ? "No knowledge added yet" : "No items match your filters"}
+                  description={
+                    searchQuery
+                      ? "Try a different search term."
+                      : totalItems === 0 && typeFilter === "all"
+                        ? "Create folders, documents, and files to organize project knowledge."
+                        : "Try a different type filter."
+                  }
+                  action={
+                    !searchQuery && totalItems === 0 && typeFilter === "all" && (
+                      <div className="flex justify-center gap-2">
+                        <Button variant="secondary" onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}>Create folder</Button>
+                        <Button variant="secondary" onClick={() => setCreateDocOpen(true)}>Create document</Button>
+                        <Button variant="secondary" onClick={() => setUploadOpen(true)}>Upload file</Button>
+                      </div>
+                    )
+                  }
                 />
               </div>
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => { setSearchQuery(""); setSearchInput(""); }}
-                  className="text-[12px] text-[var(--brand-primary)] hover:underline"
-                >
-                  Clear
-                </button>
-              )}
-            </form>
-          </div>
-
-          {itemsLoading ? (
-            <div className="p-10 text-center text-[var(--muted)]">Loading…</div>
-          ) : displayItems.length === 0 ? (
-            <div className="p-6">
-              <EmptyStateBlock
-                title={searchQuery ? "No results found" : "No knowledge added yet"}
-                description={searchQuery ? "Try a different search term." : "Create folders, documents, and files to organize project knowledge."}
-                action={
-                  !searchQuery && (
-                    <div className="flex justify-center gap-2">
-                      <Button variant="secondary" onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}>Create folder</Button>
-                      <Button variant="secondary" onClick={() => setCreateDocOpen(true)}>Create document</Button>
-                      <Button variant="secondary" onClick={() => setUploadOpen(true)}>Upload file</Button>
-                    </div>
-                  )
-                }
-              />
-            </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-[13px]">
-                <thead>
-                  <tr className="border-b border-[var(--border)] bg-[var(--surface-secondary)]">
-                    <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Name</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Type</th>
-                    {searchQuery && <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Folder path</th>}
-                    <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Updated by</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Last updated</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Size</th>
-                    <th className="px-4 py-2.5 text-right font-medium text-[var(--muted-soft)]">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayItems.map((item) => {
-                    const isAiMemory = item.type === "document" && (item as { documentType?: string }).documentType === "ai_memory";
-                    return (
-                      <tr
-                        key={`${item.type}-${item.id}`}
-                        className="border-b border-[var(--border-subtle)] last:border-0 hover:bg-[var(--surface-secondary)]/40"
-                      >
-                        <td className="px-4 py-2.5">
-                          <button onClick={() => openItem(item)} className="flex items-center gap-2 text-left hover:underline">
-                            {itemIcon(item)}
-                            <span className="truncate max-w-[280px] font-medium text-[var(--foreground)]">{itemLabel(item)}</span>
-                          </button>
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <div className="flex items-center gap-1.5">
-                            <span className="capitalize text-[var(--muted)]">{item.type}</span>
-                            {isAiMemory && (
-                              <StatusChip tone={aiMemoryTone((item as { status?: string }).status || "draft")} dot>
-                                {(item as { status?: string }).status === "approved" ? "Approved" : (item as { status?: string }).status === "rejected" ? "Rejected" : "AI Generated"}
-                              </StatusChip>
-                            )}
-                          </div>
-                        </td>
-                        {searchQuery && (
-                          <td className="px-4 py-2.5 text-[var(--muted)]">
-                            {((item as unknown as { breadcrumb?: KnowledgeBreadcrumbEntry[] }).breadcrumb || []).map((b) => b.name).join(" / ")}
+            ) : (
+              <div className="min-h-0 flex-1 overflow-auto">
+                <table className="w-full text-[13px]">
+                  <thead className="sticky top-0 z-[1]">
+                    <tr className="border-b border-[var(--border)] bg-[var(--surface-secondary)]">
+                      <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Name</th>
+                      <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Type</th>
+                      {searchQuery && <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Folder path</th>}
+                      <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Updated by</th>
+                      <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Last updated</th>
+                      <th className="px-4 py-2.5 text-left font-medium text-[var(--muted-soft)]">Size</th>
+                      <th className="px-4 py-2.5 text-right font-medium text-[var(--muted-soft)]">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pagedItems.map((item) => {
+                      const isAiMemory = item.type === "document" && (item as { documentType?: string }).documentType === "ai_memory";
+                      return (
+                        <tr
+                          key={`${item.type}-${item.id}`}
+                          className="border-b border-[var(--border-subtle)] last:border-0 hover:bg-[var(--surface-secondary)]/40"
+                        >
+                          <td className="px-4 py-2.5">
+                            <button onClick={() => openItem(item)} className="flex items-center gap-2 text-left hover:underline">
+                              {itemIcon(item)}
+                              <span className="truncate max-w-[280px] font-medium text-[var(--foreground)]">{itemLabel(item)}</span>
+                            </button>
                           </td>
-                        )}
-                        <td className="px-4 py-2.5 text-[var(--muted)]">{(item as { updatedByName?: string }).updatedByName || "—"}</td>
-                        <td className="px-4 py-2.5 text-[var(--muted)]">{formatDate((item as { updatedAt: string }).updatedAt)}</td>
-                        <td className="px-4 py-2.5 text-[var(--muted)]">{item.type === "file" ? formatFileSize((item as { fileSize?: number }).fileSize) : "—"}</td>
-                        <td className="px-4 py-2.5 text-right">
-                          <Menu
-                            align="right"
-                            trigger={
-                              <button className="rounded p-1 hover:bg-[var(--surface-tertiary)]"><IconDots size={16} /></button>
-                            }
-                          >
-                            {(close) => (
-                              <>
-                                <MenuItem onClick={() => { openItem(item); close(); }}>
-                                  <IconArrowRight size={14} /> Open
-                                </MenuItem>
-                                {item.type === "document" && (
-                                  <MenuItem onClick={() => { handleDuplicateDocument(item.id); close(); }}>
-                                    <IconCopy size={14} /> Duplicate
+                          <td className="px-4 py-2.5">
+                            <div className="flex items-center gap-1.5">
+                              <span className="capitalize text-[var(--muted)]">{item.type}</span>
+                              {isAiMemory && (
+                                <StatusChip tone={aiMemoryTone((item as { status?: string }).status || "draft")} dot>
+                                  {(item as { status?: string }).status === "approved" ? "Approved" : (item as { status?: string }).status === "rejected" ? "Rejected" : "AI Generated"}
+                                </StatusChip>
+                              )}
+                            </div>
+                          </td>
+                          {searchQuery && (
+                            <td className="px-4 py-2.5 text-[var(--muted)]">
+                              {((item as unknown as { breadcrumb?: KnowledgeBreadcrumbEntry[] }).breadcrumb || []).map((b) => b.name).join(" / ")}
+                            </td>
+                          )}
+                          <td className="px-4 py-2.5 text-[var(--muted)]">{(item as { updatedByName?: string }).updatedByName || "—"}</td>
+                          <td className="px-4 py-2.5 text-[var(--muted)]">{formatDate((item as { updatedAt: string }).updatedAt)}</td>
+                          <td className="px-4 py-2.5 text-[var(--muted)]">{item.type === "file" ? formatFileSize((item as { fileSize?: number }).fileSize) : "—"}</td>
+                          <td className="px-4 py-2.5 text-right">
+                            <Menu
+                              align="right"
+                              trigger={
+                                <button className="rounded p-1 hover:bg-[var(--surface-tertiary)]"><IconDots size={16} /></button>
+                              }
+                            >
+                              {(close) => (
+                                <>
+                                  <MenuItem onClick={() => { openItem(item); close(); }}>
+                                    <IconArrowRight size={14} /> Open
                                   </MenuItem>
-                                )}
-                                {item.type === "file" && (
-                                  <MenuItem onClick={() => { window.open(getKnowledgeFileDownloadUrl(projectId, item.id), "_blank"); close(); }}>
-                                    <IconDownload size={14} /> Download
+                                  {item.type === "document" && (
+                                    <MenuItem onClick={() => { handleDuplicateDocument(item.id); close(); }}>
+                                      <IconCopy size={14} /> Duplicate
+                                    </MenuItem>
+                                  )}
+                                  {item.type === "file" && (
+                                    <MenuItem onClick={() => { window.open(getKnowledgeFileDownloadUrl(projectId, item.id), "_blank"); close(); }}>
+                                      <IconDownload size={14} /> Download
+                                    </MenuItem>
+                                  )}
+                                  {item.type !== "folder" && (
+                                    <MenuItem onClick={() => { setMoveTarget({ kind: item.type, id: item.id }); close(); }}>
+                                      <IconArrowRight size={14} /> Move
+                                    </MenuItem>
+                                  )}
+                                  <MenuItem danger onClick={() => { handleDeleteItem(item); close(); }}>
+                                    <IconTrash size={14} /> Delete
                                   </MenuItem>
-                                )}
-                                {item.type !== "folder" && (
-                                  <MenuItem onClick={() => { setMoveTarget({ kind: item.type, id: item.id }); close(); }}>
-                                    <IconArrowRight size={14} /> Move
-                                  </MenuItem>
-                                )}
-                                <MenuItem danger onClick={() => { handleDeleteItem(item); close(); }}>
-                                  <IconTrash size={14} /> Delete
-                                </MenuItem>
-                              </>
-                            )}
-                          </Menu>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+                                </>
+                              )}
+                            </Menu>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {/* Pagination footer */}
+            {!itemsLoading && totalItems > 0 && (
+              <div className="flex h-11 shrink-0 items-center justify-between border-t border-[var(--border)] bg-[var(--surface)] px-4 text-[12px]">
+                <span className="text-[var(--muted)]">
+                  <span className="font-medium text-[var(--foreground)]">{totalItems}</span> {totalItems === 1 ? "result" : "results"}
+                  {totalPages > 1 && (
+                    <>
+                      {" · "}page <span className="font-medium text-[var(--foreground)]">{safePage}</span> of{" "}
+                      <span className="font-medium text-[var(--foreground)]">{totalPages}</span>
+                    </>
+                  )}
+                </span>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={pageSize}
+                    onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+                    className="h-7 rounded-[5px] border border-[var(--border)] bg-[var(--background)] px-2 text-[12px] text-[var(--ink-600)] outline-none"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((n) => (
+                      <option key={n} value={n}>{n} / page</option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                    disabled={safePage === 1}
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPage((prev) => (prev >= totalPages ? prev : prev + 1))}
+                    disabled={safePage >= totalPages}
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
-    </StandardPageLayout>
+    </main>
   );
 }
 

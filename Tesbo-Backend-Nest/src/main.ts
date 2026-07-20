@@ -6,8 +6,10 @@ import type { Request, Response, NextFunction } from "express";
 import { AppModule } from "./app.module";
 import { AppConfigService } from "./config/app-config.service";
 import { HttpExceptionFilter } from "./common/http-exception.filter";
+import { assertEncryptionKeyConfigured } from "./common/crypto.util";
 
 async function bootstrap() {
+  assertEncryptionKeyConfigured();
   const app = await NestFactory.create(AppModule, { cors: false });
   const config = app.get(AppConfigService);
 

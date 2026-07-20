@@ -19,13 +19,15 @@ ENV PORT=3000
 ARG NEXT_PUBLIC_API_URL=http://localhost:7000
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 
-COPY --from=deps /app/package.json /app/package-lock.json ./
-COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/public ./public
-COPY --from=deps /app/.next ./.next
-COPY --from=deps /app/instrumentation.mjs ./instrumentation.mjs
+COPY --from=deps --chown=node:node /app/package.json /app/package-lock.json ./
+COPY --from=deps --chown=node:node /app/node_modules ./node_modules
+COPY --from=deps --chown=node:node /app/public ./public
+COPY --from=deps --chown=node:node /app/.next ./.next
+COPY --from=deps --chown=node:node /app/instrumentation.mjs ./instrumentation.mjs
 
 ENV NODE_OPTIONS="--import ./instrumentation.mjs"
+
+USER node
 
 EXPOSE 3000
 
