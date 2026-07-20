@@ -2410,6 +2410,21 @@ export function getKnowledgeFolderTree(projectId: string): Promise<KnowledgeFold
   return api<KnowledgeFolderTreeNode>(`/api/projects/${projectId}/knowledge-base/folders/tree`);
 }
 
+export interface KnowledgeBaseSummary {
+  folders: number;
+  documents: number;
+  files: number;
+  total: number;
+}
+
+export function getKnowledgeBaseSummary(projectId: string): Promise<KnowledgeBaseSummary> {
+  return api<KnowledgeBaseSummary>(`/api/projects/${projectId}/knowledge-base/summary`);
+}
+
+export function getKnowledgeFolderExportUrl(projectId: string, folderId: string): string {
+  return `${API_BASE}/api/projects/${projectId}/knowledge-base/folders/${folderId}/export`;
+}
+
 export function getKnowledgeFolder(
   projectId: string,
   folderId: string

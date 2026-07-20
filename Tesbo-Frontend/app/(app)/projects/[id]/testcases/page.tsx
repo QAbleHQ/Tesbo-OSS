@@ -643,6 +643,22 @@ export default function TestCasesPage() {
     }
   }
 
+  async function handleUnarchivePanelTestCase() {
+    if (!panelTestcaseId || panelSaving) return;
+    setPanelSaving(true);
+    setPanelError(null);
+    try {
+      await updateTestCase(projectId, panelTestcaseId, { status: "Draft" });
+      await refreshData();
+      await openViewPanel(panelTestcaseId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to unarchive test case.";
+      setPanelError(message);
+    } finally {
+      setPanelSaving(false);
+    }
+  }
+
   async function handlePanelSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (panelMode !== "create" && panelMode !== "edit") return;
@@ -1659,7 +1675,11 @@ export default function TestCasesPage() {
                   </div>
                   {panelMode === "edit" && panelTestcaseId && (
                     <div className="flex items-center gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning)]">Archive</Button>
+                      {status === "Archived" ? (
+                        <Button variant="secondary" size="sm" onClick={() => void handleUnarchivePanelTestCase()} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">Unarchive</Button>
+                      ) : (
+                        <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning)]">Archive</Button>
+                      )}
                       <Button variant="destructive" size="sm" onClick={() => void handleDeletePanelTestCase()} disabled={panelSaving}>Delete</Button>
                     </div>
                   )}

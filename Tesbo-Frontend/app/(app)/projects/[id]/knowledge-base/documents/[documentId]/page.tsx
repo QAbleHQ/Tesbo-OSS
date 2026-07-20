@@ -35,6 +35,14 @@ import RichTextEditor from "@/components/knowledge-base/RichTextEditor";
 
 type SaveStatus = "saved" | "saving" | "unsaved";
 
+const DOC_TYPE_LABELS: Record<string, string> = {
+  general: "General",
+  api_note: "API Note",
+  release_note: "Release Note",
+  requirement_note: "Requirement",
+  test_data_note: "Test Data",
+};
+
 function normalizeRole(role: string): "owner" | "manager" | "qa_engineer" {
   const n = (role ?? "").trim().toLowerCase().replace(/-/g, "_").replace(/ /g, "_");
   if (n === "owner") return "owner";
@@ -281,6 +289,11 @@ export default function KnowledgeDocumentPage() {
               {doc.status === "approved" ? "Approved memory" : doc.status === "rejected" ? "Rejected" : "AI Generated"}
             </StatusChip>
           )}
+          {!isAiMemory && (
+            <span className="rounded-[4px] bg-[var(--surface-secondary)] px-2 py-0.5 font-mono text-[11px] font-medium text-[var(--accent-light)]">
+              {DOC_TYPE_LABELS[doc.documentType] || "Document"}
+            </span>
+          )}
           <span className="text-[12px] text-[var(--muted-soft)]">
             {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Unsaved changes" : "Saved"}
           </span>
@@ -311,7 +324,7 @@ export default function KnowledgeDocumentPage() {
 
       {isAiMemory && canApprove && doc.status !== "approved" && doc.status !== "rejected" && (
         <div className="mb-4 flex items-center justify-between rounded-[10px] border border-[var(--ai-border)] bg-[var(--ai-soft)] px-4 py-3">
-          <p className="text-[13px] text-[var(--ai-primary)]">This is AI-generated memory. Review before it's trusted as context.</p>
+          <p className="text-[13px] text-[var(--ai-primary)]">This is AI-generated memory. Review before it&apos;s trusted as context.</p>
           <div className="flex gap-2">
             <Button size="sm" variant="secondary" onClick={handleReject}><IconX size={14} /> Reject</Button>
             <Button size="sm" onClick={handleApprove}><IconCheck size={14} /> Approve</Button>

@@ -357,7 +357,7 @@ function SidebarContent() {
 
       {/* Footer */}
       <div className="space-y-1 border-t border-[var(--glass-border)] p-2.5">
-        {!isInSettings && (
+        {!isInSettings && !isInProject && (
           <NavLink
             href="/settings"
             label="Workspace settings"

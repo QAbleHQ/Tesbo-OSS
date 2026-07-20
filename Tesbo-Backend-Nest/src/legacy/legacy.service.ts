@@ -1280,7 +1280,10 @@ export class LegacyService implements OnModuleInit {
     }
     if (query.search) {
       values.push(`%${String(query.search).toLowerCase()}%`);
-      filters.push("(lower(title) LIKE $" + values.length + " OR lower(coalesce(description, '')) LIKE $" + values.length + ")");
+      const p = values.length;
+      filters.push(
+        `(lower(title) LIKE $${p} OR lower(coalesce(description, '')) LIKE $${p} OR lower(coalesce(external_id, '')) LIKE $${p} OR lower(coalesce(type, '')) LIKE $${p})`
+      );
     }
     const where = filters.join(" AND ");
     const total = await this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases WHERE ${where}`, values);
@@ -3144,8 +3147,14 @@ export class LegacyService implements OnModuleInit {
     for (const file of files.rows) {
       const folderPath = zipPathByFolderId.get(file.folder_id) || "";
       const entryName = sanitizeZipEntryName(file.original_file_name);
-      const buffer = await this.storage.getBuffer(file.storage_key);
-      archive.append(buffer, { name: folderPath ? `${folderPath}/${entryName}` : entryName });
+      // Best-effort per file: a storage object that's missing/unreachable (e.g. deleted out of
+      // band from the DB row) shouldn't fail the whole export — skip just that file.
+      try {
+        const buffer = await this.storage.getBuffer(file.storage_key);
+        archive.append(buffer, { name: folderPath ? `${folderPath}/${entryName}` : entryName });
+      } catch (error) {
+        this.logger.warn(`Skipping file in knowledge-base export, storage object unreadable (${file.storage_key}): ${error}`);
+      }
     }
 
     await archive.finalize();
