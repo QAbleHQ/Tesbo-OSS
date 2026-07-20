@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import {
   IconArrowRight,
   IconBug,
@@ -19,6 +20,10 @@ import {
   IconDeviceDesktop,
   IconDownload,
   IconFilterOff,
+  IconLayoutGrid,
+  IconLayoutSidebarLeftCollapse,
+  IconLayoutSidebarLeftExpand,
+  IconList,
   IconPlayerPlay,
   IconPlus,
   IconRefresh,
@@ -39,6 +44,8 @@ import {
   listSuites,
   listProjectMembers,
   listPlans,
+  listTestRuns,
+  getProject,
   toggleTestRunShare,
   createBug,
   addBugLink,
@@ -52,6 +59,7 @@ import {
   type SuiteNode,
   type BugItem,
   type IssueSearchResult,
+  type TestRunListItem,
 } from "@/lib/api";
 import { Button, StatusChip, Input, Select, Textarea, Drawer } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
@@ -59,6 +67,7 @@ import IssuePickerModal from "@/components/IssuePickerModal";
 import TrackingDestinationField, { type TrackingDestination } from "@/components/TrackingDestinationField";
 import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
 import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
+import { useTopBarSlots } from "@/components/TopBarSlots";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 
@@ -68,6 +77,7 @@ const RUN_TABS = ["All", "Passed", "Failed", "Blocked", "Skipped", "Pending"] as
 type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
 const AVATAR_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
 
 /* ───── Status tone helpers ───── */
 function statusToTone(status: string) {
@@ -89,6 +99,19 @@ function runStatusToTone(status: string) {
     Planning: "warning",
   };
   return map[status] ?? "neutral";
+}
+
+function runStatusDotColor(status: string): string {
+  const map: Record<string, string> = {
+    Completed: "var(--success)",
+    "In Progress": "var(--info)",
+    Planning: "var(--warning)",
+  };
+  return map[status] ?? "var(--muted-soft)";
+}
+
+function StatusDot({ color }: { color: string }) {
+  return <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} />;
 }
 
 /* ───── Step parsing (for the test case detail panel) ───── */
@@ -329,11 +352,21 @@ export default function TestRunDetailPage() {
   const projectId = params.id as string;
   const cycleId = params.cycleId as string;
 
+  const { startEl: topBarStartEl, endEl: topBarEndEl, setFilled: setTopBarFilled } = useTopBarSlots();
+  useEffect(() => {
+    setTopBarFilled(true);
+    return () => setTopBarFilled(false);
+  }, [setTopBarFilled]);
+
   const [run, setRun] = useState<TestRunDetail | null>(null);
   const [executions, setExecutions] = useState<ExecutionItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [memberNames, setMemberNames] = useState<Record<string, string>>({});
   const [planNames, setPlanNames] = useState<Record<string, string>>({});
+  const [projectName, setProjectName] = useState("");
+  const [allRuns, setAllRuns] = useState<TestRunListItem[]>([]);
+
+  const [runPanelOpen, setRunPanelOpen] = useState(true);
 
   /* test cases table: tab filter, search, pagination */
   const [activeTab, setActiveTab] = useState<RunTab>("All");
@@ -395,16 +428,26 @@ export default function TestRunDetailPage() {
   const [bugBetterbugsUrl, setBugBetterbugsUrl] = useState("");
   const [bugSaving, setBugSaving] = useState(false);
   const load = useCallback(() => {
-    Promise.all([getTestRun(cycleId), listCycleExecutions(cycleId)])
-      .then(([r, e]) => {
+    Promise.all([getTestRun(cycleId), listCycleExecutions(cycleId), getProject(projectId), listTestRuns(projectId)])
+      .then(([r, e, project, runsList]) => {
         setRun(r);
         setExecutions(e);
         setShareEnabled(r.shareEnabled ?? false);
         setShareToken(r.shareToken ?? null);
+        setProjectName(String(project.name || ""));
+        setAllRuns(runsList);
       })
       .catch(() => router.replace(`/projects/${projectId}/cycles`))
       .finally(() => setLoading(false));
   }, [cycleId, projectId, router]);
+
+  function toggleRunPanel() {
+    setRunPanelOpen((prev) => {
+      const next = !prev;
+      localStorage.setItem(PANEL_STORAGE_KEY, next ? "open" : "closed");
+      return next;
+    });
+  }
 
   useEffect(() => {
     getJiraStatus(projectId).then((s) => setJiraConnected(s.connected)).catch(() => setJiraConnected(false));
@@ -413,6 +456,8 @@ export default function TestRunDetailPage() {
 
 
   useEffect(() => {
+    const saved = localStorage.getItem(PANEL_STORAGE_KEY);
+    if (saved === "closed") setRunPanelOpen(false);
     authMe().then((me) => {
       if (!me) {
         router.replace("/login");
@@ -776,25 +821,42 @@ export default function TestRunDetailPage() {
   const planName = run.planId ? planNames[run.planId] : null;
 
   return (
-    <div className="tr-detail-fullwidth min-h-screen bg-[var(--background)]">
-      <main className="px-8 py-6">
-        {/* ───── Breadcrumb ───── */}
-        <div className="mb-4 flex items-center gap-2 text-[13px]">
-          <Link href={`/projects/${projectId}/cycles`} className="font-medium hover:underline" style={{ color: "var(--accent-light)" }}>
-            Test Runs
-          </Link>
-          <IconChevronRight size={13} className="text-[var(--muted-soft)]" />
-          <span className="font-medium text-[var(--foreground)]">{run.name}</span>
-        </div>
-
-        {/* ───── Run header card ───── */}
-        <div className="mb-5 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-6">
-          <div className="flex flex-wrap items-center gap-3">
-            <RunAvatar name={run.name} size={40} />
-            <h1 className="min-w-0 flex-1 truncate text-2xl font-semibold text-[var(--foreground)]">{run.name}</h1>
-            <StatusChip tone={runStatusToTone(run.status)}>{run.status}</StatusChip>
-            {ownerName && <MemberAvatar name={ownerName} size={28} />}
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
+    // Full-bleed, full-height workspace: `tc-fullbleed` drops the wrapping .tesbo-page's
+    // centered 1280px cap so this fills the content region below the 3.5rem TopBar,
+    // matching the Test Plan detail workspace pattern.
+    <main className="tc-fullbleed flex flex-col pb-4 pr-4 pt-4" style={{ height: "calc(100vh - 3.5rem)" }}>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* TopBar takeover: breadcrumb (start) + actions (end) */}
+        {topBarStartEl &&
+          createPortal(
+            <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
+              {projectName && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => router.push("/projects")}
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                  >
+                    {projectName}
+                  </button>
+                  <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
+                </>
+              )}
+              <button
+                type="button"
+                onClick={() => router.push(`/projects/${projectId}/cycles`)}
+                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+              >
+                Test Runs
+              </button>
+              <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
+              <span className="truncate font-medium text-[var(--brand-primary)]">{run.name}</span>
+            </nav>,
+            topBarStartEl,
+          )}
+        {topBarEndEl &&
+          createPortal(
+            <div className="flex flex-wrap items-center gap-2">
               {isPlanning && (
                 <Button onClick={() => handleRunStatusChange("In Progress")}>
                   <IconPlayerPlay size={14} />
@@ -828,66 +890,156 @@ export default function TestRunDetailPage() {
                 target="_blank"
                 rel="noreferrer"
                 style={{ color: "var(--ink-600)" }}
-                className="inline-flex h-9 items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] px-4 text-[13px] font-medium hover:bg-[var(--ink-100)]"
+                className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium transition-colors hover:bg-[var(--ink-100)]"
               >
-                <IconDownload size={14} />
+                <IconDownload size={13} stroke={1.75} />
                 Export CSV
               </a>
-            </div>
+            </div>,
+            topBarEndEl,
+          )}
+
+        {/* Page header: title + status + owner + description + meta */}
+        <div className="mb-3 shrink-0 pl-4">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <RunAvatar name={run.name} size={28} />
+            <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">{run.name}</h1>
+            <StatusChip tone={runStatusToTone(run.status)}>{run.status}</StatusChip>
+            {ownerName && <MemberAvatar name={ownerName} size={24} />}
           </div>
-
-          {run.description && <p className="mt-2 text-[13px] text-[var(--muted)]">{run.description}</p>}
-
-          {/* Metadata row */}
-          <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12px] text-[var(--muted-soft)]">
+          {run.description && <p className="mt-1 text-[13px] text-[var(--muted-soft)]">{run.description}</p>}
+          <div className="mt-2.5 flex flex-wrap items-center gap-4">
             {planName && (
-              <span className="flex items-center gap-1.5">
-                <IconClipboardList size={13} /> <span className="text-[var(--muted)]">{planName}</span>
+              <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
+                <IconClipboardList size={13} stroke={1.75} className="text-[var(--muted-soft)]" /> {planName}
               </span>
             )}
             {run.environment && (
-              <span className="flex items-center gap-1.5">
-                <IconDeviceDesktop size={13} /> {run.environment}
+              <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
+                <IconDeviceDesktop size={13} stroke={1.75} className="text-[var(--muted-soft)]" /> {run.environment}
               </span>
             )}
             {run.buildVersion && (
-              <span className="flex items-center gap-1.5">
-                <IconTag size={13} /> {run.buildVersion}
+              <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
+                <IconTag size={13} stroke={1.75} className="text-[var(--muted-soft)]" /> {run.buildVersion}
               </span>
             )}
-            <span className="flex items-center gap-1.5">
-              <IconClock size={13} /> <span className="font-mono">{formatDuration(run.startedAt, run.endedAt)}</span>
+            <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
+              <IconClock size={13} stroke={1.75} className="text-[var(--muted-soft)]" /> <span className="font-mono">{formatDuration(run.startedAt, run.endedAt)}</span>
             </span>
-            <span className="flex items-center gap-1.5">
-              <IconCalendarEvent size={13} /> Created {formatDate(run.createdAt)}
+            <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
+              <IconCalendarEvent size={13} stroke={1.75} className="text-[var(--muted-soft)]" /> Created {formatDate(run.createdAt)}
             </span>
-          </div>
-
-          <div className="my-5 h-px bg-[var(--border)]" />
-
-          {/* Stat pills + progress */}
-          <div className="flex flex-wrap items-center gap-3">
-            <StatPill icon={<IconClipboardCheck size={13} />} label="Total" value={stats.total} />
-            <StatPill icon={<IconCircleCheck size={13} />} label="Passed" value={stats.passed} tone="success" />
-            <StatPill icon={<IconCircleX size={13} />} label="Failed" value={stats.failed} tone="error" />
-            <StatPill icon={<IconCircleMinus size={13} />} label="Blocked" value={stats.blocked} tone="warning" />
-            <StatPill icon={<IconCircleDashed size={13} />} label="Skipped" value={stats.skipped} />
-            <StatPill icon={<IconClock size={13} />} label="Pending" value={stats.pending} />
-
-            <div className="min-w-[160px] flex-1">
-              <div className="mb-1.5 flex items-center justify-between">
-                <span className="text-[12px] text-[var(--muted-soft)]">Progress</span>
-                <span className="text-[12px] font-semibold" style={{ color: "var(--success-foreground)" }}>
-                  {passRate}% pass rate
-                </span>
-              </div>
-              <RunProgressBar passed={stats.passed} failed={stats.failed} other={stats.blocked + stats.skipped + stats.pending} total={stats.total} />
-            </div>
           </div>
         </div>
 
-        {/* ───── Test Cases section ───── */}
-        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
+        {/* Body: runs switcher panel + detail content */}
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
+          {/* ── Runs switcher panel ── */}
+          <aside className={`flex shrink-0 flex-col border-r border-[var(--border)] bg-[var(--surface)] transition-[width] duration-150 ${runPanelOpen ? "w-[220px]" : "w-[38px]"}`}>
+            <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${runPanelOpen ? "justify-between" : "justify-center"}`}>
+              {runPanelOpen && (
+                <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
+                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                  Runs
+                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                    {allRuns.length}
+                  </span>
+                </p>
+              )}
+              <div className="flex items-center gap-0.5">
+                {runPanelOpen && (
+                  <button
+                    type="button"
+                    title="New test run"
+                    onClick={() => router.push(`/projects/${projectId}/cycles?create=1`)}
+                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                  >
+                    <IconPlus size={14} stroke={2.5} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  title={runPanelOpen ? "Collapse runs" : "Show runs"}
+                  onClick={toggleRunPanel}
+                  className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                >
+                  {runPanelOpen ? <IconLayoutSidebarLeftCollapse size={14} stroke={1.75} /> : <IconLayoutSidebarLeftExpand size={14} stroke={1.75} />}
+                </button>
+              </div>
+            </div>
+
+            {runPanelOpen && (
+              <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                <button
+                  type="button"
+                  onClick={() => router.push(`/projects/${projectId}/cycles`)}
+                  className="mb-1 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] text-[var(--ink-600)] transition-colors hover:bg-[var(--surface-secondary)]"
+                >
+                  <span className="flex items-center gap-1.5"><IconList size={14} stroke={1.75} className="text-[var(--muted)]" />All runs</span>
+                  <span className="font-mono text-[11px] text-[var(--muted)]">{allRuns.length}</span>
+                </button>
+
+                <div className="mx-1 my-1.5 h-px bg-[var(--border)]" />
+
+                {allRuns.map((r) => {
+                  const isActive = r.id === cycleId;
+                  return (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => router.push(`/projects/${projectId}/cycles/${r.id}`)}
+                      className={`mb-0.5 flex h-8 w-full items-center gap-2 rounded-[6px] px-2 text-left transition-colors ${isActive ? "bg-[var(--brand-soft)]" : "hover:bg-[var(--surface-secondary)]"}`}
+                    >
+                      <StatusDot color={runStatusDotColor(r.status)} />
+                      <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
+                        {r.name}
+                      </span>
+                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                        {r.totalCases}
+                      </span>
+                    </button>
+                  );
+                })}
+
+                <button
+                  type="button"
+                  onClick={() => router.push(`/projects/${projectId}/cycles?create=1`)}
+                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                >
+                  <IconPlus size={13} stroke={1.75} />
+                  New test run
+                </button>
+              </div>
+            )}
+          </aside>
+
+          {/* ── Detail content ── */}
+          <div className="min-h-0 flex-1 overflow-y-auto p-6">
+            {/* Stat pills + progress */}
+            <section className="mb-5 rounded-[10px] border border-[var(--border)] p-5">
+              <div className="flex flex-wrap items-center gap-3">
+                <StatPill icon={<IconClipboardCheck size={13} />} label="Total" value={stats.total} />
+                <StatPill icon={<IconCircleCheck size={13} />} label="Passed" value={stats.passed} tone="success" />
+                <StatPill icon={<IconCircleX size={13} />} label="Failed" value={stats.failed} tone="error" />
+                <StatPill icon={<IconCircleMinus size={13} />} label="Blocked" value={stats.blocked} tone="warning" />
+                <StatPill icon={<IconCircleDashed size={13} />} label="Skipped" value={stats.skipped} />
+                <StatPill icon={<IconClock size={13} />} label="Pending" value={stats.pending} />
+
+                <div className="min-w-[160px] flex-1">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="text-[12px] text-[var(--muted-soft)]">Progress</span>
+                    <span className="text-[12px] font-semibold" style={{ color: "var(--success-foreground)" }}>
+                      {passRate}% pass rate
+                    </span>
+                  </div>
+                  <RunProgressBar passed={stats.passed} failed={stats.failed} other={stats.blocked + stats.skipped + stats.pending} total={stats.total} />
+                </div>
+              </div>
+            </section>
+
+            {/* ───── Test Cases section ───── */}
+            <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] px-5 py-3">
             <h2 className="text-[15px] font-semibold text-[var(--foreground)]">Test Cases</h2>
             <span className="rounded-full bg-[var(--surface-secondary)] px-2 py-0.5 text-[11px] font-semibold text-[var(--muted)]">{executions.length}</span>
@@ -1074,8 +1226,10 @@ export default function TestRunDetailPage() {
               )}
             </div>
           )}
+            </div>
+          </div>
         </div>
-      </main>
+      </div>
 
       {/* ───── Test Case Picker Modal ───── */}
       <Modal
@@ -1717,6 +1871,6 @@ export default function TestRunDetailPage() {
           </div>
         )}
       </Drawer>
-    </div>
+    </main>
   );
 }
