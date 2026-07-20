@@ -330,6 +330,7 @@ export default function PlanDetailPage() {
   }
 
   const total = progress?.totalCases || 0;
+  const visibleRuns = runs.filter((run) => run.status === "In Progress" || run.status === "Completed");
   const planName = typeof plan.name === "string" ? plan.name : "";
   const planDescription = typeof plan.description === "string" ? plan.description : "";
   const planTargetRelease = typeof plan.targetRelease === "string" ? plan.targetRelease : "";
@@ -543,7 +544,7 @@ export default function PlanDetailPage() {
                 }`}
               >
                 Test runs
-                <span className="rounded-full bg-[var(--surface-tertiary)] px-1.5 py-px font-mono text-[11px] text-[var(--muted)]">{runs.length}</span>
+                <span className="rounded-full bg-[var(--surface-tertiary)] px-1.5 py-px font-mono text-[11px] text-[var(--muted)]">{visibleRuns.length}</span>
               </button>
               <button
                 onClick={() => setActiveTab("items")}
@@ -663,13 +664,13 @@ export default function PlanDetailPage() {
                     </div>
                   </Modal>
 
-                  {runs.length === 0 ? (
+                  {visibleRuns.length === 0 ? (
                     <div className="rounded-[10px] border border-dashed border-[var(--border)] p-8 text-center">
                       <p className="text-sm text-[var(--muted)]">No runs associated with this plan. Create a new run or link an existing one.</p>
                     </div>
                   ) : (
                     <div className="flex flex-col gap-3">
-                      {runs.map((run) => {
+                      {visibleRuns.map((run) => {
                         const runTotal = run.totalCases;
                         const runExecuted = runTotal - run.untested;
                         const runPercent = runTotal > 0 ? Math.round((runExecuted / runTotal) * 100) : 0;
