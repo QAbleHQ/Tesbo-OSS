@@ -2926,11 +2926,18 @@ projects use it" into one place.
   - Client secret is encrypted at rest (AES-256-GCM, `src/common/crypto.util.ts`) before storage in
     `integration_oauth_configs`; only `hasClientSecret: true/false` is ever returned to the client,
     never the secret itself.
-  - Falls back to environment variables (`JIRA_CLIENT_ID`/`JIRA_CLIENT_SECRET`/`JIRA_REDIRECT_URI`,
-    and the `LINEAR_*` equivalents) when no workspace-level row is saved — this lets an operator
-    ship a platform-default OAuth app. A workspace-saved config always takes precedence over env
-    vars when both exist. A *partially*-saved workspace row (e.g. secret is null) is treated as
-    "unconfigured" and env vars are used instead, rather than failing.
+  - Falls back to environment variables (`JIRA_CLIENT_ID`/`JIRA_CLIENT_SECRET`, and the `LINEAR_*`
+    equivalents) when no workspace-level row is saved — this is the **platform OAuth app**: Tesbo
+    registers one app per provider, so a workspace owner just clicks Connect and never enters a
+    client id, secret, or redirect URI. A workspace-saved config always takes precedence over env
+    vars when both exist (bring-your-own-app remains an explicit opt-in override). A
+    *partially*-saved workspace row (e.g. secret is null) is treated as "unconfigured" and env vars
+    are used instead, rather than failing.
+  - `*_REDIRECT_URI` is **optional** for the env path: only `*_CLIENT_ID` + `*_CLIENT_SECRET` are
+    required, and the redirect defaults to `FRONTEND_URL` (or `APP_URL`, else `http://localhost:1010`)
+    + `/integrations/callback`. Setting it explicitly overrides that, for deployments where the
+    browser-facing callback host differs from `FRONTEND_URL`. Note the workspace-saved path still
+    *requires* `redirectUri` — the PATCH validation is unchanged.
 - **View config status** — `GET /api/workspace/integrations/:provider/config` — returns
   `configured`, `source` (`workspace` | `environment` | `none`), `clientId`, `redirectUri`,
   `hasClientSecret`, `updatedAt`. Not owner-gated — any workspace member can view it (masked).
@@ -2938,12 +2945,15 @@ projects use it" into one place.
   the provider-specific authorization URL (Atlassian: `auth.atlassian.com/authorize` with
   `audience=api.atlassian.com` and scope `read:jira-work read:jira-user write:jira-work
   offline_access`; Linear: `linear.app/oauth/authorize` with scope `read,write,issues:create,comments:create`).
-  Both set `state=<provider>` so the callback page knows which provider redirected back.
-  - **Not owner-gated** in the backend (unlike config/callback/connect-token/disconnect) — any
-    authenticated workspace member can request an auth URL even though the frontend only shows the
-    "Connect" button to owners. A non-owner who reaches this endpoint directly and completes the
-    provider's consent screen will still be rejected at the callback step (owner-only) — worth
-    testing end-to-end as a privilege-boundary case.
+  Both set a **signed** `state` shaped `<provider>.<base64url payload>.<base64url HMAC-SHA256>`,
+  where the payload carries `{p: provider, o: organizationId, t: issuedAt, n: nonce}`. The leading
+  provider segment is what the callback page reads to know which provider redirected back; the
+  signature is verified server-side at the callback (see below). The signing key is derived as
+  `sha256("tesbo:oauth-state:" + SECRETS_ENCRYPTION_KEY)` rather than reusing that key directly.
+  - **Owner-gated** — a non-owner gets a 403 before any authorize URL is issued, matching
+    config/callback/connect-token/disconnect. (Previously this endpoint was ungated and a non-owner
+    was only stopped later at the callback; the check now fails fast instead of sending them through
+    a consent screen that can't succeed.)
   - Throws a 400 with an actionable message ("… OAuth is not configured. Add Client ID, Client
     Secret, and Redirect URI in Workspace Settings → Integrations.") when neither workspace config
     nor env vars are present.
@@ -2956,6 +2966,16 @@ projects use it" into one place.
   connection id remain intact).
   - Owner-only (403 for any other role).
   - Requires `code` in the body (400 if missing).
+  - Requires the signed `state` from the authorize URL, forwarded verbatim by the callback page.
+    Rejected with 400 when it is missing, unsigned/forged, tampered with after signing, minted for a
+    different provider, or older than its 10-minute TTL; a validly-signed state belonging to a
+    *different* workspace fails with "This authorization was started for a different workspace."
+    Because all workspaces share one platform `client_id`, this binding is what stops an attacker
+    from handing a workspace owner a callback URL bearing the attacker's `code` and grafting the
+    attacker's Jira/Linear site onto the victim's workspace. State is verified **before** the token
+    exchange, so a bad state never reaches the provider. The check is stateless (HMAC + TTL, no
+    nonce store), so a state is workspace-bound and time-limited but **not** strictly single-use
+    within its TTL — worth a test if replay-within-window matters.
   - Jira: posts to `auth.atlassian.com/oauth/token`; requires both `access_token` and
     `refresh_token` in the response (400 "Jira did not return OAuth tokens." if either is missing);
     then calls `accessible-resources` to discover the Jira Cloud site — 400 "No accessible Jira
@@ -3003,7 +3023,11 @@ projects use it" into one place.
   precedence, owner gating, malformed-response handling)
 - Frontend: `Tesbo-Frontend/components/settings/IntegrationsTab.tsx` (workspace Integrations tab —
   connect/manage/disconnect cards, connected-project count), `Tesbo-Frontend/components/integrations/WorkspaceIntegrationConfig.tsx`
-  (OAuth config form + Connect button + PAT tab), `Tesbo-Frontend/app/(app)/settings/integrations/{page,jira/page,linear/page}.tsx`,
+  (Connect button + OAuth config form + PAT tab; the "Advanced: OAuth app settings" form is hidden
+  entirely when `source === "environment"`, i.e. the platform app is supplying the credentials, so
+  an owner on Tesbo Cloud sees only a single Connect button and cannot accidentally shadow the
+  working platform config with a half-filled one),
+  `Tesbo-Frontend/app/(app)/settings/integrations/{page,jira/page,linear/page}.tsx`,
   `Tesbo-Frontend/app/integrations/callback/page.tsx` (OAuth redirect landing page), `Tesbo-Frontend/lib/api.ts`
   (`getIntegrationConfig`, `updateIntegrationConfig`, `getIntegrationAuthUrl`, `integrationCallback`,
   `getIntegrationStatus`, `disconnectIntegration`)

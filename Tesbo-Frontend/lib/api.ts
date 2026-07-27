@@ -2068,11 +2068,14 @@ export async function updateIntegrationConfig(
   });
 }
 
+// `state` is the signed value the backend put on the authorize URL; it must be handed back
+// verbatim so the backend can confirm this callback belongs to the workspace that started it.
 export async function integrationCallback(
   provider: IntegrationProvider,
-  code: string
+  code: string,
+  state: string
 ): Promise<{ connectionId: string; siteUrl: string }> {
-  return api(`/api/workspace/integrations/${provider}/callback`, { method: "POST", body: { code } });
+  return api(`/api/workspace/integrations/${provider}/callback`, { method: "POST", body: { code, state } });
 }
 
 export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {

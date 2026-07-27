@@ -75,11 +75,17 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:1010}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:1010,http://127.0.0.1:1010,http://localhost:3000,http://127.0.0.1:3000}
-      JIRA_REDIRECT_URI: ${JIRA_REDIRECT_URI:-http://localhost:1010/jira/callback}
+      # Optional: derived from FRONTEND_URL + /integrations/callback when left unset.
+      JIRA_REDIRECT_URI: ${JIRA_REDIRECT_URI:-}
+      LINEAR_REDIRECT_URI: ${LINEAR_REDIRECT_URI:-}
       POSTMARK_API_TOKEN: ${POSTMARK_API_TOKEN:-}
       POSTMARK_FROM_EMAIL: ${POSTMARK_FROM_EMAIL:-noreply@example.com}
+      # Platform OAuth apps. Set these and workspace owners connect with one click — no
+      # per-workspace client id/secret entry.
       JIRA_CLIENT_ID: ${JIRA_CLIENT_ID:-}
       JIRA_CLIENT_SECRET: ${JIRA_CLIENT_SECRET:-}
+      LINEAR_CLIENT_ID: ${LINEAR_CLIENT_ID:-}
+      LINEAR_CLIENT_SECRET: ${LINEAR_CLIENT_SECRET:-}
       # AES-256-GCM key for encrypting integration secrets at rest. Override with your own
       # (openssl rand -base64 32) for any shared/non-local environment.
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-QtqFfNpvzyRZvBpFeXYIFmQMTwQHVXHQYbH85YvhlvE=}

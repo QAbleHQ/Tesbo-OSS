@@ -49,6 +49,16 @@ function savedOAuthConfigRoute(row: Record<string, unknown> | null): Route {
   return { match: "FROM integration_oauth_configs", rows: row ? [row] : [] };
 }
 
+/**
+ * Mints a real signed `state` by driving integrationAuthUrl, so callback tests carry the same value
+ * the authorize redirect would have — rather than re-implementing the HMAC here and letting the
+ * test pass against a signature scheme the service no longer uses.
+ */
+async function validState(svc: LegacyService, provider: "jira" | "linear"): Promise<string> {
+  const { url } = await svc.integrationAuthUrl("user-1", provider);
+  return new URL(url).searchParams.get("state")!;
+}
+
 function makeLegacy(db: DatabaseService): LegacyService {
   return new LegacyService(
     db,
@@ -143,6 +153,136 @@ describe("LegacyService — Linear/Jira integration OAuth config resolution", ()
     const { url } = await svc.integrationAuthUrl("user-1", "linear");
     expect(new URL(url).searchParams.get("client_id")).toBe("env-client");
   });
+
+  // The platform OAuth app is meant to need only a client id + secret: the callback path is fixed
+  // by the frontend route, so operators shouldn't have to restate it per provider.
+  it("derives the redirect URI from FRONTEND_URL when only the platform client id/secret are set", async () => {
+    const savedFrontend = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = "https://app.tesbo.io/";
+    process.env.JIRA_CLIENT_ID = "platform-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
+    try {
+      const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
+      const svc = makeLegacy(db);
+      const params = new URL((await svc.integrationAuthUrl("user-1", "jira")).url).searchParams;
+      expect(params.get("client_id")).toBe("platform-jira-client");
+      expect(params.get("redirect_uri")).toBe("https://app.tesbo.io/integrations/callback");
+    } finally {
+      if (savedFrontend === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = savedFrontend;
+    }
+  });
+
+  it("reports the platform app as the config source so the UI can hide the manual OAuth form", async () => {
+    process.env.JIRA_CLIENT_ID = "platform-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
+    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
+    const svc = makeLegacy(db);
+    const status = await svc.integrationConfigStatus("user-1", "jira");
+    expect(status.configured).toBe(true);
+    expect(status.source).toBe("environment");
+    expect(status.hasClientSecret).toBe(true);
+  });
+
+  it("still reports unconfigured when only a client id is set (no secret)", async () => {
+    process.env.JIRA_CLIENT_ID = "platform-jira-client";
+    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
+    const svc = makeLegacy(db);
+    const status = await svc.integrationConfigStatus("user-1", "jira");
+    expect(status.configured).toBe(false);
+    expect(status.source).toBe("none");
+  });
+
+  it("forbids a non-owner from starting the OAuth redirect", async () => {
+    const { db } = makeDb([
+      workspaceRoute("manager"),
+      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
+    ]);
+    const svc = makeLegacy(db);
+    const err = await rejection(svc.integrationAuthUrl("user-1", "jira"));
+    expect(err).toBeInstanceOf(ForbiddenException);
+  });
+});
+
+// Every workspace shares one platform client_id, so `state` is the only thing tying a callback to
+// the workspace that started it. These tests pin that binding.
+describe("LegacyService — OAuth state signing", () => {
+  function ownerDb(orgId = "org-1") {
+    return makeDb([
+      workspaceRoute("owner", orgId),
+      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
+    ]);
+  }
+
+  it("prefixes state with the provider so the callback page can route without trusting the payload", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const state = await validState(svc, "jira");
+    expect(state.split(".")).toHaveLength(3);
+    expect(state.split(".")[0]).toBe("jira");
+  });
+
+  it("issues a distinct state each time, so one authorize URL can't be replayed as another", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    expect(await validState(svc, "jira")).not.toBe(await validState(svc, "jira"));
+  });
+
+  it("rejects a callback with no state at all", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc" }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a forged state that was never signed", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: "jira.eyJwIjoiamlyYSJ9.deadbeef" }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a state whose payload was tampered with after signing", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const [provider, payload, signature] = (await validState(svc, "jira")).split(".");
+    const forged = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    forged.o = "org-attacker";
+    const tampered = `${provider}.${Buffer.from(JSON.stringify(forged)).toString("base64url")}.${signature}`;
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: tampered }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a validly-signed state minted for a different workspace", async () => {
+    // The attacker's own workspace signs a state, then replays it into the victim's session.
+    const attackerState = await validState(makeLegacy(ownerDb("org-attacker").db), "jira");
+    const victim = makeLegacy(ownerDb("org-1").db);
+    const err = await rejection(victim.integrationCallback("user-1", "jira", { code: "abc", state: attackerState }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/different workspace/i);
+  });
+
+  it("rejects a Linear-signed state replayed against the Jira callback", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "linear") }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a state older than its TTL", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const state = await validState(svc, "jira");
+    const elevenMinutes = 11 * 60 * 1000;
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + elevenMinutes);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/expired/i);
+  });
+
+  it("verifies state before exchanging the code, so a bad state never reaches the provider", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const fetchSpy = jest.spyOn(global, "fetch");
+    await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: "jira.bogus.sig" }));
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe("LegacyService#integrationAuthUrl — provider-specific URL construction", () => {
@@ -161,7 +301,7 @@ describe("LegacyService#integrationAuthUrl — provider-specific URL constructio
     expect(params.get("scope")).toBe("read:jira-work read:jira-user write:jira-work offline_access");
     expect(params.get("response_type")).toBe("code");
     expect(params.get("prompt")).toBe("consent");
-    expect(params.get("state")).toBe("jira");
+    expect(params.get("state")!.startsWith("jira.")).toBe(true);
   });
 
   it("builds the Linear authorize URL with the Linear scope and no Jira-only audience param", async () => {
@@ -174,7 +314,7 @@ describe("LegacyService#integrationAuthUrl — provider-specific URL constructio
     expect(url.startsWith("https://linear.app/oauth/authorize?")).toBe(true);
     const params = new URL(url).searchParams;
     expect(params.get("scope")).toBe("read,write,issues:create,comments:create");
-    expect(params.get("state")).toBe("linear");
+    expect(params.get("state")!.startsWith("linear.")).toBe(true);
     expect(params.has("audience")).toBe(false);
   });
 
@@ -224,7 +364,7 @@ describe("LegacyService#integrationCallback", () => {
     const svc = makeLegacy(db);
     jest.spyOn(global, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({}) } as unknown as Response);
 
-    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc", state: await validState(svc, "linear") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/linear did not return an oauth token/i);
   });
@@ -237,7 +377,7 @@ describe("LegacyService#integrationCallback", () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at-1" }) } as unknown as Response) // token exchange
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { organization: {} } }) } as unknown as Response); // graphql viewer, no urlKey
 
-    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc", state: await validState(svc, "linear") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/could not read the connected linear workspace/i);
   });
@@ -257,7 +397,7 @@ describe("LegacyService#integrationCallback", () => {
       } as unknown as Response)
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { organization: { id: "org-ext-1", urlKey: "acme" } } }) } as unknown as Response);
 
-    const res = await svc.integrationCallback("user-1", "linear", { code: "abc" });
+    const res = await svc.integrationCallback("user-1", "linear", { code: "abc", state: await validState(svc, "linear") });
     expect(res).toEqual({ connectionId: "conn-1", siteUrl: "https://linear.app/acme" });
 
     const insertCall = calls.find((c) => c.sql.includes("INSERT INTO integration_connections"));
@@ -278,7 +418,7 @@ describe("LegacyService#integrationCallback", () => {
     const svc = makeLegacy(db);
     jest.spyOn(global, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at-only" }) } as unknown as Response);
 
-    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "jira") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/jira did not return oauth tokens/i);
   });
@@ -291,7 +431,7 @@ describe("LegacyService#integrationCallback", () => {
       .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at", refresh_token: "rt" }) } as unknown as Response) // token exchange
       .mockResolvedValueOnce({ ok: true, json: async () => [] } as unknown as Response); // accessible-resources: empty
 
-    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "jira") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/no accessible jira site/i);
   });
@@ -311,7 +451,7 @@ describe("LegacyService#integrationCallback", () => {
       } as unknown as Response)
       .mockResolvedValueOnce({ ok: true, json: async () => [{ id: "cloud-1", url: "https://acme.atlassian.net" }] } as unknown as Response);
 
-    const res = await svc.integrationCallback("user-1", "jira", { code: "abc" });
+    const res = await svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "jira") });
     expect(res).toEqual({ connectionId: "conn-jira-1", cloudId: "cloud-1", siteUrl: "https://acme.atlassian.net" });
 
     const insertCall = calls.find((c) => c.sql.includes("INSERT INTO integration_connections"));

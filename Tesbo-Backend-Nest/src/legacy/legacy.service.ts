@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
-import { createHash, randomBytes, randomUUID } from "crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as XLSX from "xlsx";
@@ -222,6 +222,55 @@ function normalizeJiraSiteUrl(raw: string): string {
 
 const JIRA_OAUTH_SCOPE = "read:jira-work read:jira-user write:jira-work offline_access";
 const LINEAR_OAUTH_SCOPE = "read,write,issues:create,comments:create";
+
+// ── OAuth `state` signing ──
+// Tesbo ships one platform-wide OAuth app per provider, so every workspace shares a single
+// client_id and redirect_uri. That makes an opaque `state` unsafe: an attacker who completes their
+// own Atlassian consent could hand a workspace owner a link to /integrations/callback carrying the
+// attacker's `code`, and the owner's session would happily exchange it — binding the attacker's
+// Jira site to the victim's workspace. Signing the state with the workspace id pins the callback to
+// the workspace that started it.
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function oauthStateKey(): Buffer {
+  // Derived from the secrets key rather than reusing it directly, so a state signature can never
+  // be used as an oracle against the AES key that protects stored tokens.
+  return createHash("sha256").update(`tesbo:oauth-state:${process.env.SECRETS_ENCRYPTION_KEY || ""}`).digest();
+}
+
+function signOAuthState(provider: IntegrationProvider, organizationId: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({ p: provider, o: organizationId, t: Date.now(), n: randomBytes(8).toString("hex") })
+  ).toString("base64url");
+  const signature = createHmac("sha256", oauthStateKey()).update(payload).digest("base64url");
+  // The provider stays in the clear as the first segment: the callback page reads it to know which
+  // provider endpoint to POST back to, before anything has been verified.
+  return `${provider}.${payload}.${signature}`;
+}
+
+function verifyOAuthState(raw: string, provider: IntegrationProvider, organizationId: string): void {
+  const invalid = () => new BadRequestException({ error: "Invalid authorization state. Start the connection again." });
+  const parts = String(raw || "").split(".");
+  if (parts.length !== 3 || parts[0] !== provider) throw invalid();
+
+  const expected = Buffer.from(createHmac("sha256", oauthStateKey()).update(parts[1]).digest("base64url"));
+  const actual = Buffer.from(parts[2]);
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw invalid();
+
+  let claims: Body;
+  try {
+    claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (claims.p !== provider) throw invalid();
+  if (claims.o !== organizationId) {
+    throw new BadRequestException({ error: "This authorization was started for a different workspace." });
+  }
+  if (!Number.isFinite(Number(claims.t)) || Date.now() - Number(claims.t) > OAUTH_STATE_TTL_MS) {
+    throw new BadRequestException({ error: "This authorization request expired. Start the connection again." });
+  }
+}
 
 function normalizeProviderModel(provider: string, model?: string | null): string {
   const value = String(model || "").trim();
@@ -4236,12 +4285,16 @@ export class LegacyService implements OnModuleInit {
   // project. Which remote project/team feeds which Tesbo project is a separate per-project mapping
   // on top of that shared connection (jira_project_mappings / linear_project_mappings).
 
+  // The platform OAuth app: Tesbo registers one app per provider and supplies its credentials
+  // through the environment, so a workspace owner just clicks Connect. `*_REDIRECT_URI` is
+  // optional — the callback path is fixed by the frontend route, so it is derived from FRONTEND_URL
+  // unless an operator overrides it (e.g. a proxy that terminates on a different host).
   private envIntegrationConfig(provider: IntegrationProvider) {
     const prefix = provider.toUpperCase();
-    const clientId = process.env[`${prefix}_CLIENT_ID`] || "";
-    const clientSecret = process.env[`${prefix}_CLIENT_SECRET`] || "";
-    const redirectUri = process.env[`${prefix}_REDIRECT_URI`] || "";
-    if (!clientId || !clientSecret || !redirectUri) return null;
+    const clientId = (process.env[`${prefix}_CLIENT_ID`] || "").trim();
+    const clientSecret = (process.env[`${prefix}_CLIENT_SECRET`] || "").trim();
+    if (!clientId || !clientSecret) return null;
+    const redirectUri = (process.env[`${prefix}_REDIRECT_URI`] || "").trim() || this.defaultIntegrationRedirectUri();
     return { clientId, clientSecret, redirectUri };
   }
 
@@ -4339,14 +4392,16 @@ export class LegacyService implements OnModuleInit {
   async integrationAuthUrl(userId: string | null | undefined, provider: string) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     const { clientId, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
+    const state = signOAuthState(p, workspace.id);
     if (p === "jira") {
       const params = new URLSearchParams({
         audience: "api.atlassian.com",
         client_id: clientId,
         scope: JIRA_OAUTH_SCOPE,
         redirect_uri: redirectUri,
-        state: p,
+        state,
         response_type: "code",
         prompt: "consent"
       });
@@ -4356,7 +4411,7 @@ export class LegacyService implements OnModuleInit {
       client_id: clientId,
       redirect_uri: redirectUri,
       scope: LINEAR_OAUTH_SCOPE,
-      state: p,
+      state,
       response_type: "code",
       prompt: "consent"
     });
@@ -4369,6 +4424,7 @@ export class LegacyService implements OnModuleInit {
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
     const code = String(body.code || "");
     if (!code) throw new BadRequestException({ error: "Authorization code is required." });
+    verifyOAuthState(String(body.state || ""), p, workspace.id);
     const { clientId, clientSecret, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
 
     if (p === "jira") {

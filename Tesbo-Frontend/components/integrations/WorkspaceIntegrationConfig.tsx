@@ -104,6 +104,10 @@ function WorkspaceIntegrationConfigInner({
   const [patValues, setPatValues] = useState<Record<string, string>>({});
   const [connectingToken, setConnectingToken] = useState(false);
 
+  // `source: "environment"` means the backend resolved credentials from Tesbo's platform OAuth app
+  // rather than a workspace-saved one, so the owner has nothing to configure — just Connect.
+  const platformManaged = config?.source === "environment" && config.configured;
+
   const loadData = useCallback(async () => {
     try {
       const [workspace, statusRes, configRes] = await Promise.all([
@@ -300,21 +304,26 @@ function WorkspaceIntegrationConfigInner({
               <div>
                 <h2 className="text-base font-semibold text-[var(--foreground)]">Connect {label}</h2>
                 <p className="mt-1 text-sm text-[var(--muted)]">
-                  {config?.configured
-                    ? `Sign in with ${label} and pick which project to link — no manual setup needed.`
-                    : `Set up an OAuth app below (or use a Personal Access Token) to enable connecting.`}
+                  {platformManaged
+                    ? `Sign in with ${label} and approve access — Tesbo handles the OAuth app, so there's nothing to set up.`
+                    : config?.configured
+                      ? `Sign in with ${label} and pick which project to link — no manual setup needed.`
+                      : `Set up an OAuth app below (or use a Personal Access Token) to enable connecting.`}
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
                 <Button type="button" onClick={handleConnect} disabled={connecting || !config?.configured}>
-                  {connecting ? "Connecting..." : `Connect ${label}`}
+                  {connecting ? `Redirecting to ${label}...` : `Connect ${label}`}
                 </Button>
-                {config?.configured && (
-                  <span className="text-xs text-[var(--success)]">
-                    Ready via {config.source === "environment" ? "this workspace's platform connection" : "your saved OAuth app"}.
-                  </span>
+                {config?.configured && !platformManaged && (
+                  <span className="text-xs text-[var(--success)]">Ready via your saved OAuth app.</span>
                 )}
               </div>
+              {platformManaged && (
+                <p className="text-xs text-[var(--muted)]">
+                  You&apos;ll be taken to {label} to approve access, then brought back here automatically.
+                </p>
+              )}
               {returnProjectId && (
                 <p className="text-xs text-[var(--muted)]">
                   You&apos;ll be brought straight back to finish mapping your project after connecting.
@@ -322,72 +331,78 @@ function WorkspaceIntegrationConfigInner({
               )}
             </Card>
 
-            <details className="tesbo-card group p-4" open={config?.source !== "environment"}>
-              <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-semibold text-[var(--foreground)]">
-                <span>Advanced: OAuth app settings</span>
-                <ChevronIcon />
-              </summary>
-              <div className="mt-4">
-                <p className="text-sm text-[var(--muted)]">
-                  Add the OAuth app values from the {consoleName}. These values apply to this entire workspace.
-                </p>
+            {/* Bring-your-own OAuth app. Hidden when Tesbo's platform app is configured — that is
+                the whole point of the platform app, and a visible client id/secret form there just
+                invites owners to break a working connection. Self-hosted deployments with no
+                platform credentials still get the full form. */}
+            {!platformManaged && (
+              <details className="tesbo-card group p-4" open>
+                <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-semibold text-[var(--foreground)]">
+                  <span>Advanced: OAuth app settings</span>
+                  <ChevronIcon />
+                </summary>
+                <div className="mt-4">
+                  <p className="text-sm text-[var(--muted)]">
+                    Add the OAuth app values from the {consoleName}. These values apply to this entire workspace.
+                  </p>
 
-                <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 text-sm text-[var(--foreground)]">
-                  <p className="font-medium">In the {consoleName}:</p>
-                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[var(--muted)]">
-                    {consoleSteps.map((step, i) => (
-                      <li key={i}>{step}</li>
-                    ))}
-                    <li>
-                      Enable scopes: {scopes.map((scope, i) => (
-                        <span key={scope}>
-                          <span className="font-mono text-[var(--foreground)]">{scope}</span>
-                          {i < scopes.length - 1 ? ", " : ""}
-                        </span>
-                      ))}.
-                    </li>
-                    <li>Copy the Client ID and Client Secret into the form below.</li>
-                  </ol>
-                </div>
-
-                <form onSubmit={handleSaveConfig} className="mt-4 space-y-4">
-                  <Field>
-                    <FieldLabel>Authorization callback URL</FieldLabel>
-                    <Input
-                      type="url"
-                      value={redirectUri}
-                      onChange={(event) => setRedirectUri(event.target.value)}
-                      placeholder="http://localhost:1010/integrations/callback"
-                    />
-                    <p className="mt-1 text-xs text-[var(--muted)]">
-                      Paste this exact value into the {consoleName}. For this app, the callback page is <span className="font-mono text-[var(--foreground)]">/integrations/callback</span>.
-                    </p>
-                  </Field>
-                  <Field>
-                    <FieldLabel>Client ID</FieldLabel>
-                    <Input
-                      value={clientId}
-                      onChange={(event) => setClientId(event.target.value)}
-                      placeholder={`Paste ${label} OAuth client ID`}
-                    />
-                  </Field>
-                  <Field>
-                    <FieldLabel>Client Secret</FieldLabel>
-                    <Input
-                      type="password"
-                      value={clientSecret}
-                      onChange={(event) => setClientSecret(event.target.value)}
-                      placeholder={config?.hasClientSecret ? "Saved. Enter a new secret only to replace it." : `Paste ${label} OAuth client secret`}
-                    />
-                  </Field>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Button type="submit" disabled={saving}>
-                      {saving ? "Saving..." : `Save ${label} Configuration`}
-                    </Button>
+                  <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 text-sm text-[var(--foreground)]">
+                    <p className="font-medium">In the {consoleName}:</p>
+                    <ol className="mt-2 list-decimal space-y-1 pl-5 text-[var(--muted)]">
+                      {consoleSteps.map((step, i) => (
+                        <li key={i}>{step}</li>
+                      ))}
+                      <li>
+                        Enable scopes: {scopes.map((scope, i) => (
+                          <span key={scope}>
+                            <span className="font-mono text-[var(--foreground)]">{scope}</span>
+                            {i < scopes.length - 1 ? ", " : ""}
+                          </span>
+                        ))}.
+                      </li>
+                      <li>Copy the Client ID and Client Secret into the form below.</li>
+                    </ol>
                   </div>
-                </form>
-              </div>
-            </details>
+
+                  <form onSubmit={handleSaveConfig} className="mt-4 space-y-4">
+                    <Field>
+                      <FieldLabel>Authorization callback URL</FieldLabel>
+                      <Input
+                        type="url"
+                        value={redirectUri}
+                        onChange={(event) => setRedirectUri(event.target.value)}
+                        placeholder="http://localhost:1010/integrations/callback"
+                      />
+                      <p className="mt-1 text-xs text-[var(--muted)]">
+                        Paste this exact value into the {consoleName}. For this app, the callback page is <span className="font-mono text-[var(--foreground)]">/integrations/callback</span>.
+                      </p>
+                    </Field>
+                    <Field>
+                      <FieldLabel>Client ID</FieldLabel>
+                      <Input
+                        value={clientId}
+                        onChange={(event) => setClientId(event.target.value)}
+                        placeholder={`Paste ${label} OAuth client ID`}
+                      />
+                    </Field>
+                    <Field>
+                      <FieldLabel>Client Secret</FieldLabel>
+                      <Input
+                        type="password"
+                        value={clientSecret}
+                        onChange={(event) => setClientSecret(event.target.value)}
+                        placeholder={config?.hasClientSecret ? "Saved. Enter a new secret only to replace it." : `Paste ${label} OAuth client secret`}
+                      />
+                    </Field>
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Button type="submit" disabled={saving}>
+                        {saving ? "Saving..." : `Save ${label} Configuration`}
+                      </Button>
+                    </div>
+                  </form>
+                </div>
+              </details>
+            )}
 
             {patFields && (
               <details className="tesbo-card group p-4">
