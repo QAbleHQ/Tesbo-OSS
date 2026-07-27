@@ -9,6 +9,8 @@ import type { StorageService } from "../storage/storage.service";
 import type { RagIngestionService } from "../rag/rag-ingestion.service";
 import type { RagRetrievalService } from "../rag/rag-retrieval.service";
 import type { ApiTokenService } from "../auth/api-token.service";
+import type { PlanLimitsService } from "../plan-limits/plan-limits.service";
+import type { CustomFieldsService } from "../custom-fields/custom-fields.service";
 
 // A key just needs to decode to 32 bytes for aes-256-gcm; this is a throwaway test-only key
 // (crypto.util lazily loads it on first encrypt/decrypt call, so setting it at module scope
@@ -68,7 +70,9 @@ function makeLegacy(db: DatabaseService): LegacyService {
     {} as unknown as StorageService,
     {} as unknown as RagIngestionService,
     {} as unknown as RagRetrievalService,
-    {} as unknown as ApiTokenService
+    {} as unknown as ApiTokenService,
+    { assertIntegrationAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as PlanLimitsService,
+    {} as unknown as CustomFieldsService
   );
 }
 

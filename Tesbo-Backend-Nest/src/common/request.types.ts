@@ -13,4 +13,6 @@ export type AuthenticatedRequest = Request & {
   userId?: string | null;
   /** Present only for requests authenticated with an API token (machine clients). */
   apiToken?: ApiTokenContext | null;
+  /** Raw request body bytes, captured for Stripe webhook signature verification. */
+  rawBody?: Buffer;
 };

@@ -17,6 +17,10 @@ function roleLabel(role?: string): string {
   return "QA Engineer";
 }
 
+function planLabel(plan?: string): string {
+  return plan === "pro" ? "Pro" : "Launch";
+}
+
 export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolean }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceListItem[]>([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -110,7 +114,9 @@ export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolea
           <>
             <span className="min-w-0 flex-1">
               <span className="block truncate text-[13px] font-medium text-[var(--foreground)]">{active.name}</span>
-              <span className="block truncate text-[11px] text-[var(--muted)]">{roleLabel(active.role)}</span>
+              <span className="block truncate text-[11px] text-[var(--muted)]">
+                {roleLabel(active.role)} · {planLabel(active.plan)}
+              </span>
             </span>
             <IconChevronDown className="h-[14px] w-[14px] shrink-0 text-[var(--muted-soft)]" />
           </>
@@ -129,7 +135,9 @@ export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolea
             >
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium">{w.name}</span>
-                <span className="block truncate text-[11px] text-[var(--muted)]">{roleLabel(w.role)}</span>
+                <span className="block truncate text-[11px] text-[var(--muted)]">
+                  {roleLabel(w.role)} · {planLabel(w.plan)}
+                </span>
               </span>
               {w.isActive && <IconCheck className="h-[14px] w-[14px] shrink-0 text-[var(--denim)]" />}
             </button>

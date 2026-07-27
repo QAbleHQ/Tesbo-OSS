@@ -35,9 +35,15 @@ import {
   getExportUrl,
   getTemplateUrl,
   getRepositorySummary,
+  listCustomFieldDefinitions,
+  getCustomFieldValues,
+  buildCustomFieldFiltersQueryParam,
   type TestCaseListItem,
   type SuiteNode,
   type RepositorySummary,
+  type CustomFieldDefinition,
+  type CustomFieldValue,
+  type CustomFieldFilterCondition,
 } from "@/lib/api";
 import { RepositoryTestCaseTable } from "@/components/testcases/RepositoryTestCaseTable";
 import { useTopBarSlots } from "@/components/TopBarSlots";
@@ -53,6 +59,9 @@ import {
   FieldLabel,
 } from "@/components/ui";
 import ImportTestCasesModal from "@/components/ImportTestCasesModal";
+import CustomFieldsSection from "@/components/customFields/CustomFieldsSection";
+import CustomFieldFilterPopover from "@/components/customFields/CustomFieldFilterPopover";
+import { getConfiguredDefaultValue, validateCustomFieldValues } from "@/components/customFields/customFieldTypes";
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
@@ -66,7 +75,7 @@ const TESTCASE_AUTOMATION_TYPES = ["Automated", "Not Automated", "Can't Automate
 
 type Step = { stepNumber?: number; action?: string; expectedResult?: string };
 type PanelMode = "closed" | "edit" | "create";
-type PanelTab = "overview" | "steps";
+type PanelTab = "overview" | "steps" | "customFields";
 type BulkAction = "" | "delete" | "update" | "archive" | "move";
 
 const EMPTY_STEP: Step = { stepNumber: 1, action: "", expectedResult: "" };
@@ -169,6 +178,15 @@ export default function TestCasesPage() {
   const [panelJiraIssueKey, setPanelJiraIssueKey] = useState("");
   const [panelJiraUrl, setPanelJiraUrl] = useState("");
 
+  // Custom fields (Pro plan feature): `customFieldDefinitions` is the project's active
+  // definitions (used for the create form and as the base for edit-mode merging).
+  // `panelCustomFields` is the edit-mode merge of definitions + this test case's stored
+  // values (including archived/inactive fields that still hold a historical value).
+  const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
+  const [panelCustomFields, setPanelCustomFields] = useState<CustomFieldValue[]>([]);
+  const [customFieldValues, setCustomFieldValues] = useState<Record<string, unknown>>({});
+  const [customFieldErrors, setCustomFieldErrors] = useState<Record<string, string>>({});
+
   const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([]);
   const [bulkAction, setBulkAction] = useState<BulkAction>("");
   const [isBulkActionModalOpen, setIsBulkActionModalOpen] = useState(false);
@@ -192,6 +210,7 @@ export default function TestCasesPage() {
   const [suitePriorityFilter, setSuitePriorityFilter] = useState("all");
   const [suiteTypeFilter, setSuiteTypeFilter] = useState("all");
   const [suiteAutomationFilter, setSuiteAutomationFilter] = useState("all");
+  const [customFieldFilters, setCustomFieldFilters] = useState<CustomFieldFilterCondition[]>([]);
   const [debouncedSuiteSearch, setDebouncedSuiteSearch] = useState("");
 
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -205,10 +224,11 @@ export default function TestCasesPage() {
   }
 
   const loadData = useCallback(async () => {
-    const [suiteList, project, summary] = await Promise.all([
+    const [suiteList, project, summary, activeCustomFields] = await Promise.all([
       listSuites(projectId),
       getProject(projectId),
       getRepositorySummary(projectId).catch(() => null),
+      listCustomFieldDefinitions(projectId, { statuses: ["active"] }).catch(() => []),
     ]);
     const settings = parseProjectSettings(project.settings);
     const prefix = normalizeTestcaseIdPrefix(String(settings.testcaseIdPrefix || project.key || "TC")) || "TC";
@@ -217,6 +237,7 @@ export default function TestCasesPage() {
     setRepoSummary(summary);
     setDefaultTestcaseIdPrefix(prefix);
     setTestcaseIdPrefix(prefix);
+    setCustomFieldDefinitions(activeCustomFields);
   }, [projectId]);
 
   useEffect(() => {
@@ -283,6 +304,7 @@ export default function TestCasesPage() {
     suiteTypeFilter !== "all",
     suiteAutomationFilter !== "all",
     activeJiraIssueKey !== "",
+    customFieldFilters.length > 0,
   ].filter(Boolean).length;
   const totalPages = Math.max(1, Math.ceil(suiteCasesTotal / pageSize));
 
@@ -328,6 +350,7 @@ export default function TestCasesPage() {
     suiteTypeFilter,
     suiteAutomationFilter,
     activeJiraIssueKey,
+    customFieldFilters,
     pageSize,
   ]);
 
@@ -346,6 +369,7 @@ export default function TestCasesPage() {
         jiraIssueKey: activeJiraIssueKey || undefined,
         linearIssueKey: activeLinearIssueKey || undefined,
         search: debouncedSuiteSearch || undefined,
+        customFieldFilters: buildCustomFieldFiltersQueryParam(customFieldFilters),
       });
       setSuiteCases(list);
       setSuiteCasesTotal(total);
@@ -368,6 +392,7 @@ export default function TestCasesPage() {
     suiteAutomationFilter,
     activeJiraIssueKey,
     activeLinearIssueKey,
+    customFieldFilters,
     pageSize,
   ]);
 
@@ -424,6 +449,14 @@ export default function TestCasesPage() {
     setTestcaseIdPrefix(defaultTestcaseIdPrefix);
     setPanelJiraIssueKey("");
     setPanelJiraUrl("");
+    const defaults: Record<string, unknown> = {};
+    for (const def of customFieldDefinitions) {
+      const fallback = getConfiguredDefaultValue(def);
+      if (fallback !== undefined) defaults[def.id] = fallback;
+    }
+    setCustomFieldValues(defaults);
+    setCustomFieldErrors({});
+    setPanelCustomFields([]);
   }
 
   async function openCreatePanel() {
@@ -448,9 +481,15 @@ export default function TestCasesPage() {
     setPanelTestcaseId(testcaseId);
     setPanelMode("edit");
     setPanelTab("overview");
+    setCustomFieldErrors({});
     try {
-      const data = await getTestCase(projectId, testcaseId);
+      const [data, customFields] = await Promise.all([
+        getTestCase(projectId, testcaseId),
+        getCustomFieldValues(projectId, testcaseId).catch(() => []),
+      ]);
       fillFormFromTestCase(data);
+      setPanelCustomFields(customFields);
+      setCustomFieldValues(Object.fromEntries(customFields.map((f) => [f.id, f.value])));
     } catch {
       setPanelError("Failed to load test case details.");
     } finally {
@@ -470,6 +509,7 @@ export default function TestCasesPage() {
     setSuitePriorityFilter("all");
     setSuiteTypeFilter("all");
     setSuiteAutomationFilter("all");
+    setCustomFieldFilters([]);
     setSuiteCasesPage(1);
     if (activeJiraIssueKey) router.replace(`/projects/${projectId}/testcases`);
   }
@@ -687,6 +727,21 @@ export default function TestCasesPage() {
   async function handlePanelSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (panelMode !== "create" && panelMode !== "edit") return;
+
+    // Required custom fields must be filled before the test case can be saved. Checked
+    // client-side against whichever list is currently in scope — the edit-mode tab is
+    // unmounted (not just hidden) when inactive, so relying on native `required` inputs
+    // wouldn't catch a missing value if the user is looking at the Overview tab.
+    const fieldsToValidate = panelMode === "create" ? customFieldDefinitions : panelCustomFields;
+    const validationErrors = validateCustomFieldValues(fieldsToValidate, customFieldValues);
+    if (Object.keys(validationErrors).length > 0) {
+      setCustomFieldErrors(validationErrors);
+      setPanelError("Fix the highlighted custom field errors before saving.");
+      if (panelMode === "edit") setPanelTab("customFields");
+      return;
+    }
+    setCustomFieldErrors({});
+
     setPanelSaving(true);
     setPanelError(null);
     setPanelSuccess(null);
@@ -706,6 +761,7 @@ export default function TestCasesPage() {
           status,
           automationStatus,
           testcaseIdPrefix,
+          customFieldValues,
         });
         setSuiteCasesPage(1);
         setSuiteSearch("");
@@ -736,6 +792,7 @@ export default function TestCasesPage() {
           priority,
           status,
           automationStatus,
+          customFieldValues,
         });
         setPanelSuccess("Test case updated successfully.");
         setTimeout(() => setPanelSuccess(null), 4000);
@@ -1268,6 +1325,11 @@ export default function TestCasesPage() {
                         <option key={option} value={option}>{option}</option>
                       ))}
                     </select>
+                    <CustomFieldFilterPopover
+                      definitions={customFieldDefinitions}
+                      conditions={customFieldFilters}
+                      onChange={setCustomFieldFilters}
+                    />
                     {/* Columns control renders here (portaled from the table), as the 5th dropdown. */}
                     <div ref={setColumnsSlotEl} className="flex items-center empty:hidden" />
                     {activeFilterCount > 0 && (
@@ -1464,7 +1526,7 @@ export default function TestCasesPage() {
             {/* Tabs (only for edit mode) */}
             {panelMode === "edit" && (
               <div className="flex shrink-0 gap-0 border-b border-[var(--border)] px-6">
-                {(["overview", "steps"] as PanelTab[]).map((tab) => (
+                {(["overview", "steps", "customFields"] as PanelTab[]).map((tab) => (
                   <button
                     key={tab}
                     type="button"
@@ -1475,7 +1537,11 @@ export default function TestCasesPage() {
                         : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
                     }`}
                   >
-                    {tab === "overview" ? "Overview" : `Steps${steps.length > 0 ? ` (${steps.length})` : ""}`}
+                    {tab === "overview"
+                      ? "Overview"
+                      : tab === "steps"
+                      ? `Steps${steps.length > 0 ? ` (${steps.length})` : ""}`
+                      : `Custom Fields${panelCustomFields.length > 0 ? ` (${panelCustomFields.length})` : ""}`}
                   </button>
                 ))}
               </div>
@@ -1613,6 +1679,19 @@ export default function TestCasesPage() {
                         <FieldLabel>Notes</FieldLabel>
                         <Textarea value={attachments} onChange={(e) => setAttachments(e.target.value)} rows={2} placeholder="Add notes, links to screenshots, logs, or reference docs" />
                       </Field>
+                      {customFieldDefinitions.length > 0 && (
+                        <div className="border-t border-[var(--border)] pt-5">
+                          <FieldLabel>Custom Fields</FieldLabel>
+                          <div className="mt-3">
+                            <CustomFieldsSection
+                              definitions={customFieldDefinitions}
+                              values={customFieldValues}
+                              errors={customFieldErrors}
+                              onChange={(id, value) => setCustomFieldValues((prev) => ({ ...prev, [id]: value }))}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1715,6 +1794,16 @@ export default function TestCasesPage() {
                               ))}
                             </div>
                           )}
+                        </div>
+                      )}
+                      {panelTab === "customFields" && (
+                        <div className="px-6 py-5">
+                          <CustomFieldsSection
+                            definitions={panelCustomFields}
+                            values={customFieldValues}
+                            errors={customFieldErrors}
+                            onChange={(id, value) => setCustomFieldValues((prev) => ({ ...prev, [id]: value }))}
+                          />
                         </div>
                       )}
                     </>

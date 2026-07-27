@@ -31,6 +31,7 @@ const TYPE_FILTERS = [
   { value: "cycle", label: "Test runs" },
   { value: "bug", label: "Bugs" },
   { value: "knowledge_folder,knowledge_document,knowledge_file", label: "Knowledge base" },
+  { value: "custom_field_definition", label: "Custom fields" },
 ] as const;
 
 const PAGE_SIZE = 30;

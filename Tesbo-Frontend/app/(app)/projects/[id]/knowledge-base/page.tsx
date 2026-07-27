@@ -406,18 +406,33 @@ function UploadModal({
   onClose,
   onUpload,
   uploading,
+  uploadProgress,
 }: {
   open: boolean;
   onClose: () => void;
   onUpload: (files: File[]) => void;
   uploading: boolean;
+  uploadProgress: { done: number; total: number } | null;
 }) {
   const [files, setFiles] = useState<File[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const pickerOpenRef = useRef(false);
   useEffect(() => {
     if (open) setFiles([]);
   }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const clearPickerOpen = () => { pickerOpenRef.current = false; };
+    window.addEventListener("focus", clearPickerOpen);
+    return () => window.removeEventListener("focus", clearPickerOpen);
+  }, [open]);
+
+  function openFilePicker() {
+    if (pickerOpenRef.current) return;
+    pickerOpenRef.current = true;
+    inputRef.current?.click();
+  }
 
   return (
     <Modal open={open} onClose={onClose} title="Upload files">
@@ -431,13 +446,13 @@ function UploadModal({
             setDragOver(false);
             setFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
           }}
-          onClick={() => inputRef.current?.click()}
+          onClick={openFilePicker}
           role="button"
           tabIndex={0}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
-              inputRef.current?.click();
+              openFilePicker();
             }
           }}
           className={`cursor-pointer rounded-[10px] border-2 border-dashed p-8 text-center transition-colors ${
@@ -466,8 +481,13 @@ function UploadModal({
             ))}
           </ul>
         )}
+        {uploading && uploadProgress && uploadProgress.total > 1 && (
+          <p className="text-[13px] text-[var(--muted)]">
+            Uploading {uploadProgress.done} of {uploadProgress.total} files…
+          </p>
+        )}
         <div className="flex justify-end gap-2 pt-2">
-          <Button variant="secondary" onClick={onClose}>Cancel</Button>
+          <Button variant="secondary" onClick={onClose} disabled={uploading}>Cancel</Button>
           <Button disabled={files.length === 0 || uploading} onClick={() => onUpload(files)}>
             {uploading ? "Uploading…" : "Upload"}
           </Button>
@@ -526,6 +546,7 @@ function KnowledgeBasePageInner() {
   const [viewerFile, setViewerFile] = useState<KnowledgeItem | null>(null);
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
   const loadTree = useCallback(async () => {
     const root = await getKnowledgeFolderTree(projectId);
@@ -738,14 +759,21 @@ function KnowledgeBasePageInner() {
     if (!selectedFolderId) return;
     setUploading(true);
     setError(null);
+    setUploadProgress({ done: 0, total: files.length });
     try {
-      await uploadKnowledgeFiles(projectId, selectedFolderId, files);
+      await uploadKnowledgeFiles(projectId, selectedFolderId, files, (done, total) =>
+        setUploadProgress({ done, total })
+      );
       setUploadOpen(false);
       await refresh();
     } catch (err) {
+      // Earlier batches may have already been persisted before this one failed, so
+      // refresh to reflect the files that did make it in before surfacing the error.
+      await refresh();
       setError(err instanceof Error ? err.message : "Upload failed. Please try again.");
     } finally {
       setUploading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -866,7 +894,13 @@ function KnowledgeBasePageInner() {
 
         <CreateFolderModal open={createFolderOpen} onClose={() => setCreateFolderOpen(false)} onCreate={handleCreateFolder} saving={saving} />
         <CreateDocumentModal open={createDocOpen} onClose={() => setCreateDocOpen(false)} onCreate={handleCreateDocument} saving={saving} />
-        <UploadModal open={uploadOpen} onClose={() => setUploadOpen(false)} onUpload={handleUpload} uploading={uploading} />
+        <UploadModal
+          open={uploadOpen}
+          onClose={() => { if (!uploading) setUploadOpen(false); }}
+          onUpload={handleUpload}
+          uploading={uploading}
+          uploadProgress={uploadProgress}
+        />
         <RenameFolderModal
           open={!!renameTarget}
           initialName={renameTarget?.name || ""}

@@ -38,6 +38,15 @@ export class AppConfigService {
   readonly s3SecretAccessKey = this.optionalString("S3_SECRET_ACCESS_KEY") || undefined;
   readonly s3ForcePathStyle = this.string("S3_FORCE_PATH_STYLE", "false").toLowerCase() === "true";
   readonly s3PresignedUrlTtlSeconds = this.integer("S3_PRESIGNED_URL_TTL_SECONDS", 300);
+  readonly stripeSecretKey = this.optionalString("STRIPE_SECRET_KEY");
+  readonly stripeWebhookSecret = this.optionalString("STRIPE_WEBHOOK_SECRET");
+  readonly stripePriceIdProMonthly = this.optionalString("STRIPE_PRICE_ID_PRO_MONTHLY");
+  readonly stripePriceIdProAnnual = this.optionalString("STRIPE_PRICE_ID_PRO_ANNUAL");
+  // India-registered Stripe accounts can't charge Indian-issued cards in a non-INR
+  // currency (RBI cross-border rule) — these are the INR equivalents of the two prices
+  // above, charged instead when the buyer is detected as being in India.
+  readonly stripePriceIdProMonthlyInr = this.optionalString("STRIPE_PRICE_ID_PRO_MONTHLY_INR");
+  readonly stripePriceIdProAnnualInr = this.optionalString("STRIPE_PRICE_ID_PRO_ANNUAL_INR");
 
   private loadEnv(): Record<string, string | undefined> {
     const dotenvPath = this.findDotEnvPath();

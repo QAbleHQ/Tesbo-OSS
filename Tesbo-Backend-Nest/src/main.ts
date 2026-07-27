@@ -1,5 +1,6 @@
 import "reflect-metadata";
 import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
 import cookieParser from "cookie-parser";
 import { randomUUID } from "crypto";
 import { json, urlencoded } from "express";
@@ -8,14 +9,29 @@ import { AppModule } from "./app.module";
 import { AppConfigService } from "./config/app-config.service";
 import { HttpExceptionFilter } from "./common/http-exception.filter";
 import { assertEncryptionKeyConfigured } from "./common/crypto.util";
+import type { AuthenticatedRequest } from "./common/request.types";
 
 async function bootstrap() {
   assertEncryptionKeyConfigured();
   // bodyParser disabled here so we can raise the limit above Nest's 100kb default (see maxRequestBodySize below)
-  const app = await NestFactory.create(AppModule, { cors: false, bodyParser: false });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { cors: false, bodyParser: false });
   const config = app.get(AppConfigService);
 
-  app.use(json({ limit: config.maxRequestBodySize }));
+  // Trust the immediate reverse proxy (nginx, see deploy/nginx) so req.ip reflects the
+  // real client from X-Forwarded-For instead of the proxy's own address — used for the
+  // OTP rate limiter and for detecting the buyer's country at checkout (billing module).
+  app.set("trust proxy", 1);
+
+  app.use(
+    json({
+      limit: config.maxRequestBodySize,
+      // Stripe webhook signatures are verified against the exact bytes received, which the
+      // JSON parser below would otherwise discard after parsing — stash them for BillingController.
+      verify: (req, _res, buf) => {
+        (req as AuthenticatedRequest).rawBody = buf;
+      }
+    })
+  );
   app.use(urlencoded({ extended: true, limit: config.maxRequestBodySize }));
   app.use(cookieParser());
   app.use((req: Request, res: Response, next: NextFunction) => {

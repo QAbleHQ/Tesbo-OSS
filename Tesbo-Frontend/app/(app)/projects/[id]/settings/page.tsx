@@ -4,7 +4,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
-import { IconChevronRight, IconKey } from "@tabler/icons-react";
+import { IconChevronRight, IconKey, IconStack2 } from "@tabler/icons-react";
 import {
   authMe,
   getProject,
@@ -17,6 +17,7 @@ import {
   addProjectMember,
   removeProjectMember,
   listApiKeys,
+  listCustomFieldDefinitions,
   type JiraConnection,
   type LinearConnection,
   type TestEnvironmentSetting,
@@ -47,7 +48,7 @@ type ProjectSettingsPayload = {
   [key: string]: unknown;
 };
 
-type SettingsTab = "general" | "testRuns" | "members" | "apiTokens" | "jira" | "integrations";
+type SettingsTab = "general" | "testRuns" | "members" | "apiTokens" | "customFields" | "jira" | "integrations";
 type ProjectMember = { userId: string; email: string; name: string; role: string; joinedAt: string };
 type WorkspaceMember = { userId: string; email: string; name: string; role: string; joinedAt: string };
 
@@ -101,21 +102,31 @@ export default function ProjectSettingsPage() {
   const [changingRoleId, setChangingRoleId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [apiTokenCount, setApiTokenCount] = useState<number | null>(null);
+  const [customFieldCount, setCustomFieldCount] = useState<number | null>(null);
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteProjectModalOpen, setDeleteProjectModalOpen] = useState(false);
   const [deleteProjectTypedName, setDeleteProjectTypedName] = useState("");
   const { startEl: topBarStartEl, setFilled: setTopBarFilled } = useTopBarSlots();
   const jiraTabEnabled = jiraStatus?.connected === true;
+  // Hoisted above visibleTabs (rather than computed further down with the rest of the
+  // members logic) because the Custom Fields tab needs the role check to decide whether
+  // to even appear — unlike every other tab, which stays visible with only in-tab actions
+  // gated, this one must be absent (not just read-only) for non-owner/manager roles.
+  const currentUserRole = currentUserId
+    ? normalizeRole(projectMembers.find((m) => m.userId === currentUserId)?.role ?? "qa_engineer")
+    : "qa_engineer";
+  const canManageCustomFields = currentUserRole === "owner" || currentUserRole === "manager";
   const visibleTabs = useMemo<Array<{ key: SettingsTab; label: string }>>(
     () => [
       { key: "general", label: "General" },
       { key: "testRuns", label: "Test Environments" },
       { key: "members", label: "Team Members" },
       { key: "apiTokens", label: "API & MCP" },
+      ...(canManageCustomFields ? [{ key: "customFields" as const, label: "Custom Fields" }] : []),
       ...(jiraTabEnabled ? [{ key: "jira" as const, label: "Jira" }] : []),
       { key: "integrations", label: "Integrations" },
     ],
-    [jiraTabEnabled]
+    [jiraTabEnabled, canManageCustomFields]
   );
 
   useEffect(() => {
@@ -209,6 +220,7 @@ export default function ProjectSettingsPage() {
       getJiraStatus(projectId).then(setJiraStatus).catch(() => {});
       getLinearStatus(projectId).then(setLinearStatus).catch(() => {});
       listApiKeys(projectId).then((l) => setApiTokenCount(l.length)).catch(() => {});
+      listCustomFieldDefinitions(projectId).then((l) => setCustomFieldCount(l.length)).catch(() => {});
       loadMembers().catch(() => {});
     });
   }, [loadMembers, projectId, router]);
@@ -322,10 +334,7 @@ export default function ProjectSettingsPage() {
   const memberIds = new Set(projectMembers.map((member) => member.userId));
   const availableToAdd = workspaceMembers.filter((member) => !memberIds.has(member.userId));
 
-  const currentUserRole = currentUserId
-    ? normalizeRole(projectMembers.find((m) => m.userId === currentUserId)?.role ?? "qa_engineer")
-    : "qa_engineer";
-  const canManageMembers = currentUserRole === "owner" || currentUserRole === "manager";
+  const canManageMembers = canManageCustomFields;
 
   function assignableRoles(): { value: string; label: string }[] {
     if (currentUserRole === "owner") return [{ value: "manager", label: "Manager" }, { value: "qa_engineer", label: "QA Engineer" }];
@@ -812,6 +821,39 @@ export default function ProjectSettingsPage() {
                 className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
               >
                 Manage API tokens
+              </Link>
+            </div>
+          </div>
+        </Card>
+      )}
+      {activeTab === "customFields" && (
+        <Card className="p-4 space-y-4">
+          <div>
+            <h2 className="text-base font-semibold text-[var(--foreground)]">Custom Fields</h2>
+            <p className="mt-1 text-sm text-[var(--muted)]">
+              Capture additional test case metadata specific to this project&apos;s testing process (Pro plan).
+            </p>
+          </div>
+          <div className="rounded-lg border border-[var(--border)] p-4 flex items-start gap-4">
+            <div className="shrink-0 w-10 h-10 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center">
+              <IconStack2 className="w-5 h-5 text-white" stroke={1.75} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-[var(--foreground)]">Test case custom fields</h3>
+              <p className="text-xs text-[var(--muted)] mt-0.5">
+                {customFieldCount === null
+                  ? "Loading…"
+                  : customFieldCount === 0
+                  ? "No custom fields yet"
+                  : `${customFieldCount} field${customFieldCount === 1 ? "" : "s"}`}
+              </p>
+            </div>
+            <div className="shrink-0">
+              <Link
+                href={`/projects/${projectId}/settings/custom-fields`}
+                className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+              >
+                Manage custom fields
               </Link>
             </div>
           </div>

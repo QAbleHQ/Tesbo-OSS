@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -17,6 +17,9 @@ import { encryptSecret, decryptSecret } from "../common/crypto.util";
 import { ApiTokenService } from "../auth/api-token.service";
 import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
+import { PlanLimitsService } from "../plan-limits/plan-limits.service";
+import { CustomFieldsService } from "../custom-fields/custom-fields.service";
+import { CustomFieldDefinitionDto } from "../custom-fields/custom-fields.types";
 
 type Body = Record<string, any>;
 
@@ -168,6 +171,33 @@ function estimateTokens(value: string): number {
 
 function normalizeJsonArray(value: unknown): any[] {
   return Array.isArray(value) ? value : [];
+}
+
+// Renders a stored custom field value into the human-readable form used by CSV/XLSX
+// export (option ids resolved to their current labels, multi-select joined with ", ").
+function formatCustomFieldExportValue(definition: CustomFieldDefinitionDto, raw: unknown): string {
+  if (raw === undefined || raw === null || raw === "") return "";
+  switch (definition.fieldType) {
+    case "boolean": {
+      const trueFalse = definition.config.displayFormat === "true_false";
+      return raw ? (trueFalse ? "True" : "Yes") : trueFalse ? "False" : "No";
+    }
+    case "single_select": {
+      const option = (definition.config.options || []).find((o) => o.id === raw);
+      return option?.label || "";
+    }
+    case "multi_select": {
+      const options = definition.config.options || [];
+      return (Array.isArray(raw) ? raw : [])
+        .map((id) => options.find((o) => o.id === id)?.label || "")
+        .filter(Boolean)
+        .join(", ");
+    }
+    case "number":
+      return definition.config.unit ? `${raw} ${definition.config.unit}` : String(raw);
+    default:
+      return String(raw);
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -347,7 +377,9 @@ export class LegacyService implements OnModuleInit {
     private readonly storage: StorageService,
     private readonly ragIngestion: RagIngestionService,
     private readonly ragRetrieval: RagRetrievalService,
-    private readonly apiTokens: ApiTokenService
+    private readonly apiTokens: ApiTokenService,
+    private readonly planLimits: PlanLimitsService,
+    @Inject(forwardRef(() => CustomFieldsService)) private readonly customFields: CustomFieldsService
   ) {}
 
   // --- API tokens (project-scoped machine credentials) -------------------
@@ -593,7 +625,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
 
     const active = await this.db.query(
-      `SELECT o.id, o.name, o.slug, om.role, o.created_at
+      `SELECT o.id, o.name, o.slug, o.plan, om.role, o.created_at
        FROM users u
        JOIN organizations o ON o.id = u.active_organization_id
        JOIN organization_members om ON om.organization_id = o.id AND om.user_id = u.id
@@ -605,7 +637,7 @@ export class LegacyService implements OnModuleInit {
     // active_organization_id is unset or stale (e.g. user was removed from
     // that org) — fall back to the earliest membership and self-heal.
     const res = await this.db.query(
-      `SELECT o.id, o.name, o.slug, om.role, o.created_at
+      `SELECT o.id, o.name, o.slug, o.plan, om.role, o.created_at
        FROM organizations o
        JOIN organization_members om ON om.organization_id = o.id
        WHERE om.user_id = $1
@@ -627,7 +659,7 @@ export class LegacyService implements OnModuleInit {
   async listWorkspaces(userId: string | null | undefined) {
     const uid = this.requireUser(userId);
     const res = await this.db.query(
-      `SELECT o.id, o.name, o.slug, om.role, (o.id = u.active_organization_id) AS is_active
+      `SELECT o.id, o.name, o.slug, o.plan, om.role, (o.id = u.active_organization_id) AS is_active
        FROM organizations o
        JOIN organization_members om ON om.organization_id = o.id
        JOIN users u ON u.id = om.user_id
@@ -1220,6 +1252,7 @@ export class LegacyService implements OnModuleInit {
     const name = String(body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "name is required" });
     const workspace = await this.workspace(uid);
+    await this.planLimits.assertCanCreateProject(workspace.id);
     const key = projectKey(String(body.key || name));
     const res = await this.db.transaction(async (client) => {
       const project = await client.query(
@@ -1258,7 +1291,7 @@ export class LegacyService implements OnModuleInit {
   // Also surfaces the caller's own project role (caller_role) since the join is
   // already scoped to pm.user_id = the caller — callers that need to permission-check
   // an action (e.g. addProjectMember) can reuse this instead of a second query.
-  private async requireProjectAccess(userId: string | null | undefined, projectId: string) {
+  async requireProjectAccess(userId: string | null | undefined, projectId: string) {
     const uid = this.requireUser(userId);
     const workspace = await this.workspace(uid);
     const res = await this.db.query(
@@ -1446,22 +1479,42 @@ export class LegacyService implements OnModuleInit {
         `(lower(title) LIKE $${p} OR lower(coalesce(description, '')) LIKE $${p} OR lower(coalesce(external_id, '')) LIKE $${p} OR lower(coalesce(type, '')) LIKE $${p})`
       );
     }
+
+    // Custom field filters join custom_field_values once per condition (each scoped 1:1 by
+    // definition_id + testcase_id, so no fan-out risk) — see CustomFieldsService.buildListFilterSql.
+    let customFieldJoinSql = "";
+    if (query.customFieldFilters) {
+      const cf = await this.customFields.buildListFilterSql(projectId, query.customFieldFilters, values.length);
+      customFieldJoinSql = cf.joinSql;
+      if (cf.whereSql) filters.push(cf.whereSql);
+      values.push(...cf.params);
+    }
+
     const where = filters.join(" AND ");
-    const total = await this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases WHERE ${where}`, values);
+    const total = await this.db.query<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM testcases ${customFieldJoinSql} WHERE ${where}`,
+      values
+    );
     values.push(limit, offset);
     const res = await this.db.query(
-      `SELECT id, external_id, title, priority, type, automation_status, automation_tags, status,
-              suite_id, owner_id, updated_at, jira_issue_key, jira_url, linear_issue_key, linear_url
-       FROM testcases WHERE ${where}
-       ORDER BY updated_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
+      `SELECT testcases.id, testcases.external_id, testcases.title, testcases.priority, testcases.type,
+              testcases.automation_status, testcases.automation_tags, testcases.status,
+              testcases.suite_id, testcases.owner_id, testcases.updated_at, testcases.jira_issue_key,
+              testcases.jira_url, testcases.linear_issue_key, testcases.linear_url,
+              COALESCE(
+                (SELECT jsonb_object_agg(v.definition_id, v.value) FROM custom_field_values v WHERE v.testcase_id = testcases.id),
+                '{}'::jsonb
+              ) AS custom_field_values
+       FROM testcases ${customFieldJoinSql} WHERE ${where}
+       ORDER BY testcases.updated_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values
     );
     return { rows: res.rows.map(toCamel), total: Number(total.rows[0]?.count || 0) };
   }
 
-  async exportTestCases(projectId: string): Promise<Body[]> {
+  async exportTestCases(projectId: string, customFieldDefinitions: CustomFieldDefinitionDto[] = []): Promise<Body[]> {
     const res = await this.db.query(
-      `SELECT t.external_id, t.title, COALESCE(t.description, '') AS description,
+      `SELECT t.id, t.external_id, t.title, COALESCE(t.description, '') AS description,
               COALESCE(t.preconditions, '') AS preconditions,
               t.steps, COALESCE(t.test_data, '') AS test_data,
               COALESCE(t.priority, '') AS priority, COALESCE(t.severity, '') AS severity,
@@ -1473,6 +1526,22 @@ export class LegacyService implements OnModuleInit {
        ORDER BY t.updated_at DESC`,
       [projectId]
     );
+
+    const valuesByTestcase = new Map<string, Map<string, unknown>>();
+    if (customFieldDefinitions.length) {
+      const valuesRes = await this.db.query<{ testcase_id: string; definition_id: string; value: unknown }>(
+        `SELECT cfv.testcase_id, cfv.definition_id, cfv.value
+         FROM custom_field_values cfv
+         JOIN testcases t ON t.id = cfv.testcase_id
+         WHERE t.project_id = $1`,
+        [projectId]
+      );
+      for (const row of valuesRes.rows) {
+        if (!valuesByTestcase.has(row.testcase_id)) valuesByTestcase.set(row.testcase_id, new Map());
+        valuesByTestcase.get(row.testcase_id)!.set(row.definition_id, row.value);
+      }
+    }
+
     return res.rows.map((row) => {
       const steps = normalizeJsonArray(row.steps)
         .map((step) => {
@@ -1483,7 +1552,7 @@ export class LegacyService implements OnModuleInit {
         })
         .filter(Boolean)
         .join(" | ");
-      return {
+      const exportRow: Body = {
         externalId: row.external_id || "",
         title: row.title || "",
         description: row.description || "",
@@ -1497,6 +1566,11 @@ export class LegacyService implements OnModuleInit {
         suite: row.suite || "",
         component: row.component || ""
       };
+      for (const definition of customFieldDefinitions) {
+        const raw = valuesByTestcase.get(row.id)?.get(definition.id);
+        exportRow[`cf_${definition.key}`] = formatCustomFieldExportValue(definition, raw);
+      }
+      return exportRow;
     });
   }
 
@@ -1509,45 +1583,51 @@ export class LegacyService implements OnModuleInit {
   async createTestCase(projectId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
     const externalId = body.externalId || (await this.nextExternalId(projectId, body.testcaseIdPrefix));
-    const res = await this.db.query(
-      `INSERT INTO testcases
-       (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
-        priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
-        automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
-        linear_issue_key, linear_url, attachments, created_by, updated_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
-       RETURNING *`,
-      [
-        projectId,
-        body.suiteId || null,
-        externalId,
-        body.title || "Untitled test case",
-        body.description || "",
-        body.preconditions || "",
-        body.postconditions || "",
-        JSON.stringify(body.steps || body.stepsJson || []),
-        body.testData || "",
-        body.priority || "P2",
-        body.severity || null,
-        body.type || "Functional",
-        body.automationStatus || "Not Automated",
-        body.automationRepo || null,
-        body.automationPath || null,
-        body.automationTestName || null,
-        body.automationFramework || null,
-        body.automationTags || null,
-        body.ownerId || null,
-        body.component || null,
-        body.status || "Draft",
-        body.jiraIssueKey || null,
-        body.jiraUrl || null,
-        body.linearIssueKey || null,
-        body.linearUrl || null,
-        body.attachments || null,
-        uid
-      ]
-    );
-    const created = res.rows[0];
+    const created = await this.db.transaction(async (client) => {
+      const res = await client.query(
+        `INSERT INTO testcases
+         (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
+          priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
+          automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
+          linear_issue_key, linear_url, attachments, created_by, updated_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
+         RETURNING *`,
+        [
+          projectId,
+          body.suiteId || null,
+          externalId,
+          body.title || "Untitled test case",
+          body.description || "",
+          body.preconditions || "",
+          body.postconditions || "",
+          JSON.stringify(body.steps || body.stepsJson || []),
+          body.testData || "",
+          body.priority || "P2",
+          body.severity || null,
+          body.type || "Functional",
+          body.automationStatus || "Not Automated",
+          body.automationRepo || null,
+          body.automationPath || null,
+          body.automationTestName || null,
+          body.automationFramework || null,
+          body.automationTags || null,
+          body.ownerId || null,
+          body.component || null,
+          body.status || "Draft",
+          body.jiraIssueKey || null,
+          body.jiraUrl || null,
+          body.linearIssueKey || null,
+          body.linearUrl || null,
+          body.attachments || null,
+          uid
+        ]
+      );
+      const row = res.rows[0];
+      // "skip-if-disabled": on a Launch-plan project this silently no-ops rather than
+      // throwing, so ordinary test case creation is never blocked by billing state.
+      await this.customFields.setValuesForTestCase(uid, projectId, row.id, body.customFieldValues || {}, client, "skip-if-disabled");
+      return row;
+    });
     await this.logProjectActivity(projectId, uid, "testcase_created", "testcase", created.id, `${created.external_id} - ${created.title}`, { after: toCamel(created) });
     return toCamel(created);
   }
@@ -1556,54 +1636,122 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(actorId);
     const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
     if (!before.rows[0]) throw new NotFoundException({ error: "Test case not found" });
-    const res = await this.db.query(
-      `UPDATE testcases SET
-       suite_id=$2, title=COALESCE($3,title), description=COALESCE($4,description),
-       preconditions=COALESCE($5,preconditions), postconditions=COALESCE($6,postconditions),
-       steps=COALESCE($7::jsonb,steps), test_data=COALESCE($8,test_data), priority=COALESCE($9,priority),
-       severity=COALESCE($10,severity), type=COALESCE($11,type), automation_status=COALESCE($12,automation_status),
-       automation_repo=COALESCE($13,automation_repo), automation_path=COALESCE($14,automation_path),
-       automation_test_name=COALESCE($15,automation_test_name), automation_framework=COALESCE($16,automation_framework),
-       automation_tags=COALESCE($17,automation_tags), owner_id=$18, component=COALESCE($19,component),
-       status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url),
-       linear_issue_key=COALESCE($23,linear_issue_key), linear_url=COALESCE($24,linear_url),
-       attachments=COALESCE($25,attachments), updated_by=$26, updated_at=now()
-       WHERE id=$1 AND deleted_at IS NULL
-       RETURNING *`,
-      [
-        id,
-        body.suiteId ?? null,
-        body.title ?? null,
-        body.description ?? null,
-        body.preconditions ?? null,
-        body.postconditions ?? null,
-        body.steps || body.stepsJson ? JSON.stringify(body.steps || body.stepsJson) : null,
-        body.testData ?? null,
-        body.priority ?? null,
-        body.severity ?? null,
-        body.type ?? null,
-        body.automationStatus ?? null,
-        body.automationRepo ?? null,
-        body.automationPath ?? null,
-        body.automationTestName ?? null,
-        body.automationFramework ?? null,
-        body.automationTags ?? null,
-        body.ownerId ?? null,
-        body.component ?? null,
-        body.status ?? null,
-        body.jiraIssueKey ?? null,
-        body.jiraUrl ?? null,
-        body.linearIssueKey ?? null,
-        body.linearUrl ?? null,
-        body.attachments ?? null,
-        uid
-      ]
-    );
-    const after = res.rows[0];
-    await this.logProjectActivity(before.rows[0].project_id, uid, "testcase_updated", "testcase", id, `${after?.external_id} - ${after?.title}`, {
+    const projectId = before.rows[0].project_id;
+    const after = await this.db.transaction(async (client) => {
+      const res = await client.query(
+        `UPDATE testcases SET
+         suite_id=$2, title=COALESCE($3,title), description=COALESCE($4,description),
+         preconditions=COALESCE($5,preconditions), postconditions=COALESCE($6,postconditions),
+         steps=COALESCE($7::jsonb,steps), test_data=COALESCE($8,test_data), priority=COALESCE($9,priority),
+         severity=COALESCE($10,severity), type=COALESCE($11,type), automation_status=COALESCE($12,automation_status),
+         automation_repo=COALESCE($13,automation_repo), automation_path=COALESCE($14,automation_path),
+         automation_test_name=COALESCE($15,automation_test_name), automation_framework=COALESCE($16,automation_framework),
+         automation_tags=COALESCE($17,automation_tags), owner_id=$18, component=COALESCE($19,component),
+         status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url),
+         linear_issue_key=COALESCE($23,linear_issue_key), linear_url=COALESCE($24,linear_url),
+         attachments=COALESCE($25,attachments), updated_by=$26, updated_at=now()
+         WHERE id=$1 AND deleted_at IS NULL
+         RETURNING *`,
+        [
+          id,
+          body.suiteId ?? null,
+          body.title ?? null,
+          body.description ?? null,
+          body.preconditions ?? null,
+          body.postconditions ?? null,
+          body.steps || body.stepsJson ? JSON.stringify(body.steps || body.stepsJson) : null,
+          body.testData ?? null,
+          body.priority ?? null,
+          body.severity ?? null,
+          body.type ?? null,
+          body.automationStatus ?? null,
+          body.automationRepo ?? null,
+          body.automationPath ?? null,
+          body.automationTestName ?? null,
+          body.automationFramework ?? null,
+          body.automationTags ?? null,
+          body.ownerId ?? null,
+          body.component ?? null,
+          body.status ?? null,
+          body.jiraIssueKey ?? null,
+          body.jiraUrl ?? null,
+          body.linearIssueKey ?? null,
+          body.linearUrl ?? null,
+          body.attachments ?? null,
+          uid
+        ]
+      );
+      const row = res.rows[0];
+      // Always called (even with an empty body.customFieldValues) so required-field
+      // enforcement re-checks against currently-active-required fields using existing
+      // stored values — correct for "field made required after the fact".
+      await this.customFields.setValuesForTestCase(uid, projectId, id, body.customFieldValues || {}, client, "skip-if-disabled");
+      return row;
+    });
+    await this.logProjectActivity(projectId, uid, "testcase_updated", "testcase", id, `${after?.external_id} - ${after?.title}`, {
       before: toCamel(before.rows[0]),
       after: toCamel(after)
     });
+  }
+
+  // No duplicate/clone endpoint existed before this feature. Added so "custom field
+  // values are preserved when a test case is duplicated" (spec requirement) is actually
+  // satisfiable end-to-end, rather than a requirement about an operation that didn't exist.
+  async duplicateTestCase(id: string, actorId: string | null | undefined): Promise<Body> {
+    const uid = this.requireUser(actorId);
+    const source = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
+    if (!source.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+    const src = source.rows[0];
+    const externalId = await this.nextExternalId(src.project_id);
+
+    const duplicated = await this.db.transaction(async (client) => {
+      const res = await client.query(
+        `INSERT INTO testcases
+         (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
+          priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
+          automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
+          linear_issue_key, linear_url, attachments, created_by, updated_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
+         RETURNING *`,
+        [
+          src.project_id,
+          src.suite_id,
+          externalId,
+          `${src.title} (copy)`,
+          src.description,
+          src.preconditions,
+          src.postconditions,
+          JSON.stringify(src.steps || []),
+          src.test_data,
+          src.priority,
+          src.severity,
+          src.type,
+          src.automation_status,
+          src.automation_repo,
+          src.automation_path,
+          src.automation_test_name,
+          src.automation_framework,
+          src.automation_tags,
+          src.owner_id,
+          src.component,
+          src.status,
+          src.jira_issue_key,
+          src.jira_url,
+          src.linear_issue_key,
+          src.linear_url,
+          src.attachments,
+          uid
+        ]
+      );
+      const row = res.rows[0];
+      await this.customFields.copyValues(id, row.id, uid, client);
+      return row;
+    });
+
+    await this.logProjectActivity(src.project_id, uid, "testcase_duplicated", "testcase", duplicated.id, `${duplicated.external_id} - ${duplicated.title}`, {
+      sourceId: id
+    });
+    return toCamel(duplicated);
   }
 
   async deleteTestCase(id: string, actorId: string | null | undefined) {
@@ -2154,8 +2302,15 @@ export class LegacyService implements OnModuleInit {
     files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
   ) {
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
-    const bug = await this.db.query("SELECT id FROM bugs WHERE id = $1 AND project_id = $2", [bugId, projectId]);
+    const bug = await this.db.query(
+      "SELECT b.id, p.organization_id FROM bugs b JOIN projects p ON p.id = b.project_id WHERE b.id = $1 AND b.project_id = $2",
+      [bugId, projectId]
+    );
     if (!bug.rows[0]) throw new NotFoundException({ error: "Bug not found" });
+    await this.planLimits.assertStorageAvailable(
+      bug.rows[0].organization_id,
+      files.reduce((sum, file) => sum + file.size, 0)
+    );
 
     const created: Body[] = [];
     for (const file of files) {
@@ -2208,14 +2363,19 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(actorId);
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
     const execution = await this.db.query(
-      `SELECT e.id, c.project_id FROM executions e
+      `SELECT e.id, c.project_id, p.organization_id FROM executions e
        JOIN cycle_items ci ON ci.id = e.cycle_item_id
        JOIN cycles c ON c.id = ci.cycle_id
+       JOIN projects p ON p.id = c.project_id
        WHERE e.id = $1 AND c.id = $2 AND e.deleted_at IS NULL`,
       [executionId, cycleId]
     );
     if (!execution.rows[0]) throw new NotFoundException({ error: "Execution not found" });
     const projectId = execution.rows[0].project_id;
+    await this.planLimits.assertStorageAvailable(
+      execution.rows[0].organization_id,
+      files.reduce((sum, file) => sum + file.size, 0)
+    );
 
     const created: Body[] = [];
     for (const file of files) {
@@ -3732,7 +3892,7 @@ export class LegacyService implements OnModuleInit {
 
   // ─── Knowledge Base v2: files ──────────────────────────────────────────────
 
-  static readonly KB_MAX_UPLOAD_SIZE = Number(process.env.MAX_UPLOAD_SIZE) || 50 * 1024 * 1024;
+  static readonly KB_MAX_UPLOAD_SIZE = Number(process.env.MAX_UPLOAD_SIZE) || 100 * 1024 * 1024;
   static readonly KB_ALLOWED_EXTENSIONS = new Set([
     "png", "jpg", "jpeg", "webp", "svg",
     "pdf", "doc", "docx", "txt", "md",
@@ -3889,6 +4049,10 @@ export class LegacyService implements OnModuleInit {
     if (!folderId) throw new BadRequestException({ error: "folderId is required" });
     await this.kbFolder(projectId, folderId);
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
+    await this.planLimits.assertStorageAvailable(
+      project.organization_id,
+      files.reduce((sum, file) => sum + file.size, 0)
+    );
 
     // Files are held in memory (never touch disk) until the whole batch passes validation,
     // so a single unsupported file rejects the batch atomically with nothing left behind —
@@ -4422,6 +4586,7 @@ export class LegacyService implements OnModuleInit {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
+    await this.planLimits.assertIntegrationAllowed(workspace.id, p);
     const code = String(body.code || "");
     if (!code) throw new BadRequestException({ error: "Authorization code is required." });
     verifyOAuthState(String(body.state || ""), p, workspace.id);
@@ -4513,6 +4678,7 @@ export class LegacyService implements OnModuleInit {
     }
     const workspace = await this.workspace(userId);
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
+    await this.planLimits.assertIntegrationAllowed(workspace.id, p);
 
     if (p === "jira") {
       const siteUrl = normalizeJiraSiteUrl(String(body.siteUrl || ""));

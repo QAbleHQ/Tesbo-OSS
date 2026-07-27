@@ -19,13 +19,12 @@ import {
   IconLogout,
   IconChevronLeft,
   IconChevronRight,
-  IconShield,
   IconKey,
   IconList,
   IconLayoutDashboard,
   IconFolders,
 } from "@tabler/icons-react";
-import { authMe, getWorkspace, logout } from "@/lib/api";
+import { getWorkspace, logout } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
 import ThemeToggle from "@/components/ThemeToggle";
 import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
@@ -86,7 +85,7 @@ const projectNavSections: Array<{ section: string; items: NavItemConfig[] }> = [
 type MenuIconName =
   | "home" | "sparkles" | "book" | "list" | "fileText" | "clipboard"
   | "play" | "bug" | "chart" | "activity" | "settings" | "users" | "plug"
-  | "logout" | "chevronLeft" | "chevronRight" | "adminPanel" | "key"
+  | "logout" | "chevronLeft" | "chevronRight" | "key"
   | "dashboard" | "folders";
 
 function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconName; className?: string }) {
@@ -108,7 +107,6 @@ function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconNam
     case "logout":       return <IconLogout {...props} />;
     case "chevronLeft":  return <IconChevronLeft {...props} />;
     case "chevronRight": return <IconChevronRight {...props} />;
-    case "adminPanel":   return <IconShield {...props} />;
     case "key":          return <IconKey {...props} />;
     case "dashboard":    return <IconLayoutDashboard {...props} />;
     case "folders":      return <IconFolders {...props} />;
@@ -185,23 +183,17 @@ function SidebarContent() {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
-  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
   const [isWorkspaceOwner, setIsWorkspaceOwner] = useState(false);
 
   useEffect(() => {
     let active = true;
-    authMe().then((data) => {
-      if (active && data?.isPlatformAdmin) setIsPlatformAdmin(true);
-    });
     getWorkspace().then((ws) => {
       if (active && (ws.role ?? "").trim().toLowerCase() === "owner") setIsWorkspaceOwner(true);
     }).catch(() => undefined);
     return () => { active = false; };
   }, []);
 
-  const isInSettings = Boolean(
-    pathname?.startsWith("/settings") || pathname?.startsWith("/admin")
-  );
+  const isInSettings = Boolean(pathname?.startsWith("/settings"));
 
   const isOnProjectRoot = projectId != null && pathname === `/projects/${projectId}`;
   const isPathActive = (href: string) => {
@@ -275,17 +267,6 @@ function SidebarContent() {
             <div className="space-y-0.5">
               <BackToProjects collapsed={isCollapsed} />
             </div>
-
-            {isPlatformAdmin && (
-              <div>
-                {!isCollapsed && (
-                  <p className="mb-1 px-3 text-[11px] font-medium uppercase tracking-[0.06em] text-[var(--ink-300)]">Platform Admin</p>
-                )}
-                <div className="space-y-0.5">
-                  <NavLink href="/admin" label="System Health" icon="activity" active={pathname === "/admin"} collapsed={isCollapsed} />
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -378,15 +359,6 @@ function SidebarContent() {
             label="Project settings"
             icon="settings"
             active={pathname === `${projectPathPrefix}/settings` || (pathname?.startsWith(`${projectPathPrefix}/settings/`) ?? false)}
-            collapsed={isCollapsed}
-          />
-        )}
-        {isPlatformAdmin && !isInSettings && (
-          <NavLink
-            href="/admin"
-            label="Admin Panel"
-            icon="adminPanel"
-            active={pathname?.startsWith("/admin") ?? false}
             collapsed={isCollapsed}
           />
         )}
