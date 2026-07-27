@@ -2248,21 +2248,16 @@ export type IntegrationProvider = "jira" | "linear";
 // mapping screen instead of the generic workspace integrations page.
 export const INTEGRATION_RETURN_PROJECT_KEY = "tesbo:integrationReturnProjectId";
 
+/**
+ * Read-only view of how the deployment is configured for this provider. Credentials come from the
+ * backend environment (`<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET`) and cannot be set from the UI, so
+ * `configured` is simply whether connecting is possible at all. `redirectUri` is exposed so a
+ * self-hosted operator can see which callback URL to register in the provider console.
+ */
 export interface IntegrationOAuthConfig {
   configured: boolean;
-  /**
-   * Which credentials the backend resolved:
-   * - `environment` — Tesbo's platform OAuth app (Cloud). One-click connect, nothing to configure.
-   * - `workspace` — this workspace registered its own OAuth app, which overrides the platform one.
-   * - `none` — nothing configured; self-hosted installs must bring their own app or use a PAT.
-   */
-  source: "workspace" | "environment" | "none";
   clientId: string;
   redirectUri: string;
-  hasClientSecret: boolean;
-  /** True when platform credentials exist, even if a workspace config is currently overriding them. */
-  platformAvailable: boolean;
-  updatedAt: string | null;
 }
 
 export async function getIntegrationAuthUrl(provider: IntegrationProvider): Promise<{ url: string }> {
@@ -2271,21 +2266,6 @@ export async function getIntegrationAuthUrl(provider: IntegrationProvider): Prom
 
 export async function getIntegrationConfig(provider: IntegrationProvider): Promise<IntegrationOAuthConfig> {
   return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`);
-}
-
-export async function updateIntegrationConfig(
-  provider: IntegrationProvider,
-  data: { clientId: string; clientSecret: string; redirectUri: string }
-): Promise<IntegrationOAuthConfig> {
-  return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`, {
-    method: "PATCH",
-    body: data,
-  });
-}
-
-/** Clears this workspace's own OAuth app so Tesbo's platform app takes over again. */
-export async function resetIntegrationConfig(provider: IntegrationProvider): Promise<IntegrationOAuthConfig> {
-  return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`, { method: "DELETE" });
 }
 
 // `state` is the signed value the backend put on the authorize URL; it must be handed back
@@ -2302,21 +2282,10 @@ export async function disconnectIntegration(provider: IntegrationProvider): Prom
   await api(`/api/workspace/integrations/${provider}/disconnect`, { method: "DELETE" });
 }
 
-export type IntegrationAuthMethod = "oauth" | "personal_token";
-
-export async function connectIntegrationToken(
-  provider: IntegrationProvider,
-  data: { siteUrl?: string; email?: string; apiToken?: string; apiKey?: string }
-): Promise<{ connectionId: string; siteUrl: string; authMethod: "personal_token" }> {
-  return api(`/api/workspace/integrations/${provider}/connect-token`, { method: "POST", body: data });
-}
-
 export interface IntegrationConnectionStatus {
   connected: boolean;
   id?: string;
   siteUrl?: string;
-  authMethod?: IntegrationAuthMethod;
-  personalTokenIdentifier?: string | null;
   tokenExpiresAt?: string | null;
   connectedBy?: string;
   createdAt?: string;

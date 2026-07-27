@@ -240,19 +240,6 @@ function assertIntegrationProvider(provider: string): IntegrationProvider {
   return provider;
 }
 
-// Which providers support connecting via a Personal Access Token instead of OAuth. A future
-// provider that only supports OAuth simply omits itself (or sets `false`) here — the frontend's
-// per-provider PAT field map mirrors this and hides the tab accordingly.
-const INTEGRATION_PAT_SUPPORTED: Record<IntegrationProvider, boolean> = { jira: true, linear: true };
-
-function normalizeJiraSiteUrl(raw: string): string {
-  const value = raw.trim().replace(/\/+$/, "");
-  if (!/^https:\/\/[^/]+$/i.test(value)) {
-    throw new BadRequestException({ error: "Jira site URL must look like https://yourcompany.atlassian.net" });
-  }
-  return value;
-}
-
 const JIRA_OAUTH_SCOPE = "read:jira-work read:jira-user write:jira-work offline_access";
 const LINEAR_OAUTH_SCOPE = "read,write,issues:create,comments:create";
 
@@ -4470,22 +4457,17 @@ export class LegacyService implements OnModuleInit {
     return `${frontend.replace(/\/$/, "")}/integrations/callback`;
   }
 
-  private async integrationOAuthConfig(organizationId: string, provider: IntegrationProvider) {
-    const saved = await this.db.query(
-      "SELECT client_id, client_secret, redirect_uri FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
-      [organizationId, provider]
-    ).catch(() => ({ rows: [] as Body[] }));
-    const row = saved.rows[0];
-    if (row?.client_id && row?.client_secret && row?.redirect_uri) {
-      return {
-        clientId: String(row.client_id),
-        clientSecret: decryptSecret(String(row.client_secret)),
-        redirectUri: String(row.redirect_uri)
-      };
-    }
+  // Deployment-level configuration only. There is deliberately no per-workspace override: the
+  // operator registers one OAuth app and sets *_CLIENT_ID/*_CLIENT_SECRET, and every workspace in
+  // the deployment connects through it with a single click. Tesbo Cloud and a self-hosted install
+  // differ only in whose app the credentials belong to.
+  private integrationOAuthConfig(provider: IntegrationProvider) {
     const env = this.envIntegrationConfig(provider);
     if (env) return env;
-    throw new BadRequestException({ error: `${provider} OAuth is not configured. Add Client ID, Client Secret, and Redirect URI in Workspace Settings → Integrations.` });
+    const prefix = provider.toUpperCase();
+    throw new BadRequestException({
+      error: `${provider} is not configured on this deployment. Set ${prefix}_CLIENT_ID and ${prefix}_CLIENT_SECRET in the backend environment and restart.`
+    });
   }
 
   private async projectOrganizationId(projectId: string): Promise<string> {
@@ -4495,91 +4477,25 @@ export class LegacyService implements OnModuleInit {
     return organizationId;
   }
 
+  // Tells the UI whether this deployment can connect the provider at all. Read-only: there is
+  // nothing for a workspace to configure, so the shape is just "is it set up, and where does the
+  // callback land" — the latter being what an operator needs to register in the provider console.
   async integrationConfigStatus(userId: string | null | undefined, provider: string) {
     const p = assertIntegrationProvider(provider);
-    const workspace = await this.workspace(userId);
-    const saved = await this.db.query(
-      "SELECT client_id, redirect_uri, updated_at FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
-      [workspace.id, p]
-    ).catch(() => ({ rows: [] as Body[] }));
-    const row = saved.rows[0];
+    await this.workspace(userId);
     const env = this.envIntegrationConfig(p);
-    if (row) {
-      return {
-        configured: true,
-        source: "workspace",
-        clientId: row.client_id,
-        redirectUri: row.redirect_uri,
-        hasClientSecret: true,
-        // Whether a platform app exists *behind* this workspace config. The UI needs this to offer
-        // "go back to the Tesbo app" — without it, a workspace that saves its own credentials on
-        // Tesbo Cloud has no way to discover it shadowed a working platform connection.
-        platformAvailable: !!env,
-        updatedAt: row.updated_at
-      };
-    }
     return {
       configured: !!env,
-      source: env ? "environment" : "none",
       clientId: env?.clientId ?? "",
-      redirectUri: env?.redirectUri ?? this.defaultIntegrationRedirectUri(),
-      hasClientSecret: !!env?.clientSecret,
-      platformAvailable: !!env,
-      updatedAt: null
+      redirectUri: env?.redirectUri ?? this.defaultIntegrationRedirectUri()
     };
-  }
-
-  // Clears a workspace's own OAuth app so the platform app (env credentials) takes over again.
-  // Only removes the client config — an established connection in integration_connections is left
-  // alone, since the tokens it holds stay valid regardless of which app minted them.
-  async resetIntegrationConfig(userId: string | null | undefined, provider: string) {
-    const p = assertIntegrationProvider(provider);
-    const workspace = await this.workspace(userId);
-    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
-    await this.db.query(
-      "DELETE FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
-      [workspace.id, p]
-    );
-    return this.integrationConfigStatus(userId, p);
-  }
-
-  async updateIntegrationConfig(userId: string | null | undefined, provider: string, body: Body) {
-    const p = assertIntegrationProvider(provider);
-    const workspace = await this.workspace(userId);
-    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
-    const clientId = String(body.clientId || "").trim();
-    const requestedClientSecret = String(body.clientSecret || "").trim();
-    const redirectUri = String(body.redirectUri || "").trim();
-    const existing = await this.db.query(
-      "SELECT client_secret FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
-      [workspace.id, p]
-    ).catch(() => ({ rows: [] as Body[] }));
-    const clientSecret = requestedClientSecret ? encryptSecret(requestedClientSecret) : String(existing.rows[0]?.client_secret || "");
-    if (!clientId || !clientSecret || !redirectUri) {
-      throw new BadRequestException({ error: "Client ID, Client Secret, and Redirect URI are required." });
-    }
-    if (!/^https?:\/\//i.test(redirectUri)) {
-      throw new BadRequestException({ error: "Redirect URI must start with http:// or https://." });
-    }
-    await this.db.query(
-      `INSERT INTO integration_oauth_configs (organization_id, provider, client_id, client_secret, redirect_uri, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (organization_id, provider) DO UPDATE SET
-         client_id = EXCLUDED.client_id,
-         client_secret = EXCLUDED.client_secret,
-         redirect_uri = EXCLUDED.redirect_uri,
-         updated_by = EXCLUDED.updated_by,
-         updated_at = now()`,
-      [workspace.id, p, clientId, clientSecret, redirectUri, userId || null]
-    );
-    return this.integrationConfigStatus(userId, p);
   }
 
   async integrationAuthUrl(userId: string | null | undefined, provider: string) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
-    const { clientId, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
+    const { clientId, redirectUri } = this.integrationOAuthConfig(p);
     const state = signOAuthState(p, workspace.id);
     if (p === "jira") {
       const params = new URLSearchParams({
@@ -4612,7 +4528,7 @@ export class LegacyService implements OnModuleInit {
     const code = String(body.code || "");
     if (!code) throw new BadRequestException({ error: "Authorization code is required." });
     verifyOAuthState(String(body.state || ""), p, workspace.id);
-    const { clientId, clientSecret, redirectUri } = await this.integrationOAuthConfig(workspace.id, p);
+    const { clientId, clientSecret, redirectUri } = this.integrationOAuthConfig(p);
 
     if (p === "jira") {
       const token = await this.jiraFetch<Body>("https://auth.atlassian.com/oauth/token", {
@@ -4693,69 +4609,6 @@ export class LegacyService implements OnModuleInit {
     return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url };
   }
 
-  async connectIntegrationWithToken(userId: string | null | undefined, provider: string, body: Body) {
-    const p = assertIntegrationProvider(provider);
-    if (!INTEGRATION_PAT_SUPPORTED[p]) {
-      throw new BadRequestException({ error: `${p} does not support Personal Access Token authentication.` });
-    }
-    const workspace = await this.workspace(userId);
-    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
-    await this.planLimits.assertIntegrationAllowed(workspace.id, p);
-
-    if (p === "jira") {
-      const siteUrl = normalizeJiraSiteUrl(String(body.siteUrl || ""));
-      const email = String(body.email || "").trim();
-      const apiToken = String(body.apiToken || "").trim();
-      if (!email || !apiToken) throw new BadRequestException({ error: "Email and API token are required." });
-
-      const authHeader = `Basic ${Buffer.from(`${email}:${apiToken}`).toString("base64")}`;
-      await this.jiraFetch<Body>(`${siteUrl}/rest/api/3/myself`, { headers: { Authorization: authHeader, Accept: "application/json" } });
-
-      const res = await this.db.query(
-        `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
-         VALUES ($1, 'jira', NULL, $2, $3, '', now() + interval '100 years', $4, 'personal_token', $5)
-         ON CONFLICT (organization_id, provider) DO UPDATE SET
-           external_id = NULL,
-           site_url = EXCLUDED.site_url,
-           access_token = EXCLUDED.access_token,
-           refresh_token = '',
-           token_expires_at = EXCLUDED.token_expires_at,
-           connected_by = EXCLUDED.connected_by,
-           auth_method = 'personal_token',
-           personal_token_identifier = EXCLUDED.personal_token_identifier,
-           updated_at = now()
-         RETURNING id, site_url`,
-        [workspace.id, siteUrl, encryptSecret(apiToken), userId || null, email]
-      );
-      return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url, authMethod: "personal_token" };
-    }
-
-    // Linear
-    const apiKey = String(body.apiKey || "").trim();
-    if (!apiKey) throw new BadRequestException({ error: "API key is required." });
-    const viewer = await this.linearGraphQL<Body>(apiKey, "query { viewer { id } organization { id urlKey } }");
-    if (!viewer?.viewer?.id) throw new BadRequestException({ error: "Could not verify the Linear API key." });
-    const org = viewer.organization;
-
-    const res = await this.db.query(
-      `INSERT INTO integration_connections (organization_id, provider, external_id, site_url, access_token, refresh_token, token_expires_at, connected_by, auth_method, personal_token_identifier)
-       VALUES ($1, 'linear', $2, $3, $4, '', now() + interval '100 years', $5, 'personal_token', NULL)
-       ON CONFLICT (organization_id, provider) DO UPDATE SET
-         external_id = EXCLUDED.external_id,
-         site_url = EXCLUDED.site_url,
-         access_token = EXCLUDED.access_token,
-         refresh_token = '',
-         token_expires_at = EXCLUDED.token_expires_at,
-         connected_by = EXCLUDED.connected_by,
-         auth_method = 'personal_token',
-         personal_token_identifier = NULL,
-         updated_at = now()
-       RETURNING id, site_url`,
-      [workspace.id, String(org?.id || ""), org?.urlKey ? `https://linear.app/${org.urlKey}` : "", encryptSecret(apiKey), userId || null]
-    );
-    return { connectionId: res.rows[0].id, siteUrl: res.rows[0].site_url, authMethod: "personal_token" };
-  }
-
   async integrationDisconnect(userId: string | null | undefined, provider: string) {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
@@ -4784,9 +4637,7 @@ export class LegacyService implements OnModuleInit {
       connected: true,
       id: connection.id,
       siteUrl: connection.site_url,
-      authMethod: connection.auth_method,
-      personalTokenIdentifier: connection.auth_method === "personal_token" ? connection.personal_token_identifier : undefined,
-      tokenExpiresAt: connection.auth_method === "personal_token" ? null : connection.token_expires_at,
+      tokenExpiresAt: connection.token_expires_at,
       connectedBy: connection.connected_by,
       createdAt: connection.created_at,
       connectedProjects: projects.rows.map(toCamel)
@@ -5082,11 +4933,10 @@ export class LegacyService implements OnModuleInit {
     const res = await this.db.query("SELECT * FROM integration_connections WHERE organization_id = $1 AND provider = $2", [organizationId, provider]);
     const connection = res.rows[0] as Body | undefined;
     if (!connection) return null;
-    if (connection.auth_method === "personal_token") return connection; // Personal tokens don't expire; nothing to refresh.
     if (!refresh || new Date(connection.token_expires_at).getTime() > Date.now() + 60_000) return connection;
     if (provider === "linear" || !connection.refresh_token) return connection; // Linear OAuth tokens are long-lived; no refresh flow needed today.
 
-    const { clientId, clientSecret } = await this.integrationOAuthConfig(organizationId, provider);
+    const { clientId, clientSecret } = this.integrationOAuthConfig(provider);
     const token = await this.jiraFetch<Body>("https://auth.atlassian.com/oauth/token", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -5109,28 +4959,17 @@ export class LegacyService implements OnModuleInit {
     return { ...connection, access_token: encryptedAccessToken, refresh_token: encryptedRefreshToken, token_expires_at: expiresAt };
   }
 
-  // Centralizes the Bearer-vs-Basic and gateway-vs-direct-site-URL branching for Jira so call
-  // sites don't repeat the auth_method check: OAuth goes through the api.atlassian.com/ex/jira
-  // gateway with a Bearer token; a personal token calls the customer's own site directly with
-  // HTTP Basic (email:apiToken).
+  // Every connection is OAuth, so Jira is always reached through the api.atlassian.com/ex/jira
+  // gateway addressed by cloud_id, never the customer's own site URL.
   private jiraBaseUrlAndAuth(connection: Body): { baseUrl: string; headers: Record<string, string> } {
-    if (connection.auth_method === "personal_token") {
-      const email = String(connection.personal_token_identifier || "");
-      const apiToken = decryptSecret(String(connection.access_token || ""));
-      const basic = Buffer.from(`${email}:${apiToken}`).toString("base64");
-      return { baseUrl: String(connection.site_url || "").replace(/\/$/, ""), headers: { Authorization: `Basic ${basic}` } };
-    }
     return {
       baseUrl: `https://api.atlassian.com/ex/jira/${connection.cloud_id}`,
       headers: { Authorization: `Bearer ${decryptSecret(String(connection.access_token || ""))}` }
     };
   }
 
-  // Linear personal keys are passed as-is in the Authorization header; OAuth tokens need a
-  // "Bearer " prefix. Both hit the same api.linear.app/graphql endpoint.
   private linearAuthHeader(connection: Body): string {
-    const secret = decryptSecret(String(connection.access_token || ""));
-    return connection.auth_method === "personal_token" ? secret : `Bearer ${secret}`;
+    return `Bearer ${decryptSecret(String(connection.access_token || ""))}`;
   }
 
   private async jiraFetch<T = unknown>(url: string, init: RequestInit = {}): Promise<T> {

@@ -46,9 +46,21 @@ function workspaceRoute(role: string, orgId = "org-1"): Route {
   };
 }
 
-/** Route for integrationOAuthConfig()'s workspace-saved-config lookup. */
+/**
+ * Route for a leftover per-workspace OAuth row. Credentials no longer come from the database, so
+ * this exists only to prove such a row is ignored — see the "ignores any leftover" test.
+ */
 function savedOAuthConfigRoute(row: Record<string, unknown> | null): Route {
   return { match: "FROM integration_oauth_configs", rows: row ? [row] : [] };
+}
+
+/** Configures the deployment the only way it can be configured: environment credentials. */
+function setEnvCredentials(clientId = "c", clientSecret = "s", redirectUri = "https://app.example.com/cb") {
+  for (const prefix of ["JIRA", "LINEAR"]) {
+    process.env[`${prefix}_CLIENT_ID`] = clientId;
+    process.env[`${prefix}_CLIENT_SECRET`] = clientSecret;
+    process.env[`${prefix}_REDIRECT_URI`] = redirectUri;
+  }
 }
 
 /**
@@ -105,71 +117,62 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-describe("LegacyService — Linear/Jira integration OAuth config resolution", () => {
-  it("prefers the workspace-saved config over env vars when both are present", async () => {
+describe("LegacyService — deployment-level OAuth config resolution", () => {
+  // There is exactly one source of credentials: the backend environment. A workspace cannot
+  // override it, so these pin that the DB is never consulted for client credentials.
+  it("builds the authorize URL from env credentials", async () => {
     process.env.LINEAR_CLIENT_ID = "env-client";
     process.env.LINEAR_CLIENT_SECRET = "env-secret";
     process.env.LINEAR_REDIRECT_URI = "https://env.example.com/callback";
 
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "db-client", client_secret: encryptSecret("db-secret"), redirect_uri: "https://db.example.com/callback" })
-    ]);
-    const svc = makeLegacy(db);
-    const { url } = await svc.integrationAuthUrl("user-1", "linear");
-    const params = new URL(url).searchParams;
-    expect(params.get("client_id")).toBe("db-client");
-    expect(params.get("redirect_uri")).toBe("https://db.example.com/callback");
-  });
-
-  it("falls back to env vars when no workspace config is saved", async () => {
-    process.env.LINEAR_CLIENT_ID = "env-client";
-    process.env.LINEAR_CLIENT_SECRET = "env-secret";
-    process.env.LINEAR_REDIRECT_URI = "https://env.example.com/callback";
-
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-    const svc = makeLegacy(db);
-    const { url } = await svc.integrationAuthUrl("user-1", "linear");
-    const params = new URL(url).searchParams;
+    const { db } = makeDb([workspaceRoute("owner")]);
+    const params = new URL((await makeLegacy(db).integrationAuthUrl("user-1", "linear")).url).searchParams;
     expect(params.get("client_id")).toBe("env-client");
     expect(params.get("redirect_uri")).toBe("https://env.example.com/callback");
   });
 
-  it("throws a BadRequestException with an actionable message when neither is configured", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-    const svc = makeLegacy(db);
-    const err = await rejection(svc.integrationAuthUrl("user-1", "linear"));
-    expect(err).toBeInstanceOf(BadRequestException);
-    expect(err.getResponse().error).toMatch(/linear oauth is not configured/i);
-    expect(err.getResponse().error).toMatch(/workspace settings.*integrations/i);
-  });
+  it("ignores any leftover per-workspace OAuth row and never queries for one", async () => {
+    process.env.JIRA_CLIENT_ID = "env-client";
+    process.env.JIRA_CLIENT_SECRET = "env-secret";
 
-  it("treats a partially-saved workspace row (missing secret) as unconfigured and falls back to env", async () => {
-    process.env.LINEAR_CLIENT_ID = "env-client";
-    process.env.LINEAR_CLIENT_SECRET = "env-secret";
-    process.env.LINEAR_REDIRECT_URI = "https://env.example.com/callback";
-
-    const { db } = makeDb([
+    // A row left behind by an older release must not resurrect the removed override path.
+    const { db, calls } = makeDb([
       workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "db-client", client_secret: null, redirect_uri: "https://db.example.com/callback" })
+      savedOAuthConfigRoute({ client_id: "stale-db-client", client_secret: encryptSecret("s"), redirect_uri: "https://stale.example.com/cb" })
     ]);
-    const svc = makeLegacy(db);
-    const { url } = await svc.integrationAuthUrl("user-1", "linear");
-    expect(new URL(url).searchParams.get("client_id")).toBe("env-client");
+    const params = new URL((await makeLegacy(db).integrationAuthUrl("user-1", "jira")).url).searchParams;
+    expect(params.get("client_id")).toBe("env-client");
+    expect(calls.some((c) => c.sql.includes("integration_oauth_configs"))).toBe(false);
   });
 
-  // The platform OAuth app is meant to need only a client id + secret: the callback path is fixed
-  // by the frontend route, so operators shouldn't have to restate it per provider.
-  it("derives the redirect URI from FRONTEND_URL when only the platform client id/secret are set", async () => {
+  it("throws an operator-facing message naming the env vars when nothing is configured", async () => {
+    const { db } = makeDb([workspaceRoute("owner")]);
+    const err = await rejection(makeLegacy(db).integrationAuthUrl("user-1", "linear"));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/not configured on this deployment/i);
+    expect(err.getResponse().error).toMatch(/LINEAR_CLIENT_ID/);
+    expect(err.getResponse().error).toMatch(/LINEAR_CLIENT_SECRET/);
+  });
+
+  it("treats a client id with no secret as unconfigured", async () => {
+    process.env.JIRA_CLIENT_ID = "env-client";
+    const { db } = makeDb([workspaceRoute("owner")]);
+    const err = await rejection(makeLegacy(db).integrationAuthUrl("user-1", "jira"));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((await makeLegacy(db).integrationConfigStatus("user-1", "jira")).configured).toBe(false);
+  });
+
+  // Only client id + secret are required: the callback path is fixed by the frontend route, so
+  // operators shouldn't have to restate it per provider.
+  it("derives the redirect URI from FRONTEND_URL when only client id/secret are set", async () => {
     const savedFrontend = process.env.FRONTEND_URL;
     process.env.FRONTEND_URL = "https://app.tesbo.io/";
-    process.env.JIRA_CLIENT_ID = "platform-jira-client";
-    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
+    process.env.JIRA_CLIENT_ID = "env-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "env-jira-secret";
     try {
-      const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-      const svc = makeLegacy(db);
-      const params = new URL((await svc.integrationAuthUrl("user-1", "jira")).url).searchParams;
-      expect(params.get("client_id")).toBe("platform-jira-client");
+      const { db } = makeDb([workspaceRoute("owner")]);
+      const params = new URL((await makeLegacy(db).integrationAuthUrl("user-1", "jira")).url).searchParams;
+      expect(params.get("client_id")).toBe("env-jira-client");
       expect(params.get("redirect_uri")).toBe("https://app.tesbo.io/integrations/callback");
     } finally {
       if (savedFrontend === undefined) delete process.env.FRONTEND_URL;
@@ -177,77 +180,38 @@ describe("LegacyService — Linear/Jira integration OAuth config resolution", ()
     }
   });
 
-  it("reports the platform app as the config source so the UI can hide the manual OAuth form", async () => {
-    process.env.JIRA_CLIENT_ID = "platform-jira-client";
-    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-    const svc = makeLegacy(db);
-    const status = await svc.integrationConfigStatus("user-1", "jira");
-    expect(status.configured).toBe(true);
-    expect(status.source).toBe("environment");
-    expect(status.hasClientSecret).toBe(true);
-  });
-
-  it("still reports unconfigured when only a client id is set (no secret)", async () => {
-    process.env.JIRA_CLIENT_ID = "platform-jira-client";
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-    const svc = makeLegacy(db);
-    const status = await svc.integrationConfigStatus("user-1", "jira");
-    expect(status.configured).toBe(false);
-    expect(status.source).toBe("none");
-  });
-
-  // The UI needs to know a platform app exists *behind* a workspace override, so it can offer a
-  // way back instead of leaving the owner stuck on credentials they may have typed by mistake.
-  it("flags platformAvailable when a workspace config is shadowing the platform app", async () => {
-    process.env.JIRA_CLIENT_ID = "platform-jira-client";
-    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "own-client", client_secret: encryptSecret("s"), redirect_uri: "https://own.example.com/cb", updated_at: null })
-    ]);
+  it("reports configured with the callback URL an operator must register", async () => {
+    process.env.JIRA_CLIENT_ID = "env-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "env-jira-secret";
+    process.env.JIRA_REDIRECT_URI = "https://app.example.com/integrations/callback";
+    const { db } = makeDb([workspaceRoute("owner")]);
     const status = await makeLegacy(db).integrationConfigStatus("user-1", "jira");
-    expect(status.source).toBe("workspace");
-    expect(status.platformAvailable).toBe(true);
+    expect(status).toEqual({
+      configured: true,
+      clientId: "env-jira-client",
+      redirectUri: "https://app.example.com/integrations/callback"
+    });
   });
 
-  it("reports platformAvailable false for a self-hosted install with no platform credentials", async () => {
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "own-client", client_secret: encryptSecret("s"), redirect_uri: "https://own.example.com/cb", updated_at: null })
-    ]);
-    const status = await makeLegacy(db).integrationConfigStatus("user-1", "jira");
-    expect(status.platformAvailable).toBe(false);
-  });
-
-  it("resetIntegrationConfig drops the workspace row so the platform app takes over again", async () => {
-    process.env.JIRA_CLIENT_ID = "platform-jira-client";
-    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
-    // The status re-read after the DELETE sees no row, mirroring the deletion.
-    const { db, calls } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-    const status = await makeLegacy(db).resetIntegrationConfig("user-1", "jira");
-
-    const del = calls.find((c) => c.sql.includes("DELETE FROM integration_oauth_configs"));
-    expect(del).toBeDefined();
-    expect(del!.params).toEqual(["org-1", "jira"]);
-    expect(status.source).toBe("environment");
-    expect(status.clientId).toBe("platform-jira-client");
-  });
-
-  it("forbids a non-owner from clearing the workspace OAuth config", async () => {
-    const { db, calls } = makeDb([workspaceRoute("manager")]);
-    const err = await rejection(makeLegacy(db).resetIntegrationConfig("user-1", "jira"));
-    expect(err).toBeInstanceOf(ForbiddenException);
-    expect(calls.some((c) => c.sql.includes("DELETE FROM integration_oauth_configs"))).toBe(false);
+  it("still surfaces a callback URL when unconfigured, so an operator knows what to register", async () => {
+    const savedFrontend = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = "https://app.tesbo.io";
+    try {
+      const { db } = makeDb([workspaceRoute("owner")]);
+      const status = await makeLegacy(db).integrationConfigStatus("user-1", "jira");
+      expect(status.configured).toBe(false);
+      expect(status.redirectUri).toBe("https://app.tesbo.io/integrations/callback");
+    } finally {
+      if (savedFrontend === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = savedFrontend;
+    }
   });
 
   it("forbids a non-owner from starting the OAuth redirect", async () => {
-    const { db } = makeDb([
-      workspaceRoute("manager"),
-      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
-    ]);
-    const svc = makeLegacy(db);
-    const err = await rejection(svc.integrationAuthUrl("user-1", "jira"));
+    process.env.JIRA_CLIENT_ID = "env-client";
+    process.env.JIRA_CLIENT_SECRET = "env-secret";
+    const { db } = makeDb([workspaceRoute("manager")]);
+    const err = await rejection(makeLegacy(db).integrationAuthUrl("user-1", "jira"));
     expect(err).toBeInstanceOf(ForbiddenException);
   });
 });
@@ -255,11 +219,10 @@ describe("LegacyService — Linear/Jira integration OAuth config resolution", ()
 // Every workspace shares one platform client_id, so `state` is the only thing tying a callback to
 // the workspace that started it. These tests pin that binding.
 describe("LegacyService — OAuth state signing", () => {
+  beforeEach(() => setEnvCredentials());
+
   function ownerDb(orgId = "org-1") {
-    return makeDb([
-      workspaceRoute("owner", orgId),
-      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
-    ]);
+    return makeDb([workspaceRoute("owner", orgId)]);
   }
 
   it("prefixes state with the provider so the callback page can route without trusting the payload", async () => {
@@ -335,10 +298,8 @@ describe("LegacyService — OAuth state signing", () => {
 
 describe("LegacyService#integrationAuthUrl — provider-specific URL construction", () => {
   it("builds the Jira authorize URL with the Jira scope and OAuth params", async () => {
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "jira-client", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
-    ]);
+    setEnvCredentials("jira-client");
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     const { url } = await svc.integrationAuthUrl("user-1", "jira");
     expect(url.startsWith("https://auth.atlassian.com/authorize?")).toBe(true);
@@ -353,10 +314,8 @@ describe("LegacyService#integrationAuthUrl — provider-specific URL constructio
   });
 
   it("builds the Linear authorize URL with the Linear scope and no Jira-only audience param", async () => {
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "linear-client", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
-    ]);
+    setEnvCredentials("linear-client");
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     const { url } = await svc.integrationAuthUrl("user-1", "linear");
     expect(url.startsWith("https://linear.app/oauth/authorize?")).toBe(true);
@@ -376,6 +335,8 @@ describe("LegacyService#integrationAuthUrl — provider-specific URL constructio
 });
 
 describe("LegacyService#integrationCallback", () => {
+  beforeEach(() => setEnvCredentials());
+
   it("forbids a non-owner (manager) from completing the OAuth callback", async () => {
     const { db } = makeDb([workspaceRoute("manager")]);
     const svc = makeLegacy(db);
@@ -408,7 +369,7 @@ describe("LegacyService#integrationCallback", () => {
   });
 
   it("throws when Linear does not return an access token", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest.spyOn(global, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({}) } as unknown as Response);
 
@@ -418,7 +379,7 @@ describe("LegacyService#integrationCallback", () => {
   });
 
   it("throws when the connected Linear organization cannot be read", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest
       .spyOn(global, "fetch")
@@ -433,7 +394,6 @@ describe("LegacyService#integrationCallback", () => {
   it("upserts the Linear connection with encrypted tokens on a successful callback", async () => {
     const { db, calls } = makeDb([
       workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" }),
       { match: "INSERT INTO integration_connections", handler: () => ({ rows: [{ id: "conn-1", site_url: "https://linear.app/acme" }] }) }
     ]);
     const svc = makeLegacy(db);
@@ -462,7 +422,7 @@ describe("LegacyService#integrationCallback", () => {
   });
 
   it("throws when Jira omits an access or refresh token", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest.spyOn(global, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at-only" }) } as unknown as Response);
 
@@ -472,7 +432,7 @@ describe("LegacyService#integrationCallback", () => {
   });
 
   it("throws when no accessible Jira site is returned", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest
       .spyOn(global, "fetch")
@@ -487,7 +447,6 @@ describe("LegacyService#integrationCallback", () => {
   it("upserts the Jira connection with encrypted tokens on a successful callback", async () => {
     const { db, calls } = makeDb([
       workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" }),
       { match: "INSERT INTO integration_connections", handler: () => ({ rows: [{ id: "conn-jira-1", external_id: "cloud-1", site_url: "https://acme.atlassian.net" }] }) }
     ]);
     const svc = makeLegacy(db);
@@ -538,7 +497,7 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
   it("replaces existing mappings and links only well-formed teams (drops entries missing id or key)", async () => {
     const { db, calls } = makeDb([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
-      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "personal_token" }] },
+      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
       { match: "DELETE FROM linear_project_mappings", rows: [] },
       { match: "INSERT INTO linear_project_mappings", rows: [] }
     ]);
@@ -563,7 +522,7 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
   it("links zero teams (and still clears old mappings) when the request has no valid teams", async () => {
     const { db, calls } = makeDb([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
-      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "personal_token" }] },
+      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
       { match: "DELETE FROM linear_project_mappings", rows: [] }
     ]);
     const svc = makeLegacy(db);

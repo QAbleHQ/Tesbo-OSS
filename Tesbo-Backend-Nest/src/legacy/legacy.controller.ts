@@ -1053,24 +1053,9 @@ export class LegacyController {
     return this.legacy.integrationConfigStatus(req.userId, provider);
   }
 
-  @Patch("/api/workspace/integrations/:provider/config")
-  updateIntegrationConfig(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateIntegrationConfig(req.userId, provider, body);
-  }
-
-  @Delete("/api/workspace/integrations/:provider/config")
-  resetIntegrationConfig(@Req() req: AuthenticatedRequest, @Param("provider") provider: string) {
-    return this.legacy.resetIntegrationConfig(req.userId, provider);
-  }
-
   @Post("/api/workspace/integrations/:provider/callback")
   integrationCallback(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
     return this.legacy.integrationCallback(req.userId, provider, body);
-  }
-
-  @Post("/api/workspace/integrations/:provider/connect-token")
-  connectIntegrationToken(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
-    return this.legacy.connectIntegrationWithToken(req.userId, provider, body);
   }
 
   @Delete("/api/workspace/integrations/:provider/disconnect")

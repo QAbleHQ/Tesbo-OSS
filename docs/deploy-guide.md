@@ -69,14 +69,17 @@ id, client secret, or callback URL.
 
 Notes:
 
+- **This is the only way to configure it.** There is no per-workspace OAuth app and no personal
+  access token option — if the client id/secret aren't set, the Integrations page tells the workspace
+  owner to ask whoever runs the instance, and Connect stays unavailable. Self-hosted installs use the
+  exact same flow with their own app's credentials.
 - `*_REDIRECT_URI` only needs setting when the callback must differ from `FRONTEND_URL` — for
   example a proxy that terminates on another host. Whatever value is used must match the provider
   console exactly.
 - `SECRETS_ENCRYPTION_KEY` must be set: it encrypts the OAuth tokens at rest and derives the key
   that signs the OAuth `state`. Rotating it invalidates stored tokens, so workspaces must reconnect.
-- Leave the client id/secret blank and the flow degrades to bring-your-own: a workspace owner can
-  register their own OAuth app under Workspace Settings → Integrations, or connect with a personal
-  access token. Useful for self-hosted installs that don't want a shared app.
+- **Jira Server / Data Center is not supported** — cloud OAuth via `auth.atlassian.com` requires a
+  Jira Cloud site. Only `*.atlassian.net`-style cloud instances can be connected.
 
 ## Knowledge Base File Storage
 
