@@ -11,6 +11,7 @@ import {
   getIntegrationAuthUrl,
   updateIntegrationConfig,
   connectIntegrationToken,
+  resetIntegrationConfig,
   disconnectIntegration,
   INTEGRATION_RETURN_PROJECT_KEY,
   type IntegrationOAuthConfig,
@@ -104,9 +105,18 @@ function WorkspaceIntegrationConfigInner({
   const [patValues, setPatValues] = useState<Record<string, string>>({});
   const [connectingToken, setConnectingToken] = useState(false);
 
-  // `source: "environment"` means the backend resolved credentials from Tesbo's platform OAuth app
-  // rather than a workspace-saved one, so the owner has nothing to configure — just Connect.
+  const [resetting, setResetting] = useState(false);
+
+  // How this deployment is set up decides how much the owner has to do, and the same component
+  // serves both editions — Tesbo Cloud ships platform credentials in the environment, self-hosted
+  // installs generally don't. Nothing is edition-gated at build time: a self-hosted operator who
+  // sets JIRA_CLIENT_ID/SECRET gets the identical one-click flow.
+  //
+  // `platformManaged` — the backend resolved Tesbo's platform app, so Connect is the whole flow.
+  // `overridingPlatform` — this workspace saved its own app on a deployment that *has* a platform
+  //   app, so it's shadowing it and needs a route back.
   const platformManaged = config?.source === "environment" && config.configured;
+  const overridingPlatform = config?.source === "workspace" && config.platformAvailable;
 
   const loadData = useCallback(async () => {
     try {
@@ -156,6 +166,23 @@ function WorkspaceIntegrationConfigInner({
       setMessage({ type: "error", text: err instanceof Error ? err.message : `Failed to save ${label} configuration.` });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function handleResetConfig() {
+    setResetting(true);
+    setMessage(null);
+    try {
+      const next = await resetIntegrationConfig(provider);
+      setConfig(next);
+      setClientId(next.clientId || "");
+      setRedirectUri(next.redirectUri || "");
+      setClientSecret("");
+      setMessage({ type: "success", text: `Removed your own OAuth app. ${label} now uses Tesbo's app — just click Connect.` });
+    } catch (err) {
+      setMessage({ type: "error", text: err instanceof Error ? err.message : `Failed to remove your ${label} OAuth app.` });
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -315,13 +342,19 @@ function WorkspaceIntegrationConfigInner({
                 <Button type="button" onClick={handleConnect} disabled={connecting || !config?.configured}>
                   {connecting ? `Redirecting to ${label}...` : `Connect ${label}`}
                 </Button>
-                {config?.configured && !platformManaged && (
-                  <span className="text-xs text-[var(--success)]">Ready via your saved OAuth app.</span>
+                {config?.source === "workspace" && (
+                  <span className="text-xs text-[var(--success)]">Ready via your own OAuth app.</span>
                 )}
               </div>
               {platformManaged && (
                 <p className="text-xs text-[var(--muted)]">
                   You&apos;ll be taken to {label} to approve access, then brought back here automatically.
+                </p>
+              )}
+              {!config?.configured && (
+                <p className="text-xs text-[var(--muted)]">
+                  This deployment has no {label} app configured, so connecting needs your own credentials — open{" "}
+                  <span className="font-medium text-[var(--foreground)]">Advanced</span> below.
                 </p>
               )}
               {returnProjectId && (
@@ -331,90 +364,100 @@ function WorkspaceIntegrationConfigInner({
               )}
             </Card>
 
-            {/* Bring-your-own OAuth app. Hidden when Tesbo's platform app is configured — that is
-                the whole point of the platform app, and a visible client id/secret form there just
-                invites owners to break a working connection. Self-hosted deployments with no
-                platform credentials still get the full form. */}
-            {!platformManaged && (
-              <details className="tesbo-card group p-4" open>
-                <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-semibold text-[var(--foreground)]">
-                  <span>Advanced: OAuth app settings</span>
-                  <ChevronIcon />
-                </summary>
-                <div className="mt-4">
-                  <p className="text-sm text-[var(--muted)]">
-                    Add the OAuth app values from the {consoleName}. These values apply to this entire workspace.
+            {/* Both self-serve paths live under one "Advanced" disclosure, always present in both
+                editions. On Cloud it stays collapsed so the default experience is a single Connect
+                click; with no platform app it opens by default, because then it's the only way in. */}
+            <details className="tesbo-card group p-4" open={!config?.configured}>
+              <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-semibold text-[var(--foreground)]">
+                <span>Advanced: connect with your own credentials</span>
+                <ChevronIcon />
+              </summary>
+
+              <p className="mt-4 text-sm text-[var(--muted)]">
+                {platformManaged
+                  ? `Not required — ${label} is ready to connect above. Use these only if you'd rather run the integration through your own ${label} app or token, so the connection lives under your account.`
+                  : `Connect ${label} by registering your own OAuth app, or by pasting a personal token.`}
+              </p>
+
+              {overridingPlatform && (
+                <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3">
+                  <p className="text-sm text-[var(--foreground)]">
+                    This workspace is using its own OAuth app, which overrides Tesbo&apos;s.
                   </p>
-
-                  <div className="mt-4 rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 text-sm text-[var(--foreground)]">
-                    <p className="font-medium">In the {consoleName}:</p>
-                    <ol className="mt-2 list-decimal space-y-1 pl-5 text-[var(--muted)]">
-                      {consoleSteps.map((step, i) => (
-                        <li key={i}>{step}</li>
-                      ))}
-                      <li>
-                        Enable scopes: {scopes.map((scope, i) => (
-                          <span key={scope}>
-                            <span className="font-mono text-[var(--foreground)]">{scope}</span>
-                            {i < scopes.length - 1 ? ", " : ""}
-                          </span>
-                        ))}.
-                      </li>
-                      <li>Copy the Client ID and Client Secret into the form below.</li>
-                    </ol>
-                  </div>
-
-                  <form onSubmit={handleSaveConfig} className="mt-4 space-y-4">
-                    <Field>
-                      <FieldLabel>Authorization callback URL</FieldLabel>
-                      <Input
-                        type="url"
-                        value={redirectUri}
-                        onChange={(event) => setRedirectUri(event.target.value)}
-                        placeholder="http://localhost:1010/integrations/callback"
-                      />
-                      <p className="mt-1 text-xs text-[var(--muted)]">
-                        Paste this exact value into the {consoleName}. For this app, the callback page is <span className="font-mono text-[var(--foreground)]">/integrations/callback</span>.
-                      </p>
-                    </Field>
-                    <Field>
-                      <FieldLabel>Client ID</FieldLabel>
-                      <Input
-                        value={clientId}
-                        onChange={(event) => setClientId(event.target.value)}
-                        placeholder={`Paste ${label} OAuth client ID`}
-                      />
-                    </Field>
-                    <Field>
-                      <FieldLabel>Client Secret</FieldLabel>
-                      <Input
-                        type="password"
-                        value={clientSecret}
-                        onChange={(event) => setClientSecret(event.target.value)}
-                        placeholder={config?.hasClientSecret ? "Saved. Enter a new secret only to replace it." : `Paste ${label} OAuth client secret`}
-                      />
-                    </Field>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <Button type="submit" disabled={saving}>
-                        {saving ? "Saving..." : `Save ${label} Configuration`}
-                      </Button>
-                    </div>
-                  </form>
+                  <Button type="button" variant="secondary" onClick={handleResetConfig} disabled={resetting} className="mt-3">
+                    {resetting ? "Removing..." : "Use Tesbo's app instead"}
+                  </Button>
                 </div>
-              </details>
-            )}
+              )}
 
-            {patFields && (
-              <details className="tesbo-card group p-4">
-                <summary className="flex cursor-pointer list-none items-center justify-between text-sm font-semibold text-[var(--foreground)]">
-                  <span>Advanced: connect with a Personal Access Token instead</span>
-                  <ChevronIcon />
-                </summary>
-                <div className="mt-4">
+              <div className="mt-6 space-y-3">
+                <h3 className="text-sm font-semibold text-[var(--foreground)]">Option 1 — your own OAuth app</h3>
+                <p className="text-sm text-[var(--muted)]">
+                  Add the OAuth app values from the {consoleName}. These apply to this entire workspace.
+                </p>
+
+                <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 text-sm text-[var(--foreground)]">
+                  <p className="font-medium">In the {consoleName}:</p>
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-[var(--muted)]">
+                    {consoleSteps.map((step, i) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                    <li>
+                      Enable scopes: {scopes.map((scope, i) => (
+                        <span key={scope}>
+                          <span className="font-mono text-[var(--foreground)]">{scope}</span>
+                          {i < scopes.length - 1 ? ", " : ""}
+                        </span>
+                      ))}.
+                    </li>
+                    <li>Copy the Client ID and Client Secret into the form below.</li>
+                  </ol>
+                </div>
+
+                <form onSubmit={handleSaveConfig} className="space-y-4">
+                  <Field>
+                    <FieldLabel>Authorization callback URL</FieldLabel>
+                    <Input
+                      type="url"
+                      value={redirectUri}
+                      onChange={(event) => setRedirectUri(event.target.value)}
+                      placeholder="http://localhost:1010/integrations/callback"
+                    />
+                    <p className="mt-1 text-xs text-[var(--muted)]">
+                      Paste this exact value into the {consoleName}. For this app, the callback page is <span className="font-mono text-[var(--foreground)]">/integrations/callback</span>.
+                    </p>
+                  </Field>
+                  <Field>
+                    <FieldLabel>Client ID</FieldLabel>
+                    <Input
+                      value={clientId}
+                      onChange={(event) => setClientId(event.target.value)}
+                      placeholder={`Paste ${label} OAuth client ID`}
+                    />
+                  </Field>
+                  <Field>
+                    <FieldLabel>Client Secret</FieldLabel>
+                    <Input
+                      type="password"
+                      value={clientSecret}
+                      onChange={(event) => setClientSecret(event.target.value)}
+                      placeholder={config?.source === "workspace" && config.hasClientSecret ? "Saved. Enter a new secret only to replace it." : `Paste ${label} OAuth client secret`}
+                    />
+                  </Field>
+                  <Button type="submit" disabled={saving}>
+                    {saving ? "Saving..." : `Save ${label} Configuration`}
+                  </Button>
+                </form>
+              </div>
+
+              {patFields && (
+                <div className="mt-8 space-y-3 border-t border-[var(--border)] pt-6">
+                  <h3 className="text-sm font-semibold text-[var(--foreground)]">Option 2 — personal access token</h3>
                   <p className="text-sm text-[var(--muted)]">
-                    No OAuth app required — paste a personal token below to connect this workspace directly.
+                    No OAuth app required — paste a personal token to connect this workspace directly. Also the
+                    route for a {label} Server / Data Center site, which can&apos;t use cloud OAuth.
                   </p>
-                  <form onSubmit={handleConnectToken} className="mt-4 space-y-4">
+                  <form onSubmit={handleConnectToken} className="space-y-4">
                     {patFields.map((field) => (
                       <Field key={field.key}>
                         <FieldLabel>{field.label}</FieldLabel>
@@ -428,12 +471,12 @@ function WorkspaceIntegrationConfigInner({
                       </Field>
                     ))}
                     <Button type="submit" disabled={connectingToken}>
-                      {connectingToken ? "Connecting..." : `Connect ${label}`}
+                      {connectingToken ? "Connecting..." : `Connect with token`}
                     </Button>
                   </form>
                 </div>
-              </details>
-            )}
+              )}
+            </details>
           </div>
         )
       )}

@@ -2250,10 +2250,18 @@ export const INTEGRATION_RETURN_PROJECT_KEY = "tesbo:integrationReturnProjectId"
 
 export interface IntegrationOAuthConfig {
   configured: boolean;
+  /**
+   * Which credentials the backend resolved:
+   * - `environment` — Tesbo's platform OAuth app (Cloud). One-click connect, nothing to configure.
+   * - `workspace` — this workspace registered its own OAuth app, which overrides the platform one.
+   * - `none` — nothing configured; self-hosted installs must bring their own app or use a PAT.
+   */
   source: "workspace" | "environment" | "none";
   clientId: string;
   redirectUri: string;
   hasClientSecret: boolean;
+  /** True when platform credentials exist, even if a workspace config is currently overriding them. */
+  platformAvailable: boolean;
   updatedAt: string | null;
 }
 
@@ -2273,6 +2281,11 @@ export async function updateIntegrationConfig(
     method: "PATCH",
     body: data,
   });
+}
+
+/** Clears this workspace's own OAuth app so Tesbo's platform app takes over again. */
+export async function resetIntegrationConfig(provider: IntegrationProvider): Promise<IntegrationOAuthConfig> {
+  return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`, { method: "DELETE" });
 }
 
 // `state` is the signed value the backend put on the authorize URL; it must be handed back

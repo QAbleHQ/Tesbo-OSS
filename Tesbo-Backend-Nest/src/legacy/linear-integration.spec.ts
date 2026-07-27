@@ -197,6 +197,50 @@ describe("LegacyService — Linear/Jira integration OAuth config resolution", ()
     expect(status.source).toBe("none");
   });
 
+  // The UI needs to know a platform app exists *behind* a workspace override, so it can offer a
+  // way back instead of leaving the owner stuck on credentials they may have typed by mistake.
+  it("flags platformAvailable when a workspace config is shadowing the platform app", async () => {
+    process.env.JIRA_CLIENT_ID = "platform-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
+    const { db } = makeDb([
+      workspaceRoute("owner"),
+      savedOAuthConfigRoute({ client_id: "own-client", client_secret: encryptSecret("s"), redirect_uri: "https://own.example.com/cb", updated_at: null })
+    ]);
+    const status = await makeLegacy(db).integrationConfigStatus("user-1", "jira");
+    expect(status.source).toBe("workspace");
+    expect(status.platformAvailable).toBe(true);
+  });
+
+  it("reports platformAvailable false for a self-hosted install with no platform credentials", async () => {
+    const { db } = makeDb([
+      workspaceRoute("owner"),
+      savedOAuthConfigRoute({ client_id: "own-client", client_secret: encryptSecret("s"), redirect_uri: "https://own.example.com/cb", updated_at: null })
+    ]);
+    const status = await makeLegacy(db).integrationConfigStatus("user-1", "jira");
+    expect(status.platformAvailable).toBe(false);
+  });
+
+  it("resetIntegrationConfig drops the workspace row so the platform app takes over again", async () => {
+    process.env.JIRA_CLIENT_ID = "platform-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "platform-jira-secret";
+    // The status re-read after the DELETE sees no row, mirroring the deletion.
+    const { db, calls } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
+    const status = await makeLegacy(db).resetIntegrationConfig("user-1", "jira");
+
+    const del = calls.find((c) => c.sql.includes("DELETE FROM integration_oauth_configs"));
+    expect(del).toBeDefined();
+    expect(del!.params).toEqual(["org-1", "jira"]);
+    expect(status.source).toBe("environment");
+    expect(status.clientId).toBe("platform-jira-client");
+  });
+
+  it("forbids a non-owner from clearing the workspace OAuth config", async () => {
+    const { db, calls } = makeDb([workspaceRoute("manager")]);
+    const err = await rejection(makeLegacy(db).resetIntegrationConfig("user-1", "jira"));
+    expect(err).toBeInstanceOf(ForbiddenException);
+    expect(calls.some((c) => c.sql.includes("DELETE FROM integration_oauth_configs"))).toBe(false);
+  });
+
   it("forbids a non-owner from starting the OAuth redirect", async () => {
     const { db } = makeDb([
       workspaceRoute("manager"),

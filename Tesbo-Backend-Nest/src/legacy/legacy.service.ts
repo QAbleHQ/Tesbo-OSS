@@ -58,6 +58,9 @@ const ZYRA_AGENT_NAME = "Zyra the Test Generator";
 const LEGACY_ZYRA_AGENT_NAME = "Zyra the Edge Hunter";
 const ZYRA_AGENT_NAMES = [ZYRA_AGENT_NAME, LEGACY_ZYRA_AGENT_NAME];
 
+/** Frontend treats this path as "no custom logo" and renders the theme-aware lockup. */
+const DEFAULT_BRAND_LOGO_URL = "/brand/tesbo-logo-horizontal.svg";
+
 type ZyraGenerationInput = {
   story: string;
   context: string;
@@ -4390,7 +4393,7 @@ export class LegacyService implements OnModuleInit {
     const value = res.rows[0]?.value || {};
     return {
       productName: String(value.productName || "Tesbo Test Manager"),
-      logoUrl: String(value.logoUrl || "/tesbo-test-manager-logo.png")
+      logoUrl: String(value.logoUrl || DEFAULT_BRAND_LOGO_URL)
     };
   }
 
@@ -4411,7 +4414,7 @@ export class LegacyService implements OnModuleInit {
     }
     const value = {
       productName,
-      logoUrl: logoUrl || "/tesbo-test-manager-logo.png"
+      logoUrl: logoUrl || DEFAULT_BRAND_LOGO_URL
     };
     await this.db.query(
       `INSERT INTO platform_settings (key, value, updated_by, updated_at)
@@ -4508,6 +4511,10 @@ export class LegacyService implements OnModuleInit {
         clientId: row.client_id,
         redirectUri: row.redirect_uri,
         hasClientSecret: true,
+        // Whether a platform app exists *behind* this workspace config. The UI needs this to offer
+        // "go back to the Tesbo app" — without it, a workspace that saves its own credentials on
+        // Tesbo Cloud has no way to discover it shadowed a working platform connection.
+        platformAvailable: !!env,
         updatedAt: row.updated_at
       };
     }
@@ -4517,8 +4524,23 @@ export class LegacyService implements OnModuleInit {
       clientId: env?.clientId ?? "",
       redirectUri: env?.redirectUri ?? this.defaultIntegrationRedirectUri(),
       hasClientSecret: !!env?.clientSecret,
+      platformAvailable: !!env,
       updatedAt: null
     };
+  }
+
+  // Clears a workspace's own OAuth app so the platform app (env credentials) takes over again.
+  // Only removes the client config — an established connection in integration_connections is left
+  // alone, since the tokens it holds stay valid regardless of which app minted them.
+  async resetIntegrationConfig(userId: string | null | undefined, provider: string) {
+    const p = assertIntegrationProvider(provider);
+    const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
+    await this.db.query(
+      "DELETE FROM integration_oauth_configs WHERE organization_id = $1 AND provider = $2",
+      [workspace.id, p]
+    );
+    return this.integrationConfigStatus(userId, p);
   }
 
   async updateIntegrationConfig(userId: string | null | undefined, provider: string, body: Body) {

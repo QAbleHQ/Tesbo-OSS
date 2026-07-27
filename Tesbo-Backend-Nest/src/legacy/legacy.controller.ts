@@ -1058,6 +1058,11 @@ export class LegacyController {
     return this.legacy.updateIntegrationConfig(req.userId, provider, body);
   }
 
+  @Delete("/api/workspace/integrations/:provider/config")
+  resetIntegrationConfig(@Req() req: AuthenticatedRequest, @Param("provider") provider: string) {
+    return this.legacy.resetIntegrationConfig(req.userId, provider);
+  }
+
   @Post("/api/workspace/integrations/:provider/callback")
   integrationCallback(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
     return this.legacy.integrationCallback(req.userId, provider, body);
