@@ -16,7 +16,7 @@ export class OtpService {
     const email = rawEmail.trim().toLowerCase();
     if (!email) return false;
     const ipKey = this.rateLimitKeyForIp(ipAddress);
-    if ((await this.isRateLimited(email)) || (await this.isRateLimited(ipKey))) return false;
+    if ((await this.isRateLimited(this.sendLimitKey(email))) || (await this.isRateLimited(this.sendLimitKey(ipKey)))) return false;
 
     const plainCode = this.generateOtp();
     const codeHash = this.hash(plainCode);
@@ -27,8 +27,8 @@ export class OtpService {
       codeHash,
       expiresAt
     ]);
-    await this.recordOtpAttempt(email);
-    await this.recordOtpAttempt(ipKey);
+    await this.recordOtpAttempt(this.sendLimitKey(email));
+    await this.recordOtpAttempt(this.sendLimitKey(ipKey));
     await this.email.sendOtp(email, plainCode);
     return true;
   }
@@ -44,7 +44,7 @@ export class OtpService {
   async verifyOtpCode(rawEmail: string, code: string, ipAddress?: string | null): Promise<boolean> {
     const email = rawEmail.trim().toLowerCase();
     const ipKey = this.rateLimitKeyForIp(ipAddress);
-    if ((await this.isRateLimited(email)) || (await this.isRateLimited(ipKey))) return false;
+    if ((await this.isRateLimited(this.verifyLimitKey(email))) || (await this.isRateLimited(this.verifyLimitKey(ipKey)))) return false;
 
     const result = await this.db.query<{ id: string }>(
       "SELECT id FROM otp_codes WHERE email = $1 AND code_hash = $2 AND expires_at > now() AND used_at IS NULL ORDER BY created_at DESC LIMIT 1",
@@ -52,14 +52,14 @@ export class OtpService {
     );
     const otpId = result.rows[0]?.id;
     if (!otpId) {
-      await this.recordOtpAttempt(email);
-      await this.recordOtpAttempt(ipKey);
+      await this.recordOtpAttempt(this.verifyLimitKey(email));
+      await this.recordOtpAttempt(this.verifyLimitKey(ipKey));
       return false;
     }
 
     await this.markOtpUsed(otpId);
-    await this.clearRateLimit(email);
-    await this.clearRateLimit(ipKey);
+    await this.clearRateLimit(this.verifyLimitKey(email));
+    await this.clearRateLimit(this.verifyLimitKey(ipKey));
     return true;
   }
 
@@ -129,6 +129,17 @@ export class OtpService {
 
   private rateLimitKeyForIp(ipAddress?: string | null): string {
     return `ip:${ipAddress?.trim() ?? ""}`;
+  }
+
+  // Requesting a new code and guessing a code are distinct actions; keeping them on
+  // separate rate-limit buckets means resending a code can no longer lock a user out
+  // of verifying a correct, unexpired one.
+  private sendLimitKey(key: string): string {
+    return `send:${key}`;
+  }
+
+  private verifyLimitKey(key: string): string {
+    return `verify:${key}`;
   }
 
   private generateOtp(): string {

@@ -2,32 +2,24 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:700
 
 type RequestInitWithBody = Omit<RequestInit, "body"> & { body?: unknown };
 
-type ApiErrorBody = { error?: string; detail?: string };
+type ApiErrorBody = { error?: string; detail?: string; errors?: { field?: string; message?: string }[] };
 
 function formatApiError(status: number, body: ApiErrorBody): string {
+  if (!body.error && body.errors?.length) {
+    return body.errors.map((e) => e.message).filter(Boolean).join(", ") || String(status);
+  }
   const msg = body.error || String(status);
   const detail = body.detail?.trim();
   if (detail) return `${msg}: ${detail}`;
   return msg;
 }
 
-export async function api<T = unknown>(
-  path: string,
-  options: RequestInitWithBody = {}
-): Promise<T> {
-  const { body, ...rest } = options;
-  const headers: HeadersInit = {
-    "Content-Type": "application/json",
-    ...(rest.headers as Record<string, string>),
-  };
-  let res: Response;
+async function fetchWithNetworkErrorMessage(
+  input: string,
+  init: RequestInit
+): Promise<Response> {
   try {
-    res = await fetch(`${API_BASE}${path}`, {
-      ...rest,
-      headers,
-      credentials: "include",
-      ...(body !== undefined && { body: JSON.stringify(body) }),
-    });
+    return await fetch(input, init);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Network request failed";
     const looksLikeCorsOrNetwork =
@@ -42,6 +34,23 @@ export async function api<T = unknown>(
     }
     throw e instanceof Error ? e : new Error(String(e));
   }
+}
+
+export async function api<T = unknown>(
+  path: string,
+  options: RequestInitWithBody = {}
+): Promise<T> {
+  const { body, ...rest } = options;
+  const headers: HeadersInit = {
+    "Content-Type": "application/json",
+    ...(rest.headers as Record<string, string>),
+  };
+  const res = await fetchWithNetworkErrorMessage(`${API_BASE}${path}`, {
+    ...rest,
+    headers,
+    credentials: "include",
+    ...(body !== undefined && { body: JSON.stringify(body) }),
+  });
   if (!res.ok) {
     const err = (await res.json().catch(() => ({}))) as ApiErrorBody;
     throw new Error(formatApiError(res.status, err));
@@ -69,25 +78,6 @@ export async function authMe(): Promise<{
 
 // --- Platform Admin APIs ---
 
-export async function getSystemHealth() {
-  return api<{
-    status: string;
-    timestamp: string;
-    services: Record<
-      string,
-      {
-        status: string;
-        latency_ms?: number;
-        url?: string;
-        error?: string;
-        http_status?: number;
-        provider?: string;
-        latest_migration?: string;
-      }
-    >;
-  }>("/api/admin/system/health");
-}
-
 export type BrandingSettings = {
   productName: string;
   logoUrl: string;
@@ -95,14 +85,6 @@ export type BrandingSettings = {
 
 export async function getBranding(): Promise<BrandingSettings> {
   return api<BrandingSettings>("/api/branding");
-}
-
-export async function getAdminBranding(): Promise<BrandingSettings> {
-  return api<BrandingSettings>("/api/admin/branding");
-}
-
-export async function updateAdminBranding(data: BrandingSettings): Promise<BrandingSettings> {
-  return api<BrandingSettings>("/api/admin/branding", { method: "PATCH", body: data });
 }
 
 export async function getAdminList() {
@@ -225,6 +207,7 @@ export interface WorkspaceInfo {
   id: string;
   name: string;
   slug: string;
+  plan?: "launch" | "pro";
   role?: string;
   createdAt: string;
 }
@@ -248,6 +231,54 @@ export async function updateWorkspace(data: { name: string }): Promise<Workspace
     method: "PATCH",
     body: data,
   });
+}
+
+// Billing (Tesbo Cloud plans) — pricing is per workspace, not per seat.
+export type BillingInterval = "monthly" | "annual";
+
+export interface BillingInfo {
+  plan: "launch" | "pro";
+  billingInterval: BillingInterval | null;
+  status: string | null;
+  currentPeriodEnd: string | null;
+  cancelAtPeriodEnd: boolean;
+}
+
+export async function getBillingInfo(): Promise<BillingInfo> {
+  return api<BillingInfo>("/api/billing");
+}
+
+export interface BillingPricing {
+  currency: "usd" | "inr";
+  monthlyAmount: number | null;
+  annualAmount: number | null;
+}
+
+export async function getBillingPricing(): Promise<BillingPricing> {
+  return api<BillingPricing>("/api/billing/pricing");
+}
+
+export async function createCheckoutSession(interval: BillingInterval): Promise<{ url: string }> {
+  return api<{ url: string }>("/api/billing/checkout-session", {
+    method: "POST",
+    body: { interval },
+  });
+}
+
+export async function createPortalSession(): Promise<{ url: string }> {
+  return api<{ url: string }>("/api/billing/portal-session", { method: "POST" });
+}
+
+export interface PlanUsageSummary {
+  plan: "launch" | "pro";
+  projectCount: number;
+  projectLimit: number | null;
+  storageUsedBytes: number;
+  storageLimitBytes: number;
+}
+
+export async function getBillingUsage(): Promise<PlanUsageSummary> {
+  return api<PlanUsageSummary>("/api/billing/usage");
 }
 
 export interface WorkspaceListItem extends WorkspaceInfo {
@@ -889,6 +920,7 @@ export interface TestCaseListItem {
   jiraUrl?: string | null;
   linearIssueKey?: string | null;
   linearUrl?: string | null;
+  customFieldValues?: Record<string, unknown>;
 }
 
 export async function listTestCases(
@@ -904,6 +936,8 @@ export async function listTestCases(
     jiraIssueKey?: string;
     linearIssueKey?: string;
     search?: string;
+    /** JSON-stringified CustomFieldFilterCondition[] — see buildCustomFieldFiltersQueryParam(). */
+    customFieldFilters?: string;
   }
 ): Promise<{ list: TestCaseListItem[]; total: number }> {
   const sp = new URLSearchParams();
@@ -917,6 +951,7 @@ export async function listTestCases(
   if (params?.jiraIssueKey) sp.set("jiraIssueKey", params.jiraIssueKey);
   if (params?.linearIssueKey) sp.set("linearIssueKey", params.linearIssueKey);
   if (params?.search) sp.set("search", params.search);
+  if (params?.customFieldFilters) sp.set("customFieldFilters", params.customFieldFilters);
   const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000"}/api/projects/${projectId}/testcases?${sp}`, { credentials: "include" });
   const list = await res.json();
   if (!res.ok) {
@@ -948,12 +983,184 @@ export async function deleteTestCase(projectId: string, testcaseId: string): Pro
   await api(`/api/projects/${projectId}/testcases/${testcaseId}`, { method: "DELETE" });
 }
 
+export async function duplicateTestCase(projectId: string, testcaseId: string): Promise<{ id: string; externalId: string; title: string }> {
+  return api(`/api/projects/${projectId}/testcases/${testcaseId}/duplicate`, { method: "POST" });
+}
+
 export async function bulkUpdateTestCases(projectId: string, data: { testcaseIds: string[]; priority?: string; suiteId?: string; status?: string; ownerId?: string; automationStatus?: string }): Promise<void> {
   await api(`/api/projects/${projectId}/testcases/bulk-update`, { method: "POST", body: data });
 }
 
 export async function bulkDeleteTestCases(projectId: string, data: { testcaseIds: string[] }): Promise<void> {
   await api(`/api/projects/${projectId}/testcases/bulk-delete`, { method: "POST", body: data });
+}
+
+// Custom fields (Pro plan feature) ------------------------------------------------
+
+export type CustomFieldType = "text" | "long_text" | "boolean" | "single_select" | "multi_select" | "number" | "date";
+export type CustomFieldStatus = "active" | "inactive" | "archived";
+
+export interface CustomFieldOption {
+  id: string;
+  label: string;
+  active: boolean;
+  order: number;
+}
+
+export interface CustomFieldConfig {
+  placeholder?: string | null;
+  maxLength?: number | null;
+  displayFormat?: "yes_no" | "true_false";
+  options?: CustomFieldOption[];
+  defaultOptionId?: string | null;
+  defaultOptionIds?: string[];
+  minSelected?: number | null;
+  maxSelected?: number | null;
+  min?: number | null;
+  max?: number | null;
+  decimalsAllowed?: boolean;
+  unit?: string | null;
+  allowPastDates?: boolean;
+  allowFutureDates?: boolean;
+  defaultValue?: unknown;
+}
+
+export interface CustomFieldDefinition {
+  id: string;
+  projectId: string;
+  key: string;
+  name: string;
+  description: string | null;
+  fieldType: CustomFieldType;
+  status: CustomFieldStatus;
+  required: boolean;
+  displayOrder: number;
+  config: CustomFieldConfig;
+  isUsed: boolean;
+  createdBy: string | null;
+  updatedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CustomFieldValue {
+  id: string;
+  key: string;
+  name: string;
+  description: string | null;
+  fieldType: CustomFieldType;
+  status: CustomFieldStatus;
+  required: boolean;
+  displayOrder: number;
+  config: CustomFieldConfig;
+  value: unknown;
+}
+
+export type CustomFieldFilterOperator =
+  | "contains"
+  | "does_not_contain"
+  | "equals"
+  | "is_empty"
+  | "is_not_empty"
+  | "is"
+  | "is_not"
+  | "includes_any"
+  | "includes_all"
+  | "yes"
+  | "no"
+  | "greater_than"
+  | "less_than"
+  | "between"
+  | "before"
+  | "after"
+  | "on"
+  | "is_overdue";
+
+export interface CustomFieldFilterCondition {
+  definitionId: string;
+  operator: CustomFieldFilterOperator;
+  value?: unknown;
+  valueTo?: unknown;
+}
+
+export function buildCustomFieldFiltersQueryParam(conditions: CustomFieldFilterCondition[]): string | undefined {
+  return conditions.length ? JSON.stringify(conditions) : undefined;
+}
+
+export async function listCustomFieldDefinitions(
+  projectId: string,
+  opts?: { statuses?: CustomFieldStatus[] }
+): Promise<CustomFieldDefinition[]> {
+  const qs = opts?.statuses?.length ? `?status=${opts.statuses.join(",")}` : "";
+  return api<CustomFieldDefinition[]>(`/api/projects/${projectId}/custom-fields/definitions${qs}`);
+}
+
+export async function getCustomFieldDefinition(projectId: string, definitionId: string): Promise<CustomFieldDefinition> {
+  return api<CustomFieldDefinition>(`/api/projects/${projectId}/custom-fields/definitions/${definitionId}`);
+}
+
+export async function createCustomFieldDefinition(
+  projectId: string,
+  data: {
+    name: string;
+    description?: string | null;
+    fieldType: CustomFieldType;
+    required?: boolean;
+    active?: boolean;
+    config?: CustomFieldConfig;
+  }
+): Promise<CustomFieldDefinition> {
+  return api<CustomFieldDefinition>(`/api/projects/${projectId}/custom-fields/definitions`, { method: "POST", body: data });
+}
+
+export async function updateCustomFieldDefinition(
+  projectId: string,
+  definitionId: string,
+  data: Partial<{ name: string; description: string | null; required: boolean; config: CustomFieldConfig }>
+): Promise<CustomFieldDefinition> {
+  return api<CustomFieldDefinition>(`/api/projects/${projectId}/custom-fields/definitions/${definitionId}`, { method: "PATCH", body: data });
+}
+
+export async function reorderCustomFieldDefinitions(projectId: string, orderedIds: string[]): Promise<void> {
+  await api(`/api/projects/${projectId}/custom-fields/definitions/reorder`, { method: "POST", body: { orderedIds } });
+}
+
+export async function setCustomFieldDefinitionStatus(
+  projectId: string,
+  definitionId: string,
+  status: CustomFieldStatus
+): Promise<CustomFieldDefinition> {
+  return api<CustomFieldDefinition>(`/api/projects/${projectId}/custom-fields/definitions/${definitionId}/status`, {
+    method: "PATCH",
+    body: { status }
+  });
+}
+
+export async function deleteCustomFieldDefinition(projectId: string, definitionId: string): Promise<void> {
+  await api(`/api/projects/${projectId}/custom-fields/definitions/${definitionId}`, { method: "DELETE" });
+}
+
+export async function addCustomFieldOption(projectId: string, definitionId: string, label: string): Promise<CustomFieldDefinition> {
+  return api<CustomFieldDefinition>(`/api/projects/${projectId}/custom-fields/definitions/${definitionId}/options`, {
+    method: "POST",
+    body: { label }
+  });
+}
+
+export async function setCustomFieldOptionActive(
+  projectId: string,
+  definitionId: string,
+  optionId: string,
+  active: boolean
+): Promise<CustomFieldDefinition> {
+  return api<CustomFieldDefinition>(`/api/projects/${projectId}/custom-fields/definitions/${definitionId}/options/${optionId}`, {
+    method: "PATCH",
+    body: { active }
+  });
+}
+
+export async function getCustomFieldValues(projectId: string, testcaseId: string): Promise<CustomFieldValue[]> {
+  return api<CustomFieldValue[]>(`/api/projects/${projectId}/testcases/${testcaseId}/custom-field-values`);
 }
 
 export async function listLinkedJiraKeys(projectId: string): Promise<{ keys: string[]; counts: Record<string, number> }> {
@@ -2041,13 +2248,16 @@ export type IntegrationProvider = "jira" | "linear";
 // mapping screen instead of the generic workspace integrations page.
 export const INTEGRATION_RETURN_PROJECT_KEY = "tesbo:integrationReturnProjectId";
 
+/**
+ * Read-only view of how the deployment is configured for this provider. Credentials come from the
+ * backend environment (`<PROVIDER>_CLIENT_ID` / `_CLIENT_SECRET`) and cannot be set from the UI, so
+ * `configured` is simply whether connecting is possible at all. `redirectUri` is exposed so a
+ * self-hosted operator can see which callback URL to register in the provider console.
+ */
 export interface IntegrationOAuthConfig {
   configured: boolean;
-  source: "workspace" | "environment" | "none";
   clientId: string;
   redirectUri: string;
-  hasClientSecret: boolean;
-  updatedAt: string | null;
 }
 
 export async function getIntegrationAuthUrl(provider: IntegrationProvider): Promise<{ url: string }> {
@@ -2058,42 +2268,24 @@ export async function getIntegrationConfig(provider: IntegrationProvider): Promi
   return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`);
 }
 
-export async function updateIntegrationConfig(
-  provider: IntegrationProvider,
-  data: { clientId: string; clientSecret: string; redirectUri: string }
-): Promise<IntegrationOAuthConfig> {
-  return api<IntegrationOAuthConfig>(`/api/workspace/integrations/${provider}/config`, {
-    method: "PATCH",
-    body: data,
-  });
-}
-
+// `state` is the signed value the backend put on the authorize URL; it must be handed back
+// verbatim so the backend can confirm this callback belongs to the workspace that started it.
 export async function integrationCallback(
   provider: IntegrationProvider,
-  code: string
+  code: string,
+  state: string
 ): Promise<{ connectionId: string; siteUrl: string }> {
-  return api(`/api/workspace/integrations/${provider}/callback`, { method: "POST", body: { code } });
+  return api(`/api/workspace/integrations/${provider}/callback`, { method: "POST", body: { code, state } });
 }
 
 export async function disconnectIntegration(provider: IntegrationProvider): Promise<void> {
   await api(`/api/workspace/integrations/${provider}/disconnect`, { method: "DELETE" });
 }
 
-export type IntegrationAuthMethod = "oauth" | "personal_token";
-
-export async function connectIntegrationToken(
-  provider: IntegrationProvider,
-  data: { siteUrl?: string; email?: string; apiToken?: string; apiKey?: string }
-): Promise<{ connectionId: string; siteUrl: string; authMethod: "personal_token" }> {
-  return api(`/api/workspace/integrations/${provider}/connect-token`, { method: "POST", body: data });
-}
-
 export interface IntegrationConnectionStatus {
   connected: boolean;
   id?: string;
   siteUrl?: string;
-  authMethod?: IntegrationAuthMethod;
-  personalTokenIdentifier?: string | null;
   tokenExpiresAt?: string | null;
   connectedBy?: string;
   createdAt?: string;
@@ -2166,8 +2358,52 @@ export async function connectJiraProjects(
   await api(`/api/projects/${projectId}/jira/projects`, { method: "POST", body: { projects } });
 }
 
-export async function syncJiraTickets(projectId: string): Promise<{ synced: number }> {
-  return api<{ synced: number }>(`/api/projects/${projectId}/jira/sync`, { method: "POST" });
+// ── Integration sync runs ──
+// Sync is queued, not synchronous: POST returns a run to poll rather than a finished count.
+
+export type SyncRunStatus = "queued" | "running" | "succeeded" | "partial" | "failed";
+export type SyncRunStage = "queued" | "connecting" | "fetching_tickets" | "building_documents" | "done" | "failed";
+
+export interface SyncRun {
+  id: string;
+  provider: string;
+  status: SyncRunStatus;
+  stage: SyncRunStage;
+  remoteProjectKey: string | null;
+  totalTickets: number;
+  processedTickets: number;
+  failedTickets: number;
+  documentsCreated: number;
+  documentsUpdated: number;
+  commentsSynced: number;
+  decisionSummaries: number;
+  error: string | null;
+  triggeredByName: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface StartSyncResult {
+  run: SyncRun;
+  /** True when a run was already in flight and this request joined it instead of starting another. */
+  alreadyRunning: boolean;
+}
+
+export function isSyncRunActive(run: SyncRun | null | undefined): boolean {
+  return !!run && (run.status === "queued" || run.status === "running");
+}
+
+export async function syncJiraTickets(projectId: string): Promise<StartSyncResult> {
+  return api<StartSyncResult>(`/api/projects/${projectId}/jira/sync`, { method: "POST" });
+}
+
+export async function getIntegrationSyncStatus(projectId: string, provider: IntegrationProvider): Promise<{ run: SyncRun | null }> {
+  return api<{ run: SyncRun | null }>(`/api/projects/${projectId}/integrations/${provider}/sync-status`);
+}
+
+export async function getIntegrationSyncHistory(projectId: string): Promise<{ runs: SyncRun[] }> {
+  return api<{ runs: SyncRun[] }>(`/api/projects/${projectId}/integrations/sync-history`);
 }
 
 export async function addJiraComment(
@@ -2289,8 +2525,8 @@ export async function connectLinearTeams(
   await api(`/api/projects/${projectId}/linear/teams`, { method: "POST", body: { projects } });
 }
 
-export async function syncLinearTickets(projectId: string): Promise<{ synced: number }> {
-  return api<{ synced: number }>(`/api/projects/${projectId}/linear/sync`, { method: "POST" });
+export async function syncLinearTickets(projectId: string): Promise<StartSyncResult> {
+  return api<StartSyncResult>(`/api/projects/${projectId}/linear/sync`, { method: "POST" });
 }
 
 export async function addLinearComment(projectId: string, issueKey: string, comment: string): Promise<void> {
@@ -2407,6 +2643,14 @@ export interface KnowledgeDocument {
   sourceProvider: string | null;
   sourceExternalId: string | null;
   sourceUrl: string | null;
+  /** "mirror" = provider-owned, overwritten every sync. "notes" = the human-owned sibling. */
+  sourceRole: "mirror" | "notes" | null;
+  sourceSyncedBy: string | null;
+  sourceSyncedAt: string | null;
+  /** True for provider mirrors: the editor is locked and the API rejects updates. */
+  isReadOnly: boolean;
+  /** Display name of whoever last ran the sync that wrote this document. Detail endpoint only. */
+  syncedByName?: string | null;
   createdBy: string | null;
   updatedBy: string | null;
   reviewedBy: string | null;
@@ -2592,9 +2836,67 @@ export function rejectAiMemory(projectId: string, documentId: string): Promise<K
   return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/reject-ai-memory`, { method: "PATCH" });
 }
 
+// Document comments
+// Stored separately from the document body, so they work on read-only provider mirrors whose
+// body is rewritten by every sync.
+
+export interface KnowledgeDocumentComment {
+  id: string;
+  documentId: string;
+  parentCommentId: string | null;
+  authorId: string | null;
+  authorName: string;
+  body: string;
+  /** Quoted passage this thread is anchored to, or null for a document-level comment. */
+  anchorText: string | null;
+  anchorStart: number | null;
+  anchorEnd: number | null;
+  isResolved: boolean;
+  resolvedBy: string | null;
+  resolvedByName: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** One level of nesting only — replies never have replies of their own. */
+  replies: KnowledgeDocumentComment[];
+}
+
+export function listKnowledgeDocumentComments(
+  projectId: string,
+  documentId: string
+): Promise<{ list: KnowledgeDocumentComment[]; total: number; openCount: number }> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/comments`);
+}
+
+export function createKnowledgeDocumentComment(
+  projectId: string,
+  documentId: string,
+  input: { body: string; parentCommentId?: string; anchorText?: string; anchorStart?: number; anchorEnd?: number }
+): Promise<KnowledgeDocumentComment> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/comments`, { method: "POST", body: input });
+}
+
+export function updateKnowledgeDocumentComment(
+  projectId: string,
+  commentId: string,
+  input: { body?: string; isResolved?: boolean }
+): Promise<KnowledgeDocumentComment> {
+  return api(`/api/projects/${projectId}/knowledge-base/comments/${commentId}`, { method: "PATCH", body: input });
+}
+
+export function deleteKnowledgeDocumentComment(projectId: string, commentId: string): Promise<{ success: boolean }> {
+  return api(`/api/projects/${projectId}/knowledge-base/comments/${commentId}`, { method: "DELETE" });
+}
+
 // Files
 
-export async function uploadKnowledgeFiles(
+// Matches the backend's FilesInterceptor("files", 10, ...) cap per request — files beyond this
+// count in a single multipart request are dropped by multer, so larger selections are split into
+// sequential batches here instead of raising the per-request limit (which holds every file for a
+// batch in memory until the whole batch validates).
+const KB_UPLOAD_BATCH_SIZE = 10;
+
+async function uploadKnowledgeFileBatch(
   projectId: string,
   folderId: string,
   files: File[]
@@ -2602,16 +2904,31 @@ export async function uploadKnowledgeFiles(
   const formData = new FormData();
   formData.append("folderId", folderId);
   for (const file of files) formData.append("files", file);
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/knowledge-base/files/upload`, {
-    method: "POST",
-    credentials: "include",
-    body: formData,
-  });
+  const res = await fetchWithNetworkErrorMessage(
+    `${API_BASE}/api/projects/${projectId}/knowledge-base/files/upload`,
+    { method: "POST", credentials: "include", body: formData }
+  );
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((err as { error?: string }).error || String(res.status));
   }
   return res.json();
+}
+
+export async function uploadKnowledgeFiles(
+  projectId: string,
+  folderId: string,
+  files: File[],
+  onProgress?: (uploaded: number, total: number) => void
+): Promise<{ list: KnowledgeFile[]; total: number }> {
+  const list: KnowledgeFile[] = [];
+  for (let i = 0; i < files.length; i += KB_UPLOAD_BATCH_SIZE) {
+    const batch = files.slice(i, i + KB_UPLOAD_BATCH_SIZE);
+    const result = await uploadKnowledgeFileBatch(projectId, folderId, batch);
+    list.push(...result.list);
+    onProgress?.(Math.min(i + batch.length, files.length), files.length);
+  }
+  return { list, total: list.length };
 }
 
 export function getKnowledgeFile(

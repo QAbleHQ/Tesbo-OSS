@@ -44,9 +44,42 @@ Backend runtime secrets:
 - `CORS_ALLOWED_ORIGINS`
 - `FRONTEND_URL`, `SESSION_DAYS`
 - `POSTMARK_API_TOKEN`, `POSTMARK_FROM_EMAIL`
-- `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`, `JIRA_REDIRECT_URI`
+- `JIRA_CLIENT_ID`, `JIRA_CLIENT_SECRET`, `LINEAR_CLIENT_ID`, `LINEAR_CLIENT_SECRET` — platform OAuth apps (see [Jira / Linear OAuth](#jira--linear-oauth) below)
+- `JIRA_REDIRECT_URI`, `LINEAR_REDIRECT_URI` — optional; default to `FRONTEND_URL` + `/integrations/callback`
 - `UPLOAD_DIR`, `MAX_UPLOAD_SIZE`
 - `STORAGE_DRIVER`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_FORCE_PATH_STYLE`, `S3_PRESIGNED_URL_TTL_SECONDS` (see [Knowledge Base File Storage](#knowledge-base-file-storage) below)
+
+## Jira / Linear OAuth
+
+Register **one** OAuth app per provider for the whole deployment, put its credentials in the backend
+env, and every workspace owner connects by clicking **Connect** — they never see or enter a client
+id, client secret, or callback URL.
+
+**Jira** — in the [Atlassian Developer Console](https://developer.atlassian.com/console/myapps/):
+
+1. Create an app and add the **OAuth 2.0 (3LO)** authorization type.
+2. Set the callback URL to `FRONTEND_URL` + `/integrations/callback`
+   (e.g. `https://app.example.com/integrations/callback`).
+3. Under Permissions → Jira API, add the scopes
+   `read:jira-work`, `read:jira-user`, `write:jira-work`, `offline_access`.
+4. Copy the Client ID and Secret into `JIRA_CLIENT_ID` / `JIRA_CLIENT_SECRET`.
+
+**Linear** — Settings → API → OAuth applications: same callback URL, then
+`LINEAR_CLIENT_ID` / `LINEAR_CLIENT_SECRET`.
+
+Notes:
+
+- **This is the only way to configure it.** There is no per-workspace OAuth app and no personal
+  access token option — if the client id/secret aren't set, the Integrations page tells the workspace
+  owner to ask whoever runs the instance, and Connect stays unavailable. Self-hosted installs use the
+  exact same flow with their own app's credentials.
+- `*_REDIRECT_URI` only needs setting when the callback must differ from `FRONTEND_URL` — for
+  example a proxy that terminates on another host. Whatever value is used must match the provider
+  console exactly.
+- `SECRETS_ENCRYPTION_KEY` must be set: it encrypts the OAuth tokens at rest and derives the key
+  that signs the OAuth `state`. Rotating it invalidates stored tokens, so workspaces must reconnect.
+- **Jira Server / Data Center is not supported** — cloud OAuth via `auth.atlassian.com` requires a
+  Jira Cloud site. Only `*.atlassian.net`-style cloud instances can be connected.
 
 ## Knowledge Base File Storage
 

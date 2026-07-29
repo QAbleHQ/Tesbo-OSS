@@ -9,32 +9,33 @@ const PROVIDER_LABELS: Record<IntegrationProvider, string> = { jira: "Jira", lin
 function CallbackHandler() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
-  const [errorMsg, setErrorMsg] = useState("");
-  const [providerLabel, setProviderLabel] = useState("the app");
+  const code = searchParams.get("code");
+  const oauthError = searchParams.get("error");
+  // Signed state, shaped `<provider>.<payload>.<signature>`. Only the leading provider segment is
+  // read here — to pick the endpoint — and the whole value goes back for the backend to verify.
+  const state = searchParams.get("state") || "";
+  const head = state.split(".")[0];
+  const provider = head === "jira" || head === "linear" ? head : null;
+  const providerLabel = provider ? PROVIDER_LABELS[provider] : "the app";
+
+  // Failures visible straight from the query string need no round trip, so they stay derived rather
+  // than being pushed into state from inside the effect.
+  const upfrontError = oauthError
+    ? "Authorization was denied or failed."
+    : !code || !provider
+      ? "Missing authorization code or integration context."
+      : null;
+
+  const [exchange, setExchange] = useState<{ status: "loading" | "success" | "error"; errorMsg: string }>({
+    status: "loading",
+    errorMsg: "",
+  });
 
   useEffect(() => {
-    const code = searchParams.get("code");
-    const state = searchParams.get("state"); // provider ("jira" | "linear")
-    const error = searchParams.get("error");
-    const provider = state === "jira" || state === "linear" ? state : null;
-    if (provider) setProviderLabel(PROVIDER_LABELS[provider]);
-
-    if (error) {
-      setStatus("error");
-      setErrorMsg("Authorization was denied or failed.");
-      return;
-    }
-
-    if (!code || !provider) {
-      setStatus("error");
-      setErrorMsg("Missing authorization code or integration context.");
-      return;
-    }
-
-    integrationCallback(provider, code)
+    if (upfrontError || !code || !provider) return;
+    integrationCallback(provider, code, state)
       .then(() => {
-        setStatus("success");
+        setExchange({ status: "success", errorMsg: "" });
         const returnProjectId = sessionStorage.getItem(INTEGRATION_RETURN_PROJECT_KEY);
         sessionStorage.removeItem(INTEGRATION_RETURN_PROJECT_KEY);
         router.replace(
@@ -42,10 +43,12 @@ function CallbackHandler() {
         );
       })
       .catch((err) => {
-        setStatus("error");
-        setErrorMsg(err?.message || "Failed to complete authentication.");
+        setExchange({ status: "error", errorMsg: err?.message || "Failed to complete authentication." });
       });
-  }, [searchParams, router]);
+  }, [upfrontError, code, provider, state, router]);
+
+  const status = upfrontError ? "error" : exchange.status;
+  const errorMsg = upfrontError || exchange.errorMsg;
 
   return (
     <main className="min-h-screen flex items-center justify-center bg-[var(--background)]">

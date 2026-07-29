@@ -10,6 +10,7 @@ import {
   IconPaperclip,
   IconPlayerPlay,
   IconSparkles,
+  IconStack2,
   IconUsers,
 } from "@tabler/icons-react";
 import type { ActivityLogItem, ActivitySummary } from "@/lib/api";
@@ -77,6 +78,19 @@ const ACTION_META: Record<string, [string, StatusChipProps["tone"]]> = {
   invitation_cancelled: ["Cancelled", "error"],
   invitation_resent: ["Resent", "info"],
   invitation_accepted: ["Joined", "success"],
+  custom_field_created: ["Created", "success"],
+  custom_field_renamed: ["Renamed", "neutral"],
+  custom_field_required_toggled: ["Updated", "info"],
+  custom_field_config_updated: ["Updated", "info"],
+  custom_field_option_added: ["Option added", "success"],
+  custom_field_option_deactivated: ["Option deactivated", "warning"],
+  custom_field_option_reactivated: ["Option reactivated", "success"],
+  custom_field_reordered: ["Reordered", "neutral"],
+  custom_field_deactivated: ["Deactivated", "warning"],
+  custom_field_reactivated: ["Activated", "success"],
+  custom_field_archived: ["Archived", "error"],
+  custom_field_deleted: ["Deleted", "error"],
+  testcase_custom_field_updated: ["Custom field updated", "info"],
 };
 
 export function actionMeta(action: string): [string, StatusChipProps["tone"]] {
@@ -114,6 +128,7 @@ const ENTITY_META: Record<string, [string, typeof IconFileText]> = {
   project_member: ["Project member", IconUsers],
   workspace_member: ["Workspace member", IconUsers],
   invitation: ["Invitation", IconMail],
+  custom_field_definition: ["Custom Field", IconStack2],
 };
 
 export function entityMeta(entityType: string): [string, typeof IconFileText] {
@@ -175,6 +190,22 @@ export function describeActivity(item: ActivityLogItem): string | null {
   }
   if (item.action === "project_created") return "Project created.";
   if (item.action === "project_archived") return "Project archived.";
+  if (item.action === "testcase_custom_field_updated" && typeof diff?.fieldName === "string") {
+    const after = diff.after;
+    if (after == null || after === "" || (Array.isArray(after) && after.length === 0)) {
+      return `Custom field "${diff.fieldName}" cleared.`;
+    }
+    return `Custom field "${diff.fieldName}" changed to ${JSON.stringify(after)}.`;
+  }
+  if (item.action === "custom_field_renamed" && typeof diff?.before === "string" && typeof diff?.after === "string") {
+    return `Renamed from "${diff.before}" to "${diff.after}".`;
+  }
+  if (item.action === "custom_field_required_toggled") {
+    return diff?.after ? "Marked as required." : "Marked as optional.";
+  }
+  if ((item.action === "custom_field_option_added" || item.action === "custom_field_option_deactivated" || item.action === "custom_field_option_reactivated") && typeof diff?.label === "string") {
+    return `Option "${diff.label}".`;
+  }
   return null;
 }
 

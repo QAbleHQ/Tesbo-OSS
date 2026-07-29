@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import React from "react";
 import { IconRefresh, IconSettings, IconPlug } from "@tabler/icons-react";
@@ -16,15 +16,12 @@ import {
   listLinkedJiraKeys,
   listLinkedLinearKeys,
   getRequirementsSummary,
-  syncJiraTickets,
-  syncLinearTickets,
-  type JiraConnection,
-  type LinearConnection,
   type RequirementsSummary,
   type TicketSourceStats,
 } from "@/lib/api";
 import { Button, Input, StatusChip } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
+import { SyncStatusPanel, useSyncRun } from "@/components/integrations/SyncStatusPanel";
 
 const PAGE_SIZE = 25;
 
@@ -48,11 +45,54 @@ interface Requirement {
   updatedAt: string | null;
 }
 
-const SOURCE_TABS: Array<{ id: Source; label: string; logoBg: string; logoLetter: string }> = [
-  { id: "all", label: "All Sources", logoBg: "#5A4F80", logoLetter: "Σ" },
-  { id: "jira", label: "Jira", logoBg: "#0052CC", logoLetter: "J" },
-  { id: "linear", label: "Linear", logoBg: "#5E6AD2", logoLetter: "L" },
+interface ProviderMeta {
+  id: TicketSource;
+  label: string;
+  logoBg: string;
+  logoLetter: string;
+  /** Label for the provider's mapping screen — Jira maps projects, Linear maps teams. */
+  manageLabel: string;
+  getStatus: (projectId: string) => Promise<{ connected: boolean }>;
+}
+
+/**
+ * Every tracker this page knows how to render. Tabs are filtered down to the ones actually
+ * connected, so registering a provider here is all a new integration needs — and one that is
+ * never connected never shows up.
+ */
+const PROVIDERS: ProviderMeta[] = [
+  {
+    id: "jira",
+    label: "Jira",
+    logoBg: "#0052CC",
+    logoLetter: "J",
+    manageLabel: "Jira Projects",
+    getStatus: getJiraStatus,
+  },
+  {
+    id: "linear",
+    label: "Linear",
+    logoBg: "#5E6AD2",
+    logoLetter: "L",
+    manageLabel: "Linear Teams",
+    getStatus: getLinearStatus,
+  },
 ];
+
+const ALL_TAB = { id: "all" as const, label: "All Sources", logoBg: "#5A4F80", logoLetter: "Σ" };
+
+function providerFor(source: TicketSource): ProviderMeta | undefined {
+  return PROVIDERS.find((p) => p.id === source);
+}
+
+function providerLabel(source: TicketSource): string {
+  return providerFor(source)?.label ?? source;
+}
+
+function joinLabels(labels: string[]): string {
+  if (labels.length <= 1) return labels[0] ?? "";
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+}
 
 const EMPTY_STATS: TicketSourceStats = { total: 0, covered: 0, uncovered: 0, types: [], statuses: [] };
 
@@ -97,15 +137,15 @@ function IssueTypeIcon({ type }: { type: string }) {
 }
 
 function SourceBadge({ source }: { source: TicketSource }) {
-  const tab = SOURCE_TABS.find((t) => t.id === source);
-  if (!tab) return null;
+  const provider = providerFor(source);
+  if (!provider) return null;
   return (
     <span
       className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
-      style={{ background: tab.logoBg }}
-      title={tab.label}
+      style={{ background: provider.logoBg }}
+      title={provider.label}
     >
-      {tab.logoLetter}
+      {provider.logoLetter}
     </span>
   );
 }
@@ -158,8 +198,7 @@ export default function RequirementsPage() {
 
   const [loading, setLoading] = useState(true);
   const [source, setSource] = useState<Source>("all");
-  const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
-  const [linearStatus, setLinearStatus] = useState<LinearConnection | null>(null);
+  const [connectedSources, setConnectedSources] = useState<TicketSource[]>([]);
   const [summary, setSummary] = useState<RequirementsSummary | null>(null);
   const [tickets, setTickets] = useState<Requirement[]>([]);
   const [total, setTotal] = useState(0);
@@ -169,7 +208,6 @@ export default function RequirementsPage() {
   const [typeFilter, setTypeFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [coverageFilter, setCoverageFilter] = useState<"" | "covered" | "uncovered">("");
-  const [syncing, setSyncing] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [linkedJiraKeys, setLinkedJiraKeys] = useState<Set<string>>(new Set());
   const [jiraKeyCounts, setJiraKeyCounts] = useState<Record<string, number>>({});
@@ -178,12 +216,26 @@ export default function RequirementsPage() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const [generatingKey, setGeneratingKey] = useState<string | null>(null);
 
-  const jiraConnected = jiraStatus?.connected ?? false;
-  const linearConnected = linearStatus?.connected ?? false;
-  const anyConnected = jiraConnected || linearConnected;
-  const sourceConnected = source === "jira" ? jiraConnected : source === "linear" ? linearConnected : anyConnected;
+  // One polled run per provider. Both hooks are called unconditionally (React rules) and gate
+  // their own fetching on whether that provider is connected.
+  const jiraSync = useSyncRun(projectId, "jira", connectedSources.includes("jira"));
+  const linearSync = useSyncRun(projectId, "linear", connectedSources.includes("linear"));
+  const syncByProvider: Record<TicketSource, ReturnType<typeof useSyncRun>> = { jira: jiraSync, linear: linearSync };
+  const anySyncActive = jiraSync.isActive || linearSync.isActive;
+  const syncStarting = jiraSync.starting || linearSync.starting;
+
+  // Only successfully connected trackers are offered as tabs; "All Sources" earns its place
+  // once there is more than one of them to combine.
+  const connectedProviders = PROVIDERS.filter((p) => connectedSources.includes(p.id));
+  const sourceTabs: Array<{ id: Source; label: string; logoBg: string; logoLetter: string }> =
+    connectedProviders.length > 1 ? [ALL_TAB, ...connectedProviders] : connectedProviders;
+  const anyConnected = connectedProviders.length > 0;
+  const sourceConnected = source === "all" ? anyConnected : connectedSources.includes(source);
   const stats = summary?.[source] ?? EMPTY_STATS;
   const coveragePct = stats.total ? Math.round((stats.covered / stats.total) * 100) : 0;
+  const connectedPhrase = anyConnected
+    ? joinLabels(connectedProviders.map((p) => p.label))
+    : "your connected issue tracker";
 
   function tcCountFor(req: Requirement): number {
     return req.source === "jira" ? jiraKeyCounts[req.key] || 0 : linearKeyCounts[req.key] || 0;
@@ -270,13 +322,16 @@ export default function RequirementsPage() {
         router.replace("/login");
         return;
       }
-      const [jStatus, lStatus] = await Promise.all([
-        getJiraStatus(projectId).catch(() => ({ connected: false }) as JiraConnection),
-        getLinearStatus(projectId).catch(() => ({ connected: false }) as LinearConnection),
-      ]);
-      setJiraStatus(jStatus);
-      setLinearStatus(lStatus);
-      await loadTickets("all", 0, "", {});
+      const statuses = await Promise.all(
+        PROVIDERS.map((p) => p.getStatus(projectId).catch(() => ({ connected: false })))
+      );
+      const connected = PROVIDERS.filter((_, i) => statuses[i].connected).map((p) => p.id);
+      setConnectedSources(connected);
+      // With a single tracker connected there is no "All Sources" tab to sit under, so open
+      // straight onto that provider and keep the active tab in sync with what's rendered.
+      const initialSource: Source = connected.length === 1 ? connected[0] : "all";
+      setSource(initialSource);
+      await loadTickets(initialSource, 0, "", {});
       await Promise.all([refreshLinkedKeys(), refreshSummary()]);
       setLoading(false);
     })();
@@ -285,6 +340,18 @@ export default function RequirementsPage() {
   useEffect(() => {
     if (!loading) loadTickets(source, page, search, { issueType: typeFilter, status: statusFilter, coverage: coverageFilter });
   }, [source, page, search, typeFilter, statusFilter, coverageFilter, loadTickets, loading]);
+
+  // Pull the freshly synced tickets in on the active -> settled edge only. Reloading on every
+  // poll tick would refetch the whole list every two seconds for the length of the run.
+  const syncWasActiveRef = useRef(false);
+  useEffect(() => {
+    if (syncWasActiveRef.current && !anySyncActive) {
+      void loadTickets(source, page, search, { issueType: typeFilter, status: statusFilter, coverage: coverageFilter });
+      void refreshSummary();
+      void refreshLinkedKeys();
+    }
+    syncWasActiveRef.current = anySyncActive;
+  }, [anySyncActive, source, page, search, typeFilter, statusFilter, coverageFilter, loadTickets, refreshSummary, refreshLinkedKeys]);
 
   function handleSourceChange(next: Source) {
     setSource(next);
@@ -297,21 +364,12 @@ export default function RequirementsPage() {
     setExpandedId(null);
   }
 
+  // Fires the runs and returns; the ticket list is refreshed by the effect below when the last
+  // run settles, rather than by awaiting a sync that now takes minutes.
   async function handleSync() {
-    setSyncing(true);
     setSyncError(null);
-    try {
-      const jobs: Promise<unknown>[] = [];
-      if (source === "jira" || (source === "all" && jiraConnected)) jobs.push(syncJiraTickets(projectId));
-      if (source === "linear" || (source === "all" && linearConnected)) jobs.push(syncLinearTickets(projectId));
-      await Promise.all(jobs);
-      await loadTickets(source, page, search, { issueType: typeFilter, status: statusFilter, coverage: coverageFilter });
-      await refreshSummary();
-    } catch (err) {
-      setSyncError(err instanceof Error ? err.message : "Failed to sync tickets.");
-    } finally {
-      setSyncing(false);
-    }
+    const targets = PROVIDERS.filter((p) => (source === "all" ? connectedSources.includes(p.id) : source === p.id));
+    await Promise.all(targets.map((p) => syncByProvider[p.id].start()));
   }
 
   async function handleGenerateFromTicket(ticket: Requirement, mode: "generate" | "regenerate") {
@@ -319,15 +377,15 @@ export default function RequirementsPage() {
     setSyncError(null);
     try {
       const existingCount = tcCountFor(ticket);
-      const providerLabel = ticket.source === "jira" ? "Jira" : "Linear";
+      const provider = providerLabel(ticket.source);
       const story = `${ticket.key}: ${ticket.summary}`;
       const context = [
         ticket.description,
         ticket.status ? `Status: ${ticket.status}` : "",
         ticket.priority ? `Priority: ${ticket.priority}` : "",
         mode === "regenerate"
-          ? `Regenerate testcase coverage for ${ticket.key}. Update existing linked testcases where coverage overlaps, and add new testcases for new or changed ${providerLabel} requirements. Mark regenerated cases clearly with Zyra/${providerLabel} tags. Existing linked testcase count: ${existingCount}.`
-          : `Generate testcase coverage for ${ticket.key}. Mark generated cases clearly with Zyra/${providerLabel} tags.`
+          ? `Regenerate testcase coverage for ${ticket.key}. Update existing linked testcases where coverage overlaps, and add new testcases for new or changed ${provider} requirements. Mark regenerated cases clearly with Zyra/${provider} tags. Existing linked testcase count: ${existingCount}.`
+          : `Generate testcase coverage for ${ticket.key}. Mark generated cases clearly with Zyra/${provider} tags.`
       ].filter(Boolean).join("\n\n");
       await createZyraTask(projectId, {
         story,
@@ -358,7 +416,7 @@ export default function RequirementsPage() {
       header={
         <PageHeader
           title="Requirements"
-          subtitle="Requirements to be developed, synced from Jira and Linear, and turned into test coverage with Zyra. Full documents live in the Knowledge base's Requirements folder."
+          subtitle={`Requirements to be developed, synced from ${connectedPhrase}, and turned into test coverage with Zyra. Full documents live in the Knowledge base's Requirements folder.`}
           actions={
             <Link
               href={`/projects/${projectId}/settings?tab=integrations`}
@@ -372,76 +430,80 @@ export default function RequirementsPage() {
       }
     >
       {/* Source tabs + coverage stat strip */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1">
-          {SOURCE_TABS.map((tab) => {
-            const count = summary?.[tab.id]?.total ?? 0;
-            const active = source === tab.id;
-            return (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => handleSourceChange(tab.id)}
-                className={`inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                  active
-                    ? "bg-[var(--brand-primary)] text-white"
-                    : "text-[var(--muted)] hover:bg-[var(--surface-secondary)]"
-                }`}
-              >
-                <span
-                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
-                  style={{ background: tab.logoBg }}
-                >
-                  {tab.logoLetter}
-                </span>
-                {tab.label}
-                <span
-                  className={`rounded-full px-1.5 py-0.5 text-[11px] font-mono ${
-                    active ? "bg-white/20" : "bg-[var(--surface-tertiary)] text-[var(--muted)]"
-                  }`}
-                >
-                  {count}
-                </span>
-              </button>
-            );
-          })}
-        </div>
+      {(anyConnected || tickets.length > 0) && (
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          {sourceTabs.length > 0 && (
+            <div className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-1">
+              {sourceTabs.map((tab) => {
+                const count = summary?.[tab.id]?.total ?? 0;
+                const active = source === tab.id;
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => handleSourceChange(tab.id)}
+                    className={`inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                      active
+                        ? "bg-[var(--brand-primary)] text-white"
+                        : "text-[var(--muted)] hover:bg-[var(--surface-secondary)]"
+                    }`}
+                  >
+                    <span
+                      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-[9px] font-bold text-white"
+                      style={{ background: tab.logoBg }}
+                    >
+                      {tab.logoLetter}
+                    </span>
+                    {tab.label}
+                    <span
+                      className={`rounded-full px-1.5 py-0.5 text-[11px] font-mono ${
+                        active ? "bg-white/20" : "bg-[var(--surface-tertiary)] text-[var(--muted)]"
+                      }`}
+                    >
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
-        <div className="flex items-center gap-2">
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
-            <div className="text-base font-semibold text-[var(--foreground)]">{stats.total}</div>
-            <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
-          </div>
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
-            <div className="text-base font-semibold text-[var(--success-foreground)]">{stats.covered}</div>
-            <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Covered</div>
-          </div>
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
-            <div className="text-base font-semibold text-[var(--warning-foreground)]">{stats.uncovered}</div>
-            <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Uncovered</div>
-          </div>
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 min-w-[120px]">
-            <div className="mb-1.5 flex items-baseline justify-between gap-2">
-              <span className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Coverage</span>
-              <span className="text-sm font-semibold text-[var(--foreground)]">{coveragePct}%</span>
+          <div className="flex items-center gap-2">
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
+              <div className="text-base font-semibold text-[var(--foreground)]">{stats.total}</div>
+              <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
             </div>
-            <div className="h-1 rounded-full bg-[var(--surface-tertiary)] overflow-hidden">
-              <div className="h-full rounded-full bg-[var(--success)] transition-[width]" style={{ width: `${coveragePct}%` }} />
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
+              <div className="text-base font-semibold text-[var(--success-foreground)]">{stats.covered}</div>
+              <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Covered</div>
+            </div>
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-center min-w-[64px]">
+              <div className="text-base font-semibold text-[var(--warning-foreground)]">{stats.uncovered}</div>
+              <div className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Uncovered</div>
+            </div>
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 min-w-[120px]">
+              <div className="mb-1.5 flex items-baseline justify-between gap-2">
+                <span className="text-[10px] uppercase tracking-wide text-[var(--muted-soft)]">Coverage</span>
+                <span className="text-sm font-semibold text-[var(--foreground)]">{coveragePct}%</span>
+              </div>
+              <div className="h-1 rounded-full bg-[var(--surface-tertiary)] overflow-hidden">
+                <div className="h-full rounded-full bg-[var(--success)] transition-[width]" style={{ width: `${coveragePct}%` }} />
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
 
       {sourceConnected && (
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <button
               onClick={handleSync}
-              disabled={syncing}
+              disabled={syncStarting || anySyncActive}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--surface-tertiary)] text-[var(--foreground)] px-3 py-1.5 text-sm font-medium hover:bg-[var(--surface-tertiary)] disabled:opacity-50 transition-colors"
             >
-              <IconRefresh size={15} stroke={1.75} />
-              {syncing ? "Syncing…" : `Sync ${source === "all" ? "all sources" : source === "jira" ? "Jira" : "Linear"}`}
+              <IconRefresh size={15} stroke={1.75} className={anySyncActive ? "animate-spin" : undefined} />
+              {syncStarting ? "Starting…" : anySyncActive ? "Syncing…" : `Sync ${source === "all" ? "all sources" : providerLabel(source)}`}
             </button>
             {source !== "all" && (
               <Link
@@ -464,9 +526,16 @@ export default function RequirementsPage() {
         </div>
       )}
 
-      {syncError && (
+      {/* Live per-provider run state. Kept visible after a run settles so the last sync's outcome
+          (and who ran it) explains what's in the Knowledge Base right now. */}
+      {sourceConnected &&
+        PROVIDERS.filter((p) => (source === "all" ? connectedSources.includes(p.id) : source === p.id)).map((p) => (
+          <SyncStatusPanel key={p.id} run={syncByProvider[p.id].run} label={p.label} />
+        ))}
+
+      {(syncError || jiraSync.error || linearSync.error) && (
         <div className="flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
-          <span>{syncError}</span>
+          <span>{syncError || jiraSync.error || linearSync.error}</span>
           <button type="button" onClick={() => setSyncError(null)} className="ml-3 text-[var(--error)] hover:opacity-80">
             Dismiss
           </button>
@@ -479,10 +548,13 @@ export default function RequirementsPage() {
             <IconPlug size={26} stroke={1.75} className="text-[var(--brand-primary)]" />
           </div>
           <h2 className="mt-4 text-lg font-semibold text-[var(--foreground)]">
-            Connect {source === "all" ? "Jira or Linear" : source === "jira" ? "Jira" : "Linear"} to Get Started
+            {source === "all"
+              ? "Connect an Issue Tracker to Get Started"
+              : `Connect ${providerLabel(source)} to Get Started`}
           </h2>
           <p className="mt-2 text-sm text-[var(--muted)] max-w-sm mx-auto">
-            Link your {source === "all" ? "Jira or Linear" : source === "jira" ? "Jira" : "Linear"} account to automatically import tickets as requirements and use them as context for generating test cases.
+            Connect an issue tracker in project settings to automatically import tickets as
+            requirements and use them as context for generating test cases.
           </p>
           <Link
             href={`/projects/${projectId}/settings?tab=integrations`}
@@ -503,17 +575,17 @@ export default function RequirementsPage() {
           <div className="mt-4 flex items-center justify-center gap-3">
             <button
               onClick={handleSync}
-              disabled={syncing}
+              disabled={syncStarting || anySyncActive}
               className="rounded-lg bg-[var(--brand-primary)] text-white px-5 py-2 text-sm font-medium hover:bg-[var(--brand-hover)] disabled:opacity-50 transition-colors"
             >
-              {syncing ? "Syncing…" : "Sync Tickets"}
+              {syncStarting ? "Starting…" : anySyncActive ? "Syncing…" : "Sync Tickets"}
             </button>
             {source !== "all" && (
               <Link
                 href={`/projects/${projectId}/settings/integrations/${source}`}
                 className="inline-flex items-center rounded-lg border border-[var(--border)] bg-[var(--surface)] px-4 py-2 text-sm font-semibold text-[var(--foreground)] shadow-sm transition-colors hover:bg-[var(--surface-secondary)]"
               >
-                Manage {source === "jira" ? "Jira Projects" : "Linear Teams"}
+                Manage {providerFor(source)?.manageLabel ?? providerLabel(source)}
               </Link>
             )}
           </div>
@@ -734,7 +806,7 @@ export default function RequirementsPage() {
                                 rel="noopener noreferrer"
                                 className="inline-block text-xs text-[var(--brand-primary)] hover:underline"
                               >
-                                Open in {ticket.source === "jira" ? "Jira" : "Linear"} →
+                                Open in {providerLabel(ticket.source)} →
                               </a>
                             </div>
                           </td>

@@ -10,8 +10,9 @@ import MembersTab from "@/components/settings/MembersTab";
 import IntegrationsTab from "@/components/settings/IntegrationsTab";
 import AiProvidersTab from "@/components/settings/AiProvidersTab";
 import AdminsTab from "@/components/settings/AdminsTab";
+import BillingTab from "@/components/settings/BillingTab";
 
-type SettingsTab = "general" | "members" | "integrations" | "ai" | "admins";
+type SettingsTab = "general" | "members" | "integrations" | "ai" | "billing" | "admins";
 
 function WorkspaceSettingsContent() {
   const router = useRouter();
@@ -31,6 +32,7 @@ function WorkspaceSettingsContent() {
             { key: "members", label: "Members" },
             { key: "integrations", label: "Integrations" },
             { key: "ai", label: "AI Providers" },
+            { key: "billing", label: "Billing" },
           ] as const)
         : []),
       ...(isPlatformAdmin ? ([{ key: "admins", label: "Manage Admins" }] as const) : []),
@@ -171,6 +173,7 @@ function WorkspaceSettingsContent() {
               {activeTab === "members" && <MembersTab />}
               {activeTab === "integrations" && <IntegrationsTab />}
               {activeTab === "ai" && <AiProvidersTab />}
+              {activeTab === "billing" && <BillingTab />}
               {activeTab === "admins" && <AdminsTab />}
             </div>
           </div>

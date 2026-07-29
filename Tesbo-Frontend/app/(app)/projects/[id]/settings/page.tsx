@@ -4,7 +4,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
-import { IconChevronRight, IconKey } from "@tabler/icons-react";
+import { IconChevronRight, IconKey, IconSettings, IconStack2 } from "@tabler/icons-react";
 import {
   authMe,
   getProject,
@@ -17,6 +17,7 @@ import {
   addProjectMember,
   removeProjectMember,
   listApiKeys,
+  listCustomFieldDefinitions,
   type JiraConnection,
   type LinearConnection,
   type TestEnvironmentSetting,
@@ -37,8 +38,6 @@ type ProjectSettingsPayload = {
   ai?: {
     enabled?: boolean;
   };
-  jiraAutoComment?: boolean;
-  jiraTicketSelector?: boolean;
   testcaseIdPrefix?: string;
   testRunEnvironments?: Array<{
     name?: string;
@@ -47,7 +46,7 @@ type ProjectSettingsPayload = {
   [key: string]: unknown;
 };
 
-type SettingsTab = "general" | "testRuns" | "members" | "apiTokens" | "jira" | "integrations";
+type SettingsTab = "general" | "testRuns" | "members" | "apiTokens" | "customFields" | "integrations";
 type ProjectMember = { userId: string; email: string; name: string; role: string; joinedAt: string };
 type WorkspaceMember = { userId: string; email: string; name: string; role: string; joinedAt: string };
 
@@ -79,8 +78,6 @@ export default function ProjectSettingsPage() {
   const [project, setProject] = useState<Record<string, unknown> | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [jiraAutoComment, setJiraAutoComment] = useState(false);
-  const [jiraTicketSelector, setJiraTicketSelector] = useState(false);
   const [testcaseIdPrefix, setTestcaseIdPrefix] = useState("");
   const [testRunEnvironments, setTestRunEnvironments] = useState<TestEnvironmentSetting[]>([]);
   const [newEnvironmentName, setNewEnvironmentName] = useState("");
@@ -101,21 +98,29 @@ export default function ProjectSettingsPage() {
   const [changingRoleId, setChangingRoleId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [apiTokenCount, setApiTokenCount] = useState<number | null>(null);
+  const [customFieldCount, setCustomFieldCount] = useState<number | null>(null);
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteProjectModalOpen, setDeleteProjectModalOpen] = useState(false);
   const [deleteProjectTypedName, setDeleteProjectTypedName] = useState("");
   const { startEl: topBarStartEl, setFilled: setTopBarFilled } = useTopBarSlots();
-  const jiraTabEnabled = jiraStatus?.connected === true;
+  // Hoisted above visibleTabs (rather than computed further down with the rest of the
+  // members logic) because the Custom Fields tab needs the role check to decide whether
+  // to even appear — unlike every other tab, which stays visible with only in-tab actions
+  // gated, this one must be absent (not just read-only) for non-owner/manager roles.
+  const currentUserRole = currentUserId
+    ? normalizeRole(projectMembers.find((m) => m.userId === currentUserId)?.role ?? "qa_engineer")
+    : "qa_engineer";
+  const canManageCustomFields = currentUserRole === "owner" || currentUserRole === "manager";
   const visibleTabs = useMemo<Array<{ key: SettingsTab; label: string }>>(
     () => [
       { key: "general", label: "General" },
       { key: "testRuns", label: "Test Environments" },
       { key: "members", label: "Team Members" },
       { key: "apiTokens", label: "API & MCP" },
-      ...(jiraTabEnabled ? [{ key: "jira" as const, label: "Jira" }] : []),
+      ...(canManageCustomFields ? [{ key: "customFields" as const, label: "Custom Fields" }] : []),
       { key: "integrations", label: "Integrations" },
     ],
-    [jiraTabEnabled]
+    [canManageCustomFields]
   );
 
   useEffect(() => {
@@ -126,6 +131,9 @@ export default function ProjectSettingsPage() {
       testEnvironments: "testRuns",
       team: "members",
       teamMembers: "members",
+      // Jira no longer has its own tab — its settings live on the Jira integration page, which is
+      // one click away from the Integrations tab. Keeps old ?tab=jira links from landing nowhere.
+      jira: "integrations",
     };
     const normalizedTab = tabAliases[tab] ?? tab;
     const allowed: SettingsTab[] = visibleTabs.map((item) => item.key);
@@ -133,12 +141,6 @@ export default function ProjectSettingsPage() {
       setActiveTab(normalizedTab as SettingsTab);
     }
   }, [searchParams, visibleTabs]);
-
-  useEffect(() => {
-    if (activeTab === "jira" && !jiraTabEnabled) {
-      setActiveTab("integrations");
-    }
-  }, [activeTab, jiraTabEnabled]);
 
   useEffect(() => {
     setTopBarFilled(true);
@@ -201,14 +203,13 @@ export default function ProjectSettingsPage() {
         setName((p.name as string) ?? "");
         setDescription((p.description as string) ?? "");
         const parsedSettings = parseProjectSettings(p.settings);
-        setJiraAutoComment(parsedSettings.jiraAutoComment === true);
-        setJiraTicketSelector(parsedSettings.jiraTicketSelector === true);
         setTestcaseIdPrefix(normalizeTestcaseIdPrefix(String(parsedSettings.testcaseIdPrefix || p.key || "TC")));
         setTestRunEnvironments(normalizeTestRunEnvironments(parsedSettings.testRunEnvironments));
       }).catch(() => router.replace("/projects"));
       getJiraStatus(projectId).then(setJiraStatus).catch(() => {});
       getLinearStatus(projectId).then(setLinearStatus).catch(() => {});
       listApiKeys(projectId).then((l) => setApiTokenCount(l.length)).catch(() => {});
+      listCustomFieldDefinitions(projectId).then((l) => setCustomFieldCount(l.length)).catch(() => {});
       loadMembers().catch(() => {});
     });
   }, [loadMembers, projectId, router]);
@@ -238,8 +239,6 @@ export default function ProjectSettingsPage() {
       const currentSettings = parseProjectSettings(project?.settings);
       const nextSettings: ProjectSettingsPayload = {
         ...currentSettings,
-        jiraAutoComment,
-        jiraTicketSelector,
         testcaseIdPrefix: normalizeTestcaseIdPrefix(testcaseIdPrefix) || "TC",
         testRunEnvironments: environmentsToSave.map((item) => ({
           name: item.name.trim(),
@@ -322,10 +321,7 @@ export default function ProjectSettingsPage() {
   const memberIds = new Set(projectMembers.map((member) => member.userId));
   const availableToAdd = workspaceMembers.filter((member) => !memberIds.has(member.userId));
 
-  const currentUserRole = currentUserId
-    ? normalizeRole(projectMembers.find((m) => m.userId === currentUserId)?.role ?? "qa_engineer")
-    : "qa_engineer";
-  const canManageMembers = currentUserRole === "owner" || currentUserRole === "manager";
+  const canManageMembers = canManageCustomFields;
 
   function assignableRoles(): { value: string; label: string }[] {
     if (currentUserRole === "owner") return [{ value: "manager", label: "Manager" }, { value: "qa_engineer", label: "QA Engineer" }];
@@ -461,7 +457,7 @@ export default function ProjectSettingsPage() {
           {/* ── Tab content ── */}
           <div className="min-w-0 flex-1 overflow-y-auto p-6">
             <div className="max-w-3xl space-y-5">
-      {(activeTab === "general" || activeTab === "testRuns" || activeTab === "jira") && (
+      {(activeTab === "general" || activeTab === "testRuns") && (
         <form onSubmit={handleSubmit} className="space-y-5">
           {activeTab === "general" && (
             <>
@@ -595,44 +591,6 @@ export default function ProjectSettingsPage() {
             </Card>
           )}
 
-          {activeTab === "jira" && (
-            <Card className="p-4 space-y-4">
-              <div>
-                <h2 className="text-base font-semibold text-[var(--foreground)]">Jira + AI Generation</h2>
-                <p className="mt-1 text-sm text-[var(--muted)]">
-                  Control how Jira tickets interact with AI test generation.
-                </p>
-              </div>
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={jiraAutoComment}
-                  onChange={(e) => setJiraAutoComment(e.target.checked)}
-                  className="mt-0.5"
-                />
-                <div>
-                  <span className="text-sm font-medium text-[var(--foreground)]">Auto-comment on Jira ticket</span>
-                  <p className="text-xs text-[var(--muted)] mt-0.5">
-                    When test cases are generated from a Jira ticket and saved, automatically add a comment to the Jira ticket listing the created test cases.
-                  </p>
-                </div>
-              </label>
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={jiraTicketSelector}
-                  onChange={(e) => setJiraTicketSelector(e.target.checked)}
-                  className="mt-0.5"
-                />
-                <div>
-                  <span className="text-sm font-medium text-[var(--foreground)]">Jira ticket selector on AI Generation</span>
-                  <p className="text-xs text-[var(--muted)] mt-0.5">
-                    Show a Jira ticket search dropdown on the AI Test Generation page so users can pick a ticket directly without going through the Knowledge Base.
-                  </p>
-                </div>
-              </label>
-            </Card>
-          )}
           {message && (
             <p className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm text-[var(--foreground)]">
               {message}
@@ -817,13 +775,47 @@ export default function ProjectSettingsPage() {
           </div>
         </Card>
       )}
+      {activeTab === "customFields" && (
+        <Card className="p-4 space-y-4">
+          <div>
+            <h2 className="text-base font-semibold text-[var(--foreground)]">Custom Fields</h2>
+            <p className="mt-1 text-sm text-[var(--muted)]">
+              Capture additional test case metadata specific to this project&apos;s testing process (Pro plan).
+            </p>
+          </div>
+          <div className="rounded-lg border border-[var(--border)] p-4 flex items-start gap-4">
+            <div className="shrink-0 w-10 h-10 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center">
+              <IconStack2 className="w-5 h-5 text-white" stroke={1.75} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-sm font-semibold text-[var(--foreground)]">Test case custom fields</h3>
+              <p className="text-xs text-[var(--muted)] mt-0.5">
+                {customFieldCount === null
+                  ? "Loading…"
+                  : customFieldCount === 0
+                  ? "No custom fields yet"
+                  : `${customFieldCount} field${customFieldCount === 1 ? "" : "s"}`}
+              </p>
+            </div>
+            <div className="shrink-0">
+              <Link
+                href={`/projects/${projectId}/settings/custom-fields`}
+                className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+              >
+                Manage custom fields
+              </Link>
+            </div>
+          </div>
+        </Card>
+      )}
       {activeTab === "integrations" && (
         <Card className="p-4 space-y-4">
           <div>
             <h2 className="text-base font-semibold text-[var(--foreground)]">App Integrations</h2>
             <p className="mt-1 text-sm text-[var(--muted)]">
               Jira and Linear connect once for the whole workspace (Workspace Settings → Integrations).
-              Here you pick which remote project/team feeds <em>this</em> project and sync tickets.
+              Open a connected integration&apos;s settings to pick which remote project/team feeds <em>this</em>{" "}
+              project, sync tickets, and configure the rest of its options.
             </p>
           </div>
 
@@ -859,16 +851,23 @@ export default function ProjectSettingsPage() {
               )}
             </div>
             <div className="shrink-0">
-              <Link
-                href={jiraStatus?.connected ? `/projects/${projectId}/settings/integrations/jira` : "/settings/integrations/jira"}
-                className={
-                  jiraStatus?.connected
-                    ? "rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)] transition-colors"
-                    : "inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
-                }
-              >
-                {jiraStatus?.connected ? "Manage mapping" : "Connect in Workspace Settings"}
-              </Link>
+              {jiraStatus?.connected ? (
+                <Link
+                  href={`/projects/${projectId}/settings/integrations/jira`}
+                  aria-label="Jira integration settings"
+                  title="Jira integration settings"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                >
+                  <IconSettings size={17} stroke={1.75} />
+                </Link>
+              ) : (
+                <Link
+                  href="/settings/integrations/jira"
+                  className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+                >
+                  Connect in Workspace Settings
+                </Link>
+              )}
             </div>
           </div>
 
@@ -904,16 +903,23 @@ export default function ProjectSettingsPage() {
               )}
             </div>
             <div className="shrink-0">
-              <Link
-                href={linearStatus?.connected ? `/projects/${projectId}/settings/integrations/linear` : "/settings/integrations/linear"}
-                className={
-                  linearStatus?.connected
-                    ? "rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] hover:bg-[var(--surface-secondary)] transition-colors"
-                    : "inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
-                }
-              >
-                {linearStatus?.connected ? "Manage mapping" : "Connect in Workspace Settings"}
-              </Link>
+              {linearStatus?.connected ? (
+                <Link
+                  href={`/projects/${projectId}/settings/integrations/linear`}
+                  aria-label="Linear integration settings"
+                  title="Linear integration settings"
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-[10px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                >
+                  <IconSettings size={17} stroke={1.75} />
+                </Link>
+              ) : (
+                <Link
+                  href="/settings/integrations/linear"
+                  className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+                >
+                  Connect in Workspace Settings
+                </Link>
+              )}
             </div>
           </div>
 

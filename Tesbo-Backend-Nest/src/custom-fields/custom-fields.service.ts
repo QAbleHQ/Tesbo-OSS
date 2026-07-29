@@ -1,0 +1,562 @@
+import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, NotFoundException } from "@nestjs/common";
+import { randomBytes, randomUUID } from "crypto";
+import { DatabaseService } from "../database/database.service";
+import { PlanLimitsService } from "../plan-limits/plan-limits.service";
+import { LegacyService } from "../legacy/legacy.service";
+import { buildCustomFieldFiltersSql } from "./custom-field-filters";
+import { applyDefaultIfMissing, isEmptyValue, validateAndNormalizeValue, validateConfigShape } from "./custom-field-validation";
+import {
+  CustomFieldDefinitionDto,
+  CustomFieldFilterInput,
+  CustomFieldValueDto,
+  FieldOption,
+  FieldStatus,
+  FieldType,
+  QueryRunner
+} from "./custom-fields.types";
+
+type Body = Record<string, any>;
+
+const FIELD_TYPES: FieldType[] = ["text", "long_text", "boolean", "single_select", "multi_select", "number", "date"];
+
+const DEFINITION_SELECT = `
+  SELECT d.*, EXISTS (SELECT 1 FROM custom_field_values v WHERE v.definition_id = d.id) AS is_used
+  FROM custom_field_definitions d
+`;
+
+function slugify(value: string): string {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(?:^-)|(?:-$)/g, "")
+      .slice(0, 60) || "field"
+  );
+}
+
+function mapDefinitionRow(row: Body): CustomFieldDefinitionDto {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    key: row.key,
+    name: row.name,
+    description: row.description ?? null,
+    fieldType: row.field_type,
+    status: row.status,
+    required: row.required,
+    displayOrder: row.display_order,
+    config: row.config || {},
+    isUsed: Boolean(row.is_used),
+    createdBy: row.created_by ?? null,
+    updatedBy: row.updated_by ?? null,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+@Injectable()
+export class CustomFieldsService {
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly planLimits: PlanLimitsService,
+    @Inject(forwardRef(() => LegacyService)) private readonly legacy: LegacyService
+  ) {}
+
+  private async requireConfigAccess(userId: string | null | undefined, projectId: string) {
+    const project = await this.legacy.requireProjectAccess(userId, projectId);
+    await this.planLimits.assertCustomFieldsEnabled(project.organization_id);
+    const callerRole = this.legacy.normalizeRole(project.caller_role);
+    if (callerRole === "qa_engineer") {
+      throw new ForbiddenException({ error: "QA Engineers cannot manage custom fields" });
+    }
+    return project;
+  }
+
+  async listDefinitions(userId: string | null | undefined, projectId: string, statuses?: FieldStatus[]): Promise<CustomFieldDefinitionDto[]> {
+    await this.legacy.requireProjectAccess(userId, projectId);
+    const values: unknown[] = [projectId];
+    let statusFilter = "";
+    if (statuses?.length) {
+      values.push(statuses);
+      statusFilter = ` AND d.status = ANY($${values.length})`;
+    }
+    const res = await this.db.query(`${DEFINITION_SELECT} WHERE d.project_id = $1${statusFilter} ORDER BY d.display_order, d.created_at`, values);
+    return res.rows.map(mapDefinitionRow);
+  }
+
+  async getDefinition(userId: string | null | undefined, projectId: string, definitionId: string): Promise<CustomFieldDefinitionDto> {
+    await this.legacy.requireProjectAccess(userId, projectId);
+    const res = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Custom field not found" });
+    return mapDefinitionRow(res.rows[0]);
+  }
+
+  async createDefinition(userId: string | null | undefined, projectId: string, body: Body): Promise<CustomFieldDefinitionDto> {
+    await this.requireConfigAccess(userId, projectId);
+
+    const name = String(body.name || "").trim();
+    if (!name) throw new BadRequestException({ error: "name is required" });
+    const fieldType = body.fieldType as FieldType;
+    if (!FIELD_TYPES.includes(fieldType)) throw new BadRequestException({ error: "Invalid fieldType" });
+    const config = validateConfigShape(fieldType, body.config);
+    const status: FieldStatus = body.active === false ? "inactive" : "active";
+
+    const clash = await this.db.query(
+      "SELECT 1 FROM custom_field_definitions WHERE project_id = $1 AND lower(name) = lower($2) AND status <> 'archived'",
+      [projectId, name]
+    );
+    if (clash.rows[0]) throw new BadRequestException({ error: "A field with this name already exists" });
+
+    let key = "";
+    for (let attempt = 0; attempt < 5 && !key; attempt++) {
+      const candidate = `${slugify(name)}-${randomBytes(2).toString("hex")}`;
+      const exists = await this.db.query("SELECT 1 FROM custom_field_definitions WHERE project_id = $1 AND key = $2", [projectId, candidate]);
+      if (!exists.rows[0]) key = candidate;
+    }
+    if (!key) throw new BadRequestException({ error: "Could not generate a unique field key, please try again" });
+
+    const orderRes = await this.db.query<{ next: number }>(
+      "SELECT COALESCE(MAX(display_order) + 1, 0) AS next FROM custom_field_definitions WHERE project_id = $1",
+      [projectId]
+    );
+
+    const res = await this.db.query(
+      `INSERT INTO custom_field_definitions
+       (project_id, key, name, description, field_type, status, required, display_order, config, created_by, updated_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$10)
+       RETURNING *, false AS is_used`,
+      [projectId, key, name, body.description || null, fieldType, status, Boolean(body.required), orderRes.rows[0].next, JSON.stringify(config), userId]
+    );
+    const dto = mapDefinitionRow(res.rows[0]);
+    await this.legacy.logProjectActivity(projectId, userId ?? null, "custom_field_created", "custom_field_definition", dto.id, dto.name, { after: dto });
+    return dto;
+  }
+
+  async updateDefinition(userId: string | null | undefined, projectId: string, definitionId: string, body: Body): Promise<CustomFieldDefinitionDto> {
+    await this.requireConfigAccess(userId, projectId);
+
+    const existingRes = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
+    if (!existingRes.rows[0]) throw new NotFoundException({ error: "Custom field not found" });
+    const existing = mapDefinitionRow(existingRes.rows[0]);
+    if (existing.status === "archived") throw new BadRequestException({ error: "Archived fields are read-only" });
+    if (body.fieldType && body.fieldType !== existing.fieldType) {
+      throw new BadRequestException({ error: "Field type cannot be changed after creation" });
+    }
+
+    let name = existing.name;
+    if (body.name !== undefined) {
+      name = String(body.name || "").trim();
+      if (!name) throw new BadRequestException({ error: "name is required" });
+      if (name.toLowerCase() !== existing.name.toLowerCase()) {
+        const clash = await this.db.query(
+          "SELECT 1 FROM custom_field_definitions WHERE project_id = $1 AND lower(name) = lower($2) AND status <> 'archived' AND id <> $3",
+          [projectId, name, definitionId]
+        );
+        if (clash.rows[0]) throw new BadRequestException({ error: "A field with this name already exists" });
+      }
+    }
+
+    const mergedConfig = body.config !== undefined ? { ...existing.config, ...body.config } : existing.config;
+    const config = validateConfigShape(existing.fieldType, mergedConfig);
+    const required = body.required !== undefined ? Boolean(body.required) : existing.required;
+    const description = body.description !== undefined ? body.description || null : existing.description;
+
+    const res = await this.db.query(
+      `UPDATE custom_field_definitions
+       SET name = $3, description = $4, required = $5, config = $6::jsonb, updated_by = $7, updated_at = now()
+       WHERE id = $1 AND project_id = $2
+       RETURNING *, (SELECT EXISTS (SELECT 1 FROM custom_field_values v WHERE v.definition_id = $1)) AS is_used`,
+      [definitionId, projectId, name, description, required, JSON.stringify(config), userId]
+    );
+    const dto = mapDefinitionRow(res.rows[0]);
+    await this.logConfigChangeEvents(projectId, userId, existing, dto);
+    return dto;
+  }
+
+  private async logConfigChangeEvents(
+    projectId: string,
+    userId: string | null | undefined,
+    before: CustomFieldDefinitionDto,
+    after: CustomFieldDefinitionDto
+  ): Promise<void> {
+    const uid = userId ?? null;
+    let matched = false;
+    if (before.name !== after.name) {
+      await this.legacy.logProjectActivity(projectId, uid, "custom_field_renamed", "custom_field_definition", after.id, after.name, {
+        before: before.name,
+        after: after.name
+      });
+      matched = true;
+    }
+    if (before.required !== after.required) {
+      await this.legacy.logProjectActivity(projectId, uid, "custom_field_required_toggled", "custom_field_definition", after.id, after.name, {
+        before: before.required,
+        after: after.required
+      });
+      matched = true;
+    }
+    const beforeOptions = before.config.options || [];
+    const afterOptions = after.config.options || [];
+    const beforeById = new Map(beforeOptions.map((o) => [o.id, o]));
+    for (const option of afterOptions) {
+      const prior = beforeById.get(option.id);
+      if (!prior) {
+        await this.legacy.logProjectActivity(projectId, uid, "custom_field_option_added", "custom_field_definition", after.id, after.name, {
+          optionId: option.id,
+          label: option.label
+        });
+        matched = true;
+      } else if (prior.active && !option.active) {
+        await this.legacy.logProjectActivity(projectId, uid, "custom_field_option_deactivated", "custom_field_definition", after.id, after.name, {
+          optionId: option.id,
+          label: option.label
+        });
+        matched = true;
+      }
+    }
+    if (!matched && JSON.stringify(before.config) !== JSON.stringify(after.config)) {
+      await this.legacy.logProjectActivity(projectId, uid, "custom_field_config_updated", "custom_field_definition", after.id, after.name, {
+        before: before.config,
+        after: after.config
+      });
+    }
+  }
+
+  async addOption(userId: string | null | undefined, projectId: string, definitionId: string, label: string): Promise<CustomFieldDefinitionDto> {
+    await this.requireConfigAccess(userId, projectId);
+    const trimmed = String(label || "").trim();
+    if (!trimmed) throw new BadRequestException({ error: "label is required" });
+
+    return this.db.transaction(async (client) => {
+      const res = await client.query(`SELECT * FROM custom_field_definitions WHERE id = $1 AND project_id = $2 FOR UPDATE`, [definitionId, projectId]);
+      const row = res.rows[0];
+      if (!row) throw new NotFoundException({ error: "Custom field not found" });
+      if (row.status === "archived") throw new BadRequestException({ error: "Archived fields are read-only" });
+      if (row.field_type !== "single_select" && row.field_type !== "multi_select") {
+        throw new BadRequestException({ error: "Only select fields have options" });
+      }
+      const options: FieldOption[] = row.config?.options || [];
+      if (options.some((o) => o.label.toLowerCase() === trimmed.toLowerCase())) {
+        throw new BadRequestException({ error: "Duplicate option label" });
+      }
+      const option: FieldOption = { id: randomUUID(), label: trimmed, active: true, order: options.length };
+      const nextConfig = { ...row.config, options: [...options, option] };
+
+      const updateRes = await client.query(
+        `UPDATE custom_field_definitions SET config = $3::jsonb, updated_by = $4, updated_at = now()
+         WHERE id = $1 AND project_id = $2
+         RETURNING *, (SELECT EXISTS (SELECT 1 FROM custom_field_values v WHERE v.definition_id = $1)) AS is_used`,
+        [definitionId, projectId, JSON.stringify(nextConfig), userId]
+      );
+      const dto = mapDefinitionRow(updateRes.rows[0]);
+      await this.legacy.logProjectActivity(projectId, userId ?? null, "custom_field_option_added", "custom_field_definition", dto.id, dto.name, {
+        optionId: option.id,
+        label: option.label
+      });
+      return dto;
+    });
+  }
+
+  async setOptionActive(
+    userId: string | null | undefined,
+    projectId: string,
+    definitionId: string,
+    optionId: string,
+    active: boolean
+  ): Promise<CustomFieldDefinitionDto> {
+    await this.requireConfigAccess(userId, projectId);
+
+    return this.db.transaction(async (client) => {
+      const res = await client.query(`SELECT * FROM custom_field_definitions WHERE id = $1 AND project_id = $2 FOR UPDATE`, [definitionId, projectId]);
+      const row = res.rows[0];
+      if (!row) throw new NotFoundException({ error: "Custom field not found" });
+      if (row.status === "archived") throw new BadRequestException({ error: "Archived fields are read-only" });
+      const options: FieldOption[] = row.config?.options || [];
+      const option = options.find((o) => o.id === optionId);
+      if (!option) throw new NotFoundException({ error: "Option not found" });
+      option.active = active;
+      const nextConfig = { ...row.config, options };
+
+      const updateRes = await client.query(
+        `UPDATE custom_field_definitions SET config = $3::jsonb, updated_by = $4, updated_at = now()
+         WHERE id = $1 AND project_id = $2
+         RETURNING *, (SELECT EXISTS (SELECT 1 FROM custom_field_values v WHERE v.definition_id = $1)) AS is_used`,
+        [definitionId, projectId, JSON.stringify(nextConfig), userId]
+      );
+      const dto = mapDefinitionRow(updateRes.rows[0]);
+      await this.legacy.logProjectActivity(
+        projectId,
+        userId ?? null,
+        active ? "custom_field_option_reactivated" : "custom_field_option_deactivated",
+        "custom_field_definition",
+        dto.id,
+        dto.name,
+        { optionId: option.id, label: option.label }
+      );
+      return dto;
+    });
+  }
+
+  async reorderDefinitions(userId: string | null | undefined, projectId: string, orderedIds: string[]): Promise<void> {
+    await this.requireConfigAccess(userId, projectId);
+    if (!Array.isArray(orderedIds) || !orderedIds.length) throw new BadRequestException({ error: "orderedIds is required" });
+
+    const current = await this.db.query<{ id: string }>(
+      "SELECT id FROM custom_field_definitions WHERE project_id = $1 AND status <> 'archived'",
+      [projectId]
+    );
+    const currentIds = new Set(current.rows.map((r) => r.id));
+    const incomingIds = new Set(orderedIds);
+    const matches = currentIds.size === incomingIds.size && [...currentIds].every((id) => incomingIds.has(id));
+    if (!matches) throw new BadRequestException({ error: "orderedIds must exactly match the project's active/inactive custom fields" });
+
+    await this.db.transaction(async (client) => {
+      for (let i = 0; i < orderedIds.length; i++) {
+        await client.query(
+          "UPDATE custom_field_definitions SET display_order = $3, updated_by = $4, updated_at = now() WHERE id = $1 AND project_id = $2",
+          [orderedIds[i], projectId, i, userId]
+        );
+      }
+    });
+    await this.legacy.logProjectActivity(projectId, userId ?? null, "custom_field_reordered", "project", projectId, null, { order: orderedIds });
+  }
+
+  async setStatus(userId: string | null | undefined, projectId: string, definitionId: string, status: FieldStatus): Promise<CustomFieldDefinitionDto> {
+    await this.requireConfigAccess(userId, projectId);
+    if (!["active", "inactive", "archived"].includes(status)) throw new BadRequestException({ error: "Invalid status" });
+
+    const existingRes = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
+    if (!existingRes.rows[0]) throw new NotFoundException({ error: "Custom field not found" });
+    const existing = mapDefinitionRow(existingRes.rows[0]);
+    if (existing.status === "archived") throw new BadRequestException({ error: "Archived fields cannot be reactivated" });
+
+    const res = await this.db.query(
+      `UPDATE custom_field_definitions SET status = $3, updated_by = $4, updated_at = now()
+       WHERE id = $1 AND project_id = $2
+       RETURNING *, (SELECT EXISTS (SELECT 1 FROM custom_field_values v WHERE v.definition_id = $1)) AS is_used`,
+      [definitionId, projectId, status, userId]
+    );
+    const dto = mapDefinitionRow(res.rows[0]);
+    const action = status === "archived" ? "custom_field_archived" : status === "active" ? "custom_field_reactivated" : "custom_field_deactivated";
+    await this.legacy.logProjectActivity(projectId, userId ?? null, action, "custom_field_definition", dto.id, dto.name, {
+      before: existing.status,
+      after: status
+    });
+    return dto;
+  }
+
+  async deleteDefinition(userId: string | null | undefined, projectId: string, definitionId: string): Promise<void> {
+    await this.requireConfigAccess(userId, projectId);
+
+    const existingRes = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
+    if (!existingRes.rows[0]) throw new NotFoundException({ error: "Custom field not found" });
+    const dto = mapDefinitionRow(existingRes.rows[0]);
+    if (dto.isUsed) {
+      throw new ConflictException({ error: "Field has recorded values and cannot be deleted; archive it instead", code: "FORCE_ARCHIVE" });
+    }
+    await this.db.query("DELETE FROM custom_field_definitions WHERE id = $1 AND project_id = $2", [definitionId, projectId]);
+    await this.legacy.logProjectActivity(projectId, userId ?? null, "custom_field_deleted", "custom_field_definition", dto.id, dto.name, { before: dto });
+  }
+
+  async getValuesForTestCase(userId: string | null | undefined, projectId: string, testcaseId: string): Promise<CustomFieldValueDto[]> {
+    await this.legacy.requireProjectAccess(userId, projectId);
+    const tc = await this.db.query("SELECT 1 FROM testcases WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL", [testcaseId, projectId]);
+    if (!tc.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+
+    const res = await this.db.query(
+      `SELECT d.id, d.key, d.name, d.description, d.field_type, d.status, d.required, d.config, d.display_order, v.value
+       FROM custom_field_definitions d
+       LEFT JOIN custom_field_values v ON v.definition_id = d.id AND v.testcase_id = $2
+       WHERE d.project_id = $1 AND (d.status <> 'archived' OR v.id IS NOT NULL)
+       ORDER BY d.display_order`,
+      [projectId, testcaseId]
+    );
+    return res.rows.map((row) => ({
+      id: row.id,
+      key: row.key,
+      name: row.name,
+      description: row.description ?? null,
+      fieldType: row.field_type,
+      status: row.status,
+      required: row.required,
+      displayOrder: row.display_order,
+      config: row.config || {},
+      value: row.value ?? null
+    }));
+  }
+
+  /**
+   * Core value-write path. `mode` controls how the Pro-plan gate behaves:
+   * - "enforce" (dedicated PUT .../custom-field-values endpoint): a project-access check
+   *   is performed and a disabled plan throws the paywall 403.
+   * - "skip-if-disabled" (embedded in legacy.service.ts's createTestCase/updateTestCase,
+   *   invoked on every test case save regardless of whether the project uses custom
+   *   fields): a disabled plan silently no-ops instead of throwing, so ordinary test case
+   *   creation/editing on Launch-plan workspaces is never affected by this feature.
+   */
+  async setValuesForTestCase(
+    actorId: string | null | undefined,
+    projectId: string,
+    testcaseId: string,
+    values: Body,
+    runner: QueryRunner = this.db,
+    mode: "enforce" | "skip-if-disabled" = "enforce"
+  ): Promise<void> {
+    if (mode === "enforce") {
+      await this.legacy.requireProjectAccess(actorId, projectId);
+    }
+
+    try {
+      const orgRes = await runner.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
+      const organizationId = orgRes.rows[0]?.organization_id;
+      if (organizationId) await this.planLimits.assertCustomFieldsEnabled(organizationId);
+    } catch (err) {
+      if (mode === "skip-if-disabled") return;
+      throw err;
+    }
+
+    const definitionsRes = await runner.query<Body>("SELECT * FROM custom_field_definitions WHERE project_id = $1", [projectId]);
+    const definitions = definitionsRes.rows;
+    if (!definitions.length && !Object.keys(values || {}).length) return;
+    const definitionsById = new Map(definitions.map((d) => [d.id, d]));
+
+    const errors: { field: string; message: string }[] = [];
+    const normalized: Body = {};
+
+    for (const [definitionId, raw] of Object.entries(values || {})) {
+      const definition = definitionsById.get(definitionId);
+      if (!definition) {
+        errors.push({ field: definitionId, message: "Unknown custom field" });
+        continue;
+      }
+      if (definition.status === "archived") {
+        errors.push({ field: definitionId, message: "Cannot set a value for an archived field" });
+        continue;
+      }
+      if (isEmptyValue(raw)) {
+        normalized[definitionId] = null;
+        continue;
+      }
+      try {
+        normalized[definitionId] = validateAndNormalizeValue(definitionId, definition.field_type, definition.config || {}, raw);
+      } catch (err) {
+        if (err instanceof BadRequestException) {
+          const response = err.getResponse() as { message?: string };
+          errors.push({ field: definitionId, message: response?.message || "Invalid value" });
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    const existingRes = await runner.query<{ definition_id: string; value: unknown }>(
+      "SELECT definition_id, value FROM custom_field_values WHERE testcase_id = $1",
+      [testcaseId]
+    );
+    const existingByDefinition = new Map(existingRes.rows.map((r) => [r.definition_id, r.value]));
+
+    for (const definition of definitions) {
+      if (definition.status !== "active") continue;
+      if (Object.prototype.hasOwnProperty.call(values || {}, definition.id)) continue;
+      if (existingByDefinition.has(definition.id)) continue;
+      const fallback = applyDefaultIfMissing(definition.config || {}, definition.field_type);
+      if (fallback !== undefined) normalized[definition.id] = fallback;
+    }
+
+    for (const definition of definitions) {
+      if (definition.status !== "active" || !definition.required) continue;
+      const effective = Object.prototype.hasOwnProperty.call(normalized, definition.id)
+        ? normalized[definition.id]
+        : existingByDefinition.get(definition.id);
+      if (isEmptyValue(effective)) errors.push({ field: definition.id, message: `${definition.name} is required` });
+    }
+
+    if (errors.length) throw new BadRequestException({ errors });
+
+    const changedDefinitionIds: string[] = [];
+    for (const [definitionId, value] of Object.entries(normalized)) {
+      const before = existingByDefinition.has(definitionId) ? existingByDefinition.get(definitionId) : null;
+      const beforeStr = JSON.stringify(before ?? null);
+      const afterStr = JSON.stringify(isEmptyValue(value) ? null : value);
+      if (beforeStr === afterStr) continue;
+      changedDefinitionIds.push(definitionId);
+
+      if (isEmptyValue(value)) {
+        await runner.query("DELETE FROM custom_field_values WHERE definition_id = $1 AND testcase_id = $2", [definitionId, testcaseId]);
+      } else {
+        await runner.query(
+          `INSERT INTO custom_field_values (definition_id, testcase_id, value, created_by, updated_by)
+           VALUES ($1,$2,$3::jsonb,$4,$4)
+           ON CONFLICT (definition_id, testcase_id) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+          [definitionId, testcaseId, JSON.stringify(value), actorId ?? null]
+        );
+      }
+    }
+
+    if (changedDefinitionIds.length) {
+      const tcRes = await runner.query<{ external_id: string; title: string }>("SELECT external_id, title FROM testcases WHERE id = $1", [testcaseId]);
+      const tc = tcRes.rows[0];
+      const entityName = tc ? `${tc.external_id} - ${tc.title}` : null;
+      for (const definitionId of changedDefinitionIds) {
+        const definition = definitionsById.get(definitionId)!;
+        await runner.query(
+          `INSERT INTO audit_logs (project_id, actor_id, action, entity_type, entity_id, entity_name, diff, organization_id)
+           VALUES ($1,$2,'testcase_custom_field_updated','testcase',$3,$4,$5::jsonb, (SELECT organization_id FROM projects WHERE id = $1))`,
+          [
+            projectId,
+            actorId ?? null,
+            testcaseId,
+            entityName,
+            JSON.stringify({
+              fieldId: definitionId,
+              fieldKey: definition.key,
+              fieldName: definition.name,
+              before: existingByDefinition.get(definitionId) ?? null,
+              after: normalized[definitionId]
+            })
+          ]
+        );
+      }
+    }
+  }
+
+  async copyValues(fromTestcaseId: string, toTestcaseId: string, actorId: string | null | undefined, runner: QueryRunner = this.db): Promise<void> {
+    await runner.query(
+      `INSERT INTO custom_field_values (definition_id, testcase_id, value, created_by, updated_by)
+       SELECT definition_id, $2, value, $3, $3 FROM custom_field_values WHERE testcase_id = $1
+       ON CONFLICT (definition_id, testcase_id) DO NOTHING`,
+      [fromTestcaseId, toTestcaseId, actorId ?? null]
+    );
+  }
+
+  async listActiveDefinitionsForColumns(userId: string | null | undefined, projectId: string): Promise<CustomFieldDefinitionDto[]> {
+    return this.listDefinitions(userId, projectId, ["active"]);
+  }
+
+  private parseFilterInput(raw: unknown): CustomFieldFilterInput[] {
+    if (!raw) return [];
+    try {
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      throw new BadRequestException({ error: "Invalid customFieldFilters" });
+    }
+  }
+
+  /**
+   * Builds the LEFT JOIN + WHERE fragment for listTestCases's custom-field filters.
+   * Deliberately does not require userId/project access — listTestCases itself has no
+   * user context today (no @Req() on that route), so this only reads definitions scoped
+   * to the given projectId, matching that route's existing (pre-existing gap) behavior.
+   */
+  async buildListFilterSql(projectId: string, rawFilters: unknown, paramIndexStart: number) {
+    const filters = this.parseFilterInput(rawFilters);
+    if (!filters.length) return { joinSql: "", whereSql: "", params: [] as unknown[] };
+    const res = await this.db.query<{ id: string; field_type: FieldType }>("SELECT id, field_type FROM custom_field_definitions WHERE project_id = $1", [
+      projectId
+    ]);
+    const definitionsById = new Map(res.rows.map((r) => [r.id, { fieldType: r.field_type }]));
+    return buildCustomFieldFiltersSql(filters, definitionsById, paramIndexStart);
+  }
+}

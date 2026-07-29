@@ -45,7 +45,7 @@ export function AuthSplitShell({ children }: { children: ReactNode }) {
         </svg>
 
         <div className="relative z-10">
-          <BrandLogo className="h-9 w-auto object-contain brightness-0 invert" />
+          <BrandLogo className="h-9 w-auto object-contain" />
         </div>
 
         <div className="relative z-10">
@@ -79,7 +79,7 @@ export function AuthSplitShell({ children }: { children: ReactNode }) {
 
       <div className="flex flex-1 flex-col items-center justify-center bg-[var(--background)] px-6 py-12">
         <div className="mb-8 lg:hidden">
-          <BrandLogo className="h-9 w-auto object-contain brightness-0 invert" />
+          <BrandLogo className="h-9 w-auto object-contain" />
         </div>
         <div className="w-full max-w-sm">{children}</div>
       </div>

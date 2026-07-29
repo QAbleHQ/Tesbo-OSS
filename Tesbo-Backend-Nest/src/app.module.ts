@@ -10,6 +10,8 @@ import { HealthModule } from "./health/health.module";
 import { AdminModule } from "./admin/admin.module";
 import { LegacyModule } from "./legacy/legacy.module";
 import { McpModule } from "./mcp/mcp.module";
+import { BillingModule } from "./billing/billing.module";
+import { CustomFieldsModule } from "./custom-fields/custom-fields.module";
 
 @Module({
   imports: [
@@ -25,7 +27,9 @@ import { McpModule } from "./mcp/mcp.module";
     HealthModule,
     AdminModule,
     LegacyModule,
-    McpModule
+    McpModule,
+    BillingModule,
+    CustomFieldsModule
   ]
 })
 export class AppModule {}

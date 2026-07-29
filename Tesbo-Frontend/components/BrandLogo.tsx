@@ -2,17 +2,20 @@
 
 import { useEffect, useState } from "react";
 import { getBranding } from "@/lib/api";
-
-const DEFAULT_PRODUCT_NAME = "Tesbo Test Manager";
-const DEFAULT_LOGO_URL = "/tesbo-test-manager-logo.png";
+import { DEFAULT_LOGO_URL, DEFAULT_PRODUCT_NAME, isBuiltInLogo } from "@/lib/branding";
 
 type BrandLogoProps = {
   className?: string;
   alt?: string;
   decorative?: boolean;
+  /**
+   * Render the square bot mark instead of the horizontal lockup — for tight
+   * spots like the collapsed sidebar. Ignored when a custom logo is uploaded.
+   */
+  mark?: boolean;
 };
 
-export function BrandLogo({ className = "h-10 w-auto object-contain", alt, decorative = false }: BrandLogoProps) {
+export function BrandLogo({ className = "h-10 w-auto object-contain", alt, decorative = false, mark = false }: BrandLogoProps) {
   const [branding, setBranding] = useState({ productName: DEFAULT_PRODUCT_NAME, logoUrl: DEFAULT_LOGO_URL });
 
   useEffect(() => {
@@ -27,12 +30,20 @@ export function BrandLogo({ className = "h-10 w-auto object-contain", alt, decor
     };
   }, []);
 
-  return (
-    <img
-      src={branding.logoUrl || DEFAULT_LOGO_URL}
-      alt={decorative ? "" : alt || branding.productName || DEFAULT_PRODUCT_NAME}
-      className={className}
-    />
-  );
-}
+  const label = decorative ? undefined : alt || branding.productName || DEFAULT_PRODUCT_NAME;
 
+  // The built-in lockup is drawn as a background image so the light/dark variant
+  // is picked by CSS — no theme state to hydrate, and only one file is fetched.
+  if (isBuiltInLogo(branding.logoUrl)) {
+    return (
+      <span
+        className={`${mark ? "tesbo-brand-mark" : "tesbo-brand-logo"} ${className}`}
+        role={label ? "img" : undefined}
+        aria-label={label}
+        aria-hidden={label ? undefined : true}
+      />
+    );
+  }
+
+  return <img src={branding.logoUrl} alt={label ?? ""} className={className} />;
+}

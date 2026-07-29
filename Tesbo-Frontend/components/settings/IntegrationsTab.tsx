@@ -4,23 +4,28 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import {
   getWorkspace,
+  getBillingInfo,
   getIntegrationStatus,
   disconnectIntegration,
+  type BillingInfo,
   type IntegrationConnectionStatus,
   type IntegrationProvider,
 } from "@/lib/api";
 import { Button, Card } from "@/components/ui";
+import PricingModal from "@/components/PricingModal";
 
 const PROVIDERS: {
   id: IntegrationProvider;
   name: string;
   description: string;
+  proOnly: boolean;
   icon: React.ReactNode;
 }[] = [
   {
     id: "jira",
     name: "Jira",
     description: "Import tickets from Jira to use as knowledge base for test generation.",
+    proOnly: false,
     icon: (
       <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
         <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53ZM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77ZM2 11.6c0 2.4 1.95 4.34 4.35 4.35h1.78v1.71c0 2.4 1.95 4.35 4.35 4.35V12.44a.84.84 0 0 0-.84-.84H2Z" />
@@ -31,6 +36,7 @@ const PROVIDERS: {
     id: "linear",
     name: "Linear",
     description: "Import issues from Linear to use as knowledge base for test generation.",
+    proOnly: true,
     icon: (
       <svg viewBox="0 0 24 24" className="w-6 h-6 text-white" fill="currentColor">
         <path d="M2.28 15.36 8.64 21.7c-3.14-.55-5.79-3.2-6.36-6.34Zm-.27-2.06L14.7 22c.34.02.68.02 1.02 0L1.99 8.98c-.02.34-.02.68.02 1.02Zm.5-3.14L15.84 21.5a10.9 10.9 0 0 0 1.87-1.1L3.6 6.29a10.9 10.9 0 0 0-1.09 1.87Zm1.9-2.98L18.82 18.5a11 11 0 0 0 1.28-1.55L5.06 5.9a11 11 0 0 0-1.55 1.28Zm2.71-2.2L21.02 15.87A11 11 0 0 0 22 1.98L8.12 1a11 11 0 0 0-1.9 1.98Z" />
@@ -41,22 +47,27 @@ const PROVIDERS: {
 
 export default function IntegrationsTab() {
   const [workspaceRole, setWorkspaceRole] = useState<string>("member");
+  const [billingInfo, setBillingInfo] = useState<BillingInfo | null>(null);
   const [statuses, setStatuses] = useState<Record<string, IntegrationConnectionStatus>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [disconnectingProvider, setDisconnectingProvider] = useState<IntegrationProvider | null>(null);
+  const [pricingOpen, setPricingOpen] = useState(false);
 
   const canManage = workspaceRole === "owner";
+  const isPro = billingInfo?.plan === "pro";
 
   const loadData = useCallback(async () => {
     try {
-      const [workspace, jira, linear] = await Promise.all([
+      const [workspace, billing, jira, linear] = await Promise.all([
         getWorkspace(),
+        getBillingInfo().catch(() => null),
         getIntegrationStatus("jira").catch(() => ({ connected: false }) as IntegrationConnectionStatus),
         getIntegrationStatus("linear").catch(() => ({ connected: false }) as IntegrationConnectionStatus),
       ]);
       setWorkspaceRole((workspace.role || "member").toLowerCase());
+      setBillingInfo(billing);
       setStatuses({ jira, linear });
       setError(null);
     } catch (e) {
@@ -122,13 +133,31 @@ export default function IntegrationsTab() {
 
         {PROVIDERS.map((provider) => {
           const status = statuses[provider.id];
+          const locked = provider.proOnly && !isPro && !status?.connected;
           return (
-            <div key={provider.id} className="rounded-lg border border-[var(--border)] p-4 flex items-start gap-4">
-              <div className="shrink-0 w-10 h-10 rounded-lg bg-[var(--brand-primary)] flex items-center justify-center">
-                {provider.icon}
+            <div
+              key={provider.id}
+              className={`rounded-lg border border-[var(--border)] p-4 flex items-start gap-4 ${locked ? "opacity-75" : ""}`}
+            >
+              <div className={`shrink-0 w-10 h-10 rounded-lg flex items-center justify-center ${locked ? "bg-[var(--surface-tertiary)]" : "bg-[var(--brand-primary)]"}`}>
+                {locked ? (
+                  <svg viewBox="0 0 24 24" className="w-5 h-5 text-[var(--muted-soft)]" fill="none" stroke="currentColor" strokeWidth={2}>
+                    <rect x="4" y="10" width="16" height="10" rx="2" />
+                    <path d="M8 10V7a4 4 0 0 1 8 0v3" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  provider.icon
+                )}
               </div>
               <div className="flex-1 min-w-0">
-                <h3 className="text-sm font-semibold text-[var(--foreground)]">{provider.name}</h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold text-[var(--foreground)]">{provider.name}</h3>
+                  {provider.proOnly && !isPro && (
+                    <span className="inline-flex items-center rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--brand-primary)]">
+                      Requires Pro
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-[var(--muted)] mt-0.5">{provider.description}</p>
                 {status?.connected && (
                   <div className="mt-2 space-y-1">
@@ -180,6 +209,10 @@ export default function IntegrationsTab() {
                       </Button>
                     )}
                   </>
+                ) : locked ? (
+                  <Button type="button" size="sm" onClick={() => setPricingOpen(true)}>
+                    Upgrade to Pro
+                  </Button>
                 ) : (
                   <Link
                     href={`/settings/integrations/${provider.id}`}
@@ -210,6 +243,8 @@ export default function IntegrationsTab() {
           </div>
         </div>
       </Card>
+
+      <PricingModal open={pricingOpen} onClose={() => setPricingOpen(false)} billingInfo={billingInfo} />
     </div>
   );
 }

@@ -8,7 +8,10 @@ import type { AppConfigService } from "../config/app-config.service";
 import type { StorageService } from "../storage/storage.service";
 import type { RagIngestionService } from "../rag/rag-ingestion.service";
 import type { RagRetrievalService } from "../rag/rag-retrieval.service";
+import type { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import type { ApiTokenService } from "../auth/api-token.service";
+import type { PlanLimitsService } from "../plan-limits/plan-limits.service";
+import type { CustomFieldsService } from "../custom-fields/custom-fields.service";
 
 // A key just needs to decode to 32 bytes for aes-256-gcm; this is a throwaway test-only key
 // (crypto.util lazily loads it on first encrypt/decrypt call, so setting it at module scope
@@ -44,9 +47,31 @@ function workspaceRoute(role: string, orgId = "org-1"): Route {
   };
 }
 
-/** Route for integrationOAuthConfig()'s workspace-saved-config lookup. */
+/**
+ * Route for a leftover per-workspace OAuth row. Credentials no longer come from the database, so
+ * this exists only to prove such a row is ignored — see the "ignores any leftover" test.
+ */
 function savedOAuthConfigRoute(row: Record<string, unknown> | null): Route {
   return { match: "FROM integration_oauth_configs", rows: row ? [row] : [] };
+}
+
+/** Configures the deployment the only way it can be configured: environment credentials. */
+function setEnvCredentials(clientId = "c", clientSecret = "s", redirectUri = "https://app.example.com/cb") {
+  for (const prefix of ["JIRA", "LINEAR"]) {
+    process.env[`${prefix}_CLIENT_ID`] = clientId;
+    process.env[`${prefix}_CLIENT_SECRET`] = clientSecret;
+    process.env[`${prefix}_REDIRECT_URI`] = redirectUri;
+  }
+}
+
+/**
+ * Mints a real signed `state` by driving integrationAuthUrl, so callback tests carry the same value
+ * the authorize redirect would have — rather than re-implementing the HMAC here and letting the
+ * test pass against a signature scheme the service no longer uses.
+ */
+async function validState(svc: LegacyService, provider: "jira" | "linear"): Promise<string> {
+  const { url } = await svc.integrationAuthUrl("user-1", provider);
+  return new URL(url).searchParams.get("state")!;
 }
 
 function makeLegacy(db: DatabaseService): LegacyService {
@@ -58,7 +83,10 @@ function makeLegacy(db: DatabaseService): LegacyService {
     {} as unknown as StorageService,
     {} as unknown as RagIngestionService,
     {} as unknown as RagRetrievalService,
-    {} as unknown as ApiTokenService
+    {} as unknown as IntegrationSyncService,
+    {} as unknown as ApiTokenService,
+    { assertIntegrationAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as PlanLimitsService,
+    {} as unknown as CustomFieldsService
   );
 }
 
@@ -91,66 +119,189 @@ afterEach(() => {
   jest.restoreAllMocks();
 });
 
-describe("LegacyService — Linear/Jira integration OAuth config resolution", () => {
-  it("prefers the workspace-saved config over env vars when both are present", async () => {
+describe("LegacyService — deployment-level OAuth config resolution", () => {
+  // There is exactly one source of credentials: the backend environment. A workspace cannot
+  // override it, so these pin that the DB is never consulted for client credentials.
+  it("builds the authorize URL from env credentials", async () => {
     process.env.LINEAR_CLIENT_ID = "env-client";
     process.env.LINEAR_CLIENT_SECRET = "env-secret";
     process.env.LINEAR_REDIRECT_URI = "https://env.example.com/callback";
 
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "db-client", client_secret: encryptSecret("db-secret"), redirect_uri: "https://db.example.com/callback" })
-    ]);
-    const svc = makeLegacy(db);
-    const { url } = await svc.integrationAuthUrl("user-1", "linear");
-    const params = new URL(url).searchParams;
-    expect(params.get("client_id")).toBe("db-client");
-    expect(params.get("redirect_uri")).toBe("https://db.example.com/callback");
-  });
-
-  it("falls back to env vars when no workspace config is saved", async () => {
-    process.env.LINEAR_CLIENT_ID = "env-client";
-    process.env.LINEAR_CLIENT_SECRET = "env-secret";
-    process.env.LINEAR_REDIRECT_URI = "https://env.example.com/callback";
-
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-    const svc = makeLegacy(db);
-    const { url } = await svc.integrationAuthUrl("user-1", "linear");
-    const params = new URL(url).searchParams;
+    const { db } = makeDb([workspaceRoute("owner")]);
+    const params = new URL((await makeLegacy(db).integrationAuthUrl("user-1", "linear")).url).searchParams;
     expect(params.get("client_id")).toBe("env-client");
     expect(params.get("redirect_uri")).toBe("https://env.example.com/callback");
   });
 
-  it("throws a BadRequestException with an actionable message when neither is configured", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute(null)]);
-    const svc = makeLegacy(db);
-    const err = await rejection(svc.integrationAuthUrl("user-1", "linear"));
-    expect(err).toBeInstanceOf(BadRequestException);
-    expect(err.getResponse().error).toMatch(/linear oauth is not configured/i);
-    expect(err.getResponse().error).toMatch(/workspace settings.*integrations/i);
+  it("ignores any leftover per-workspace OAuth row and never queries for one", async () => {
+    process.env.JIRA_CLIENT_ID = "env-client";
+    process.env.JIRA_CLIENT_SECRET = "env-secret";
+
+    // A row left behind by an older release must not resurrect the removed override path.
+    const { db, calls } = makeDb([
+      workspaceRoute("owner"),
+      savedOAuthConfigRoute({ client_id: "stale-db-client", client_secret: encryptSecret("s"), redirect_uri: "https://stale.example.com/cb" })
+    ]);
+    const params = new URL((await makeLegacy(db).integrationAuthUrl("user-1", "jira")).url).searchParams;
+    expect(params.get("client_id")).toBe("env-client");
+    expect(calls.some((c) => c.sql.includes("integration_oauth_configs"))).toBe(false);
   });
 
-  it("treats a partially-saved workspace row (missing secret) as unconfigured and falls back to env", async () => {
-    process.env.LINEAR_CLIENT_ID = "env-client";
-    process.env.LINEAR_CLIENT_SECRET = "env-secret";
-    process.env.LINEAR_REDIRECT_URI = "https://env.example.com/callback";
+  it("throws an operator-facing message naming the env vars when nothing is configured", async () => {
+    const { db } = makeDb([workspaceRoute("owner")]);
+    const err = await rejection(makeLegacy(db).integrationAuthUrl("user-1", "linear"));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/not configured on this deployment/i);
+    expect(err.getResponse().error).toMatch(/LINEAR_CLIENT_ID/);
+    expect(err.getResponse().error).toMatch(/LINEAR_CLIENT_SECRET/);
+  });
 
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "db-client", client_secret: null, redirect_uri: "https://db.example.com/callback" })
-    ]);
-    const svc = makeLegacy(db);
-    const { url } = await svc.integrationAuthUrl("user-1", "linear");
-    expect(new URL(url).searchParams.get("client_id")).toBe("env-client");
+  it("treats a client id with no secret as unconfigured", async () => {
+    process.env.JIRA_CLIENT_ID = "env-client";
+    const { db } = makeDb([workspaceRoute("owner")]);
+    const err = await rejection(makeLegacy(db).integrationAuthUrl("user-1", "jira"));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((await makeLegacy(db).integrationConfigStatus("user-1", "jira")).configured).toBe(false);
+  });
+
+  // Only client id + secret are required: the callback path is fixed by the frontend route, so
+  // operators shouldn't have to restate it per provider.
+  it("derives the redirect URI from FRONTEND_URL when only client id/secret are set", async () => {
+    const savedFrontend = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = "https://app.tesbo.io/";
+    process.env.JIRA_CLIENT_ID = "env-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "env-jira-secret";
+    try {
+      const { db } = makeDb([workspaceRoute("owner")]);
+      const params = new URL((await makeLegacy(db).integrationAuthUrl("user-1", "jira")).url).searchParams;
+      expect(params.get("client_id")).toBe("env-jira-client");
+      expect(params.get("redirect_uri")).toBe("https://app.tesbo.io/integrations/callback");
+    } finally {
+      if (savedFrontend === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = savedFrontend;
+    }
+  });
+
+  it("reports configured with the callback URL an operator must register", async () => {
+    process.env.JIRA_CLIENT_ID = "env-jira-client";
+    process.env.JIRA_CLIENT_SECRET = "env-jira-secret";
+    process.env.JIRA_REDIRECT_URI = "https://app.example.com/integrations/callback";
+    const { db } = makeDb([workspaceRoute("owner")]);
+    const status = await makeLegacy(db).integrationConfigStatus("user-1", "jira");
+    expect(status).toEqual({
+      configured: true,
+      clientId: "env-jira-client",
+      redirectUri: "https://app.example.com/integrations/callback"
+    });
+  });
+
+  it("still surfaces a callback URL when unconfigured, so an operator knows what to register", async () => {
+    const savedFrontend = process.env.FRONTEND_URL;
+    process.env.FRONTEND_URL = "https://app.tesbo.io";
+    try {
+      const { db } = makeDb([workspaceRoute("owner")]);
+      const status = await makeLegacy(db).integrationConfigStatus("user-1", "jira");
+      expect(status.configured).toBe(false);
+      expect(status.redirectUri).toBe("https://app.tesbo.io/integrations/callback");
+    } finally {
+      if (savedFrontend === undefined) delete process.env.FRONTEND_URL;
+      else process.env.FRONTEND_URL = savedFrontend;
+    }
+  });
+
+  it("forbids a non-owner from starting the OAuth redirect", async () => {
+    process.env.JIRA_CLIENT_ID = "env-client";
+    process.env.JIRA_CLIENT_SECRET = "env-secret";
+    const { db } = makeDb([workspaceRoute("manager")]);
+    const err = await rejection(makeLegacy(db).integrationAuthUrl("user-1", "jira"));
+    expect(err).toBeInstanceOf(ForbiddenException);
+  });
+});
+
+// Every workspace shares one platform client_id, so `state` is the only thing tying a callback to
+// the workspace that started it. These tests pin that binding.
+describe("LegacyService — OAuth state signing", () => {
+  beforeEach(() => setEnvCredentials());
+
+  function ownerDb(orgId = "org-1") {
+    return makeDb([workspaceRoute("owner", orgId)]);
+  }
+
+  it("prefixes state with the provider so the callback page can route without trusting the payload", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const state = await validState(svc, "jira");
+    expect(state.split(".")).toHaveLength(3);
+    expect(state.split(".")[0]).toBe("jira");
+  });
+
+  it("issues a distinct state each time, so one authorize URL can't be replayed as another", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    expect(await validState(svc, "jira")).not.toBe(await validState(svc, "jira"));
+  });
+
+  it("rejects a callback with no state at all", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc" }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a forged state that was never signed", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: "jira.eyJwIjoiamlyYSJ9.deadbeef" }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a state whose payload was tampered with after signing", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const [provider, payload, signature] = (await validState(svc, "jira")).split(".");
+    const forged = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    forged.o = "org-attacker";
+    const tampered = `${provider}.${Buffer.from(JSON.stringify(forged)).toString("base64url")}.${signature}`;
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: tampered }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a validly-signed state minted for a different workspace", async () => {
+    // The attacker's own workspace signs a state, then replays it into the victim's session.
+    const attackerState = await validState(makeLegacy(ownerDb("org-attacker").db), "jira");
+    const victim = makeLegacy(ownerDb("org-1").db);
+    const err = await rejection(victim.integrationCallback("user-1", "jira", { code: "abc", state: attackerState }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/different workspace/i);
+  });
+
+  it("rejects a Linear-signed state replayed against the Jira callback", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "linear") }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/invalid authorization state/i);
+  });
+
+  it("rejects a state older than its TTL", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const state = await validState(svc, "jira");
+    const elevenMinutes = 11 * 60 * 1000;
+    jest.spyOn(Date, "now").mockReturnValue(Date.now() + elevenMinutes);
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state }));
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(err.getResponse().error).toMatch(/expired/i);
+  });
+
+  it("verifies state before exchanging the code, so a bad state never reaches the provider", async () => {
+    const svc = makeLegacy(ownerDb().db);
+    const fetchSpy = jest.spyOn(global, "fetch");
+    await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: "jira.bogus.sig" }));
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 
 describe("LegacyService#integrationAuthUrl — provider-specific URL construction", () => {
   it("builds the Jira authorize URL with the Jira scope and OAuth params", async () => {
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "jira-client", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
-    ]);
+    setEnvCredentials("jira-client");
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     const { url } = await svc.integrationAuthUrl("user-1", "jira");
     expect(url.startsWith("https://auth.atlassian.com/authorize?")).toBe(true);
@@ -161,20 +312,18 @@ describe("LegacyService#integrationAuthUrl — provider-specific URL constructio
     expect(params.get("scope")).toBe("read:jira-work read:jira-user write:jira-work offline_access");
     expect(params.get("response_type")).toBe("code");
     expect(params.get("prompt")).toBe("consent");
-    expect(params.get("state")).toBe("jira");
+    expect(params.get("state")!.startsWith("jira.")).toBe(true);
   });
 
   it("builds the Linear authorize URL with the Linear scope and no Jira-only audience param", async () => {
-    const { db } = makeDb([
-      workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "linear-client", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })
-    ]);
+    setEnvCredentials("linear-client");
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     const { url } = await svc.integrationAuthUrl("user-1", "linear");
     expect(url.startsWith("https://linear.app/oauth/authorize?")).toBe(true);
     const params = new URL(url).searchParams;
     expect(params.get("scope")).toBe("read,write,issues:create,comments:create");
-    expect(params.get("state")).toBe("linear");
+    expect(params.get("state")!.startsWith("linear.")).toBe(true);
     expect(params.has("audience")).toBe(false);
   });
 
@@ -188,6 +337,8 @@ describe("LegacyService#integrationAuthUrl — provider-specific URL constructio
 });
 
 describe("LegacyService#integrationCallback", () => {
+  beforeEach(() => setEnvCredentials());
+
   it("forbids a non-owner (manager) from completing the OAuth callback", async () => {
     const { db } = makeDb([workspaceRoute("manager")]);
     const svc = makeLegacy(db);
@@ -220,24 +371,24 @@ describe("LegacyService#integrationCallback", () => {
   });
 
   it("throws when Linear does not return an access token", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest.spyOn(global, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({}) } as unknown as Response);
 
-    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc", state: await validState(svc, "linear") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/linear did not return an oauth token/i);
   });
 
   it("throws when the connected Linear organization cannot be read", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest
       .spyOn(global, "fetch")
       .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at-1" }) } as unknown as Response) // token exchange
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { organization: {} } }) } as unknown as Response); // graphql viewer, no urlKey
 
-    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "linear", { code: "abc", state: await validState(svc, "linear") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/could not read the connected linear workspace/i);
   });
@@ -245,7 +396,6 @@ describe("LegacyService#integrationCallback", () => {
   it("upserts the Linear connection with encrypted tokens on a successful callback", async () => {
     const { db, calls } = makeDb([
       workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" }),
       { match: "INSERT INTO integration_connections", handler: () => ({ rows: [{ id: "conn-1", site_url: "https://linear.app/acme" }] }) }
     ]);
     const svc = makeLegacy(db);
@@ -257,7 +407,7 @@ describe("LegacyService#integrationCallback", () => {
       } as unknown as Response)
       .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { organization: { id: "org-ext-1", urlKey: "acme" } } }) } as unknown as Response);
 
-    const res = await svc.integrationCallback("user-1", "linear", { code: "abc" });
+    const res = await svc.integrationCallback("user-1", "linear", { code: "abc", state: await validState(svc, "linear") });
     expect(res).toEqual({ connectionId: "conn-1", siteUrl: "https://linear.app/acme" });
 
     const insertCall = calls.find((c) => c.sql.includes("INSERT INTO integration_connections"));
@@ -274,24 +424,24 @@ describe("LegacyService#integrationCallback", () => {
   });
 
   it("throws when Jira omits an access or refresh token", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest.spyOn(global, "fetch").mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at-only" }) } as unknown as Response);
 
-    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "jira") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/jira did not return oauth tokens/i);
   });
 
   it("throws when no accessible Jira site is returned", async () => {
-    const { db } = makeDb([workspaceRoute("owner"), savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" })]);
+    const { db } = makeDb([workspaceRoute("owner")]);
     const svc = makeLegacy(db);
     jest
       .spyOn(global, "fetch")
       .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: "at", refresh_token: "rt" }) } as unknown as Response) // token exchange
       .mockResolvedValueOnce({ ok: true, json: async () => [] } as unknown as Response); // accessible-resources: empty
 
-    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc" }));
+    const err = await rejection(svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "jira") }));
     expect(err).toBeInstanceOf(BadRequestException);
     expect(err.getResponse().error).toMatch(/no accessible jira site/i);
   });
@@ -299,7 +449,6 @@ describe("LegacyService#integrationCallback", () => {
   it("upserts the Jira connection with encrypted tokens on a successful callback", async () => {
     const { db, calls } = makeDb([
       workspaceRoute("owner"),
-      savedOAuthConfigRoute({ client_id: "c", client_secret: encryptSecret("s"), redirect_uri: "https://app.example.com/cb" }),
       { match: "INSERT INTO integration_connections", handler: () => ({ rows: [{ id: "conn-jira-1", external_id: "cloud-1", site_url: "https://acme.atlassian.net" }] }) }
     ]);
     const svc = makeLegacy(db);
@@ -311,7 +460,7 @@ describe("LegacyService#integrationCallback", () => {
       } as unknown as Response)
       .mockResolvedValueOnce({ ok: true, json: async () => [{ id: "cloud-1", url: "https://acme.atlassian.net" }] } as unknown as Response);
 
-    const res = await svc.integrationCallback("user-1", "jira", { code: "abc" });
+    const res = await svc.integrationCallback("user-1", "jira", { code: "abc", state: await validState(svc, "jira") });
     expect(res).toEqual({ connectionId: "conn-jira-1", cloudId: "cloud-1", siteUrl: "https://acme.atlassian.net" });
 
     const insertCall = calls.find((c) => c.sql.includes("INSERT INTO integration_connections"));
@@ -347,11 +496,11 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
     expect(err).toBeInstanceOf(NotFoundException);
   });
 
-  it("replaces existing mappings and links only well-formed teams (drops entries missing id or key)", async () => {
+  it("disables the previous mapping and links the one well-formed team (drops entries missing id or key)", async () => {
     const { db, calls } = makeDb([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
-      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "personal_token" }] },
-      { match: "DELETE FROM linear_project_mappings", rows: [] },
+      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
+      { match: "UPDATE linear_project_mappings SET enabled = false", rows: [] },
       { match: "INSERT INTO linear_project_mappings", rows: [] }
     ]);
     const svc = makeLegacy(db);
@@ -364,8 +513,11 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
     });
     expect(res).toEqual({ linked: 1 });
 
-    const deleteCall = calls.find((c) => c.sql.includes("DELETE FROM linear_project_mappings"));
-    expect(deleteCall!.params).toEqual(["proj-1", "conn-1"]);
+    // Disabled, not deleted: the outgoing mapping's tickets and mirrored KB documents still
+    // reference it (V72).
+    const disableCall = calls.find((c) => c.sql.includes("UPDATE linear_project_mappings SET enabled = false"));
+    expect(disableCall!.params).toEqual(["proj-1"]);
+    expect(calls.some((c) => c.sql.includes("DELETE FROM linear_project_mappings"))).toBe(false);
 
     const insertCalls = calls.filter((c) => c.sql.includes("INSERT INTO linear_project_mappings"));
     expect(insertCalls).toHaveLength(1);
@@ -375,12 +527,33 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
   it("links zero teams (and still clears old mappings) when the request has no valid teams", async () => {
     const { db, calls } = makeDb([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
-      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "personal_token" }] },
-      { match: "DELETE FROM linear_project_mappings", rows: [] }
+      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
+      { match: "UPDATE linear_project_mappings SET enabled = false", rows: [] }
     ]);
     const svc = makeLegacy(db);
     const res = await svc.connectLinearTeams("proj-1", { projects: [] });
     expect(res).toEqual({ linked: 0 });
+    expect(calls.some((c) => c.sql.includes("INSERT INTO linear_project_mappings"))).toBe(false);
+  });
+
+  // V72 constrains a Tesbo project to exactly one Linear team (idx_linear_project_mappings_one_per_project),
+  // so a multi-team request is rejected outright rather than silently linking the first.
+  it("rejects a request carrying more than one team", async () => {
+    const { db, calls } = makeDb([
+      { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
+      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] }
+    ]);
+    const svc = makeLegacy(db);
+    const err = await rejection(
+      svc.connectLinearTeams("proj-1", {
+        projects: [
+          { id: "team-1", key: "ENG", name: "Engineering" },
+          { id: "team-2", key: "OPS", name: "Operations" }
+        ]
+      })
+    );
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(calls.some((c) => c.sql.includes("UPDATE linear_project_mappings SET enabled = false"))).toBe(false);
     expect(calls.some((c) => c.sql.includes("INSERT INTO linear_project_mappings"))).toBe(false);
   });
 });

@@ -27,8 +27,8 @@ Nine modules, roughly in the order a user would encounter them:
    generation, the Zyra chat assistant, and the Zyra autonomous task/review workflow.
 7. **Knowledge Base** — hierarchical folders/documents/files, versioning, AI-memory approval,
    search, and the RAG pipeline that powers Zyra's semantic retrieval.
-8. **Third-Party Integrations** — the OAuth framework, Personal Access Token auth, Jira, Linear,
-   and how test cases/bugs link to external tickets.
+8. **Third-Party Integrations** — the OAuth framework, Jira, Linear, and how test cases/bugs link
+   to external tickets.
 9. **Platform Admin, Branding, Tesbo Reports, MCP Server & RAG Infrastructure** — the
    cross-tenant super-admin console, white-label branding, the (currently stubbed) automated
    test-run ingestion feature, and the MCP server that lets AI clients act on a project.
@@ -2882,17 +2882,13 @@ frontend, which is built entirely against the v2 (folders/documents/files) API.
 
 ---
 
-## Section H — Third-Party Integrations (Jira, Linear, OAuth, Personal Access Tokens)
+## Section H — Third-Party Integrations (Jira, Linear, OAuth)
 
-Scope note on naming: the codebase has two unrelated features that both involve the phrase
-"Personal Access Token." (1) `connectIntegrationWithToken` / `auth_method = 'personal_token'` on
-`integration_connections` — this is what the frontend actually labels "Personal Access Token" and
-is the PAT alternative to the Jira/Linear OAuth redirect flow; it is documented in its own section
-below. (2) `src/auth/api-token.service.ts` — a same-week, differently-scoped feature ("Tesbo MCP
-API tokens") that issues Tesbo's *own* bearer tokens so external/machine clients (e.g. an MCP
-server) can call *Tesbo's* REST API without a browser session. It has no relationship to Jira or
-Linear and does not back any of the `/connect-token` routes. Both are documented below so nothing
-is missed, but they should not be conflated when writing test cases.
+Scope note on naming: `src/auth/api-token.service.ts` ("Tesbo MCP API tokens") issues Tesbo's *own*
+bearer tokens so external/machine clients can call *Tesbo's* REST API without a browser session. It
+has nothing to do with Jira or Linear. Historically there was also a per-workspace "Personal Access
+Token" path for connecting Jira/Linear (`auth_method = 'personal_token'`); that has been removed —
+see the compatibility note below.
 
 ### Workspace Integration Connections (OAuth Framework)
 
@@ -2903,59 +2899,80 @@ provider per workspace), not per-project — a workspace owner connects Jira/Lin
 individual projects later opt in by mapping to a remote project/team (see the Jira/Linear
 Integration sections).
 
-**Use cases:**
-- A workspace owner sets up Jira or Linear once for the whole company/workspace instead of every
-  project owner having to authenticate separately.
-- An admin brings their own OAuth app (self-hosted Jira/Linear OAuth client) so the integration
-  runs under their own Atlassian/Linear developer account rather than a shared Tesbo-wide app.
-- A platform operator pre-configures default OAuth client credentials via environment variables so
-  customers can connect without creating their own OAuth app first.
+**Exactly one way to configure it.** OAuth client credentials come from the backend environment
+(`JIRA_CLIENT_ID`/`JIRA_CLIENT_SECRET`, `LINEAR_CLIENT_ID`/`LINEAR_CLIENT_SECRET`) and nothing else.
+There is no per-workspace override and no personal-token alternative. Tesbo Cloud and a self-hosted
+install run the *identical* flow; they differ only in whose OAuth app the credentials belong to —
+Tesbo's for Cloud, the operator's own for self-hosted. A workspace owner's entire job is clicking
+**Connect**.
 
-**Problem it solves:** Avoids re-authenticating per project and avoids storing raw OAuth
-credentials in plaintext; centralizes "is this workspace connected to Jira/Linear, and which
-projects use it" into one place.
+**Use cases:**
+- A workspace owner connects Jira or Linear once for the whole workspace instead of every project
+  owner authenticating separately.
+- An operator (Tesbo Cloud, or anyone self-hosting) registers one OAuth app for the deployment so
+  every workspace on it connects in one click.
+
+**Problem it solves:** Avoids re-authenticating per project, avoids storing raw OAuth credentials in
+plaintext, and removes OAuth-app registration from the end user's path entirely.
+
+**Compatibility note (breaking, for anyone upgrading):** two previously-supported connection paths
+were removed.
+- Per-workspace OAuth app config (`PATCH`/`DELETE /api/workspace/integrations/:provider/config`).
+  Any leftover `integration_oauth_configs` rows are now **ignored** — the table is no longer read.
+  A workspace that had configured its own app must have the deployment's env credentials set instead.
+- Personal Access Token auth (`POST /api/workspace/integrations/:provider/connect-token`). This was
+  the only path that worked for **Jira Server / Data Center**, which cannot use Atlassian cloud
+  OAuth — those instances can no longer be connected at all. Existing rows with
+  `auth_method = 'personal_token'` will no longer authenticate correctly, since Jira requests now
+  always go through the `api.atlassian.com/ex/jira` gateway addressed by `cloud_id` rather than the
+  customer's own site URL with HTTP Basic.
+The `auth_method` / `personal_token_identifier` columns and the `integration_oauth_configs` table
+are intentionally left in the schema (no migration drops them), so the change is reversible and any
+rows in an existing deployment are preserved rather than destroyed.
 
 **Features & actions:**
-- **Configure OAuth client (workspace owner only)** — `PATCH /api/workspace/integrations/:provider/config`
-  - Requires `clientId`, `redirectUri`, and (on first save) `clientSecret`; on later saves, submitting a
-    blank `clientSecret` keeps the previously-saved encrypted secret rather than clearing it.
-  - `redirectUri` must start with `http://` or `https://` (validated server-side) — anything else is
-    rejected with a 400.
-  - Blocked for non-owners (manager, qa_engineer, or any unrecognized role) with a 403
-    "Only the workspace owner can manage integrations."
-  - Client secret is encrypted at rest (AES-256-GCM, `src/common/crypto.util.ts`) before storage in
-    `integration_oauth_configs`; only `hasClientSecret: true/false` is ever returned to the client,
-    never the secret itself.
-  - Falls back to environment variables (`JIRA_CLIENT_ID`/`JIRA_CLIENT_SECRET`/`JIRA_REDIRECT_URI`,
-    and the `LINEAR_*` equivalents) when no workspace-level row is saved — this lets an operator
-    ship a platform-default OAuth app. A workspace-saved config always takes precedence over env
-    vars when both exist. A *partially*-saved workspace row (e.g. secret is null) is treated as
-    "unconfigured" and env vars are used instead, rather than failing.
-- **View config status** — `GET /api/workspace/integrations/:provider/config` — returns
-  `configured`, `source` (`workspace` | `environment` | `none`), `clientId`, `redirectUri`,
-  `hasClientSecret`, `updatedAt`. Not owner-gated — any workspace member can view it (masked).
+- **View config status** — `GET /api/workspace/integrations/:provider/config` — returns just
+  `configured` (are env credentials present), `clientId`, and `redirectUri`. Read-only; there is
+  nothing to write. Not owner-gated — any workspace member can see whether the deployment is set up.
+  `redirectUri` is returned even when unconfigured, so a self-hosted operator can see which callback
+  URL to register in the provider console.
 - **Get the OAuth authorize URL** — `GET /api/workspace/integrations/:provider/auth-url` — builds
   the provider-specific authorization URL (Atlassian: `auth.atlassian.com/authorize` with
   `audience=api.atlassian.com` and scope `read:jira-work read:jira-user write:jira-work
   offline_access`; Linear: `linear.app/oauth/authorize` with scope `read,write,issues:create,comments:create`).
-  Both set `state=<provider>` so the callback page knows which provider redirected back.
-  - **Not owner-gated** in the backend (unlike config/callback/connect-token/disconnect) — any
-    authenticated workspace member can request an auth URL even though the frontend only shows the
-    "Connect" button to owners. A non-owner who reaches this endpoint directly and completes the
-    provider's consent screen will still be rejected at the callback step (owner-only) — worth
-    testing end-to-end as a privilege-boundary case.
-  - Throws a 400 with an actionable message ("… OAuth is not configured. Add Client ID, Client
-    Secret, and Redirect URI in Workspace Settings → Integrations.") when neither workspace config
-    nor env vars are present.
+  Both set a **signed** `state` shaped `<provider>.<base64url payload>.<base64url HMAC-SHA256>`,
+  where the payload carries `{p: provider, o: organizationId, t: issuedAt, n: nonce}`. The leading
+  provider segment is what the callback page reads to know which provider redirected back; the
+  signature is verified server-side at the callback (see below). The signing key is derived as
+  `sha256("tesbo:oauth-state:" + SECRETS_ENCRYPTION_KEY)` rather than reusing that key directly.
+  - **Owner-gated** — a non-owner gets a 403 before any authorize URL is issued.
+  - Throws a 400 naming the required env vars ("… is not configured on this deployment. Set
+    `JIRA_CLIENT_ID` and `JIRA_CLIENT_SECRET` in the backend environment and restart.") when
+    credentials are absent. This is deliberately operator-facing: no end user can fix it from the UI.
+  - `*_REDIRECT_URI` is **optional** — only `*_CLIENT_ID` + `*_CLIENT_SECRET` are required, and the
+    redirect defaults to `FRONTEND_URL` (or `APP_URL`, else `http://localhost:1010`) +
+    `/integrations/callback`. Set it explicitly only when the browser-facing callback host differs
+    from `FRONTEND_URL`.
   - Unsupported `:provider` values (anything other than `jira`/`linear`) are rejected with 400
     *before* any DB query.
+  - **Not** plan-gated, unlike the callback — see the gap noted at the end of this section.
 - **OAuth callback / token exchange** — `POST /api/workspace/integrations/:provider/callback` —
   exchanges the `code` for tokens and upserts `integration_connections` (`ON CONFLICT
   (organization_id, provider) DO UPDATE`, so reconnecting the same provider updates the same row
   rather than creating a duplicate — existing project mappings/synced tickets tied to that
-  connection id remain intact).
-  - Owner-only (403 for any other role).
+  connection id remain intact). Always written with `auth_method = 'oauth'`.
+  - Owner-only (403 for any other role), and plan-gated via `planLimits.assertIntegrationAllowed`.
   - Requires `code` in the body (400 if missing).
+  - Requires the signed `state` from the authorize URL, forwarded verbatim by the callback page.
+    Rejected with 400 when it is missing, unsigned/forged, tampered with after signing, minted for a
+    different provider, or older than its 10-minute TTL; a validly-signed state belonging to a
+    *different* workspace fails with "This authorization was started for a different workspace."
+    Because all workspaces on a deployment share one `client_id`, this binding is what stops an
+    attacker from handing a workspace owner a callback URL bearing the attacker's `code` and
+    grafting the attacker's Jira/Linear site onto the victim's workspace. State is verified
+    **before** the token exchange, so a bad state never reaches the provider. The check is stateless
+    (HMAC + TTL, no nonce store), so a state is workspace-bound and time-limited but **not** strictly
+    single-use within its TTL — worth a test if replay-within-window matters.
   - Jira: posts to `auth.atlassian.com/oauth/token`; requires both `access_token` and
     `refresh_token` in the response (400 "Jira did not return OAuth tokens." if either is missing);
     then calls `accessible-resources` to discover the Jira Cloud site — 400 "No accessible Jira
@@ -2982,147 +2999,38 @@ projects use it" into one place.
     `source_provider = 'jira'/'linear'`, also no FK to the connection). Reconnecting starts sync
     from a clean slate and project-to-remote mappings must be re-selected from scratch.
 - **Connection status** — `GET /api/workspace/integrations/:provider/status` — returns
-  `connected`, connection `id`, `siteUrl`, `authMethod` (`oauth`|`personal_token`),
-  `personalTokenIdentifier` (Jira PAT email, only when `authMethod === personal_token`),
-  `tokenExpiresAt` (`null` for personal-token connections), `connectedBy`, `createdAt`, and
+  `connected`, connection `id`, `siteUrl`, `tokenExpiresAt`, `connectedBy`, `createdAt`, and
   `connectedProjects` (every Tesbo project currently mapped to this connection, with name/key).
   Not owner-gated.
 
+**Known gap worth testing:** `planLimits.assertIntegrationAllowed` runs in the *callback* but not in
+*auth-url*, so a workspace whose plan disallows integrations can click Connect, complete the
+provider's consent screen, and only then be rejected. Fail-late rather than fail-fast.
+
 **Key files:**
-- Backend controller: `Tesbo-Backend-Nest/src/legacy/legacy.controller.ts` lines 1008–1041
-  (`auth-url`, `config` GET/PATCH, `callback`, `disconnect`, `status`)
-- Backend service: `Tesbo-Backend-Nest/src/legacy/legacy.service.ts` — `integrationConfigStatus`
-  (~3994), `updateIntegrationConfig` (~4023), `integrationAuthUrl` (~4055), `integrationCallback`
-  (~4082), `integrationDisconnect` (~4231), `integrationStatus` (~4239), private helpers
-  `envIntegrationConfig` (~3955), `integrationOAuthConfig` (~3969), `getIntegrationConnection`
-  (~4553), constants `JIRA_OAUTH_SCOPE`/`LINEAR_OAUTH_SCOPE` (~223), `assertIntegrationProvider` (~203)
+- Backend controller: `Tesbo-Backend-Nest/src/legacy/legacy.controller.ts`
+  (`auth-url`, `config` GET, `callback`, `disconnect`, `status`)
+- Backend service: `Tesbo-Backend-Nest/src/legacy/legacy.service.ts` — `integrationConfigStatus`,
+  `integrationAuthUrl`, `integrationCallback`, `integrationDisconnect`, `integrationStatus`, private
+  helpers `envIntegrationConfig`, `integrationOAuthConfig` (env-only, synchronous),
+  `defaultIntegrationRedirectUri`, `getIntegrationConnection`, `jiraBaseUrlAndAuth`,
+  `linearAuthHeader`, module-level `signOAuthState`/`verifyOAuthState`/`oauthStateKey`, constants
+  `JIRA_OAUTH_SCOPE`/`LINEAR_OAUTH_SCOPE`, `assertIntegrationProvider`
 - Crypto: `Tesbo-Backend-Nest/src/common/crypto.util.ts` (AES-256-GCM `encryptSecret`/`decryptSecret`)
 - Migrations: `V38_jira_oauth_config.sql`, `V47_integration_connections.sql` (workspace-scoped
   tables + migration of legacy per-project connections), `V68_integration_personal_access_tokens.sql`
-- Tests: `Tesbo-Backend-Nest/src/legacy/linear-integration.spec.ts` (auth-url/callback config
-  precedence, owner gating, malformed-response handling)
+  — the latter two now describe columns/tables the code no longer reads (see the compatibility note)
+- Tests: `Tesbo-Backend-Nest/src/legacy/linear-integration.spec.ts` (env-only config resolution,
+  state signing/verification, owner gating, malformed-response handling)
 - Frontend: `Tesbo-Frontend/components/settings/IntegrationsTab.tsx` (workspace Integrations tab —
-  connect/manage/disconnect cards, connected-project count), `Tesbo-Frontend/components/integrations/WorkspaceIntegrationConfig.tsx`
-  (OAuth config form + Connect button + PAT tab), `Tesbo-Frontend/app/(app)/settings/integrations/{page,jira/page,linear/page}.tsx`,
-  `Tesbo-Frontend/app/integrations/callback/page.tsx` (OAuth redirect landing page), `Tesbo-Frontend/lib/api.ts`
-  (`getIntegrationConfig`, `updateIntegrationConfig`, `getIntegrationAuthUrl`, `integrationCallback`,
-  `getIntegrationStatus`, `disconnectIntegration`)
-
----
-
-### Personal Access Token Authentication for Jira/Linear Connections
-
-**What it is:** An alternative to the OAuth redirect flow for connecting Jira or Linear to a
-workspace: instead of an OAuth app + browser consent screen, the workspace owner pastes a
-provider-issued personal token directly (a Jira API token + Atlassian account email, or a Linear
-personal API key) and Tesbo verifies it live against the provider before saving it. Implemented
-entirely in `connectIntegrationWithToken` — it reuses the same `integration_connections` table as
-OAuth, distinguished by `auth_method = 'personal_token'` (added in migration V68, originally
-numbered V51).
-
-**Use cases:**
-- A workspace owner who doesn't want to (or isn't allowed to) register an OAuth application in
-  their Atlassian/Linear admin console can still connect using a token they can generate themselves
-  in under a minute.
-- Faster setup for trials/demos/small teams — no OAuth app, client ID/secret, or redirect URI
-  configuration required.
-- Connecting a Jira Server/Data Center instance or any Jira site where the org hasn't approved a
-  Marketplace/OAuth app yet, since PAT auth talks directly to the customer's own site URL rather
-  than through Atlassian's `api.atlassian.com/ex/jira` OAuth gateway.
-
-**Problem it solves:** Removes the OAuth app-registration step as a hard prerequisite for
-connecting an issue tracker, at the cost of a credential that (by design) never expires and isn't
-scoped as tightly as OAuth.
-
-**Features & actions:**
-- **Connect via token** — `POST /api/workspace/integrations/:provider/connect-token` (owner-only,
-  403 otherwise).
-  - `INTEGRATION_PAT_SUPPORTED` gates this per provider (`{ jira: true, linear: true }`) — a future
-    provider that only supports OAuth would 400 with "`{provider}` does not support Personal Access
-    Token authentication." The frontend's `PROVIDER_PAT_FIELDS` map mirrors this so the "Personal
-    Access Token" tab simply doesn't render for such a provider.
-  - **Jira**: requires `siteUrl`, `email`, `apiToken`.
-    - `siteUrl` is normalized/validated by `normalizeJiraSiteUrl` — must match
-      `https://<host>` exactly (no path, no query string); trailing slashes are stripped; anything
-      not starting with `https://` (e.g. `http://`) or containing a path is rejected with 400
-      "Jira site URL must look like https://yourcompany.atlassian.net".
-    - `email` and `apiToken` are both required (400 "Email and API token are required." if either
-      is blank).
-    - Before saving, Tesbo calls `GET {siteUrl}/rest/api/3/myself` with HTTP Basic auth
-      (`email:apiToken` base64-encoded) to confirm the credential actually authenticates — an
-      invalid token, wrong email, or wrong site URL surfaces as a 400 from the upstream call
-      (`Jira request failed (401).` etc.), and nothing is persisted.
-    - On success, upserts `integration_connections` with `auth_method='personal_token'`,
-      `personal_token_identifier = email`, `external_id = NULL` (no Jira Cloud ID for a
-      directly-addressed site), `refresh_token = ''`, and `token_expires_at = now() + 100 years`
-      (i.e., "never expires" is modeled as a far-future timestamp rather than nullable).
-  - **Linear**: requires `apiKey` only (400 "API key is required." if blank).
-    - Before saving, verifies the key by querying `viewer { id } organization { id urlKey }` over
-      GraphQL; a 400 "Could not verify the Linear API key." is returned if `viewer.id` comes back
-      empty (invalid/revoked key).
-    - Upserts with `auth_method='personal_token'`, `personal_token_identifier = NULL` (Linear
-      personal keys are a single opaque value, no paired identity field), `site_url` derived from
-      the organization's `urlKey` if present.
-  - **Upsert semantics / switching auth methods**: connecting via token when an OAuth connection
-    already exists for that provider **overwrites the same row** (`ON CONFLICT (organization_id,
-    provider) DO UPDATE`) — the connection `id` is preserved, so existing project mappings
-    (`jira_project_mappings`/`linear_project_mappings`) and any already-synced tickets keep working
-    without re-selecting them. The reverse (PAT → OAuth via `/callback`) behaves the same way. This
-    is a good positive-path regression test: switch auth methods without disconnecting first and
-    confirm project mappings survive.
-- **Request auth differences from OAuth** (relevant to every Jira/Linear API call the backend
-  makes, not just connect): `jiraBaseUrlAndAuth` routes personal-token Jira connections directly to
-  the customer's own `site_url` with an HTTP Basic header, vs. OAuth connections which go through
-  `https://api.atlassian.com/ex/jira/{cloudId}` with a Bearer token. `linearAuthHeader` sends the
-  raw personal key as-is for PAT connections vs. a `Bearer `-prefixed token for OAuth. A bug in
-  either branch would only surface for one auth method, so both need independent test coverage for
-  every Jira/Linear action (status, projects/teams, sync, tickets, comment, search-issues).
-- **No refresh cycle**: `getIntegrationConnection` short-circuits token refresh entirely for
-  `auth_method === 'personal_token'` ("Personal tokens don't expire; nothing to refresh") — there is
-  no revalidation of a personal token's continued validity until the next live API call fails.
-- **Status reporting**: `GET .../status` surfaces `authMethod: "personal_token"` and
-  `personalTokenIdentifier` (Jira email) so the UI can show "Connected via Personal Access Token
-  (you@company.com)" instead of "Connected via OAuth."
-- Edge cases worth testing: connecting with a syntactically valid but wrong/expired Jira API token
-  or Linear key (should 400 with the upstream error, no partial write); connecting with a Jira site
-  URL missing `https://` or with a trailing path; connecting with a Linear key that belongs to a
-  different Linear organization than expected; revoking the token on the provider's side *after*
-  connecting (no proactive detection — the failure only surfaces the next time a Jira/Linear API
-  call is made, e.g. Sync or Search); a non-owner attempting `connect-token` directly.
-
-**Note — a separate, unrelated "API token" feature exists:** `Tesbo-Backend-Nest/src/auth/api-token.service.ts`
-(+ `api-token.service.spec.ts`) implements project-scoped Tesbo API tokens (`tsbo_` prefix, SHA-256
-hashed, stored in the `api_tokens` table) that let *external/machine clients* — e.g. the Tesbo MCP
-server — authenticate *into Tesbo's own REST API* via `Authorization: Bearer tsbo_...`, as an
-alternative to the browser session cookie. This is consumed by `AuthMiddleware`
-(`Tesbo-Backend-Nest/src/auth/auth.middleware.ts`): it first tries the session cookie, and only
-falls back to `ApiTokenService.authenticate()` if there's no session, resolving to an
-`ApiTokenPrincipal` (`tokenId`, `userId`, `projectId`, `scopes: ["read"|"write"]`). Key behaviors:
-`hashToken`/`generateRawToken` (24 random bytes, hex-encoded, `tsbo_` prefix), `issueToken` (returns
-the raw token exactly once — never recoverable afterward, only a `tokenPrefix` hint like
-`tsbo_…a1b2c3` is shown thereafter), `revokeToken` (delete, scoped to `projectId` so one project
-can't revoke another's token), `authenticate` (returns `null` for blank/unknown tokens without
-querying the DB for blank input; best-effort `last_used_at` stamping that never blocks auth if it
-fails), and scope normalization that silently discards invalid scope strings and **defaults to
-`["read","write"]`** if nothing valid was supplied — worth testing that issuing a token with a
-garbage scope string (e.g. `"delete"`) doesn't silently grant more than intended.
-**This mechanism has no code path that touches Jira, Linear, or `integration_connections` at all** —
-it is not what backs `/connect-token`, and should not be tested as part of the Jira/Linear
-connection flow. It is documented here because it was explicitly in scope for this investigation,
-not because it is part of the Jira/Linear PAT feature.
-
-**Key files:**
-- Backend (Jira/Linear PAT): `Tesbo-Backend-Nest/src/legacy/legacy.controller.ts` line 1028 (`connect-token`
-  route); `Tesbo-Backend-Nest/src/legacy/legacy.service.ts` — `connectIntegrationWithToken` (~4169–4229),
-  `INTEGRATION_PAT_SUPPORTED` (~213), `normalizeJiraSiteUrl` (~215), `jiraBaseUrlAndAuth` (~4588),
-  `linearAuthHeader` (~4603)
-- Migration: `Tesbo-Backend-Nest/migrations/V68_integration_personal_access_tokens.sql` (adds
-  `auth_method`, `personal_token_identifier`, check constraints)
-- Backend (unrelated Tesbo API tokens): `Tesbo-Backend-Nest/src/auth/api-token.service.ts`,
-  `api-token.service.spec.ts`, `Tesbo-Backend-Nest/src/auth/auth.middleware.ts`
-- Frontend: `Tesbo-Frontend/components/integrations/WorkspaceIntegrationConfig.tsx`
-  (`PROVIDER_PAT_FIELDS`, OAuth/"Personal Access Token" tab toggle, `handleConnectToken`), `Tesbo-Frontend/lib/api.ts`
-  (`connectIntegrationToken`)
+  connect/manage/disconnect cards, connected-project count),
+  `Tesbo-Frontend/components/integrations/WorkspaceIntegrationConfig.tsx` (Connect/Disconnect only;
+  when unconfigured it renders operator instructions naming the two env vars and the callback URL to
+  register, since no end user can fix it),
+  `Tesbo-Frontend/app/(app)/settings/integrations/{page,jira/page,linear/page}.tsx`,
+  `Tesbo-Frontend/app/integrations/callback/page.tsx` (OAuth redirect landing page),
+  `Tesbo-Frontend/lib/api.ts` (`getIntegrationConfig`, `getIntegrationAuthUrl`,
+  `integrationCallback`, `getIntegrationStatus`, `disconnectIntegration`)
 
 ---
 
@@ -3724,7 +3632,8 @@ exact code. Good first candidates for a bug-bash or a "does this still repro" re
 5. **AI features gated by key allocation** — the "no key / inactive key / wrong provider" states
    recur across AI Test Generation, Zyra Chat, Zyra Tasks, and RAG; one shared test matrix covers
    all of them.
-6. **Integrations** (Jira/Linear OAuth + PAT, sync, ticket linking) — focus on the PAT vs OAuth
-   auth-path divergence (each has independent code) and the ticket-link-dropped bug above.
+6. **Integrations** (Jira/Linear OAuth, sync, ticket linking) — focus on OAuth `state`
+   verification (workspace binding, tamper/expiry rejection) and the ticket-link-dropped bug above.
+   The PAT auth path no longer exists, so the old PAT-vs-OAuth divergence matrix is obsolete.
 7. **Explicitly deprioritize** everything in section B until product decides whether to build,
    finish, or remove them — cover with a single "stays a stub" smoke test each instead.

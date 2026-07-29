@@ -18,10 +18,29 @@ import type { Response } from "express";
 import * as XLSX from "xlsx";
 import { AuthenticatedRequest } from "../common/request.types";
 import { LegacyService } from "./legacy.service";
+import { CustomFieldsService } from "../custom-fields/custom-fields.service";
+
+const TESTCASE_EXPORT_BASE_HEADERS = [
+  "externalId",
+  "title",
+  "description",
+  "preconditions",
+  "steps",
+  "testData",
+  "priority",
+  "severity",
+  "type",
+  "status",
+  "suite",
+  "component"
+];
 
 @Controller()
 export class LegacyController {
-  constructor(private readonly legacy: LegacyService) {}
+  constructor(
+    private readonly legacy: LegacyService,
+    private readonly customFields: CustomFieldsService
+  ) {}
 
   private csvEscape(value: unknown): string {
     const text = String(value ?? "");
@@ -290,6 +309,11 @@ export class LegacyController {
     return this.legacy.deleteTestCase(testcaseId, req.userId);
   }
 
+  @Post("/api/projects/:projectId/testcases/:testcaseId/duplicate")
+  duplicateTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string) {
+    return this.legacy.duplicateTestCase(testcaseId, req.userId);
+  }
+
   @Post("/api/projects/:projectId/testcases/bulk-update")
   bulkUpdate(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.bulkUpdateTestCases(projectId, req.userId, body);
@@ -521,17 +545,19 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/testcases/export/csv")
-  async exportCsv(@Param("projectId") projectId: string, @Res() res: Response) {
-    const rows = await this.legacy.exportTestCases(projectId);
-    const headers = ["externalId", "title", "description", "preconditions", "steps", "testData", "priority", "severity", "type", "status", "suite", "component"];
+  async exportCsv(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Res() res: Response) {
+    const definitions = await this.customFields.listActiveDefinitionsForColumns(req.userId, projectId);
+    const rows = await this.legacy.exportTestCases(projectId, definitions);
+    const headers = [...TESTCASE_EXPORT_BASE_HEADERS, ...definitions.map((d) => `cf_${d.key}`)];
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", 'attachment; filename="testcases.csv"');
     res.send(this.rowsToCsv(headers, rows));
   }
 
   @Get("/api/projects/:projectId/testcases/export/xlsx")
-  async exportXlsx(@Param("projectId") projectId: string, @Res() res: Response) {
-    const rows = await this.legacy.exportTestCases(projectId);
+  async exportXlsx(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Res() res: Response) {
+    const definitions = await this.customFields.listActiveDefinitionsForColumns(req.userId, projectId);
+    const rows = await this.legacy.exportTestCases(projectId, definitions);
     this.sendWorkbook(res, "testcases.xlsx", "Test Cases", rows);
   }
 
@@ -859,6 +885,40 @@ export class LegacyController {
     return this.legacy.rejectAiMemory(projectId, req.userId, documentId);
   }
 
+  // ── Document comments ──
+  // Must stay above the bare /documents/:documentId route below, same ordering constraint noted
+  // at the top of this Knowledge Base block.
+
+  @Get("/api/projects/:projectId/knowledge-base/documents/:documentId/comments")
+  listKnowledgeDocumentComments(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.listKnowledgeDocumentComments(projectId, req.userId, documentId);
+  }
+
+  @Post("/api/projects/:projectId/knowledge-base/documents/:documentId/comments")
+  createKnowledgeDocumentComment(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("documentId") documentId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.createKnowledgeDocumentComment(projectId, req.userId, documentId, body);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/comments/:commentId")
+  updateKnowledgeDocumentComment(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("commentId") commentId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.updateKnowledgeDocumentComment(projectId, req.userId, commentId, body);
+  }
+
+  @Delete("/api/projects/:projectId/knowledge-base/comments/:commentId")
+  deleteKnowledgeDocumentComment(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("commentId") commentId: string) {
+    return this.legacy.deleteKnowledgeDocumentComment(projectId, req.userId, commentId);
+  }
+
   @Get("/api/projects/:projectId/knowledge-base/documents/:documentId")
   getKnowledgeDocument(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
     return this.legacy.getKnowledgeDocument(projectId, req.userId, documentId);
@@ -1027,19 +1087,9 @@ export class LegacyController {
     return this.legacy.integrationConfigStatus(req.userId, provider);
   }
 
-  @Patch("/api/workspace/integrations/:provider/config")
-  updateIntegrationConfig(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateIntegrationConfig(req.userId, provider, body);
-  }
-
   @Post("/api/workspace/integrations/:provider/callback")
   integrationCallback(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
     return this.legacy.integrationCallback(req.userId, provider, body);
-  }
-
-  @Post("/api/workspace/integrations/:provider/connect-token")
-  connectIntegrationToken(@Req() req: AuthenticatedRequest, @Param("provider") provider: string, @Body() body: Record<string, any>) {
-    return this.legacy.connectIntegrationWithToken(req.userId, provider, body);
   }
 
   @Delete("/api/workspace/integrations/:provider/disconnect")
@@ -1070,8 +1120,8 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/jira/sync")
-  syncJira(@Param("projectId") projectId: string) {
-    return this.legacy.syncJira(projectId);
+  syncJira(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.syncJira(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/jira/tickets")
@@ -1107,8 +1157,20 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/linear/sync")
-  syncLinear(@Param("projectId") projectId: string) {
-    return this.legacy.syncLinear(projectId);
+  syncLinear(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.syncLinear(req.userId, projectId);
+  }
+
+  // ── Sync run status (polled by the Requirements page while a sync is in flight) ──
+
+  @Get("/api/projects/:projectId/integrations/:provider/sync-status")
+  integrationSyncStatus(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("provider") provider: string) {
+    return this.legacy.integrationSyncStatus(req.userId, projectId, provider);
+  }
+
+  @Get("/api/projects/:projectId/integrations/sync-history")
+  integrationSyncHistory(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.integrationSyncHistory(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/linear/tickets")

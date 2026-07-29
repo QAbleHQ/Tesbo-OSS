@@ -85,7 +85,10 @@ server {
     ssl_session_cache   shared:SSL:10m;
     ssl_session_timeout 10m;
 
-    client_max_body_size 50M;
+    # Knowledge base / attachment uploads allow files up to 100MB each, batched up to 10
+    # per request (see MAX_UPLOAD_SIZE and KB_UPLOAD_BATCH_SIZE) — cap comfortably above
+    # that worst case (10 x 100MB) rather than the per-file limit.
+    client_max_body_size 1100M;
 
     location / {
         proxy_pass         http://127.0.0.1:PORT_PLACEHOLDER;

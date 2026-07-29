@@ -7,8 +7,11 @@ import {
   getTemplateUrl,
   listTestCases,
   listSuites,
+  listCustomFieldDefinitions,
   type ImportResult,
+  type CustomFieldDefinition,
 } from "@/lib/api";
+import { validateCustomFieldValue } from "@/components/customFields/customFieldTypes";
 
 type ImportStep = "upload" | "mapping" | "result";
 type ParsedSheet = {
@@ -63,6 +66,8 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
   const [preview, setPreview] = useState<ImportPreviewResult | null>(null);
   const [selectedSheetName, setSelectedSheetName] = useState("");
   const [mapping, setMapping] = useState<Record<string, number>>({});
+  const [customFieldDefinitions, setCustomFieldDefinitions] = useState<CustomFieldDefinition[]>([]);
+  const [customFieldMapping, setCustomFieldMapping] = useState<Record<string, number>>({});
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
@@ -81,11 +86,18 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
     setResult(null);
     setImportError(null);
     setDragActive(false);
+    setCustomFieldMapping({});
   }, []);
 
   useEffect(() => {
-    if (!open) reset();
-  }, [open, reset]);
+    if (!open) {
+      reset();
+      return;
+    }
+    listCustomFieldDefinitions(projectId, { statuses: ["active"] })
+      .then(setCustomFieldDefinitions)
+      .catch(() => setCustomFieldDefinitions([]));
+  }, [open, projectId, reset]);
 
   const normalizeHeader = useCallback((value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ""), []);
   const normalizeSuiteName = useCallback((value: string) => value.trim().replace(/\s+/g, " ").toLowerCase(), []);
@@ -121,6 +133,70 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
     return map;
   }, [normalizeHeader]);
 
+  const autoMapCustomFields = useCallback((headers: string[]) => {
+    const map: Record<string, number> = {};
+    const lowerHeaders = headers.map(normalizeHeader);
+    for (const definition of customFieldDefinitions) {
+      const candidates = new Set([normalizeHeader(definition.name), normalizeHeader(definition.key)]);
+      const idx = lowerHeaders.findIndex((h) => candidates.has(h));
+      if (idx >= 0) map[definition.id] = idx;
+    }
+    return map;
+  }, [customFieldDefinitions, normalizeHeader]);
+
+  // Coerces a raw spreadsheet cell into the shape setValuesForTestCase expects for this
+  // field's type. Returns `error` (without `value`) when the cell can't be parsed, so the
+  // caller can attribute a specific, field-named message to the row instead of a generic
+  // "failed to import row" once it reaches the backend.
+  const coerceCustomFieldImportValue = useCallback((definition: CustomFieldDefinition, raw: string): { value?: unknown; error?: string } => {
+    const trimmed = raw.trim();
+    if (!trimmed) return {};
+    switch (definition.fieldType) {
+      case "text":
+      case "long_text":
+        return { value: trimmed };
+      case "boolean": {
+        const normalized = trimmed.toLowerCase();
+        if (["yes", "true", "1"].includes(normalized)) return { value: true };
+        if (["no", "false", "0"].includes(normalized)) return { value: false };
+        return { error: `'${raw}' is not a valid value for ${definition.name} (expected yes/no)` };
+      }
+      case "number": {
+        const num = Number(trimmed);
+        if (!Number.isFinite(num)) return { error: `'${raw}' is not a valid number for ${definition.name}` };
+        return { value: num };
+      }
+      case "date": {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+          const parsed = new Date(trimmed);
+          if (Number.isNaN(parsed.getTime())) return { error: `'${raw}' is not a valid date for ${definition.name}` };
+          return { value: parsed.toISOString().slice(0, 10) };
+        }
+        return { value: trimmed };
+      }
+      case "single_select": {
+        const options = definition.config.options || [];
+        const match = options.find((o) => o.label.toLowerCase() === trimmed.toLowerCase());
+        if (!match) return { error: `'${raw}' is not a valid option for ${definition.name}` };
+        if (!match.active) return { error: `'${raw}' is an inactive option for ${definition.name}` };
+        return { value: match.id };
+      }
+      case "multi_select": {
+        const options = definition.config.options || [];
+        const tokens = trimmed.split(/[,;]/).map((t) => t.trim()).filter(Boolean);
+        const ids: string[] = [];
+        for (const token of tokens) {
+          const match = options.find((o) => o.label.toLowerCase() === token.toLowerCase());
+          if (!match || !match.active) return { error: `'${token}' is not a valid option for ${definition.name}` };
+          ids.push(match.id);
+        }
+        return { value: ids };
+      }
+      default:
+        return {};
+    }
+  }, []);
+
   const buildPreview = useCallback((sheets: ParsedSheet[], sheetName: string): ImportPreviewResult => {
     const selected = sheets.find((sheet) => sheet.name === sheetName) || sheets[0];
     return {
@@ -140,8 +216,9 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
     setSelectedSheetName(nextPreview.selectedSheetName);
     setPreview(nextPreview);
     setMapping(autoMap(nextPreview.headers));
+    setCustomFieldMapping(autoMapCustomFields(nextPreview.headers));
     setImportError(null);
-  }, [autoMap, buildPreview, preview?.sheets]);
+  }, [autoMap, autoMapCustomFields, buildPreview, preview?.sheets]);
 
   const parseWorkbook = useCallback(async (inputFile: File): Promise<ParsedSheet[]> => {
     const XLSX = await import("xlsx");
@@ -193,6 +270,7 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
       setPreview(result);
       setSelectedSheetName(result.selectedSheetName);
       setMapping(autoMap(result.headers));
+      setCustomFieldMapping(autoMapCustomFields(result.headers));
       setStep("mapping");
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : "Failed to parse file");
@@ -285,6 +363,29 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
           continue;
         }
         importTitles.add(normalizedTitle);
+
+        const customFieldValues: Record<string, unknown> = {};
+        let customFieldRowError: string | null = null;
+        for (const definition of customFieldDefinitions) {
+          const colIdx = customFieldMapping[definition.id];
+          const raw = colIdx != null && colIdx >= 0 && colIdx < row.length ? String(row[colIdx] || "") : "";
+          const { value, error } = coerceCustomFieldImportValue(definition, raw);
+          if (error) {
+            customFieldRowError = error;
+            break;
+          }
+          if (value !== undefined) customFieldValues[definition.id] = value;
+          const requiredError = validateCustomFieldValue(definition, value);
+          if (requiredError) {
+            customFieldRowError = requiredError;
+            break;
+          }
+        }
+        if (customFieldRowError) {
+          errors.push({ row: activeSheet.headerRowIndex + index + 2, message: customFieldRowError });
+          continue;
+        }
+
         const stepsText = valueFor("steps");
         const steps = stepsText
           // Each step segment may embed its expected result as "action => expected result" —
@@ -314,6 +415,7 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
             status: valueFor("status") || "Draft",
             component: valueFor("component") || undefined,
             suiteId,
+            customFieldValues,
           });
           imported += 1;
         } catch (err) {
@@ -542,6 +644,40 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
                   </div>
                 ))}
               </div>
+
+              {customFieldDefinitions.length > 0 && (
+                <div className="mt-5">
+                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted)]">Custom Fields</p>
+                  <div className="space-y-2">
+                    {customFieldDefinitions.map((definition) => (
+                      <div key={definition.id} className="flex items-center gap-3">
+                        <label className="w-40 shrink-0 text-sm font-medium text-[var(--foreground)]">
+                          {definition.name}
+                          {definition.required && <span className="ml-0.5 text-[var(--error)]">*</span>}
+                        </label>
+                        <select
+                          value={customFieldMapping[definition.id] ?? ""}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            setCustomFieldMapping((prev) => {
+                              const next = { ...prev };
+                              if (val === "") delete next[definition.id];
+                              else next[definition.id] = parseInt(val, 10);
+                              return next;
+                            });
+                          }}
+                          className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-1.5 text-sm text-[var(--foreground)]"
+                        >
+                          <option value="">-- Skip --</option>
+                          {preview.headers.map((header, idx) => (
+                            <option key={idx} value={idx}>{header}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Preview table */}
               {mappedPreviewData.length > 0 && (

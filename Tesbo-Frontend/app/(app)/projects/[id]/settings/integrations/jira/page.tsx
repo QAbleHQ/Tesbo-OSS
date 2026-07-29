@@ -1,7 +1,8 @@
 "use client";
 
 import { ProjectIntegrationMapping } from "@/components/integrations/ProjectIntegrationMapping";
-import { getJiraStatus, listJiraProjects, connectJiraProjects, syncJiraTickets } from "@/lib/api";
+import { JiraProjectSettings } from "@/components/integrations/JiraProjectSettings";
+import { getJiraStatus, listJiraProjects, connectJiraProjects } from "@/lib/api";
 
 export default function JiraProjectIntegrationPage() {
   return (
@@ -13,7 +14,7 @@ export default function JiraProjectIntegrationPage() {
       fetchStatus={getJiraStatus}
       fetchRemoteList={listJiraProjects}
       saveMapping={connectJiraProjects}
-      sync={syncJiraTickets}
+      settingsPanel={<JiraProjectSettings />}
     />
   );
 }
