@@ -183,6 +183,8 @@ export interface CreateWorkspaceResponse {
 
 export async function createWorkspace(data: {
   orgName: string;
+  /** ISO 3166-1 alpha-2. Soft signal for currency detection at checkout. */
+  country?: string;
 }): Promise<CreateWorkspaceResponse> {
   return api<CreateWorkspaceResponse>("/api/onboarding/workspace", {
     method: "POST",
@@ -209,6 +211,8 @@ export interface WorkspaceInfo {
   slug: string;
   plan?: "launch" | "pro";
   role?: string;
+  /** Self-reported ISO 3166-1 alpha-2 country; null when never provided. */
+  country?: string | null;
   createdAt: string;
 }
 
@@ -226,7 +230,8 @@ export async function getWorkspace(): Promise<WorkspaceInfo> {
   return api<WorkspaceInfo>("/api/workspace");
 }
 
-export async function updateWorkspace(data: { name: string }): Promise<WorkspaceInfo> {
+// Omit `country` to leave it untouched; pass "" to clear it.
+export async function updateWorkspace(data: { name: string; country?: string }): Promise<WorkspaceInfo> {
   return api<WorkspaceInfo>("/api/workspace", {
     method: "PATCH",
     body: data,
@@ -242,26 +247,78 @@ export interface BillingInfo {
   status: string | null;
   currentPeriodEnd: string | null;
   cancelAtPeriodEnd: boolean;
+  /** Set while a subscription invoice is unpaid — Stripe is still retrying. */
+  paymentFailedAt: string | null;
+  /** When Launch limits start applying after a downgrade. */
+  graceEndsAt: string | null;
+  /** Downgraded, but still holding Pro-sized limits until graceEndsAt. */
+  inGracePeriod: boolean;
+  /** Grace window closed — Launch limits are now enforced. */
+  limitsEnforced: boolean;
 }
 
 export async function getBillingInfo(): Promise<BillingInfo> {
   return api<BillingInfo>("/api/billing");
 }
 
+export type BillingCurrency = "usd" | "inr";
+
 export interface BillingPricing {
-  currency: "usd" | "inr";
+  currency: BillingCurrency;
   monthlyAmount: number | null;
   annualAmount: number | null;
+  /** Whether THIS visitor may choose INR — the server decides from the detected country. */
+  inrAvailable: boolean;
+  /** A past payment has fixed the currency in Stripe; it can no longer be changed. */
+  currencyLocked: boolean;
 }
 
-export async function getBillingPricing(): Promise<BillingPricing> {
-  return api<BillingPricing>("/api/billing/pricing");
+// `currency` states a preference only — the server independently decides whether it's allowed
+// (INR requires being detected in India) and rejects it otherwise. Omit for pure auto-detection.
+export async function getBillingPricing(currency?: BillingCurrency): Promise<BillingPricing> {
+  const query = currency ? `?currency=${currency}` : "";
+  return api<BillingPricing>(`/api/billing/pricing${query}`);
 }
 
-export async function createCheckoutSession(interval: BillingInterval): Promise<{ url: string }> {
+// Pulls subscription state straight from Stripe. Called after checkout redirects back so the
+// upgrade lands even if the webhook is late, dropped, or not configured.
+export async function reconcileBilling(): Promise<BillingInfo> {
+  return api<BillingInfo>("/api/billing/reconcile", { method: "POST" });
+}
+
+export interface BillingHistoryEntry {
+  /** Machine-readable event, e.g. billing_upgraded / billing_payment_failed. */
+  action: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  at: string;
+}
+
+export async function getBillingHistory(): Promise<BillingHistoryEntry[]> {
+  return api<BillingHistoryEntry[]>("/api/billing/history");
+}
+
+export interface BillingInvoice {
+  id: string;
+  number: string | null;
+  status: string | null;
+  /** Minor units (paise / cents). */
+  amountPaid: number;
+  amountDue: number;
+  currency: string;
+  createdAt: string;
+  hostedInvoiceUrl: string | null;
+  invoicePdf: string | null;
+}
+
+export async function getBillingInvoices(): Promise<BillingInvoice[]> {
+  return api<BillingInvoice[]>("/api/billing/invoices");
+}
+
+export async function createCheckoutSession(interval: BillingInterval, currency?: BillingCurrency): Promise<{ url: string }> {
   return api<{ url: string }>("/api/billing/checkout-session", {
     method: "POST",
-    body: { interval },
+    body: { interval, currency },
   });
 }
 
@@ -272,9 +329,14 @@ export async function createPortalSession(): Promise<{ url: string }> {
 export interface PlanUsageSummary {
   plan: "launch" | "pro";
   projectCount: number;
+  /** The limits actually in force — Pro-sized while a downgraded workspace is in its grace window. */
   projectLimit: number | null;
   storageUsedBytes: number;
   storageLimitBytes: number;
+  inGracePeriod: boolean;
+  graceEndsAt: string | null;
+  /** Where to send someone who needs more room than their plan allows. */
+  supportContactEmail: string;
 }
 
 export async function getBillingUsage(): Promise<PlanUsageSummary> {

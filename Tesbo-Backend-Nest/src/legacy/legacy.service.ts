@@ -156,6 +156,18 @@ function slugify(value: string): string {
     .slice(0, 64) || "workspace";
 }
 
+/**
+ * Normalizes a self-reported country to an ISO 3166-1 alpha-2 code, or null.
+ *
+ * Returns null rather than throwing for anything unrecognized: this is a soft signal used only as a
+ * pricing-detection fallback, so a junk value should degrade to "not provided" instead of failing an
+ * otherwise-valid signup or rename.
+ */
+function normalizeCountryCode(value: unknown): string | null {
+  const code = String(value ?? "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : null;
+}
+
 function projectKey(value: string): string {
   return value
     .trim()
@@ -552,8 +564,8 @@ export class LegacyService implements OnModuleInit {
     if (!name) throw new BadRequestException({ error: "orgName is required" });
     const res = await this.db.transaction(async (client) => {
       const org = await client.query<{ id: string }>(
-        "INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id",
-        [name, slugify(name)]
+        "INSERT INTO organizations (name, slug, country) VALUES ($1, $2, $3) RETURNING id",
+        [name, slugify(name), normalizeCountryCode(body.country)]
       );
       await client.query(
         "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING",
@@ -576,8 +588,8 @@ export class LegacyService implements OnModuleInit {
     const key = projectKey(String(body.projectKey || name));
     return this.db.transaction(async (client) => {
       const org = await client.query<{ id: string }>(
-        "INSERT INTO organizations (name, slug) VALUES ($1, $2) RETURNING id",
-        [orgName, slugify(orgName)]
+        "INSERT INTO organizations (name, slug, country) VALUES ($1, $2, $3) RETURNING id",
+        [orgName, slugify(orgName), normalizeCountryCode(body.country)]
       );
       await client.query("INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'owner')", [
         org.rows[0].id,
@@ -601,7 +613,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
 
     const active = await this.db.query(
-      `SELECT o.id, o.name, o.slug, o.plan, om.role, o.created_at
+      `SELECT o.id, o.name, o.slug, o.plan, o.country, om.role, o.created_at
        FROM users u
        JOIN organizations o ON o.id = u.active_organization_id
        JOIN organization_members om ON om.organization_id = o.id AND om.user_id = u.id
@@ -613,7 +625,7 @@ export class LegacyService implements OnModuleInit {
     // active_organization_id is unset or stale (e.g. user was removed from
     // that org) — fall back to the earliest membership and self-heal.
     const res = await this.db.query(
-      `SELECT o.id, o.name, o.slug, o.plan, om.role, o.created_at
+      `SELECT o.id, o.name, o.slug, o.plan, o.country, om.role, o.created_at
        FROM organizations o
        JOIN organization_members om ON om.organization_id = o.id
        WHERE om.user_id = $1
@@ -671,7 +683,12 @@ export class LegacyService implements OnModuleInit {
     if (!name) throw new BadRequestException({ error: "name is required" });
     if (name.length > 255) throw new BadRequestException({ error: "name must be 255 characters or fewer" });
 
-    await this.db.query("UPDATE organizations SET name = $1, updated_at = now() WHERE id = $2", [name, workspace.id]);
+    // `country` is optional here so a plain rename doesn't clear it; passing "" clears it explicitly.
+    const country = body.country === undefined ? undefined : normalizeCountryCode(body.country);
+    await this.db.query(
+      `UPDATE organizations SET name = $1, country = CASE WHEN $3 THEN $2 ELSE country END, updated_at = now() WHERE id = $4`,
+      [name, country, country !== undefined, workspace.id]
+    );
     return this.workspace(uid);
   }
 

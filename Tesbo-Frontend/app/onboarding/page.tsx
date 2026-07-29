@@ -1,18 +1,33 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { addWorkspaceMember, authMe, createWorkspace, getWorkspace } from "@/lib/api";
-import { Button, Field, FieldError, FieldHint, FieldLabel, Input, Textarea } from "@/components/ui";
+import { countryOptions } from "@/lib/countries";
+import { Button, Field, FieldError, FieldHint, FieldLabel, Input, Select, Textarea } from "@/components/ui";
+
+/** Best-effort default from the browser locale (e.g. "en-IN" → "IN"); empty when it has no region. */
+function guessCountryFromLocale(): string {
+  try {
+    const region = new Intl.Locale(navigator.language).region;
+    return region && /^[A-Z]{2}$/.test(region) ? region : "";
+  } catch {
+    return "";
+  }
+}
 
 export default function OnboardingPage() {
   const router = useRouter();
   const [checking, setChecking] = useState(true);
   const [step, setStep] = useState<"workspace" | "team">("workspace");
   const [orgName, setOrgName] = useState("");
+  // Prefilled from the browser's own locale as a sensible default — it's only a soft pricing signal,
+  // and pre-selecting the likely answer beats making everyone scroll a 240-entry list.
+  const [country, setCountry] = useState(() => guessCountryFromLocale());
   const [teamEmails, setTeamEmails] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const countries = useMemo(() => countryOptions(), []);
 
   useEffect(() => {
     async function guardOnboardingAccess() {
@@ -49,6 +64,7 @@ export default function OnboardingPage() {
     try {
       await createWorkspace({
         orgName: orgName.trim(),
+        ...(country && { country }),
       });
       setStep("team");
     } catch (err) {
@@ -123,6 +139,18 @@ export default function OnboardingPage() {
                 placeholder="My Team"
                 disabled={loading}
               />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="country">Country</FieldLabel>
+              <Select id="country" value={country} onChange={(e) => setCountry(e.target.value)} disabled={loading}>
+                <option value="">Select a country…</option>
+                {countries.map((c) => (
+                  <option key={c.code} value={c.code}>
+                    {c.name}
+                  </option>
+                ))}
+              </Select>
+              <FieldHint>Used to show the right currency at checkout. You can change this later in workspace settings.</FieldHint>
             </Field>
             {error && <FieldError>{error}</FieldError>}
             <Button type="submit" disabled={loading} fullWidth>

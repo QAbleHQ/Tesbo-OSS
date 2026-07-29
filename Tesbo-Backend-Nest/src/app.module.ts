@@ -1,5 +1,8 @@
 import { BullModule } from "@nestjs/bullmq";
 import { Module } from "@nestjs/common";
+import { APP_GUARD } from "@nestjs/core";
+import { PlanLimitsModule } from "./plan-limits/plan-limits.module";
+import { ProjectWriteLockGuard } from "./plan-limits/project-write-lock.guard";
 import { ConfigModule } from "./config/config.module";
 import { AppConfigService } from "./config/app-config.service";
 import { DatabaseModule } from "./database/database.module";
@@ -29,7 +32,11 @@ import { CustomFieldsModule } from "./custom-fields/custom-fields.module";
     LegacyModule,
     McpModule,
     BillingModule,
-    CustomFieldsModule
-  ]
+    CustomFieldsModule,
+    PlanLimitsModule
+  ],
+  // Global so every current and future mutating /api/projects/:id route is covered; the guard
+  // itself no-ops on reads and on workspaces that are within their limits.
+  providers: [{ provide: APP_GUARD, useClass: ProjectWriteLockGuard }]
 })
 export class AppModule {}
