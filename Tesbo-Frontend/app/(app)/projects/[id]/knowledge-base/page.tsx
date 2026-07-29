@@ -1136,6 +1136,15 @@ function KnowledgeBasePageInner() {
                   <tbody>
                     {pagedItems.map((item) => {
                       const isAiMemory = item.type === "document" && (item as { documentType?: string }).documentType === "ai_memory";
+                      // Provider-owned mirror: flagged in the list so the read-only state and its
+                      // origin are visible without opening the document.
+                      const syncedFrom =
+                        item.type === "document" && (item as { sourceRole?: string }).sourceRole === "mirror"
+                          ? (item as { sourceProvider?: string }).sourceProvider === "linear"
+                            ? "Linear"
+                            : "Jira"
+                          : null;
+                      const syncedBy = (item as { syncedByName?: string }).syncedByName;
                       return (
                         <tr
                           key={`${item.type}-${item.id}`}
@@ -1155,6 +1164,11 @@ function KnowledgeBasePageInner() {
                                   {(item as { status?: string }).status === "approved" ? "Approved" : (item as { status?: string }).status === "rejected" ? "Rejected" : "AI Generated"}
                                 </StatusChip>
                               )}
+                              {syncedFrom && (
+                                <StatusChip tone="info" dot>
+                                  {syncedFrom}
+                                </StatusChip>
+                              )}
                             </div>
                           </td>
                           {searchQuery && (
@@ -1162,7 +1176,13 @@ function KnowledgeBasePageInner() {
                               {((item as unknown as { breadcrumb?: KnowledgeBreadcrumbEntry[] }).breadcrumb || []).map((b) => b.name).join(" / ")}
                             </td>
                           )}
-                          <td className="px-4 py-2.5 text-[var(--muted)]">{(item as { updatedByName?: string }).updatedByName || "—"}</td>
+                          {/* A mirror has no human editor — attribute it to the integration, and
+                              name whoever ran the sync that last wrote it. */}
+                          <td className="px-4 py-2.5 text-[var(--muted)]">
+                            {syncedFrom
+                              ? `${syncedFrom} integration${syncedBy ? ` · synced by ${syncedBy}` : ""}`
+                              : (item as { updatedByName?: string }).updatedByName || "—"}
+                          </td>
                           <td className="px-4 py-2.5 text-[var(--muted)]">{formatDate((item as { updatedAt: string }).updatedAt)}</td>
                           <td className="px-4 py-2.5 text-[var(--muted)]">{item.type === "file" ? formatFileSize((item as { fileSize?: number }).fileSize) : "—"}</td>
                           <td className="px-4 py-2.5 text-right">

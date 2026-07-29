@@ -8,6 +8,7 @@ import type { AppConfigService } from "../config/app-config.service";
 import type { StorageService } from "../storage/storage.service";
 import type { RagIngestionService } from "../rag/rag-ingestion.service";
 import type { RagRetrievalService } from "../rag/rag-retrieval.service";
+import type { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import type { ApiTokenService } from "../auth/api-token.service";
 import type { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import type { CustomFieldsService } from "../custom-fields/custom-fields.service";
@@ -82,6 +83,7 @@ function makeLegacy(db: DatabaseService): LegacyService {
     {} as unknown as StorageService,
     {} as unknown as RagIngestionService,
     {} as unknown as RagRetrievalService,
+    {} as unknown as IntegrationSyncService,
     {} as unknown as ApiTokenService,
     { assertIntegrationAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as PlanLimitsService,
     {} as unknown as CustomFieldsService
@@ -494,11 +496,11 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
     expect(err).toBeInstanceOf(NotFoundException);
   });
 
-  it("replaces existing mappings and links only well-formed teams (drops entries missing id or key)", async () => {
+  it("disables the previous mapping and links the one well-formed team (drops entries missing id or key)", async () => {
     const { db, calls } = makeDb([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
       { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
-      { match: "DELETE FROM linear_project_mappings", rows: [] },
+      { match: "UPDATE linear_project_mappings SET enabled = false", rows: [] },
       { match: "INSERT INTO linear_project_mappings", rows: [] }
     ]);
     const svc = makeLegacy(db);
@@ -511,8 +513,11 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
     });
     expect(res).toEqual({ linked: 1 });
 
-    const deleteCall = calls.find((c) => c.sql.includes("DELETE FROM linear_project_mappings"));
-    expect(deleteCall!.params).toEqual(["proj-1", "conn-1"]);
+    // Disabled, not deleted: the outgoing mapping's tickets and mirrored KB documents still
+    // reference it (V72).
+    const disableCall = calls.find((c) => c.sql.includes("UPDATE linear_project_mappings SET enabled = false"));
+    expect(disableCall!.params).toEqual(["proj-1"]);
+    expect(calls.some((c) => c.sql.includes("DELETE FROM linear_project_mappings"))).toBe(false);
 
     const insertCalls = calls.filter((c) => c.sql.includes("INSERT INTO linear_project_mappings"));
     expect(insertCalls).toHaveLength(1);
@@ -523,11 +528,32 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
     const { db, calls } = makeDb([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
       { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
-      { match: "DELETE FROM linear_project_mappings", rows: [] }
+      { match: "UPDATE linear_project_mappings SET enabled = false", rows: [] }
     ]);
     const svc = makeLegacy(db);
     const res = await svc.connectLinearTeams("proj-1", { projects: [] });
     expect(res).toEqual({ linked: 0 });
+    expect(calls.some((c) => c.sql.includes("INSERT INTO linear_project_mappings"))).toBe(false);
+  });
+
+  // V72 constrains a Tesbo project to exactly one Linear team (idx_linear_project_mappings_one_per_project),
+  // so a multi-team request is rejected outright rather than silently linking the first.
+  it("rejects a request carrying more than one team", async () => {
+    const { db, calls } = makeDb([
+      { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
+      { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] }
+    ]);
+    const svc = makeLegacy(db);
+    const err = await rejection(
+      svc.connectLinearTeams("proj-1", {
+        projects: [
+          { id: "team-1", key: "ENG", name: "Engineering" },
+          { id: "team-2", key: "OPS", name: "Operations" }
+        ]
+      })
+    );
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect(calls.some((c) => c.sql.includes("UPDATE linear_project_mappings SET enabled = false"))).toBe(false);
     expect(calls.some((c) => c.sql.includes("INSERT INTO linear_project_mappings"))).toBe(false);
   });
 });

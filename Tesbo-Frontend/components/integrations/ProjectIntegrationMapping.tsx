@@ -8,11 +8,13 @@ import {
   getWorkspace,
   getIntegrationConfig,
   getIntegrationAuthUrl,
+  isSyncRunActive,
   INTEGRATION_RETURN_PROJECT_KEY,
   type IntegrationProvider,
 } from "@/lib/api";
 import { Button, Card } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
+import { SyncStatusPanel, useSyncRun } from "@/components/integrations/SyncStatusPanel";
 
 interface RemoteItem {
   id: string;
@@ -35,7 +37,7 @@ export function ProjectIntegrationMapping({
   fetchStatus,
   fetchRemoteList,
   saveMapping,
-  sync,
+  settingsPanel,
 }: {
   provider: IntegrationProvider;
   label: string;
@@ -44,7 +46,12 @@ export function ProjectIntegrationMapping({
   fetchStatus: (projectId: string) => Promise<ConnectionStatus>;
   fetchRemoteList: (projectId: string) => Promise<RemoteItem[]>;
   saveMapping: (projectId: string, items: { id: string; key: string; name: string }[]) => Promise<void>;
-  sync: (projectId: string) => Promise<{ synced: number }>;
+  /**
+   * Settings that only make sense for this provider — Jira's AI-generation toggles, say. Rendered
+   * below the mapping and sync cards, so each integration owns its settings on its own page instead
+   * of adding a tab to the project settings rail.
+   */
+  settingsPanel?: React.ReactNode;
 }) {
   const params = useParams();
   const router = useRouter();
@@ -56,11 +63,12 @@ export function ProjectIntegrationMapping({
   const [connecting, setConnecting] = useState(false);
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [remoteItems, setRemoteItems] = useState<RemoteItem[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Exactly one remote project/team per Tesbo project, so this is a single id rather than a Set.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [itemsLoading, setItemsLoading] = useState(false);
+  const { run, starting, error: syncError, start: startSync } = useSyncRun(projectId, provider, !!status?.connected);
 
   const loadData = useCallback(async () => {
     try {
@@ -77,7 +85,7 @@ export function ProjectIntegrationMapping({
         setItemsLoading(true);
         const items = await fetchRemoteList(projectId);
         setRemoteItems(items);
-        setSelected(new Set(items.filter((item) => item.connected).map((item) => item.id)));
+        setSelectedId(items.find((item) => item.connected)?.id ?? null);
         setItemsLoading(false);
       } else {
         const config = await getIntegrationConfig(provider).catch(() => null);
@@ -107,42 +115,29 @@ export function ProjectIntegrationMapping({
     }
   }
 
-  function toggleItem(id: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
   async function handleSaveMapping() {
     setSaving(true);
     setMessage(null);
     try {
-      const items = remoteItems
-        .filter((item) => selected.has(item.id))
-        .map((item) => ({ id: item.id, key: item.key, name: item.name }));
-      await saveMapping(projectId, items);
-      setMessage({ type: "success", text: `${remoteUnitLabel} mapping saved.` });
+      const item = remoteItems.find((candidate) => candidate.id === selectedId);
+      await saveMapping(projectId, item ? [{ id: item.id, key: item.key, name: item.name }] : []);
+      setMessage({
+        type: "success",
+        text: item ? `${item.name} linked to this project.` : `${remoteUnitLabel} unlinked from this project.`,
+      });
       setStatus(await fetchStatus(projectId));
-    } catch {
-      setMessage({ type: "error", text: `Failed to save ${remoteUnitLabel} mapping.` });
+    } catch (err) {
+      setMessage({ type: "error", text: err instanceof Error ? err.message : `Failed to save ${remoteUnitLabel} mapping.` });
     } finally {
       setSaving(false);
     }
   }
 
   async function handleSync() {
-    setSyncing(true);
     setMessage(null);
-    try {
-      const result = await sync(projectId);
-      setMessage({ type: "success", text: `Synced ${result.synced} tickets from ${label}.` });
-    } catch (err) {
-      setMessage({ type: "error", text: err instanceof Error ? err.message : `Failed to sync ${label} tickets.` });
-    } finally {
-      setSyncing(false);
+    const result = await startSync();
+    if (result?.alreadyRunning) {
+      setMessage({ type: "success", text: `A ${label} sync is already running — showing its progress below.` });
     }
   }
 
@@ -237,9 +232,11 @@ export function ProjectIntegrationMapping({
       )}
 
       <Card className="p-4">
-        <h2 className="text-base font-semibold text-[var(--foreground)]">Select {remoteUnitLabel}s</h2>
+        <h2 className="text-base font-semibold text-[var(--foreground)]">Select a {remoteUnitLabel}</h2>
         <p className="mt-1 text-sm text-[var(--muted)]">
-          Choose which {remoteUnitLabel.toLowerCase()}(s) to link. Tickets from selected {remoteUnitLabel.toLowerCase()}s will be available in the Knowledge Base.
+          One {remoteUnitLabel.toLowerCase()} feeds this project. Its tickets are mirrored into the{" "}
+          <span className="font-medium text-[var(--foreground)]">{label}</span> folder of the Knowledge Base, where Zyra can use them as
+          context. Picking a different {remoteUnitLabel.toLowerCase()} replaces the link — already-synced documents are left in place.
         </p>
 
         {itemsLoading ? (
@@ -250,21 +247,22 @@ export function ProjectIntegrationMapping({
         ) : remoteItems.length === 0 ? (
           <p className="mt-4 text-sm text-[var(--muted)]">No {remoteUnitLabel.toLowerCase()}s found in your {label} workspace.</p>
         ) : (
-          <div className="mt-4 space-y-2 max-h-80 overflow-y-auto">
+          <div className="mt-4 space-y-2 max-h-80 overflow-y-auto" role="radiogroup" aria-label={`${label} ${remoteUnitLabel}`}>
             {remoteItems.map((item) => (
               <label
                 key={item.id}
                 className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 cursor-pointer transition-colors ${
-                  selected.has(item.id)
+                  selectedId === item.id
                     ? "border-[var(--brand-primary)] bg-[var(--brand-soft)]"
                     : "border-[var(--border)] hover:bg-[var(--surface-secondary)]"
                 }`}
               >
                 <input
-                  type="checkbox"
-                  checked={selected.has(item.id)}
-                  onChange={() => toggleItem(item.id)}
-                  className="rounded border-[var(--border)] text-[var(--brand-primary)] focus:ring-[var(--brand-soft)]"
+                  type="radio"
+                  name="remote-item"
+                  checked={selectedId === item.id}
+                  onChange={() => setSelectedId(item.id)}
+                  className="border-[var(--border)] text-[var(--brand-primary)] focus:ring-[var(--brand-soft)]"
                 />
                 <div className="min-w-0 flex-1">
                   <span className="text-sm font-medium text-[var(--foreground)]">{item.name}</span>
@@ -275,11 +273,19 @@ export function ProjectIntegrationMapping({
           </div>
         )}
 
-        <div className="mt-4 flex items-center gap-3">
-          <Button onClick={handleSaveMapping} disabled={saving || selected.size === 0}>
-            {saving ? "Saving…" : `Link ${selected.size} ${remoteUnitLabel}${selected.size !== 1 ? "s" : ""}`}
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button onClick={handleSaveMapping} disabled={saving || !selectedId}>
+            {saving ? "Saving…" : `Link ${remoteUnitLabel}`}
           </Button>
-          <span className="text-xs text-[var(--muted-soft)]">{selected.size} selected</span>
+          {selectedId && (
+            <button
+              type="button"
+              onClick={() => setSelectedId(null)}
+              className="text-xs text-[var(--muted)] underline hover:text-[var(--foreground)]"
+            >
+              Clear selection
+            </button>
+          )}
         </div>
       </Card>
 
@@ -287,18 +293,23 @@ export function ProjectIntegrationMapping({
         <Card className="p-4">
           <h2 className="text-base font-semibold text-[var(--foreground)]">Sync Tickets</h2>
           <p className="mt-1 text-sm text-[var(--muted)]">
-            Pull the latest tickets from your linked {remoteUnitLabel.toLowerCase()}s into the Knowledge Base.
+            Pulls every ticket from the linked {remoteUnitLabel.toLowerCase()} — description, comments, and an AI summary of the decisions
+            in each thread — into the {label} folder of the Knowledge Base. Runs in the background, so you can leave this page.
           </p>
           <div className="mt-3 flex items-center gap-3">
-            <Button variant="secondary" onClick={handleSync} disabled={syncing}>
-              {syncing ? "Syncing…" : "Sync Now"}
+            <Button variant="secondary" onClick={handleSync} disabled={starting || isSyncRunActive(run)}>
+              {starting ? "Starting…" : isSyncRunActive(run) ? "Syncing…" : "Sync Now"}
             </Button>
             <Link href={`/projects/${projectId}/knowledge-base`} className="text-sm text-[var(--brand-primary)] hover:underline">
               View Knowledge Base →
             </Link>
           </div>
+          {syncError && <p className="mt-3 text-sm text-[var(--error)]">{syncError}</p>}
+          <SyncStatusPanel run={run} label={label} className="mt-3" />
         </Card>
       )}
+
+      {settingsPanel}
     </StandardPageLayout>
   );
 }

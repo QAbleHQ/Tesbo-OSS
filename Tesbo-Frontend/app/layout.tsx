@@ -20,9 +20,13 @@ export const metadata: Metadata = {
   title: "Tesbo Test Manager",
   description: "AI-Powered Test Case Management",
   icons: {
-    icon: "/tesbo-test-manager-logo.png",
-    shortcut: "/tesbo-test-manager-logo.png",
-    apple: "/tesbo-test-manager-logo.png",
+    // app/favicon.ico (16/32/48) is linked automatically by Next; these cover
+    // high-DPI tabs and Android home screens.
+    icon: [
+      { url: "/brand/tesbo-mark-192.png", type: "image/png", sizes: "192x192" },
+      { url: "/brand/tesbo-mark-512.png", type: "image/png", sizes: "512x512" },
+    ],
+    apple: { url: "/brand/apple-touch-icon.png", sizes: "180x180" },
   },
 };
 

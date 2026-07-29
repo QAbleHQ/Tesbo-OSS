@@ -240,7 +240,7 @@ function SidebarContent() {
         <Link href="/projects" className={`flex items-center ${isCollapsed ? "justify-center" : ""}`} aria-label="Tesbo Test Manager">
           {isCollapsed ? (
             <span className="grid h-9 w-9 place-items-center rounded-xl border border-[var(--glass-border)] bg-[var(--glass-surface-strong)] shadow-sm">
-              <BrandLogo decorative className="h-7 w-auto object-contain" />
+              <BrandLogo mark decorative className="h-7 w-auto object-contain" />
             </span>
           ) : (
             <BrandLogo className="h-10 max-w-[150px] object-contain" />

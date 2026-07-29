@@ -7,6 +7,7 @@ import type { AppConfigService } from "../config/app-config.service";
 import type { StorageService } from "../storage/storage.service";
 import type { RagIngestionService } from "../rag/rag-ingestion.service";
 import type { RagRetrievalService } from "../rag/rag-retrieval.service";
+import type { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import type { ApiTokenService } from "../auth/api-token.service";
 import type { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import type { CustomFieldsService } from "../custom-fields/custom-fields.service";
@@ -57,6 +58,7 @@ function makeLegacy(db: DatabaseService): LegacyService {
     {} as unknown as StorageService,
     {} as unknown as RagIngestionService,
     {} as unknown as RagRetrievalService,
+    {} as unknown as IntegrationSyncService,
     {} as unknown as ApiTokenService,
     {} as unknown as PlanLimitsService,
     {} as unknown as CustomFieldsService

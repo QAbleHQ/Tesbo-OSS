@@ -2358,8 +2358,52 @@ export async function connectJiraProjects(
   await api(`/api/projects/${projectId}/jira/projects`, { method: "POST", body: { projects } });
 }
 
-export async function syncJiraTickets(projectId: string): Promise<{ synced: number }> {
-  return api<{ synced: number }>(`/api/projects/${projectId}/jira/sync`, { method: "POST" });
+// ── Integration sync runs ──
+// Sync is queued, not synchronous: POST returns a run to poll rather than a finished count.
+
+export type SyncRunStatus = "queued" | "running" | "succeeded" | "partial" | "failed";
+export type SyncRunStage = "queued" | "connecting" | "fetching_tickets" | "building_documents" | "done" | "failed";
+
+export interface SyncRun {
+  id: string;
+  provider: string;
+  status: SyncRunStatus;
+  stage: SyncRunStage;
+  remoteProjectKey: string | null;
+  totalTickets: number;
+  processedTickets: number;
+  failedTickets: number;
+  documentsCreated: number;
+  documentsUpdated: number;
+  commentsSynced: number;
+  decisionSummaries: number;
+  error: string | null;
+  triggeredByName: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+}
+
+export interface StartSyncResult {
+  run: SyncRun;
+  /** True when a run was already in flight and this request joined it instead of starting another. */
+  alreadyRunning: boolean;
+}
+
+export function isSyncRunActive(run: SyncRun | null | undefined): boolean {
+  return !!run && (run.status === "queued" || run.status === "running");
+}
+
+export async function syncJiraTickets(projectId: string): Promise<StartSyncResult> {
+  return api<StartSyncResult>(`/api/projects/${projectId}/jira/sync`, { method: "POST" });
+}
+
+export async function getIntegrationSyncStatus(projectId: string, provider: IntegrationProvider): Promise<{ run: SyncRun | null }> {
+  return api<{ run: SyncRun | null }>(`/api/projects/${projectId}/integrations/${provider}/sync-status`);
+}
+
+export async function getIntegrationSyncHistory(projectId: string): Promise<{ runs: SyncRun[] }> {
+  return api<{ runs: SyncRun[] }>(`/api/projects/${projectId}/integrations/sync-history`);
 }
 
 export async function addJiraComment(
@@ -2481,8 +2525,8 @@ export async function connectLinearTeams(
   await api(`/api/projects/${projectId}/linear/teams`, { method: "POST", body: { projects } });
 }
 
-export async function syncLinearTickets(projectId: string): Promise<{ synced: number }> {
-  return api<{ synced: number }>(`/api/projects/${projectId}/linear/sync`, { method: "POST" });
+export async function syncLinearTickets(projectId: string): Promise<StartSyncResult> {
+  return api<StartSyncResult>(`/api/projects/${projectId}/linear/sync`, { method: "POST" });
 }
 
 export async function addLinearComment(projectId: string, issueKey: string, comment: string): Promise<void> {
@@ -2599,6 +2643,14 @@ export interface KnowledgeDocument {
   sourceProvider: string | null;
   sourceExternalId: string | null;
   sourceUrl: string | null;
+  /** "mirror" = provider-owned, overwritten every sync. "notes" = the human-owned sibling. */
+  sourceRole: "mirror" | "notes" | null;
+  sourceSyncedBy: string | null;
+  sourceSyncedAt: string | null;
+  /** True for provider mirrors: the editor is locked and the API rejects updates. */
+  isReadOnly: boolean;
+  /** Display name of whoever last ran the sync that wrote this document. Detail endpoint only. */
+  syncedByName?: string | null;
   createdBy: string | null;
   updatedBy: string | null;
   reviewedBy: string | null;
@@ -2782,6 +2834,58 @@ export function approveAiMemory(projectId: string, documentId: string): Promise<
 
 export function rejectAiMemory(projectId: string, documentId: string): Promise<KnowledgeDocument> {
   return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/reject-ai-memory`, { method: "PATCH" });
+}
+
+// Document comments
+// Stored separately from the document body, so they work on read-only provider mirrors whose
+// body is rewritten by every sync.
+
+export interface KnowledgeDocumentComment {
+  id: string;
+  documentId: string;
+  parentCommentId: string | null;
+  authorId: string | null;
+  authorName: string;
+  body: string;
+  /** Quoted passage this thread is anchored to, or null for a document-level comment. */
+  anchorText: string | null;
+  anchorStart: number | null;
+  anchorEnd: number | null;
+  isResolved: boolean;
+  resolvedBy: string | null;
+  resolvedByName: string | null;
+  resolvedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** One level of nesting only — replies never have replies of their own. */
+  replies: KnowledgeDocumentComment[];
+}
+
+export function listKnowledgeDocumentComments(
+  projectId: string,
+  documentId: string
+): Promise<{ list: KnowledgeDocumentComment[]; total: number; openCount: number }> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/comments`);
+}
+
+export function createKnowledgeDocumentComment(
+  projectId: string,
+  documentId: string,
+  input: { body: string; parentCommentId?: string; anchorText?: string; anchorStart?: number; anchorEnd?: number }
+): Promise<KnowledgeDocumentComment> {
+  return api(`/api/projects/${projectId}/knowledge-base/documents/${documentId}/comments`, { method: "POST", body: input });
+}
+
+export function updateKnowledgeDocumentComment(
+  projectId: string,
+  commentId: string,
+  input: { body?: string; isResolved?: boolean }
+): Promise<KnowledgeDocumentComment> {
+  return api(`/api/projects/${projectId}/knowledge-base/comments/${commentId}`, { method: "PATCH", body: input });
+}
+
+export function deleteKnowledgeDocumentComment(projectId: string, commentId: string): Promise<{ success: boolean }> {
+  return api(`/api/projects/${projectId}/knowledge-base/comments/${commentId}`, { method: "DELETE" });
 }
 
 // Files

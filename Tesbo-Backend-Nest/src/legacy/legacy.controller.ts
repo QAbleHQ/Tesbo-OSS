@@ -885,6 +885,40 @@ export class LegacyController {
     return this.legacy.rejectAiMemory(projectId, req.userId, documentId);
   }
 
+  // ── Document comments ──
+  // Must stay above the bare /documents/:documentId route below, same ordering constraint noted
+  // at the top of this Knowledge Base block.
+
+  @Get("/api/projects/:projectId/knowledge-base/documents/:documentId/comments")
+  listKnowledgeDocumentComments(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
+    return this.legacy.listKnowledgeDocumentComments(projectId, req.userId, documentId);
+  }
+
+  @Post("/api/projects/:projectId/knowledge-base/documents/:documentId/comments")
+  createKnowledgeDocumentComment(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("documentId") documentId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.createKnowledgeDocumentComment(projectId, req.userId, documentId, body);
+  }
+
+  @Patch("/api/projects/:projectId/knowledge-base/comments/:commentId")
+  updateKnowledgeDocumentComment(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("commentId") commentId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.updateKnowledgeDocumentComment(projectId, req.userId, commentId, body);
+  }
+
+  @Delete("/api/projects/:projectId/knowledge-base/comments/:commentId")
+  deleteKnowledgeDocumentComment(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("commentId") commentId: string) {
+    return this.legacy.deleteKnowledgeDocumentComment(projectId, req.userId, commentId);
+  }
+
   @Get("/api/projects/:projectId/knowledge-base/documents/:documentId")
   getKnowledgeDocument(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("documentId") documentId: string) {
     return this.legacy.getKnowledgeDocument(projectId, req.userId, documentId);
@@ -1086,8 +1120,8 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/jira/sync")
-  syncJira(@Param("projectId") projectId: string) {
-    return this.legacy.syncJira(projectId);
+  syncJira(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.syncJira(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/jira/tickets")
@@ -1123,8 +1157,20 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/linear/sync")
-  syncLinear(@Param("projectId") projectId: string) {
-    return this.legacy.syncLinear(projectId);
+  syncLinear(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.syncLinear(req.userId, projectId);
+  }
+
+  // ── Sync run status (polled by the Requirements page while a sync is in flight) ──
+
+  @Get("/api/projects/:projectId/integrations/:provider/sync-status")
+  integrationSyncStatus(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("provider") provider: string) {
+    return this.legacy.integrationSyncStatus(req.userId, projectId, provider);
+  }
+
+  @Get("/api/projects/:projectId/integrations/sync-history")
+  integrationSyncHistory(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.integrationSyncHistory(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/linear/tickets")

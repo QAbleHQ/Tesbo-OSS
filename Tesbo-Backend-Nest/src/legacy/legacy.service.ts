@@ -14,9 +14,11 @@ import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
 import { StorageService } from "../storage/storage.service";
 import { encryptSecret, decryptSecret } from "../common/crypto.util";
+import { escapeHtml, jiraDescriptionToText } from "../common/integration-text.util";
 import { ApiTokenService } from "../auth/api-token.service";
 import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
+import { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import { CustomFieldsService } from "../custom-fields/custom-fields.service";
 import { CustomFieldDefinitionDto } from "../custom-fields/custom-fields.types";
@@ -203,10 +205,6 @@ function formatCustomFieldExportValue(definition: CustomFieldDefinitionDto, raw:
   }
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
 // Strips path separators/control characters from a folder or document/file name so it's safe
 // to use as a zip entry path segment (used only by exportKnowledgeFolder).
 function sanitizeZipEntryName(value: string): string {
@@ -216,19 +214,6 @@ function sanitizeZipEntryName(value: string): string {
 
 function escapeJql(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
-function jiraDescriptionToText(value: unknown): string {
-  if (!value) return "";
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(jiraDescriptionToText).filter(Boolean).join("\n");
-  if (typeof value !== "object") return String(value);
-
-  const node = value as Body;
-  const parts: string[] = [];
-  if (typeof node.text === "string") parts.push(node.text);
-  if (Array.isArray(node.content)) parts.push(jiraDescriptionToText(node.content));
-  return parts.filter(Boolean).join(node.type === "paragraph" ? "\n" : " ");
 }
 
 type IntegrationProvider = "jira" | "linear";
@@ -367,6 +352,7 @@ export class LegacyService implements OnModuleInit {
     private readonly storage: StorageService,
     private readonly ragIngestion: RagIngestionService,
     private readonly ragRetrieval: RagRetrievalService,
+    private readonly integrationSync: IntegrationSyncService,
     private readonly apiTokens: ApiTokenService,
     private readonly planLimits: PlanLimitsService,
     @Inject(forwardRef(() => CustomFieldsService)) private readonly customFields: CustomFieldsService
@@ -3311,6 +3297,7 @@ export class LegacyService implements OnModuleInit {
   private static readonly KB_VERSION_SNAPSHOT_MINUTES = 15;
   private static readonly KB_DOCUMENT_COLUMNS = `id, organization_id, project_id, folder_id, title, content_json, content_html, content_text,
     document_type, status, is_ai_generated, source_provider, source_external_id, source_url,
+    source_role, source_synced_by, source_synced_at, is_read_only,
     created_by, updated_by, reviewed_by, reviewed_at, is_deleted, created_at, updated_at, deleted_at`;
 
   private async kbProjectRole(userId: string, projectId: string): Promise<"owner" | "manager" | "qa_engineer"> {
@@ -3651,8 +3638,11 @@ export class LegacyService implements OnModuleInit {
         [folderId]
       ),
       this.db.query(
-        `SELECT kd.*, u.name AS updated_by_name, u.email AS updated_by_email
-         FROM knowledge_documents kd LEFT JOIN users u ON u.id = kd.updated_by
+        `SELECT kd.*, u.name AS updated_by_name, u.email AS updated_by_email,
+                COALESCE(NULLIF(TRIM(su.name), ''), su.email) AS synced_by_name
+         FROM knowledge_documents kd
+         LEFT JOIN users u ON u.id = kd.updated_by
+         LEFT JOIN users su ON su.id = kd.source_synced_by
          WHERE kd.folder_id = $1 AND kd.is_deleted = false ORDER BY kd.updated_at DESC`,
         [folderId]
       ),
@@ -3742,7 +3732,19 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
     const doc = await this.kbDocument(projectId, documentId);
     const breadcrumb = await this.kbBreadcrumb(doc.folder_id);
-    return { ...toCamel(doc), breadcrumb };
+    // Resolved separately rather than joined: KB_DOCUMENT_COLUMNS is shared with INSERT/UPDATE
+    // RETURNING clauses where a join isn't available.
+    const syncedByName = await this.kbSyncedByName(doc.source_synced_by);
+    return { ...toCamel(doc), syncedByName, breadcrumb };
+  }
+
+  // Display name for the person whose Sync click last rewrote a mirrored document.
+  private async kbSyncedByName(userId: unknown): Promise<string | null> {
+    if (!userId) return null;
+    const res = await this.db
+      .query<{ name: string | null }>("SELECT COALESCE(NULLIF(TRIM(name), ''), email) AS name FROM users WHERE id = $1", [userId])
+      .catch(() => ({ rows: [] as Array<{ name: string | null }> }));
+    return res.rows[0]?.name || null;
   }
 
   async updateKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string, body: Body) {
@@ -3751,6 +3753,15 @@ export class LegacyService implements OnModuleInit {
     const doc = await this.kbDocument(projectId, documentId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, doc.created_by, uid);
+    // Provider-owned mirrors are rewritten wholesale by every sync, so an edit here would be
+    // silently discarded later. Comments are the writable channel on these documents — they live
+    // in knowledge_document_comments, untouched by sync. Enforced here and not only in the editor,
+    // since the API is reachable directly.
+    if (doc.is_read_only) {
+      throw new BadRequestException({
+        error: `"${doc.title}" is synced from ${doc.source_provider === "linear" ? "Linear" : "Jira"} and its body can't be edited — the next sync would overwrite your changes. Add a comment on the document instead.`
+      });
+    }
 
     const nextTitle = body.title !== undefined ? String(body.title).trim() : doc.title;
     const nextJson = body.contentJson !== undefined ? JSON.stringify(body.contentJson) : doc.content_json ? JSON.stringify(doc.content_json) : null;
@@ -3878,6 +3889,187 @@ export class LegacyService implements OnModuleInit {
     if (!res.rows[0]) throw new NotFoundException({ error: "Document not found" });
     await this.logProjectActivity(projectId, uid, "restored", "knowledge_document", documentId, res.rows[0].title, {});
     return toCamel(res.rows[0]);
+  }
+
+  // ─── Knowledge Base v2: document comments ──────────────────────────────────
+  // Google-Docs-shaped discussion on a document: one level of threading (root + replies),
+  // resolvable per thread, optionally anchored to a quoted passage. Comments are stored apart
+  // from the body, which is what lets them work on a read-only provider mirror whose body is
+  // rewritten by every sync.
+
+  private static readonly KB_COMMENT_COLUMNS = `c.id, c.document_id, c.parent_comment_id, c.author_id, c.body,
+    c.anchor_text, c.anchor_start, c.anchor_end, c.is_resolved, c.resolved_by, c.resolved_at,
+    c.created_at, c.updated_at`;
+
+  private kbCommentView(row: Body): Body {
+    return {
+      id: String(row.id),
+      documentId: String(row.document_id),
+      parentCommentId: row.parent_comment_id ? String(row.parent_comment_id) : null,
+      authorId: row.author_id ? String(row.author_id) : null,
+      authorName: row.author_name ? String(row.author_name) : "Unknown",
+      body: String(row.body || ""),
+      anchorText: row.anchor_text ? String(row.anchor_text) : null,
+      anchorStart: row.anchor_start === null || row.anchor_start === undefined ? null : Number(row.anchor_start),
+      anchorEnd: row.anchor_end === null || row.anchor_end === undefined ? null : Number(row.anchor_end),
+      isResolved: !!row.is_resolved,
+      resolvedBy: row.resolved_by ? String(row.resolved_by) : null,
+      resolvedByName: row.resolved_by_name ? String(row.resolved_by_name) : null,
+      resolvedAt: row.resolved_at ? new Date(row.resolved_at).toISOString() : null,
+      createdAt: new Date(row.created_at).toISOString(),
+      updatedAt: new Date(row.updated_at).toISOString(),
+      replies: [] as Body[]
+    };
+  }
+
+  async listKnowledgeDocumentComments(projectId: string, userId: string | null | undefined, documentId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.kbDocument(projectId, documentId);
+
+    const res = await this.db.query(
+      `SELECT ${LegacyService.KB_COMMENT_COLUMNS},
+              COALESCE(NULLIF(TRIM(a.name), ''), a.email) AS author_name,
+              COALESCE(NULLIF(TRIM(r.name), ''), r.email) AS resolved_by_name
+       FROM knowledge_document_comments c
+       LEFT JOIN users a ON a.id = c.author_id
+       LEFT JOIN users r ON r.id = c.resolved_by
+       WHERE c.document_id = $1 AND c.is_deleted = false
+       ORDER BY c.created_at ASC`,
+      [documentId]
+    );
+
+    // Assembled into threads here rather than with a recursive CTE: nesting is one level deep, so
+    // a single ordered pass is both simpler and cheaper.
+    const roots: Body[] = [];
+    const byId = new Map<string, Body>();
+    for (const row of res.rows) {
+      const view = this.kbCommentView(row);
+      byId.set(view.id, view);
+      if (!view.parentCommentId) roots.push(view);
+    }
+    for (const row of res.rows) {
+      const parentId = row.parent_comment_id ? String(row.parent_comment_id) : null;
+      if (!parentId) continue;
+      // A reply whose root was deleted has nowhere to hang; promoting it would silently reorder
+      // the conversation, so it is dropped from the view (the row itself is untouched).
+      byId.get(parentId)?.replies.push(byId.get(String(row.id))!);
+    }
+
+    const openCount = roots.filter((thread) => !thread.isResolved).length;
+    return { list: roots, total: roots.length, openCount };
+  }
+
+  async createKnowledgeDocumentComment(projectId: string, userId: string | null | undefined, documentId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const doc = await this.kbDocument(projectId, documentId);
+
+    const text = String(body?.body ?? "").trim();
+    if (!text) throw new BadRequestException({ error: "Comment cannot be empty." });
+    if (text.length > 10000) throw new BadRequestException({ error: "Comment is too long (10,000 character limit)." });
+
+    const parentCommentId = body?.parentCommentId ? String(body.parentCommentId) : null;
+    if (parentCommentId) {
+      const parent = await this.db.query<{ id: string; parent_comment_id: string | null }>(
+        "SELECT id, parent_comment_id FROM knowledge_document_comments WHERE id = $1 AND document_id = $2 AND is_deleted = false",
+        [parentCommentId, documentId]
+      );
+      if (!parent.rows[0]) throw new NotFoundException({ error: "The comment you're replying to no longer exists." });
+      // Threads stay one level deep — a reply to a reply joins the same thread instead.
+      if (parent.rows[0].parent_comment_id) {
+        throw new BadRequestException({ error: "Reply to the top comment of the thread instead of to another reply." });
+      }
+    }
+
+    // Only a thread root can carry an anchor; the CHECK in V73 enforces the same shape.
+    const anchorText = !parentCommentId && body?.anchorText ? String(body.anchorText).slice(0, 2000) : null;
+    const anchorStart = anchorText && Number.isFinite(Number(body?.anchorStart)) ? Math.max(0, Number(body.anchorStart)) : null;
+    const anchorEnd = anchorText && Number.isFinite(Number(body?.anchorEnd)) ? Math.max(0, Number(body.anchorEnd)) : null;
+
+    const res = await this.db.query(
+      `INSERT INTO knowledge_document_comments
+         (organization_id, project_id, document_id, parent_comment_id, author_id, body, anchor_text, anchor_start, anchor_end)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [doc.organization_id, projectId, documentId, parentCommentId, uid, text, anchorText, anchorStart, anchorEnd]
+    );
+    await this.logProjectActivity(projectId, uid, parentCommentId ? "replied" : "commented", "knowledge_document", documentId, doc.title, {
+      commentId: res.rows[0].id
+    });
+    return this.getKnowledgeDocumentComment(projectId, res.rows[0].id);
+  }
+
+  private async getKnowledgeDocumentComment(projectId: string, commentId: string): Promise<Body> {
+    const res = await this.db.query(
+      `SELECT ${LegacyService.KB_COMMENT_COLUMNS},
+              COALESCE(NULLIF(TRIM(a.name), ''), a.email) AS author_name,
+              COALESCE(NULLIF(TRIM(r.name), ''), r.email) AS resolved_by_name
+       FROM knowledge_document_comments c
+       LEFT JOIN users a ON a.id = c.author_id
+       LEFT JOIN users r ON r.id = c.resolved_by
+       WHERE c.id = $1 AND c.project_id = $2 AND c.is_deleted = false`,
+      [commentId, projectId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Comment not found" });
+    return this.kbCommentView(res.rows[0]);
+  }
+
+  async updateKnowledgeDocumentComment(projectId: string, userId: string | null | undefined, commentId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const existing = await this.db.query<{ id: string; author_id: string | null; parent_comment_id: string | null; document_id: string }>(
+      "SELECT id, author_id, parent_comment_id, document_id FROM knowledge_document_comments WHERE id = $1 AND project_id = $2 AND is_deleted = false",
+      [commentId, projectId]
+    );
+    const comment = existing.rows[0];
+    if (!comment) throw new NotFoundException({ error: "Comment not found" });
+    const role = await this.kbProjectRole(uid, projectId);
+
+    // Editing wording is the author's alone — a manager rewriting someone else's comment would
+    // misattribute it. Resolving is a triage action, so it follows the usual KB mutate rule.
+    if (body?.body !== undefined) {
+      if (comment.author_id !== uid) throw new ForbiddenException({ error: "You can only edit your own comments" });
+      const text = String(body.body).trim();
+      if (!text) throw new BadRequestException({ error: "Comment cannot be empty." });
+      if (text.length > 10000) throw new BadRequestException({ error: "Comment is too long (10,000 character limit)." });
+      await this.db.query("UPDATE knowledge_document_comments SET body = $2, updated_at = now() WHERE id = $1", [commentId, text]);
+    }
+
+    if (body?.isResolved !== undefined) {
+      if (comment.parent_comment_id) throw new BadRequestException({ error: "Resolve the whole thread from its top comment." });
+      this.kbRequireMutateAccess(role, comment.author_id, uid);
+      const resolved = !!body.isResolved;
+      await this.db.query(
+        `UPDATE knowledge_document_comments
+         SET is_resolved = $2, resolved_by = $3, resolved_at = $4, updated_at = now()
+         WHERE id = $1`,
+        [commentId, resolved, resolved ? uid : null, resolved ? new Date().toISOString() : null]
+      );
+    }
+
+    return this.getKnowledgeDocumentComment(projectId, commentId);
+  }
+
+  async deleteKnowledgeDocumentComment(projectId: string, userId: string | null | undefined, commentId: string) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const existing = await this.db.query<{ id: string; author_id: string | null }>(
+      "SELECT id, author_id FROM knowledge_document_comments WHERE id = $1 AND project_id = $2 AND is_deleted = false",
+      [commentId, projectId]
+    );
+    const comment = existing.rows[0];
+    if (!comment) throw new NotFoundException({ error: "Comment not found" });
+    const role = await this.kbProjectRole(uid, projectId);
+    this.kbRequireMutateAccess(role, comment.author_id, uid);
+
+    // Soft delete, and take the thread's replies with it so no orphans are left behind.
+    await this.db.query(
+      `UPDATE knowledge_document_comments
+       SET is_deleted = true, deleted_at = now(), updated_at = now()
+       WHERE id = $1 OR parent_comment_id = $1`,
+      [commentId]
+    );
+    return { success: true };
   }
 
   // ─── Knowledge Base v2: files ──────────────────────────────────────────────
@@ -4695,136 +4887,82 @@ export class LegacyService implements OnModuleInit {
         name: String(project.name || project.key || "").trim()
       }))
       .filter((project) => project.id && project.key);
-    await this.db.query("DELETE FROM jira_project_mappings WHERE project_id = $1 AND jira_connection_id = $2", [projectId, connection.id]);
-    for (const project of projects) {
-      await this.db.query(
-        `INSERT INTO jira_project_mappings (jira_connection_id, project_id, jira_project_id, jira_project_key, jira_project_name)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (jira_connection_id, jira_project_id, project_id) DO UPDATE SET
-           jira_project_key = EXCLUDED.jira_project_key,
-           jira_project_name = EXCLUDED.jira_project_name,
-           enabled = true`,
-        [connection.id, projectId, project.id, project.key, project.name]
-      );
-    }
-    return { linked: projects.length };
+    // Exactly one Jira project per Tesbo project (enforced in the schema by
+    // idx_jira_project_mappings_one_per_project). Linking a different one replaces the link;
+    // the previous mapping's already-synced tickets and Knowledge Base documents are left alone.
+    if (projects.length > 1) throw new BadRequestException({ error: "Link one Jira project at a time to this project." });
+
+    // Disable rather than DELETE: the outgoing mapping's jira_tickets rows and mirrored Knowledge
+    // Base documents reference it, and re-linking the same project later restores continuity
+    // instead of re-mirroring from scratch. An empty request is an explicit unlink.
+    await this.db.query("UPDATE jira_project_mappings SET enabled = false WHERE project_id = $1 AND enabled = true", [projectId]);
+    const [project] = projects;
+    if (!project) return { linked: 0 };
+
+    await this.db.query(
+      `INSERT INTO jira_project_mappings (jira_connection_id, project_id, jira_project_id, jira_project_key, jira_project_name)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (jira_connection_id, jira_project_id, project_id) DO UPDATE SET
+         jira_project_key = EXCLUDED.jira_project_key,
+         jira_project_name = EXCLUDED.jira_project_name,
+         enabled = true`,
+      [connection.id, projectId, project.id, project.key, project.name]
+    );
+    return { linked: 1 };
   }
 
-  async syncJira(projectId: string) {
-    const connection = await this.getJiraConnection(projectId, true);
-    if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
-    const mappings = await this.db.query(
-      "SELECT jira_project_key FROM jira_project_mappings WHERE project_id = $1 AND enabled = true",
+  async syncJira(userId: string | null | undefined, projectId: string) {
+    return this.startIntegrationSync(userId, projectId, "jira");
+  }
+
+  // ── Integration -> Knowledge Base sync (queued) ──
+  // Sync used to page the provider API inline on the request thread and mirror documents as it
+  // went, which meant a large backlog either timed out the HTTP call or blocked it for minutes
+  // with no feedback. Both providers now hand off to IntegrationSyncModule's queue and return
+  // immediately with a run the UI can poll; the pipeline itself lives in
+  // integration-sync.processor.ts.
+
+  private async startIntegrationSync(userId: string | null | undefined, projectId: string, provider: IntegrationProvider) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    const organizationId = await this.projectOrganizationId(projectId);
+    const label = provider === "jira" ? "Jira" : "Linear";
+
+    const connection = await this.getIntegrationConnection(organizationId, provider, false);
+    if (!connection) throw new NotFoundException({ error: `${label} is not connected.` });
+
+    const mapping = await this.db.query<{ remote_key: string }>(
+      provider === "jira"
+        ? "SELECT jira_project_key AS remote_key FROM jira_project_mappings WHERE project_id = $1 AND enabled = true LIMIT 1"
+        : "SELECT linear_team_key AS remote_key FROM linear_project_mappings WHERE project_id = $1 AND enabled = true LIMIT 1",
       [projectId]
     );
-    const keys = mappings.rows.map((row) => String(row.jira_project_key)).filter(Boolean);
-    if (!keys.length) return { synced: 0 };
-
-    // Mirror each synced ticket into the Knowledge Base's Requirements folder as a document
-    // (source_provider = 'jira'), so tickets are searchable and usable as Zyra context
-    // alongside manually-written docs. A future Linear/etc. integration follows the same pattern.
-    const project = await this.db.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
-    const requirementsFolder = await this.db.query<{ id: string }>(
-      `SELECT kf.id FROM knowledge_folders kf
-       JOIN knowledge_folders root ON kf.parent_folder_id = root.id AND root.is_root = true AND root.project_id = $1
-       WHERE kf.project_id = $1 AND kf.name = 'Requirements' AND kf.is_deleted = false
-       LIMIT 1`,
-      [projectId]
-    );
-    let mirrorFolderId = requirementsFolder.rows[0]?.id || null;
-    if (!mirrorFolderId) {
-      const root = await this.db.query<{ id: string }>(
-        "SELECT id FROM knowledge_folders WHERE project_id = $1 AND is_root = true LIMIT 1",
-        [projectId]
-      );
-      mirrorFolderId = root.rows[0]?.id || null;
+    const remoteKey = mapping.rows[0]?.remote_key ? String(mapping.rows[0].remote_key) : null;
+    if (!remoteKey) {
+      throw new BadRequestException({ error: `Link a ${label} ${provider === "jira" ? "project" : "team"} to this project before syncing.` });
     }
 
-    const { baseUrl: jiraBaseUrl, headers: jiraAuthHeaders } = this.jiraBaseUrlAndAuth(connection);
-    let synced = 0;
-    for (const key of keys) {
-      const jql = `project = "${key}" ORDER BY updated DESC`;
-      const data = await this.jiraFetch<Body>(
-        `${jiraBaseUrl}/rest/api/3/search/jql`,
-        {
-          method: "POST",
-          headers: { ...jiraAuthHeaders, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jql,
-            maxResults: 100,
-            fields: ["summary", "description", "issuetype", "status", "priority", "assignee", "reporter", "labels", "created", "updated"]
-          })
-        }
-      );
-      for (const issue of normalizeJsonArray(data.issues)) {
-        const fields = (issue.fields || {}) as Body;
-        await this.db.query(
-          `INSERT INTO jira_tickets (
-             project_id, jira_connection_id, jira_issue_id, jira_issue_key, summary, description,
-             issue_type, status, priority, assignee, reporter, labels, jira_created_at, jira_updated_at, jira_url, synced_at
-           )
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
-           ON CONFLICT (jira_connection_id, jira_issue_id) DO UPDATE SET
-             jira_issue_key = EXCLUDED.jira_issue_key,
-             summary = EXCLUDED.summary,
-             description = EXCLUDED.description,
-             issue_type = EXCLUDED.issue_type,
-             status = EXCLUDED.status,
-             priority = EXCLUDED.priority,
-             assignee = EXCLUDED.assignee,
-             reporter = EXCLUDED.reporter,
-             labels = EXCLUDED.labels,
-             jira_created_at = EXCLUDED.jira_created_at,
-             jira_updated_at = EXCLUDED.jira_updated_at,
-             jira_url = EXCLUDED.jira_url,
-             synced_at = now()`,
-          [
-            projectId,
-            connection.id,
-            String(issue.id || ""),
-            String(issue.key || ""),
-            String(fields.summary || ""),
-            jiraDescriptionToText(fields.description),
-            String(fields.issuetype?.name || ""),
-            String(fields.status?.name || ""),
-            String(fields.priority?.name || ""),
-            String(fields.assignee?.displayName || ""),
-            String(fields.reporter?.displayName || ""),
-            normalizeJsonArray(fields.labels).join(", "),
-            fields.created || null,
-            fields.updated || null,
-            `${connection.site_url}/browse/${issue.key}`
-          ]
-        );
-        synced += 1;
-
-        if (mirrorFolderId) {
-          const summary = String(fields.summary || "");
-          const description = jiraDescriptionToText(fields.description);
-          const url = `${connection.site_url}/browse/${issue.key}`;
-          const mirrorRes = await this.db.query<{ id: string }>(
-            `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
-             VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'jira', $7, $8)
-             ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
-               title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
-               source_url = EXCLUDED.source_url, updated_at = now()
-             RETURNING id`,
-            [
-              project.rows[0]?.organization_id,
-              projectId,
-              mirrorFolderId,
-              `${issue.key}: ${summary}`,
-              description,
-              description ? `<pre>${escapeHtml(description)}</pre>` : null,
-              String(issue.id || ""),
-              url
-            ]
-          );
-          if (mirrorRes.rows[0]?.id) this.enqueueEmbedding(project.rows[0]?.organization_id, projectId, "document", mirrorRes.rows[0].id, "updated");
-        }
-      }
+    const { run, alreadyRunning } = await this.integrationSync.startRun(organizationId, projectId, provider, uid, remoteKey);
+    // Only the click that actually started a run is an activity event — a second click that
+    // joined the in-flight run isn't a separate sync.
+    if (!alreadyRunning) {
+      await this.logProjectActivity(projectId, uid, "integration.sync.started", "integration", run.id, `${label} · ${remoteKey}`, {
+        provider,
+        remoteKey,
+        runId: run.id
+      });
     }
-    return { synced };
+    return { run, alreadyRunning };
+  }
+
+  async integrationSyncStatus(userId: string | null | undefined, projectId: string, provider: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return { run: await this.integrationSync.getLatestRun(projectId, assertIntegrationProvider(provider)) };
+  }
+
+  async integrationSyncHistory(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return { runs: await this.integrationSync.listRecentRuns(projectId) };
   }
 
   async jiraTickets(projectId: string, query: Body) {
@@ -5052,139 +5190,27 @@ export class LegacyService implements OnModuleInit {
         name: String(team.name || team.key || "").trim()
       }))
       .filter((team) => team.id && team.key);
-    await this.db.query("DELETE FROM linear_project_mappings WHERE project_id = $1 AND integration_connection_id = $2", [projectId, connection.id]);
-    for (const team of teams) {
-      await this.db.query(
-        `INSERT INTO linear_project_mappings (integration_connection_id, project_id, linear_team_id, linear_team_key, linear_team_name)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (integration_connection_id, linear_team_id, project_id) DO UPDATE SET
-           linear_team_key = EXCLUDED.linear_team_key,
-           linear_team_name = EXCLUDED.linear_team_name,
-           enabled = true`,
-        [connection.id, projectId, team.id, team.key, team.name]
-      );
-    }
-    return { linked: teams.length };
+    // One Linear team per Tesbo project — same invariant as Jira above.
+    if (teams.length > 1) throw new BadRequestException({ error: "Link one Linear team at a time to this project." });
+
+    await this.db.query("UPDATE linear_project_mappings SET enabled = false WHERE project_id = $1 AND enabled = true", [projectId]);
+    const [team] = teams;
+    if (!team) return { linked: 0 };
+
+    await this.db.query(
+      `INSERT INTO linear_project_mappings (integration_connection_id, project_id, linear_team_id, linear_team_key, linear_team_name)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (integration_connection_id, linear_team_id, project_id) DO UPDATE SET
+         linear_team_key = EXCLUDED.linear_team_key,
+         linear_team_name = EXCLUDED.linear_team_name,
+         enabled = true`,
+      [connection.id, projectId, team.id, team.key, team.name]
+    );
+    return { linked: 1 };
   }
 
-  async syncLinear(projectId: string) {
-    const organizationId = await this.projectOrganizationId(projectId);
-    const connection = await this.getIntegrationConnection(organizationId, "linear", true);
-    if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
-    const mappings = await this.db.query(
-      "SELECT linear_team_id FROM linear_project_mappings WHERE project_id = $1 AND integration_connection_id = $2 AND enabled = true",
-      [projectId, connection.id]
-    );
-    const teamIds = mappings.rows.map((row) => String(row.linear_team_id)).filter(Boolean);
-    if (!teamIds.length) return { synced: 0 };
-
-    // Mirror each synced ticket into the Knowledge Base's Requirements folder, same as Jira sync
-    // (source_provider = 'linear'), so tickets are searchable and usable as Zyra context.
-    const requirementsFolder = await this.db.query<{ id: string }>(
-      `SELECT kf.id FROM knowledge_folders kf
-       JOIN knowledge_folders root ON kf.parent_folder_id = root.id AND root.is_root = true AND root.project_id = $1
-       WHERE kf.project_id = $1 AND kf.name = 'Requirements' AND kf.is_deleted = false
-       LIMIT 1`,
-      [projectId]
-    );
-    let mirrorFolderId = requirementsFolder.rows[0]?.id || null;
-    if (!mirrorFolderId) {
-      const root = await this.db.query<{ id: string }>(
-        "SELECT id FROM knowledge_folders WHERE project_id = $1 AND is_root = true LIMIT 1",
-        [projectId]
-      );
-      mirrorFolderId = root.rows[0]?.id || null;
-    }
-
-    const linearAuthHeader = this.linearAuthHeader(connection);
-    let synced = 0;
-    for (const teamId of teamIds) {
-      const data = await this.linearGraphQL<Body>(
-        linearAuthHeader,
-        `query TeamIssues($teamId: String!) {
-           team(id: $teamId) {
-             issues(first: 100, orderBy: updatedAt) {
-               nodes {
-                 id identifier title description url createdAt updatedAt
-                 state { name }
-                 priorityLabel
-                 assignee { name }
-                 creator { name }
-                 labels { nodes { name } }
-               }
-             }
-           }
-         }`,
-        { teamId }
-      );
-      for (const issue of normalizeJsonArray(data?.team?.issues?.nodes)) {
-        const summary = String(issue.title || "");
-        const description = String(issue.description || "");
-        const labels = normalizeJsonArray(issue.labels?.nodes).map((label) => label.name).join(", ");
-        await this.db.query(
-          `INSERT INTO linear_tickets (
-             project_id, integration_connection_id, linear_issue_id, linear_issue_key, summary, description,
-             issue_type, status, priority, assignee, reporter, labels, linear_created_at, linear_updated_at, linear_url, synced_at
-           )
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
-           ON CONFLICT (integration_connection_id, linear_issue_id) DO UPDATE SET
-             linear_issue_key = EXCLUDED.linear_issue_key,
-             summary = EXCLUDED.summary,
-             description = EXCLUDED.description,
-             issue_type = EXCLUDED.issue_type,
-             status = EXCLUDED.status,
-             priority = EXCLUDED.priority,
-             assignee = EXCLUDED.assignee,
-             reporter = EXCLUDED.reporter,
-             labels = EXCLUDED.labels,
-             linear_created_at = EXCLUDED.linear_created_at,
-             linear_updated_at = EXCLUDED.linear_updated_at,
-             linear_url = EXCLUDED.linear_url,
-             synced_at = now()`,
-          [
-            projectId,
-            connection.id,
-            String(issue.id || ""),
-            String(issue.identifier || ""),
-            summary,
-            description,
-            "Issue",
-            String(issue.state?.name || ""),
-            String(issue.priorityLabel || ""),
-            String(issue.assignee?.name || ""),
-            String(issue.creator?.name || ""),
-            labels,
-            issue.createdAt || null,
-            issue.updatedAt || null,
-            String(issue.url || "")
-          ]
-        );
-        synced += 1;
-
-        if (mirrorFolderId) {
-          const mirrorRes = await this.db.query<{ id: string }>(
-            `INSERT INTO knowledge_documents (organization_id, project_id, folder_id, title, content_text, content_html, document_type, status, source_provider, source_external_id, source_url)
-             VALUES ($1, $2, $3, $4, $5, $6, 'requirement_note', 'published', 'linear', $7, $8)
-             ON CONFLICT (source_provider, source_external_id) WHERE source_provider IS NOT NULL DO UPDATE SET
-               title = EXCLUDED.title, content_text = EXCLUDED.content_text, content_html = EXCLUDED.content_html,
-               source_url = EXCLUDED.source_url, updated_at = now()
-             RETURNING id`,
-            [
-              organizationId,
-              projectId,
-              mirrorFolderId,
-              `${issue.identifier}: ${summary}`,
-              description,
-              description ? `<pre>${escapeHtml(description)}</pre>` : null,
-              String(issue.id || ""),
-              String(issue.url || "")
-            ]
-          );
-          if (mirrorRes.rows[0]?.id) this.enqueueEmbedding(organizationId, projectId, "document", mirrorRes.rows[0].id, "updated");
-        }
-      }
-    }
-    return { synced };
+  async syncLinear(userId: string | null | undefined, projectId: string) {
+    return this.startIntegrationSync(userId, projectId, "linear");
   }
 
   async linearTickets(projectId: string, query: Body) {
@@ -7141,7 +7167,7 @@ export class LegacyService implements OnModuleInit {
                issue_type, status, priority, assignee, reporter, labels, jira_created_at, jira_updated_at, jira_url, synced_at
              )
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
-             ON CONFLICT (jira_connection_id, jira_issue_id) DO UPDATE SET
+             ON CONFLICT (jira_connection_id, jira_issue_id, project_id) DO UPDATE SET
                jira_issue_key = EXCLUDED.jira_issue_key,
                summary = EXCLUDED.summary,
                description = EXCLUDED.description,

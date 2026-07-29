@@ -1,7 +1,7 @@
 "use client";
 
 import { ProjectIntegrationMapping } from "@/components/integrations/ProjectIntegrationMapping";
-import { getLinearStatus, listLinearTeams, connectLinearTeams, syncLinearTickets } from "@/lib/api";
+import { getLinearStatus, listLinearTeams, connectLinearTeams } from "@/lib/api";
 
 export default function LinearProjectIntegrationPage() {
   return (
@@ -13,7 +13,6 @@ export default function LinearProjectIntegrationPage() {
       fetchStatus={getLinearStatus}
       fetchRemoteList={listLinearTeams}
       saveMapping={connectLinearTeams}
-      sync={syncLinearTickets}
     />
   );
 }

@@ -14,6 +14,7 @@ import {
   IconLink,
   IconCheck,
   IconX,
+  IconMessagePlus,
 } from "@tabler/icons-react";
 import {
   authMe,
@@ -32,6 +33,7 @@ import {
 } from "@/lib/api";
 import { Button, Input, Modal, StatusChip } from "@/components/ui";
 import RichTextEditor from "@/components/knowledge-base/RichTextEditor";
+import { DocumentComments } from "@/components/knowledge-base/DocumentComments";
 
 type SaveStatus = "saved" | "saving" | "unsaved";
 
@@ -63,6 +65,90 @@ function normalizeRole(role: string): "owner" | "manager" | "qa_engineer" {
   return "qa_engineer";
 }
 
+const FLASH_HIGHLIGHT_NAME = "kb-comment-flash";
+
+/** Flattens a container's text nodes so a quote spanning several elements can still be located. */
+function textNodeMap(container: HTMLElement): { nodes: Text[]; text: string; starts: number[] } {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  const starts: number[] = [];
+  let text = "";
+  let node = walker.nextNode() as Text | null;
+  while (node) {
+    starts.push(text.length);
+    nodes.push(node);
+    text += node.data;
+    node = walker.nextNode() as Text | null;
+  }
+  return { nodes, text, starts };
+}
+
+/** Maps an offset in the flattened text back to a (node, offset) pair. */
+function locate(map: ReturnType<typeof textNodeMap>, offset: number): { node: Text; offset: number } | null {
+  for (let i = map.nodes.length - 1; i >= 0; i -= 1) {
+    if (offset >= map.starts[i]) return { node: map.nodes[i], offset: Math.min(offset - map.starts[i], map.nodes[i].data.length) };
+  }
+  return null;
+}
+
+/** The user's current selection, as a quote plus its offsets into the container's text. */
+function readSelection(container: HTMLElement): { text: string; start: number; end: number } | null {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!container.contains(range.commonAncestorContainer)) return null;
+  const quote = selection.toString().replace(/\s+/g, " ").trim();
+  if (quote.length < 2) return null;
+
+  const before = document.createRange();
+  before.selectNodeContents(container);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = before.toString().length;
+  return { text: quote.slice(0, 2000), start, end: start + quote.length };
+}
+
+/**
+ * Scrolls a quoted passage into view and briefly highlights it.
+ *
+ * Uses the CSS Custom Highlight API rather than wrapping the text in a <mark>: the body is
+ * rendered by TipTap, and mutating its DOM would desync the editor. Where the API is missing the
+ * passage still scrolls into view, just without the flash.
+ */
+function flashQuote(container: HTMLElement, quote: string, hint: number | null): boolean {
+  const map = textNodeMap(container);
+  const needle = quote.replace(/\s+/g, " ").trim();
+  if (!needle) return false;
+
+  // Prefer the occurrence nearest the stored offset, so repeated phrases resolve to the one that
+  // was actually commented on.
+  let index = -1;
+  if (hint !== null) {
+    const from = Math.max(0, hint - needle.length);
+    index = map.text.indexOf(needle, from);
+  }
+  if (index === -1) index = map.text.indexOf(needle);
+  if (index === -1) return false;
+
+  const from = locate(map, index);
+  const to = locate(map, index + needle.length);
+  if (!from || !to) return false;
+
+  const range = document.createRange();
+  range.setStart(from.node, from.offset);
+  range.setEnd(to.node, to.offset);
+
+  const rect = range.getBoundingClientRect();
+  window.scrollTo({ top: window.scrollY + rect.top - window.innerHeight / 3, behavior: "smooth" });
+
+  const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
+  const HighlightCtor = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
+  if (highlights && HighlightCtor) {
+    highlights.set(FLASH_HIGHLIGHT_NAME, new HighlightCtor(range));
+    setTimeout(() => highlights.delete(FLASH_HIGHLIGHT_NAME), 2000);
+  }
+  return true;
+}
+
 export default function KnowledgeDocumentPage() {
   const params = useParams();
   const router = useRouter();
@@ -81,6 +167,13 @@ export default function KnowledgeDocumentPage() {
   const [linkCopied, setLinkCopied] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  // The selection captured by the floating "Comment" button, handed to DocumentComments as the
+  // anchor for the next thread.
+  const [pendingAnchor, setPendingAnchor] = useState<{ text: string; start: number; end: number } | null>(null);
+  const [selectionBubble, setSelectionBubble] = useState<{ top: number; left: number } | null>(null);
+  const [anchorMissMessage, setAnchorMissMessage] = useState<string | null>(null);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestContent = useRef<{ contentJson: JSONContent; contentHtml: string; contentText: string } | null>(null);
@@ -92,6 +185,7 @@ export default function KnowledgeDocumentPage() {
         router.replace("/login");
         return;
       }
+      setCurrentUserId(me.userId);
       try {
         const data = await getKnowledgeDocument(projectId, documentId);
         setDoc(data);
@@ -125,6 +219,52 @@ export default function KnowledgeDocumentPage() {
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [menuOpen]);
+
+  // Offers "Comment" whenever there's a selection inside the document body. Bound to selection
+  // end (mouseup/keyup) rather than `selectionchange`, which fires on every extend of a drag.
+  useEffect(() => {
+    function onSelectionEnd() {
+      const container = bodyRef.current;
+      if (!container) return;
+      const selected = readSelection(container);
+      if (!selected) {
+        setSelectionBubble(null);
+        return;
+      }
+      const range = window.getSelection()?.getRangeAt(0);
+      if (!range) return;
+      const rect = range.getBoundingClientRect();
+      const hostRect = container.getBoundingClientRect();
+      setSelectionBubble({ top: rect.top - hostRect.top - 40, left: Math.max(0, rect.left - hostRect.left) });
+    }
+    document.addEventListener("mouseup", onSelectionEnd);
+    document.addEventListener("keyup", onSelectionEnd);
+    return () => {
+      document.removeEventListener("mouseup", onSelectionEnd);
+      document.removeEventListener("keyup", onSelectionEnd);
+    };
+  }, []);
+
+  function captureSelection() {
+    const container = bodyRef.current;
+    if (!container) return;
+    const selected = readSelection(container);
+    if (!selected) return;
+    setPendingAnchor(selected);
+    setSelectionBubble(null);
+    window.getSelection()?.removeAllRanges();
+    document.getElementById("kb-comments")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function jumpToAnchor(anchorText: string) {
+    const container = bodyRef.current;
+    if (!container) return;
+    const found = flashQuote(container, anchorText, null);
+    // A re-synced body can drop the passage a comment was anchored to. Say so rather than
+    // silently doing nothing.
+    setAnchorMissMessage(found ? null : "That passage is no longer in this document — it was probably changed by a later sync.");
+    if (found) setAnchorMissMessage(null);
+  }
 
   const scheduleSave = useCallback(
     (nextTitle: string) => {
@@ -270,6 +410,10 @@ export default function KnowledgeDocumentPage() {
   }
 
   const isAiMemory = doc.documentType === "ai_memory";
+  // Provider mirrors are rewritten wholesale by each sync, so the editor is locked and the API
+  // rejects updates. Comments are the writable channel — they're stored apart from the body.
+  const isSyncedMirror = doc.isReadOnly && doc.sourceRole === "mirror";
+  const providerLabel = doc.sourceProvider === "linear" ? "Linear" : "Jira";
 
   const parentFolder = breadcrumb[breadcrumb.length - 1];
   const rootFolder = breadcrumb[0];
@@ -318,10 +462,18 @@ export default function KnowledgeDocumentPage() {
         <Input
           value={title}
           onChange={(e) => handleTitleChange(e.target.value)}
-          className="!h-auto flex-1 border-0 !bg-transparent px-0 text-[26px] font-semibold shadow-none focus:ring-0"
+          readOnly={isSyncedMirror}
+          className={`!h-auto flex-1 border-0 !bg-transparent px-0 text-[26px] font-semibold shadow-none focus:ring-0 ${
+            isSyncedMirror ? "cursor-default" : ""
+          }`}
           placeholder="Untitled document"
         />
         <div className="flex shrink-0 items-center gap-2">
+          {isSyncedMirror && (
+            <StatusChip tone="info" dot>
+              Synced from {providerLabel}
+            </StatusChip>
+          )}
           {isAiMemory && (
             <StatusChip tone={doc.status === "approved" ? "success" : doc.status === "rejected" ? "error" : "draft"} dot>
               {doc.status === "approved" ? "Approved memory" : doc.status === "rejected" ? "Rejected" : "AI Generated"}
@@ -332,9 +484,11 @@ export default function KnowledgeDocumentPage() {
               {DOC_TYPE_LABELS[doc.documentType] || "Document"}
             </span>
           )}
-          <span className="text-[12px] text-[var(--muted-soft)]">
-            {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Unsaved changes" : "Saved"}
-          </span>
+          {!isSyncedMirror && (
+            <span className="text-[12px] text-[var(--muted-soft)]">
+              {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Unsaved changes" : "Saved"}
+            </span>
+          )}
           <div className="relative" ref={menuRef}>
             <button onClick={() => setMenuOpen((v) => !v)} className="rounded-[6px] border border-[var(--border)] p-2 hover:bg-[var(--surface-secondary)]">
               <IconDots size={16} />
@@ -356,9 +510,45 @@ export default function KnowledgeDocumentPage() {
               </div>
             )}
           </div>
-          <Button variant="secondary" size="sm" onClick={handleManualSave}>Save</Button>
+          {!isSyncedMirror && (
+            <Button variant="secondary" size="sm" onClick={handleManualSave}>Save</Button>
+          )}
         </div>
       </div>
+
+      {/* The "why does this document look like this?" banner: what wrote it, who ran that sync,
+          when, and where to put your own notes instead. */}
+      {isSyncedMirror && (
+        <div className="mb-4 rounded-[10px] border border-[var(--border)] bg-[var(--surface-secondary)] px-4 py-3">
+          <p className="text-[13px] text-[var(--foreground)]">
+            Read-only — this document is written by the {providerLabel} integration and is replaced on every sync.
+          </p>
+          <p className="mt-1 text-[12px] text-[var(--muted)]">
+            {doc.syncedByName ? `Last synced by ${doc.syncedByName}` : "Last synced"}
+            {doc.sourceSyncedAt ? ` on ${new Date(doc.sourceSyncedAt).toLocaleString()}` : ""}
+            {". "}
+            The body is read-only, but comments are not — select any passage to comment on it, or{" "}
+            <button
+              type="button"
+              onClick={() => document.getElementById("kb-comments")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+              className="text-[var(--brand-primary)] underline hover:no-underline"
+            >
+              add a comment below
+            </button>
+            . Comments are stored separately, so a sync never overwrites them.
+          </p>
+          {doc.sourceUrl && (
+            <a
+              href={doc.sourceUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 inline-flex items-center gap-1 text-[12px] font-medium text-[var(--brand-primary)] hover:underline"
+            >
+              Open in {providerLabel} <IconArrowRight size={13} />
+            </a>
+          )}
+        </div>
+      )}
 
       {isAiMemory && canApprove && doc.status !== "approved" && doc.status !== "rejected" && (
         <div className="mb-4 flex items-center justify-between rounded-[10px] border border-[var(--ai-border)] bg-[var(--ai-soft)] px-4 py-3">
@@ -370,7 +560,44 @@ export default function KnowledgeDocumentPage() {
         </div>
       )}
 
-      <RichTextEditor contentJson={doc.contentJson as JSONContent | null} contentHtml={doc.contentHtml} onUpdate={handleEditorUpdate} />
+      {anchorMissMessage && (
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-soft)] px-4 py-2.5 text-[13px] text-[var(--warning)]">
+          <span>{anchorMissMessage}</span>
+          <button onClick={() => setAnchorMissMessage(null)}><IconX size={15} /></button>
+        </div>
+      )}
+
+      <div ref={bodyRef} className="relative">
+        {selectionBubble && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={captureSelection}
+            style={{ top: selectionBubble.top, left: selectionBubble.left }}
+            className="absolute z-20 inline-flex items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface-overlay)] px-2.5 py-1.5 text-[12px] font-medium text-[var(--foreground)] shadow-[var(--shadow-elevated)] hover:bg-[var(--surface-secondary)]"
+          >
+            <IconMessagePlus size={14} /> Comment
+          </button>
+        )}
+        <RichTextEditor
+          contentJson={doc.contentJson as JSONContent | null}
+          contentHtml={doc.contentHtml}
+          editable={!isSyncedMirror}
+          onUpdate={handleEditorUpdate}
+        />
+      </div>
+
+      <div id="kb-comments">
+        <DocumentComments
+          projectId={projectId}
+          documentId={documentId}
+          currentUserId={currentUserId}
+          canModerate={canApprove}
+          pendingAnchor={pendingAnchor}
+          onAnchorConsumed={() => setPendingAnchor(null)}
+          onAnchorClick={jumpToAnchor}
+        />
+      </div>
 
       <Modal open={historyOpen} onClose={() => setHistoryOpen(false)} title="Version history">
         {versions.length === 0 ? (
