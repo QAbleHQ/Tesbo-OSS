@@ -119,7 +119,9 @@ function build(opts: {
   const email = makeEmail();
   const legacy = {
     workspace: jest.fn().mockResolvedValue({ id: "org-1", name: "Acme", role: opts.role ?? "owner" }),
-    normalizeRole: (r: string) => r
+    normalizeRole: (r: string) => r,
+    // Billing history writes go through here; the real one swallows its own errors.
+    logWorkspaceActivity: jest.fn().mockResolvedValue(undefined)
   } as unknown as LegacyService;
   // Stands in for a hard IP match either way, which is what most of these tests care about; the
   // declared-country describe block below exercises the soft fallback path instead.
@@ -540,9 +542,179 @@ describe("reconcile a workspace whose plan drifted from Stripe", () => {
   });
 });
 
+describe("billing history", () => {
+  const onPro = (from: string): Route[] => [
+    {
+      match: "SELECT plan, stripe_customer_id, stripe_subscription_id",
+      rows: [{ plan: from, stripe_customer_id: "cus_1", stripe_subscription_id: from === "pro" ? "sub_1" : null }]
+    },
+    { match: "SELECT plan, plan_grace_ends_at, payment_failed_at", rows: [{ plan: from, plan_grace_ends_at: null }] },
+    { match: "FROM organization_members m", rows: [{ email: "owner@example.com", name: "Acme" }] }
+  ];
+
+  const sub = (status: string) =>
+    ({
+      id: "sub_1",
+      status,
+      metadata: { organizationId: "org-1" },
+      items: { data: [{ price: { id: PRICES.inrMonthly, currency: "inr" }, current_period_end: 1800000000 }] },
+      cancel_at_period_end: false
+    }) as unknown as Stripe.Subscription;
+
+  function logCalls(legacyMock: unknown) {
+    return (legacyMock as { logWorkspaceActivity: jest.Mock }).logWorkspaceActivity.mock.calls;
+  }
+
+  it("records an upgrade", async () => {
+    const { service, stripe } = build({ routes: onPro("launch") });
+    (stripe.client.subscriptions.list as jest.Mock).mockResolvedValue({ data: [sub("active")] });
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    await service.getBillingInfo("user-1");
+     
+    const legacyMock = (service as any).legacy;
+    const actions = logCalls(legacyMock).map((c) => c[2]);
+    expect(actions).toContain("billing_upgraded");
+    warn.mockRestore();
+  });
+
+  it("records a downgrade with the date limits start applying", async () => {
+    const { service, stripe } = build({ routes: onPro("pro") });
+    (stripe.client.subscriptions as unknown as { retrieve: jest.Mock }).retrieve = jest.fn().mockResolvedValue(sub("canceled"));
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    await service.getBillingInfo("user-1");
+     
+    const entry = logCalls((service as any).legacy).find((c) => c[2] === "billing_downgraded");
+    expect(entry).toBeDefined();
+    expect(entry?.[6]).toMatchObject({ status: "canceled" });
+    expect((entry?.[6] as Record<string, unknown>).graceEndsAt).toBeTruthy();
+    warn.mockRestore();
+  });
+
+  it("returns history newest-first for the workspace only", async () => {
+    const { service, calls } = build({
+      routes: [
+        {
+          match: "FROM audit_logs",
+          rows: [
+            { action: "billing_downgraded", entity_name: "Moved to Launch", diff: {}, created_at: "2026-07-29T00:00:00Z" },
+            { action: "billing_upgraded", entity_name: "Upgraded to Pro", diff: {}, created_at: "2026-07-01T00:00:00Z" }
+          ]
+        }
+      ]
+    });
+    const history = await service.getBillingHistory("user-1");
+    expect(history.map((h) => h.action)).toEqual(["billing_downgraded", "billing_upgraded"]);
+    const sql = calls.find((c) => c.sql.includes("FROM audit_logs"));
+    expect(sql?.sql).toContain("organization_id = $1");
+    expect(sql?.sql).toContain("entity_type = 'billing'");
+  });
+
+  it("caps the history limit so a caller can't request the whole table", async () => {
+    const { service, calls } = build({ routes: [{ match: "FROM audit_logs", rows: [] }] });
+    await service.getBillingHistory("user-1", 100000);
+    expect(calls.find((c) => c.sql.includes("FROM audit_logs"))?.params[1]).toBe(200);
+  });
+});
+
+describe("invoices", () => {
+  it("returns hosted links and skips drafts", async () => {
+    const { service, stripe } = build({ routes: [{ match: "SELECT stripe_customer_id", rows: [{ stripe_customer_id: "cus_1" }] }] });
+    (stripe.client.invoices.list as jest.Mock).mockResolvedValue({
+      data: [
+        { id: "in_1", number: "T-001", status: "paid", amount_paid: 130000, amount_due: 130000, currency: "inr", created: 1785326719, hosted_invoice_url: "https://inv", invoice_pdf: "https://pdf" },
+        { id: "in_draft", status: "draft", amount_paid: 0, amount_due: 130000, currency: "inr", created: 1785326720 }
+      ]
+    });
+    const invoices = await service.getInvoices("user-1");
+    expect(invoices).toHaveLength(1);
+    expect(invoices[0]).toMatchObject({ number: "T-001", status: "paid", amountPaid: 130000, currency: "inr", hostedInvoiceUrl: "https://inv" });
+  });
+
+  it("returns nothing rather than calling Stripe when the workspace has no customer", async () => {
+    const { service, stripe } = build({ routes: [] });
+    await expect(service.getInvoices("user-1")).resolves.toEqual([]);
+    expect(stripe.client.invoices.list).not.toHaveBeenCalled();
+  });
+});
+
 describe("owner-only billing", () => {
   it("refuses checkout for a non-owner", async () => {
     const { service } = build({ role: "manager" });
     await expect(service.createCheckoutSession("user-1", "monthly", REQ)).rejects.toThrow(ForbiddenException);
+  });
+});
+
+/**
+ * Subscriptions are per WORKSPACE, not per user: one person can own several workspaces and each is
+ * billed independently. Every billing read and write must therefore be scoped to the caller's active
+ * workspace, so acting on one can never move another's plan, currency, or grace window.
+ */
+describe("per-workspace isolation", () => {
+  function forWorkspace(orgId: string, routes: Route[]) {
+    const { db, query, calls } = makeDb(routes);
+    const stripe = makeStripe();
+    const legacy = {
+      workspace: jest.fn().mockResolvedValue({ id: orgId, name: orgId, role: "owner" }),
+      normalizeRole: (r: string) => r,
+      logWorkspaceActivity: jest.fn().mockResolvedValue(undefined)
+    } as unknown as LegacyService;
+    const countries = {
+      resolve: jest.fn().mockResolvedValue({ country: "IN", source: "ip", detected: "IN" })
+    } as unknown as CountryDetectionService;
+    const service = new BillingService(db, makeConfig(), stripe.provider, legacy, {} as PlanLimitsService, countries, makeEmail());
+    return { service, query, calls, stripe };
+  }
+
+  const orgRow = (plan: string, currency: string | null, customer: string | null) => [
+    { match: "SELECT plan, billing_interval", rows: [{ plan, subscription_status: "active", billing_currency: currency }] },
+    { match: "SELECT plan, stripe_customer_id, stripe_subscription_id", rows: [{ plan, stripe_customer_id: customer, stripe_subscription_id: null }] },
+    { match: "SELECT billing_currency", rows: [{ billing_currency: currency, stripe_customer_id: customer }] },
+    { match: "SELECT country FROM organizations", rows: [{ country: null }] },
+    { match: "SELECT stripe_customer_id", rows: [{ stripe_customer_id: customer }] },
+    { match: "FROM audit_logs", rows: [] }
+  ];
+
+  it("scopes every billing read to the caller's active workspace", async () => {
+    for (const orgId of ["org-A", "org-B"]) {
+      const { service, calls } = forWorkspace(orgId, orgRow("launch", null, null));
+      await service.getBillingInfo("user-1");
+      await service.getBillingHistory("user-1");
+      const scoped = calls.filter((c) => c.params.includes(orgId));
+      expect(scoped.length).toBeGreaterThan(0);
+      // Nothing may reference the other workspace.
+      const other = orgId === "org-A" ? "org-B" : "org-A";
+      expect(calls.some((c) => c.params.includes(other))).toBe(false);
+    }
+  });
+
+  it("keeps each workspace's currency lock independent", async () => {
+    // Workspace A pinned to INR by a past invoice; workspace B still open.
+    const a = forWorkspace("org-A", orgRow("pro", "inr", "cus_A"));
+    const b = forWorkspace("org-B", orgRow("launch", null, null));
+    expect((await a.service.getPricing("user-1", REQ)).currency).toBe("inr");
+    expect((await a.service.getPricing("user-1", REQ)).currencyLocked).toBe(true);
+    const bPricing = await b.service.getPricing("user-1", REQ);
+    expect(bPricing.currencyLocked).toBe(false);
+  });
+
+  it("filters billing history by organization", async () => {
+    const { service, calls } = forWorkspace("org-A", orgRow("launch", null, null));
+    await service.getBillingHistory("user-1");
+    const q = calls.find((c) => c.sql.includes("FROM audit_logs"));
+    expect(q?.sql).toContain("organization_id = $1");
+    expect(q?.params[0]).toBe("org-A");
+  });
+
+  it("gives each workspace its own Stripe customer", async () => {
+    // org-B has no customer yet, so checkout must create a fresh one rather than reuse another's.
+    const { service, stripe } = forWorkspace("org-B", [
+      { match: "SELECT plan, billing_interval", rows: [{ plan: "launch" }] },
+      { match: "SELECT billing_currency", rows: [{ billing_currency: null, stripe_customer_id: null }] },
+      { match: "SELECT country FROM organizations", rows: [{ country: null }] },
+      { match: "SELECT stripe_customer_id", rows: [{ stripe_customer_id: null }] },
+      { match: "SELECT plan, stripe_customer_id, stripe_subscription_id", rows: [{ plan: "launch", stripe_customer_id: null, stripe_subscription_id: null }] }
+    ]);
+    await service.createCheckoutSession("user-1", "monthly", REQ);
+    expect(stripe.client.customers.create).toHaveBeenCalledWith(expect.objectContaining({ metadata: { organizationId: "org-B" } }));
   });
 });

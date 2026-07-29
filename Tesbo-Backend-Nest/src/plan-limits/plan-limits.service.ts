@@ -121,6 +121,17 @@ export class PlanLimitsService {
         WHERE m.organization_id = $1 AND m.role = 'owner' ORDER BY m.created_at LIMIT 1`,
       [organizationId]
     );
+    // Mirrors BillingService.recordBillingEvent — same append-only audit_logs trail, so the billing
+    // history shows the moment limits actually started applying, not just when the plan changed.
+    // Errors are swallowed: a history write must never fail the request that triggered it.
+    await this.db
+      .query(
+        `INSERT INTO audit_logs (organization_id, actor_id, action, entity_type, entity_id, entity_name, diff)
+         VALUES ($1, NULL, 'billing_limits_enforced', 'billing', NULL, $2, '{}'::jsonb)`,
+        [organizationId, "Grace period ended — Launch limits now apply"]
+      )
+      .catch(() => undefined);
+
     const email = owner.rows[0]?.email;
     if (!email) return;
     await this.email.sendGraceEnded(email, claimed.rows[0].name, `${this.config.frontendUrl}/settings?tab=billing`);

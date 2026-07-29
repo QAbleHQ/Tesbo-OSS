@@ -38,6 +38,26 @@ export interface BillingInfo {
   limitsEnforced: boolean;
 }
 
+/** One entry in the workspace's billing history, rendered as a timeline in settings. */
+export interface BillingHistoryEntry {
+  action: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  at: string;
+}
+
+export interface BillingInvoice {
+  id: string;
+  number: string | null;
+  status: string | null;
+  amountPaid: number;
+  amountDue: number;
+  currency: string;
+  createdAt: string;
+  hostedInvoiceUrl: string | null;
+  invoicePdf: string | null;
+}
+
 export interface BillingPricing {
   currency: Currency;
   monthlyAmount: number | null;
@@ -390,10 +410,30 @@ export class BillingService {
         const organizationId = session.metadata?.organizationId;
         const subscriptionId = typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
         if (organizationId && subscriptionId) {
+          const before = await this.db.query<{ plan: string }>("SELECT plan FROM organizations WHERE id = $1", [organizationId]);
           await this.db.query(
             `UPDATE organizations SET plan = 'pro', stripe_subscription_id = $1, updated_at = now() WHERE id = $2`,
             [subscriptionId, organizationId]
           );
+          /*
+           * The upgrade is recorded HERE, not in applySubscriptionState.
+           *
+           * customer.subscription.created lands moments later and also calls applySubscriptionState,
+           * but by then this handler has already set plan='pro' — so its "wasn't pro, now is"
+           * check sees no transition and would record nothing. Recording at the point of checkout is
+           * both the accurate moment and the one that can't be missed.
+           *
+           * applySubscriptionState keeps its own upgrade entry for activations that never involve a
+           * checkout event at all — the reconcile and self-heal paths — and its !wasPro guard stops
+           * the two ever double-recording.
+           */
+          if (before.rows[0]?.plan !== "pro") {
+            await this.recordBillingEvent(organizationId, "billing_upgraded", subscriptionId, "Upgraded to Pro", {
+              via: "checkout",
+              amountTotal: session.amount_total,
+              currency: session.currency
+            });
+          }
         }
         break;
       }
@@ -439,6 +479,14 @@ export class BillingService {
     const alreadyNotified = !!res.rows[0]?.payment_failed_at;
     if (alreadyNotified) return;
 
+    await this.recordBillingEvent(
+      organizationId,
+      "billing_payment_failed",
+      invoice.id ?? null,
+      `Payment failed — ${this.formatMoney(invoice.amount_due ?? 0, invoice.currency ?? "usd")}`,
+      { amountDue: invoice.amount_due, currency: invoice.currency, invoiceUrl: invoice.hosted_invoice_url ?? null }
+    );
+
     const owner = await this.workspaceOwner(organizationId);
     if (!owner) return;
     await this.email.sendPaymentFailed(owner.email, owner.workspaceName, this.billingUrl, this.config.planGraceDays);
@@ -451,9 +499,16 @@ export class BillingService {
 
     await this.db.query("UPDATE organizations SET payment_failed_at = NULL, updated_at = now() WHERE id = $1", [organizationId]);
 
+    const amountLabel = this.formatMoney(invoice.amount_paid ?? 0, invoice.currency ?? "usd");
+    await this.recordBillingEvent(organizationId, "billing_payment_succeeded", invoice.id ?? null, `Payment received — ${amountLabel}`, {
+      amountPaid: invoice.amount_paid,
+      currency: invoice.currency,
+      invoiceNumber: invoice.number ?? null,
+      invoiceUrl: invoice.hosted_invoice_url ?? null
+    });
+
     const owner = await this.workspaceOwner(organizationId);
     if (!owner) return;
-    const amountLabel = this.formatMoney(invoice.amount_paid ?? 0, invoice.currency ?? "usd");
     const periodEnd = invoice.lines?.data?.[0]?.period?.end ?? null;
     await this.email.sendPaymentSucceeded(
       owner.email,
@@ -531,6 +586,80 @@ export class BillingService {
 
   private get billingUrl(): string {
     return `${this.config.frontendUrl}/settings?tab=billing`;
+  }
+
+  /**
+   * Appends one entry to the workspace's billing history.
+   *
+   * Reuses audit_logs (organization-scoped, append-only by trigger) rather than a dedicated table,
+   * so this history inherits the same immutability guarantee as the rest of the audit trail — a
+   * billing record nobody can quietly rewrite is the point of keeping it.
+   *
+   * actor_id is null because these originate from Stripe, not from a person clicking something. The
+   * underlying helper swallows its own errors, so a logging failure can never fail a webhook and
+   * trigger a Stripe retry.
+   */
+  private async recordBillingEvent(
+    organizationId: string,
+    action: string,
+    entityId: string | null,
+    summary: string,
+    detail: Record<string, unknown> = {}
+  ): Promise<void> {
+    await this.legacy.logWorkspaceActivity(organizationId, null, action, "billing", entityId, summary, detail);
+  }
+
+  /** Billing history for the current workspace, newest first. */
+  async getBillingHistory(userId: string | null | undefined, limit = 50): Promise<BillingHistoryEntry[]> {
+    const uid = this.requireUser(userId);
+    const workspace = await this.legacy.workspace(uid);
+    const res = await this.db.query<{ action: string; entity_name: string | null; diff: Record<string, unknown> | null; created_at: string }>(
+      `SELECT action, entity_name, diff, created_at
+         FROM audit_logs
+        WHERE organization_id = $1 AND entity_type = 'billing'
+        ORDER BY created_at DESC
+        LIMIT $2`,
+      [workspace.id, Math.min(Math.max(1, limit), 200)]
+    );
+    return res.rows.map((r) => ({
+      action: r.action,
+      summary: r.entity_name ?? r.action,
+      detail: r.diff ?? {},
+      at: r.created_at
+    }));
+  }
+
+  /**
+   * The workspace's Stripe invoices, so past receipts are reachable from inside the app.
+   *
+   * Read live from Stripe rather than mirrored locally: invoices are Stripe's record, and the hosted
+   * URLs it returns are what customers actually need for accounting.
+   */
+  async getInvoices(userId: string | null | undefined): Promise<BillingInvoice[]> {
+    const uid = this.requireUser(userId);
+    const workspace = await this.legacy.workspace(uid);
+    const res = await this.db.query<{ stripe_customer_id: string | null }>(
+      "SELECT stripe_customer_id FROM organizations WHERE id = $1",
+      [workspace.id]
+    );
+    const customerId = res.rows[0]?.stripe_customer_id;
+    if (!customerId) return [];
+
+    const invoices = await this.callStripe(() => this.stripeClient.client.invoices.list({ customer: customerId, limit: 24 }));
+    return invoices.data
+      // Drafts have no stable number or hosted page yet and aren't money that moved.
+      .filter((inv) => inv.status !== "draft")
+      .map((inv) => ({
+        id: inv.id ?? "",
+        number: inv.number ?? null,
+        status: inv.status ?? null,
+        amountPaid: inv.amount_paid ?? 0,
+        amountDue: inv.amount_due ?? 0,
+        currency: (inv.currency ?? "usd").toLowerCase(),
+        createdAt: new Date((inv.created ?? 0) * 1000).toISOString(),
+        hostedInvoiceUrl: inv.hosted_invoice_url ?? null,
+        invoicePdf: inv.invoice_pdf ?? null
+      }));
   }
 
   private formatMoney(amountMinor: number, currency: string): string {
@@ -756,13 +885,17 @@ export class BillingService {
       plan_grace_ends_at: string | null;
       payment_failed_at: string | null;
       grace_locked_notified_at: string | null;
+      cancel_at_period_end: boolean | null;
     }>(
-      "SELECT plan, plan_grace_ends_at, payment_failed_at, grace_locked_notified_at FROM organizations WHERE id = $1",
+      `SELECT plan, plan_grace_ends_at, payment_failed_at, grace_locked_notified_at, cancel_at_period_end
+         FROM organizations WHERE id = $1`,
       [organizationId]
     );
     const current = before.rows[0];
     const wasPro = current?.plan === "pro";
     const droppingToLaunch = wasPro && plan === "launch";
+    const wasCancelling = current?.cancel_at_period_end === true;
+    const nowCancelling = subscription.cancel_at_period_end === true;
 
     /*
      * Grace window bookkeeping.
@@ -817,6 +950,38 @@ export class BillingService {
         organizationId
       ]
     );
+
+    // History entries, so the workspace can see what changed and when without reading Stripe.
+    const intervalLabel = billingInterval ?? "";
+    if (!wasPro && plan === "pro") {
+      await this.recordBillingEvent(
+        organizationId,
+        "billing_upgraded",
+        subscription.id,
+        `Upgraded to Pro${intervalLabel ? ` (${intervalLabel})` : ""}`,
+        { interval: billingInterval, currency, status: subscription.status }
+      );
+    } else if (droppingToLaunch) {
+      await this.recordBillingEvent(
+        organizationId,
+        "billing_downgraded",
+        subscription.id,
+        `Subscription ${subscription.status === "canceled" ? "cancelled" : subscription.status} — moved to Launch`,
+        { status: subscription.status, graceEndsAt, limitsApplyFrom: graceEndsAt }
+      );
+    }
+
+    if (plan === "pro" && nowCancelling !== wasCancelling) {
+      await this.recordBillingEvent(
+        organizationId,
+        nowCancelling ? "billing_cancel_scheduled" : "billing_cancel_reverted",
+        subscription.id,
+        nowCancelling
+          ? `Cancellation scheduled${periodEndSeconds ? ` for ${this.formatDate(new Date(periodEndSeconds * 1000))}` : ""}`
+          : "Cancellation reverted — subscription will renew",
+        { cancelAtPeriodEnd: nowCancelling }
+      );
+    }
 
     if (droppingToLaunch) {
       const owner = await this.workspaceOwner(organizationId);

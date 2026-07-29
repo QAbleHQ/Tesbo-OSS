@@ -286,6 +286,35 @@ export async function reconcileBilling(): Promise<BillingInfo> {
   return api<BillingInfo>("/api/billing/reconcile", { method: "POST" });
 }
 
+export interface BillingHistoryEntry {
+  /** Machine-readable event, e.g. billing_upgraded / billing_payment_failed. */
+  action: string;
+  summary: string;
+  detail: Record<string, unknown>;
+  at: string;
+}
+
+export async function getBillingHistory(): Promise<BillingHistoryEntry[]> {
+  return api<BillingHistoryEntry[]>("/api/billing/history");
+}
+
+export interface BillingInvoice {
+  id: string;
+  number: string | null;
+  status: string | null;
+  /** Minor units (paise / cents). */
+  amountPaid: number;
+  amountDue: number;
+  currency: string;
+  createdAt: string;
+  hostedInvoiceUrl: string | null;
+  invoicePdf: string | null;
+}
+
+export async function getBillingInvoices(): Promise<BillingInvoice[]> {
+  return api<BillingInvoice[]>("/api/billing/invoices");
+}
+
 export async function createCheckoutSession(interval: BillingInterval, currency?: BillingCurrency): Promise<{ url: string }> {
   return api<{ url: string }>("/api/billing/checkout-session", {
     method: "POST",
