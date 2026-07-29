@@ -92,6 +92,10 @@ services:
       STRIPE_PRICE_ID_PRO_ANNUAL: ${STRIPE_PRICE_ID_PRO_ANNUAL:-}
       STRIPE_PRICE_ID_PRO_MONTHLY_INR: ${STRIPE_PRICE_ID_PRO_MONTHLY_INR:-}
       STRIPE_PRICE_ID_PRO_ANNUAL_INR: ${STRIPE_PRICE_ID_PRO_ANNUAL_INR:-}
+      BILLING_FORCE_COUNTRY: ${BILLING_FORCE_COUNTRY:-}
+      TRUST_PROXY_COUNTRY_HEADER: ${TRUST_PROXY_COUNTRY_HEADER:-false}
+      PLAN_GRACE_DAYS: ${PLAN_GRACE_DAYS:-30}
+      SUPPORT_CONTACT_EMAIL: ${SUPPORT_CONTACT_EMAIL:-support@tryqable.com}
       # AES-256-GCM key for encrypting integration secrets at rest. Override with your own
       # (openssl rand -base64 32) for any shared/non-local environment.
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-QtqFfNpvzyRZvBpFeXYIFmQMTwQHVXHQYbH85YvhlvE=}

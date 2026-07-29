@@ -7,6 +7,7 @@ import {
   getBillingInfo,
   getBillingUsage,
   getWorkspace,
+  reconcileBilling,
   type BillingInfo,
   type PlanUsageSummary,
 } from "@/lib/api";
@@ -88,14 +89,32 @@ export default function BillingTab() {
     const checkout = searchParams.get("checkout");
     if (!checkout) return;
     if (checkout === "success") {
-      showToast("You're on Tesbo Pro. Welcome aboard!");
-      load();
+      // Reconcile against Stripe rather than trusting the redirect: the plan only flips when a
+      // webhook lands, and the webhook may be late, dropped, or not configured. This also means the
+      // toast reports what actually happened instead of always claiming success.
+      reconcileBilling()
+        .then((info) => {
+          setBillingInfo(info);
+          showToast(
+            info.plan === "pro"
+              ? "You're on Tesbo Pro. Welcome aboard!"
+              : "Payment received — we're still activating your plan. Refresh in a moment."
+          );
+        })
+        .catch(() => showToast("Payment received — we're still activating your plan. Refresh in a moment."))
+        .finally(() => {
+          getBillingUsage().then(setUsage).catch(() => {});
+        });
     } else if (checkout === "cancelled") {
       showToast("Checkout was cancelled — no changes were made.");
     }
     router.replace("/settings?tab=billing", { scroll: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
+
+  function formatShortDate(iso: string | null): string {
+    return iso ? formatDate(iso) : "";
+  }
 
   async function handleManageBilling() {
     setError("");
@@ -131,6 +150,57 @@ export default function BillingTab() {
       {toast && (
         <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--ink-800)] px-4 py-2.5 text-sm text-white shadow-lg">
           {toast}
+        </div>
+      )}
+
+      {/* Payment is failing and Stripe is still retrying. Pro access continues for now, so this is
+          the one screen that can recover the payment before it lapses — make it impossible to miss. */}
+      {billingInfo?.paymentFailedAt && plan === "pro" && (
+        <div className="rounded-[10px] border border-[var(--error)] bg-[var(--error-soft)] p-4">
+          <p className="text-[13px] font-semibold text-[var(--error-foreground)]">We couldn&apos;t process your last payment</p>
+          <p className="mt-1 text-[13px] text-[var(--ink-600)]">
+            Your card was declined on {formatShortDate(billingInfo.paymentFailedAt)}. Pro access continues while we retry, but the
+            workspace will move to the free Launch plan if the payment can&apos;t be collected.
+          </p>
+          {isOwner && (
+            <Button className="mt-3" onClick={handleManageBilling} disabled={redirecting}>
+              {redirecting ? "Opening…" : "Update payment method"}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Downgraded but still inside the grace window: full access, with a clear deadline. */}
+      {billingInfo?.inGracePeriod && (
+        <div className="rounded-[10px] border border-[var(--warning)] bg-[var(--warning-soft)] p-4">
+          <p className="text-[13px] font-semibold text-[var(--warning-foreground)]">
+            Your Pro subscription has ended — full access until {formatShortDate(billingInfo.graceEndsAt)}
+          </p>
+          <p className="mt-1 text-[13px] text-[var(--ink-600)]">
+            Nothing has been deleted and everything still works as before. After {formatShortDate(billingInfo.graceEndsAt)}, Launch
+            limits apply: projects beyond the first two become read-only and new uploads pause until you&apos;re under 500 MB.
+          </p>
+          {isOwner && (
+            <Button className="mt-3" onClick={() => setPricingOpen(true)}>
+              Resubscribe to Pro
+            </Button>
+          )}
+        </div>
+      )}
+
+      {/* Grace window closed — limits are actively applied. Lead with "your data is safe". */}
+      {billingInfo?.limitsEnforced && (
+        <div className="rounded-[10px] border border-[var(--error)] bg-[var(--error-soft)] p-4">
+          <p className="text-[13px] font-semibold text-[var(--error-foreground)]">Launch plan limits are now in effect</p>
+          <p className="mt-1 text-[13px] text-[var(--ink-600)]">
+            <strong>Your data is safe — nothing has been deleted.</strong> Projects beyond the first two are read-only and new uploads
+            are paused. Upgrading restores full access immediately; you can also archive a project to free a slot.
+          </p>
+          {isOwner && (
+            <Button className="mt-3" onClick={() => setPricingOpen(true)}>
+              Upgrade to Pro
+            </Button>
+          )}
         </div>
       )}
 
@@ -196,15 +266,57 @@ export default function BillingTab() {
               limitLabel={formatBytes(usage.storageLimitBytes)}
             />
           </div>
-          {plan === "launch" && (usage.projectCount >= (usage.projectLimit ?? Infinity) || usage.storageUsedBytes >= usage.storageLimitBytes) && (
-            <p className="mt-4 text-[13px] text-[var(--warning-foreground)]">
-              You&apos;ve hit a Launch plan limit.{" "}
-              <button type="button" className="font-medium underline" onClick={() => setPricingOpen(true)}>
-                Upgrade to Pro
-              </button>{" "}
-              for more room.
-            </p>
-          )}
+          {(() => {
+            const storagePct = usage.storageLimitBytes > 0 ? (usage.storageUsedBytes / usage.storageLimitBytes) * 100 : 0;
+            const atProjectLimit = usage.projectCount >= (usage.projectLimit ?? Infinity);
+            // The limits in force are Pro-sized during a grace window, so key the messaging off the
+            // effective plan rather than the billed one.
+            const onProLimits = usage.plan === "pro" || usage.inGracePeriod;
+
+            // Storage is the case a Pro customer can actually hit, and "upgrade" is no answer for
+            // them — previously they got a red bar and no next step at all.
+            if (storagePct >= 80) {
+              return (
+                <p className="mt-4 text-[13px] text-[var(--warning-foreground)]">
+                  {storagePct >= 100
+                    ? "Your workspace is out of storage — new uploads are blocked until you free space."
+                    : `Your workspace is at ${Math.floor(storagePct)}% of its storage limit.`}{" "}
+                  {onProLimits ? (
+                    <>
+                      You&apos;re on our largest plan, so{" "}
+                      <a
+                        href={`mailto:${usage.supportContactEmail}?subject=${encodeURIComponent("More storage for my Tesbo workspace")}`}
+                        className="font-medium underline"
+                      >
+                        contact us
+                      </a>{" "}
+                      to add more, or delete large knowledge-base files and attachments you no longer need.
+                    </>
+                  ) : (
+                    <>
+                      <button type="button" className="font-medium underline" onClick={() => setPricingOpen(true)}>
+                        Upgrade to Pro
+                      </button>{" "}
+                      for 5 GB, or delete files you no longer need.
+                    </>
+                  )}
+                </p>
+              );
+            }
+
+            if (atProjectLimit && !onProLimits) {
+              return (
+                <p className="mt-4 text-[13px] text-[var(--warning-foreground)]">
+                  You&apos;ve reached the Launch plan&apos;s {usage.projectLimit}-project limit.{" "}
+                  <button type="button" className="font-medium underline" onClick={() => setPricingOpen(true)}>
+                    Upgrade to Pro
+                  </button>{" "}
+                  for unlimited projects.
+                </p>
+              );
+            }
+            return null;
+          })()}
         </Card>
       )}
 

@@ -930,10 +930,7 @@ textarea:focus-visible {
 .tiptap-editor th, .tiptap-editor td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
 .tiptap-editor th { background: var(--surface-secondary); font-weight: 600; }
 
-/* Flash applied when a reader clicks a comment's quoted passage to jump to it in the document.
-   Uses the CSS Custom Highlight API so the editor's DOM is never mutated (see flashQuote in the
-   knowledge-base document page); browsers without ::highlight support just scroll, no flash. */
-::highlight(kb-comment-flash) {
-  background-color: color-mix(in oklab, var(--warning) 35%, transparent);
-  color: var(--foreground);
-}
+/* The ::highlight(kb-comment-flash) rule that pairs with flashQuote in the knowledge-base
+   document page is NOT here: Turbopack's CSS parser rejects the ::highlight() pseudo-element
+   outright and fails the production build. It's injected at runtime instead, next to the
+   CSS.highlights call that needs it — see ensureFlashHighlightStyle in that page. */

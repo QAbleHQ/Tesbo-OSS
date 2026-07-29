@@ -66,6 +66,24 @@ function normalizeRole(role: string): "owner" | "manager" | "qa_engineer" {
 }
 
 const FLASH_HIGHLIGHT_NAME = "kb-comment-flash";
+const FLASH_HIGHLIGHT_STYLE_ID = "kb-comment-flash-style";
+
+/**
+ * Installs the ::highlight() rule the flash needs, once, on first use.
+ *
+ * This lives here rather than in globals.css because Turbopack's CSS parser doesn't recognise the
+ * ::highlight() pseudo-element and fails the production build on it. Injecting it keeps the rule
+ * away from build-time CSS parsing; var()/color-mix() still resolve against :root at runtime.
+ * Only called once the Custom Highlight API has been feature-detected, so it never adds a rule
+ * to a browser that couldn't use it anyway.
+ */
+function ensureFlashHighlightStyle(): void {
+  if (document.getElementById(FLASH_HIGHLIGHT_STYLE_ID)) return;
+  const style = document.createElement("style");
+  style.id = FLASH_HIGHLIGHT_STYLE_ID;
+  style.textContent = `::highlight(${FLASH_HIGHLIGHT_NAME}){background-color:color-mix(in oklab, var(--warning) 35%, transparent);color:var(--foreground);}`;
+  document.head.appendChild(style);
+}
 
 /** Flattens a container's text nodes so a quote spanning several elements can still be located. */
 function textNodeMap(container: HTMLElement): { nodes: Text[]; text: string; starts: number[] } {
@@ -143,6 +161,7 @@ function flashQuote(container: HTMLElement, quote: string, hint: number | null):
   const highlights = (CSS as unknown as { highlights?: Map<string, unknown> }).highlights;
   const HighlightCtor = (window as unknown as { Highlight?: new (...ranges: Range[]) => unknown }).Highlight;
   if (highlights && HighlightCtor) {
+    ensureFlashHighlightStyle();
     highlights.set(FLASH_HIGHLIGHT_NAME, new HighlightCtor(range));
     setTimeout(() => highlights.delete(FLASH_HIGHLIGHT_NAME), 2000);
   }

@@ -1,12 +1,16 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace, updateWorkspace } from "@/lib/api";
-import { Button, Card, Field, FieldError, FieldLabel, Input } from "@/components/ui";
+import { countryOptions } from "@/lib/countries";
+import { Button, Card, Field, FieldError, FieldHint, FieldLabel, Input, Select } from "@/components/ui";
 
 export default function GeneralTab() {
   const [name, setName] = useState("");
   const [savedName, setSavedName] = useState("");
+  const [country, setCountry] = useState("");
+  const [savedCountry, setSavedCountry] = useState("");
+  const countries = useMemo(() => countryOptions(), []);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -17,6 +21,8 @@ export default function GeneralTab() {
       const workspace = await getWorkspace();
       setName(workspace.name || "");
       setSavedName(workspace.name || "");
+      setCountry(workspace.country || "");
+      setSavedCountry(workspace.country || "");
     } catch (e) {
       setError((e as Error).message || "Failed to load workspace");
     } finally {
@@ -39,16 +45,16 @@ export default function GeneralTab() {
       setError("Workspace name is required");
       return;
     }
-    if (trimmed === savedName) return;
+    if (trimmed === savedName && country === savedCountry) return;
     setSaving(true);
     try {
-      await updateWorkspace({ name: trimmed });
-      showToast("Workspace name updated");
+      await updateWorkspace({ name: trimmed, country });
+      showToast("Workspace details updated");
       // Sidebar, workspace switcher, and this page's header all read the name
       // from separate client-side fetches — reload so they all pick it up.
       window.location.reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update workspace name");
+      setError(err instanceof Error ? err.message : "Failed to update workspace");
       setSaving(false);
     }
   }
@@ -91,10 +97,29 @@ export default function GeneralTab() {
             />
           </Field>
 
+          <Field>
+            <FieldLabel htmlFor="workspace-country">Country</FieldLabel>
+            <Select id="workspace-country" value={country} onChange={(e) => setCountry(e.target.value)} disabled={saving}>
+              <option value="">Not set</option>
+              {countries.map((c) => (
+                <option key={c.code} value={c.code}>
+                  {c.name}
+                </option>
+              ))}
+            </Select>
+            <FieldHint>
+              Helps pick the right currency at checkout. Your location is detected automatically at checkout — this is only used as
+              a fallback when that isn&apos;t possible.
+            </FieldHint>
+          </Field>
+
           {error && <FieldError>{error}</FieldError>}
 
           <div className="flex justify-end">
-            <Button type="submit" disabled={saving || !name.trim() || name.trim() === savedName}>
+            <Button
+              type="submit"
+              disabled={saving || !name.trim() || (name.trim() === savedName && country === savedCountry)}
+            >
               {saving ? "Saving…" : "Save changes"}
             </Button>
           </div>

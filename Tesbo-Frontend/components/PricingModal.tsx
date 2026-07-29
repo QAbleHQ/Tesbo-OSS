@@ -4,7 +4,14 @@ import { useEffect, useState } from "react";
 import { IconCheck } from "@tabler/icons-react";
 import { Button, Modal } from "@/components/ui";
 import { cx } from "@/components/ui/cx";
-import { createCheckoutSession, getBillingPricing, type BillingInfo, type BillingInterval, type BillingPricing } from "@/lib/api";
+import {
+  createCheckoutSession,
+  getBillingPricing,
+  type BillingCurrency,
+  type BillingInfo,
+  type BillingInterval,
+  type BillingPricing,
+} from "@/lib/api";
 
 type PricingModalProps = {
   open: boolean;
@@ -36,21 +43,44 @@ export default function PricingModal({ open, onClose, billingInfo }: PricingModa
   const [interval, setInterval] = useState<BillingInterval>("annual");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const [pricing, setPricing] = useState<BillingPricing | null>(null);
+  // null = let the backend pick from the buyer's country; set once the buyer ticks or
+  // unticks the India-pricing box, from which point their choice wins over detection.
+  const [currencyChoice, setCurrencyChoice] = useState<BillingCurrency | null>(null);
+  // The quote, tagged with the currencyChoice it was fetched for, so "is the quote on screen
+  // still the one that was asked for" is derived rather than tracked as a separate flag.
+  const [quote, setQuote] = useState<{ requestedFor: BillingCurrency | null; pricing: BillingPricing | null } | null>(null);
 
   const currentPlan = billingInfo?.plan ?? "launch";
 
   useEffect(() => {
     if (!open) return;
-    getBillingPricing()
-      .then(setPricing)
-      .catch(() => setPricing(null));
-  }, [open]);
+    let cancelled = false;
+    getBillingPricing(currencyChoice ?? undefined)
+      .then((pricing) => {
+        if (!cancelled) setQuote({ requestedFor: currencyChoice, pricing });
+      })
+      .catch(() => {
+        // Records the failure against this choice too, so a dead /pricing call doesn't leave
+        // the modal stuck on "Updating price…" forever — it falls back to the USD list price.
+        if (!cancelled) setQuote({ requestedFor: currencyChoice, pricing: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, currencyChoice]);
+
+  const pricing = quote?.pricing ?? null;
+  // True from the moment the box is clicked until the matching quote lands, so the amount on
+  // screen and the currency about to be charged can never disagree.
+  const pricingLoading = quote === null || quote.requestedFor !== currencyChoice;
 
   // Falls back to the USD list price while /pricing is loading (or if it fails), so the
   // modal never shows a blank/broken amount — the real, currency-matched price replaces
   // it as soon as the buyer's location has been resolved.
   const currency = pricing?.currency ?? "usd";
+  // Reflects the pending choice immediately, so the box responds to the click rather than
+  // waiting on the refetch that follows it.
+  const indiaPricing = (currencyChoice ?? pricing?.currency) === "inr";
   const currencySymbol = currency === "inr" ? "₹" : "$";
   const locale = currency === "inr" ? "en-IN" : "en-US";
   const monthlyAmount = (pricing?.monthlyAmount ?? 4000) / 100;
@@ -65,7 +95,9 @@ export default function PricingModal({ open, onClose, billingInfo }: PricingModa
     setError("");
     setSubmitting(true);
     try {
-      const { url } = await createCheckoutSession(interval);
+      // Sends the currency of the quote actually on screen (not the raw checkbox state), so
+      // the card is charged in the currency the buyer was shown.
+      const { url } = await createCheckoutSession(interval, pricing?.currency);
       window.location.href = url;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start checkout");
@@ -112,6 +144,36 @@ export default function PricingModal({ open, onClose, billingInfo }: PricingModa
           </button>
         </div>
       </div>
+
+      {/* Rendered only when the server confirmed this visitor may pay in INR (detected in India, or
+          already locked to INR by a past payment). Visitors elsewhere never see it, and the server
+          rejects an INR request from them regardless of what the client sends. */}
+      {pricing?.inrAvailable && (
+        <div className="mb-5 flex justify-center">
+          <label
+            className={cx(
+              "flex items-center gap-2 text-[13px] text-[var(--muted-soft)]",
+              pricing.currencyLocked ? "cursor-not-allowed opacity-70" : "cursor-pointer"
+            )}
+            title={
+              pricing.currencyLocked
+                ? "Stripe fixes a customer's billing currency at their first payment, so this can't be changed."
+                : undefined
+            }
+          >
+            <input
+              type="checkbox"
+              checked={indiaPricing}
+              disabled={submitting || pricing.currencyLocked}
+              onChange={(e) => setCurrencyChoice(e.target.checked ? "inr" : "usd")}
+            />
+            <span>
+              I&apos;m in India — show prices in <span className="font-medium text-[var(--foreground)]">₹ INR</span> and charge my card in INR
+              {pricing.currencyLocked && " (locked in by your first payment)"}
+            </span>
+          </label>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] p-5">
@@ -160,8 +222,16 @@ export default function PricingModal({ open, onClose, billingInfo }: PricingModa
             ))}
           </ul>
           {error && <p className="mb-2 text-[12px] text-[var(--error-foreground)]">{error}</p>}
-          <Button fullWidth disabled={submitting || currentPlan === "pro"} onClick={handleUpgrade}>
-            {currentPlan === "pro" ? "Current plan" : submitting ? "Redirecting…" : "Upgrade to Pro"}
+          {/* Blocked while the quote is in flight so checkout can't start against the
+              previous currency's amount. */}
+          <Button fullWidth disabled={submitting || pricingLoading || currentPlan === "pro"} onClick={handleUpgrade}>
+            {currentPlan === "pro"
+              ? "Current plan"
+              : submitting
+                ? "Redirecting…"
+                : pricingLoading
+                  ? "Updating price…"
+                  : "Upgrade to Pro"}
           </Button>
         </div>
       </div>

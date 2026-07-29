@@ -47,6 +47,19 @@ export class AppConfigService {
   // above, charged instead when the buyer is detected as being in India.
   readonly stripePriceIdProMonthlyInr = this.optionalString("STRIPE_PRICE_ID_PRO_MONTHLY_INR");
   readonly stripePriceIdProAnnualInr = this.optionalString("STRIPE_PRICE_ID_PRO_ANNUAL_INR");
+  // Forces the detected country (e.g. "IN") for every request. Local stacks and staging see only
+  // private IPs, which can't be geolocated, so without this the India price list is untestable.
+  // Must stay unset in production — it would hand INR pricing to every visitor.
+  readonly billingForceCountry = this.optionalString("BILLING_FORCE_COUNTRY");
+  // Only enable when an edge that OVERWRITES client-supplied country headers (Cloudflare,
+  // CloudFront, Vercel, Fastly) fronts the app. Otherwise a caller can forge cf-ipcountry: IN
+  // and buy the India price list from anywhere.
+  readonly trustProxyCountryHeader = this.string("TRUST_PROXY_COUNTRY_HEADER", "false").toLowerCase() === "true";
+  // Days of full Pro-level access a workspace keeps after its subscription ends, before Launch
+  // limits are enforced for real. 0 disables the grace window (immediate enforcement).
+  readonly planGraceDays = this.integer("PLAN_GRACE_DAYS", 30);
+  // Where "need more storage?" and other billing dead-ends point people.
+  readonly supportContactEmail = this.string("SUPPORT_CONTACT_EMAIL", "support@tryqable.com");
 
   private loadEnv(): Record<string, string | undefined> {
     const dotenvPath = this.findDotEnvPath();
