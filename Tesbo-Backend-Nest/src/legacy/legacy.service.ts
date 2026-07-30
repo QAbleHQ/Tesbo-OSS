@@ -5834,6 +5834,7 @@ export class LegacyService implements OnModuleInit {
       "  - For comparisons or tabular data use markdown table syntax: | Heading | Heading |\\n|---|---|\\n| value | value |",
       "  - When testcase rows are in the testcases array the UI already renders them in a table — only write a brief summary in reply (e.g. 'Created 3 test cases covering the checkout flow.'). Do NOT duplicate testcase data as a markdown table in reply.",
       "  - NEVER put raw JSON, object/array literals, code blocks, or placeholder text like <string> in reply.",
+      "  - JSON STRING ESCAPING IS MANDATORY: every double quote inside reply must be written as \\\" and every line break as \\n. An unescaped quote or a literal newline makes the whole response unparseable. Prefer 'single quotes' for quoted phrases so this cannot happen.",
       "  - Be direct — skip filler openers like 'Certainly!', 'Sure!', or 'Here is your answer:'.",
       "  - For analytical responses (coverage gaps, test strategy, explanations) use structured headings and bullets so the answer is easy to scan.",
       "",
@@ -7407,6 +7408,112 @@ export class LegacyService implements OnModuleInit {
     return null;
   }
 
+  // Models routinely emit *almost* valid JSON: an unescaped quote or a literal newline
+  // inside a long markdown string value. Strict JSON.parse rejects the whole payload, and
+  // without this repair the raw envelope leaks into the chat as the visible reply.
+  // Walks the text and escapes control chars plus any quote that is not a real terminator
+  // (a terminator is followed only by whitespace and one of , : } ] or end of input).
+  private repairLooseJson(text: string): string {
+    const out: string[] = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (!inString) {
+        out.push(char);
+        if (char === "\"") inString = true;
+        continue;
+      }
+      if (escaped) {
+        out.push(char);
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        out.push(char);
+        escaped = true;
+        continue;
+      }
+      if (char === "\"") {
+        let lookahead = index + 1;
+        while (lookahead < text.length && /\s/.test(text[lookahead])) lookahead += 1;
+        const next = text[lookahead];
+        if (lookahead >= text.length || next === "," || next === ":" || next === "}" || next === "]") {
+          out.push(char);
+          inString = false;
+        } else {
+          out.push("\\\"");
+        }
+        continue;
+      }
+      if (char === "\n") out.push("\\n");
+      else if (char === "\r") out.push("\\r");
+      else if (char === "\t") out.push("\\t");
+      else if (char < " ") out.push(" ");
+      else out.push(char);
+    }
+    return out.join("");
+  }
+
+  // Last resort when even the repaired payload will not parse: pull the string fields we
+  // actually render straight out of the text so the user still sees prose, never an envelope.
+  private salvageJsonStringFields(text: string, fields: string[]): Body | null {
+    const salvaged: Body = {};
+    for (const field of fields) {
+      const start = text.indexOf(`"${field}"`);
+      if (start < 0) continue;
+      const colon = text.indexOf(":", start + field.length + 2);
+      if (colon < 0) continue;
+      let cursor = colon + 1;
+      while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+      if (text[cursor] !== "\"") continue;
+      cursor += 1;
+      const chars: string[] = [];
+      let escaped = false;
+      for (; cursor < text.length; cursor += 1) {
+        const char = text[cursor];
+        if (escaped) {
+          if (char === "n") chars.push("\n");
+          else if (char === "r") chars.push("\r");
+          else if (char === "t") chars.push("\t");
+          else chars.push(char);
+          escaped = false;
+          continue;
+        }
+        if (char === "\\") {
+          escaped = true;
+          continue;
+        }
+        if (char === "\"") {
+          let lookahead = cursor + 1;
+          while (lookahead < text.length && /\s/.test(text[lookahead])) lookahead += 1;
+          const next = text[lookahead];
+          if (lookahead >= text.length || next === "," || next === "}") break;
+        }
+        chars.push(char);
+      }
+      const value = chars.join("").trim();
+      if (value) salvaged[field] = value;
+    }
+    return Object.keys(salvaged).length ? salvaged : null;
+  }
+
+  // Strict parse → repaired parse → textual field salvage. Returns null only when the text
+  // holds no recoverable JSON object at all, which callers surface as plain prose.
+  private parseModelJson(raw: string, salvageFields: string[] = ["reply", "reasoningSummary"]): Body | null {
+    const payload = this.extractJsonPayload(String(raw || "").trim());
+    if (!payload) return null;
+    try {
+      const parsed = JSON.parse(payload) as Body;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch { /* fall through to repair */ }
+    try {
+      const parsed = JSON.parse(this.repairLooseJson(payload)) as Body;
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch { /* fall through to field salvage */ }
+    return this.salvageJsonStringFields(payload, salvageFields);
+  }
+
   // Plain JSON-mode completion for internal tool calls that need a small, arbitrary JSON
   // shape (not the fixed Zyra chat decision schema) — used to plan the scenario todo list
   // for "all possible cases" generation without pulling in the full chat-decision prompt.
@@ -7429,7 +7536,9 @@ export class LegacyService implements OnModuleInit {
       }
       const data = await res.json() as Body;
       const text = normalizeJsonArray(data.content).map((item: Body) => item?.text || "").join("\n");
-      return JSON.parse(this.extractJsonPayload(text));
+      const parsed = this.parseModelJson(text, []);
+      if (!parsed) throw new Error("Anthropic returned no parseable JSON.");
+      return parsed;
     }
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     const authHeader = String(key.auth_header_name || "Authorization");
@@ -7455,7 +7564,9 @@ export class LegacyService implements OnModuleInit {
     }
     const data = await res.json() as Body;
     const content = String(data.choices?.[0]?.message?.content || "{}");
-    return JSON.parse(this.extractJsonPayload(content));
+    const parsed = this.parseModelJson(content, []);
+    if (!parsed) throw new Error("OpenAI returned no parseable JSON.");
+    return parsed;
   }
 
   // Plans a todo list of distinct scenarios to cover for an exhaustive ("all possible cases")
@@ -7702,13 +7813,11 @@ export class LegacyService implements OnModuleInit {
     }
     const data = await res.json() as Body;
     const content = String(data.choices?.[0]?.message?.content || "{}");
-    try {
-      return JSON.parse(this.extractJsonPayload(content));
-    } catch {
-      // AI returned prose instead of JSON — surface it as a plain answer so the
-      // user sees the actual message rather than a SyntaxError string.
-      return { reply: content.trim().slice(0, 5000), action: "answer", actionType: "answer", operations: [], testcases: [] };
-    }
+    const parsed = this.parseModelJson(content);
+    if (parsed) return parsed;
+    // AI returned prose instead of JSON — surface it as a plain answer so the
+    // user sees the actual message rather than a SyntaxError string.
+    return { reply: content.trim().slice(0, 5000), action: "answer", actionType: "answer", operations: [], testcases: [] };
   }
 
   private async zyraChatWithAnthropic(key: Body, model: string, context: string, message: string): Promise<Body> {
@@ -7720,7 +7829,12 @@ export class LegacyService implements OnModuleInit {
         model: candidate,
         max_tokens: 2200,
         system: context,
-        messages: [{ role: "user", content: message }]
+        // Prefilling the opening brace stops Claude from wrapping the envelope in a
+        // conversational preamble or a markdown fence — it can only continue the JSON.
+        messages: [
+          { role: "user", content: message },
+          { role: "assistant", content: "{" }
+        ]
       };
       const res = await fetch(chatUrl, {
         method: "POST",
@@ -7740,26 +7854,26 @@ export class LegacyService implements OnModuleInit {
         continue;
       }
       const data = await res.json() as Body;
-      const content = normalizeJsonArray(data.content).map((item) => item?.text || "").join("\n").trim();
-      try {
-        return JSON.parse(this.extractJsonPayload(content || "{}"));
-      } catch {
-        // AI returned prose instead of JSON — surface it as a plain answer so the
-        // user sees the actual message rather than a SyntaxError string.
-        return { reply: content.trim().slice(0, 5000), action: "answer", actionType: "answer", operations: [], testcases: [] };
-      }
+      const rawText = normalizeJsonArray(data.content).map((item) => item?.text || "").join("\n").trim();
+      // The assistant prefill is stripped from the response, so put the brace back before parsing.
+      const content = rawText.startsWith("{") ? rawText : `{${rawText}`;
+      const parsed = this.parseModelJson(content || "{}");
+      if (parsed) return parsed;
+      // AI returned prose instead of JSON — surface it as a plain answer so the
+      // user sees the actual message rather than a SyntaxError string.
+      return { reply: rawText.slice(0, 5000), action: "answer", actionType: "answer", operations: [], testcases: [] };
     }
     throw new Error(`Claude chat failed: ${lastStatus || "No compatible model was accepted."}`);
   }
 
   private sanitizeZyraReply(raw: unknown, fallback: string): string {
     let text = String(raw ?? "").trim();
-    // AI occasionally nests a full JSON blob inside the reply field — unwrap it
-    if (text.startsWith("{")) {
-      try {
-        const inner = JSON.parse(text);
-        if (typeof inner?.reply === "string" && inner.reply) text = inner.reply.trim();
-      } catch { /* not JSON */ }
+    // AI occasionally nests a full JSON blob inside the reply field — unwrap it. The tolerant
+    // parse matters here: a malformed envelope must never reach the user as visible chat text.
+    if (text.startsWith("{") || text.startsWith("[")) {
+      const inner = this.parseModelJson(text);
+      const innerReply = typeof inner?.reply === "string" ? inner.reply.trim() : "";
+      text = innerReply || "";
     }
     return (text || fallback).slice(0, 5000);
   }

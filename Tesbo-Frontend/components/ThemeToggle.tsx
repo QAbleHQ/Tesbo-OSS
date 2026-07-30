@@ -20,7 +20,7 @@ function ThemeIcon({ mode }: { mode: ThemeMode }) {
   );
 }
 
-export default function ThemeToggle() {
+export default function ThemeToggle({ isCollapsed = false }: { isCollapsed?: boolean }) {
   const [theme, setTheme] = useState<ThemeMode>(() => readStoredTheme());
 
   useEffect(() => {
@@ -33,7 +33,11 @@ export default function ThemeToggle() {
   };
 
   return (
-    <div className="tesbo-glass-strong inline-flex items-center rounded-lg p-0.5">
+    <div
+      className={`tesbo-glass-strong inline-flex items-center rounded-lg p-0.5 ${
+        isCollapsed ? "flex-col" : ""
+      }`}
+    >
       {(["light", "dark"] as ThemeMode[]).map((mode) => {
         const active = theme === mode;
         return (
