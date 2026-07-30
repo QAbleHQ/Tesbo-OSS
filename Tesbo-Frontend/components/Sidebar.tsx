@@ -232,15 +232,24 @@ function SidebarContent() {
   return (
     <aside
       className={`tesbo-sidebar sticky top-0 shrink-0 flex h-screen flex-col border-r transition-[width] duration-200 ${
-        isCollapsed ? "w-[52px]" : "w-[260px]"
+        isCollapsed ? "w-[60px]" : "w-[260px]"
       }`}
     >
-      {/* Header */}
-      <div className="flex h-16 items-center justify-between gap-2 border-b border-[var(--glass-border)] px-3">
-        <Link href="/projects" className={`flex items-center ${isCollapsed ? "justify-center" : ""}`} aria-label="Tesbo Test Manager">
+      {/*
+        Header. The collapsed rail is far too narrow to fit the brand mark and the
+        toggle side by side, so they stack. Keeping them on one row overflowed the
+        rail and pushed the toggle underneath the sticky TopBar (z-20), which left
+        the sidebar collapsed with no reachable way to expand it again.
+      */}
+      <div
+        className={`flex h-16 items-center border-b border-[var(--glass-border)] ${
+          isCollapsed ? "flex-col justify-center gap-1 px-2" : "justify-between gap-2 px-3"
+        }`}
+      >
+        <Link href="/projects" className="flex shrink-0 items-center justify-center" aria-label="Tesbo Test Manager">
           {isCollapsed ? (
-            <span className="grid h-9 w-9 place-items-center rounded-xl border border-[var(--glass-border)] bg-[var(--glass-surface-strong)] shadow-sm">
-              <BrandLogo mark decorative className="h-7 w-auto object-contain" />
+            <span className="grid h-8 w-8 place-items-center rounded-lg border border-[var(--glass-border)] bg-[var(--glass-surface-strong)] shadow-sm">
+              <BrandLogo mark decorative className="h-6 w-auto object-contain" />
             </span>
           ) : (
             <BrandLogo className="h-10 max-w-[150px] object-contain" />
@@ -249,7 +258,9 @@ function SidebarContent() {
         <button
           type="button"
           onClick={() => setIsCollapsed((prev) => !prev)}
-          className="rounded-xl border border-transparent p-1.5 text-[var(--muted-soft)] transition-colors hover:border-[var(--glass-border)] hover:bg-[var(--glass-surface-muted)] hover:text-[var(--foreground)]"
+          className={`shrink-0 rounded-xl border border-transparent text-[var(--muted-soft)] transition-colors hover:border-[var(--glass-border)] hover:bg-[var(--glass-surface-muted)] hover:text-[var(--foreground)] ${
+            isCollapsed ? "p-1" : "p-1.5"
+          }`}
           aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
           <MenuIcon name={isCollapsed ? "chevronRight" : "chevronLeft"} className="h-[16px] w-[16px]" />
@@ -363,7 +374,7 @@ function SidebarContent() {
           />
         )}
         <div className={`flex items-center ${isCollapsed ? "flex-col gap-1" : "gap-2"}`}>
-          <ThemeToggle />
+          <ThemeToggle isCollapsed={isCollapsed} />
           <button
             type="button"
             onClick={onLogout}

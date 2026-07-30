@@ -10,6 +10,10 @@ const STATE_PATH = path.join(AUTH_DIR, "state.json");
 const CONTEXT_PATH = path.join(AUTH_DIR, "context.json");
 const STATE_PATH_B = path.join(AUTH_DIR, "state-b.json");
 const CONTEXT_PATH_B = path.join(AUTH_DIR, "context-b.json");
+const STATE_PATH_BILLING_API = path.join(AUTH_DIR, "state-billing-api.json");
+const CONTEXT_PATH_BILLING_API = path.join(AUTH_DIR, "context-billing-api.json");
+const STATE_PATH_BILLING_UI = path.join(AUTH_DIR, "state-billing-ui.json");
+const CONTEXT_PATH_BILLING_UI = path.join(AUTH_DIR, "context-billing-ui.json");
 
 // One tenant's worth of provisioning inputs — account A and account B (see utils/env.ts) each
 // pass their own set through the same provisioning/bootstrap logic below.
@@ -19,6 +23,14 @@ type Account = {
   name: string;
   orgName: string;
   projectName: string;
+  /**
+   * Skip the OTP signup attempt and seed this user straight into Postgres.
+   *
+   * /api/auth/signup/start is IP rate-limited, and every tenant here looks like the same caller, so
+   * each extra signup attempt spends budget the auth suite's own rate-limit tests need. Set for
+   * tenants that are pure fixtures and never exercise the signup flow itself.
+   */
+  seedDirectly?: boolean;
 };
 
 const accountA: Account = {
@@ -35,6 +47,27 @@ const accountB: Account = {
   name: env.testNameB,
   orgName: env.orgNameB,
   projectName: env.projectNameB,
+};
+
+// Sacrificial tenants for the payment suites, which rewrite their workspace's plan/grace/dunning
+// columns directly in Postgres. One per billing spec file — see the comment on env.billingApiEmail
+// for why they can't share a workspace with each other or with account A.
+const billingApiAccount: Account = {
+  email: env.billingApiEmail,
+  password: env.billingApiPassword,
+  name: env.billingApiName,
+  orgName: env.billingApiOrgName,
+  projectName: env.billingApiProjectName,
+  seedDirectly: true,
+};
+
+const billingUiAccount: Account = {
+  email: env.billingUiEmail,
+  password: env.billingUiPassword,
+  name: env.billingUiName,
+  orgName: env.billingUiOrgName,
+  projectName: env.billingUiProjectName,
+  seedDirectly: true,
 };
 
 function sleep(ms: number) {
@@ -81,9 +114,15 @@ async function provisionUserViaOtp(api: APIRequestContext, account: Account): Pr
     failOnStatusCode: false,
   });
   if (!startRes.ok()) {
-    throw new Error(
-      `Failed to start signup for ${account.email}: ${startRes.status()} ${await startRes.text()}`,
+    // Don't throw: no OTP means the caller falls back to seeding this user directly, which is the
+    // whole reason that fallback exists. The common cause is the IP rate limiter, which is shared
+    // across every tenant provisioned in this run — that's a provisioning detail, not a reason to
+    // fail the suite before a single test has run.
+    console.warn(
+      `[e2e] signup/start failed for ${account.email} (${startRes.status()} ${await startRes.text()}) — ` +
+        "falling back to seeding the user directly into Postgres",
     );
+    return false;
   }
 
   const code = await tryScrapeOtpFromDockerLogs(account.email);
@@ -137,7 +176,7 @@ function provisionUserViaDatabaseSeed(account: Account): void {
 }
 
 async function provisionUser(api: APIRequestContext, account: Account): Promise<void> {
-  const provisionedViaOtp = await provisionUserViaOtp(api, account);
+  const provisionedViaOtp = account.seedDirectly ? false : await provisionUserViaOtp(api, account);
   if (!provisionedViaOtp) {
     provisionUserViaDatabaseSeed(account);
   }
@@ -244,11 +283,40 @@ async function setUpAccount(
   }
 }
 
+/**
+ * Provisions a tenant whose absence must not fail the whole run.
+ *
+ * The payment suites need a workspace they're allowed to break, and they detect a missing context
+ * file and skip themselves. So against a target where these tenants can't be created (a remote
+ * environment with E2E_AUTO_PROVISION=false, say) the right outcome is "payment suites skipped",
+ * not "every spec in the run fails during global setup". Any stale context file is removed so a
+ * previous run's tenant can't be mistaken for this one's.
+ */
+async function setUpOptionalAccount(
+  account: Account,
+  statePath: string,
+  contextPath: string,
+  label: string,
+): Promise<void> {
+  try {
+    await setUpAccount(account, statePath, contextPath);
+  } catch (error) {
+    fs.rmSync(contextPath, { force: true });
+    console.warn(
+      `[e2e] could not provision the ${label} tenant (${account.email}) — the payment suites that ` +
+        `depend on it will skip. Underlying error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
 export default async function globalSetup(): Promise<void> {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
-  // Two independent tenants, provisioned with separate APIRequestContexts so their session
-  // cookies never mix. Account B only backs the cross-tenant authorization suite — every other
-  // spec keeps using account A via the default storageState in playwright.config.ts.
+  // Independent tenants, provisioned with separate APIRequestContexts so their session cookies
+  // never mix. Account B only backs the cross-tenant authorization suite, and the two billing
+  // tenants only back the payment suites — every other spec keeps using account A via the default
+  // storageState in playwright.config.ts.
   await setUpAccount(accountA, STATE_PATH, CONTEXT_PATH);
   await setUpAccount(accountB, STATE_PATH_B, CONTEXT_PATH_B);
+  await setUpOptionalAccount(billingApiAccount, STATE_PATH_BILLING_API, CONTEXT_PATH_BILLING_API, "billing API");
+  await setUpOptionalAccount(billingUiAccount, STATE_PATH_BILLING_UI, CONTEXT_PATH_BILLING_UI, "billing UI");
 }

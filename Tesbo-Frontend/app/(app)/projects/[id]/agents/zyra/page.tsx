@@ -215,6 +215,122 @@ function TestcaseTable({ rows }: { rows: ZyraChatTestcaseRow[] }) {
   );
 }
 
+// ─── JSON recovery ────────────────────────────────────────────────────────────
+// Models routinely emit *almost* valid JSON — an unescaped quote or a literal newline
+// inside a long markdown string. Strict JSON.parse rejects the whole envelope, which is
+// how a raw blob ends up rendered in the chat. Escape control chars and any quote that
+// isn't a real terminator (a terminator is followed only by whitespace and , : } ] or EOF).
+function repairLooseJson(text: string): string {
+  const out: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (!inString) {
+      out.push(char);
+      if (char === '"') inString = true;
+      continue;
+    }
+    if (escaped) { out.push(char); escaped = false; continue; }
+    if (char === "\\") { out.push(char); escaped = true; continue; }
+    if (char === '"') {
+      let j = i + 1;
+      while (j < text.length && /\s/.test(text[j])) j++;
+      const next = text[j];
+      if (j >= text.length || next === "," || next === ":" || next === "}" || next === "]") {
+        out.push(char);
+        inString = false;
+      } else {
+        out.push('\\"');
+      }
+      continue;
+    }
+    if (char === "\n") out.push("\\n");
+    else if (char === "\r") out.push("\\r");
+    else if (char === "\t") out.push("\\t");
+    else if (char < " ") out.push(" ");
+    else out.push(char);
+  }
+  return out.join("");
+}
+
+// Last resort when even the repaired envelope won't parse: lift the string field out of the
+// text directly, so the user reads prose instead of an envelope.
+function salvageJsonField(text: string, field: string): string {
+  const start = text.indexOf(`"${field}"`);
+  if (start < 0) return "";
+  const colon = text.indexOf(":", start + field.length + 2);
+  if (colon < 0) return "";
+  let cursor = colon + 1;
+  while (cursor < text.length && /\s/.test(text[cursor])) cursor++;
+  if (text[cursor] !== '"') return "";
+  cursor++;
+  const chars: string[] = [];
+  let escaped = false;
+  for (; cursor < text.length; cursor++) {
+    const char = text[cursor];
+    if (escaped) {
+      chars.push(char === "n" ? "\n" : char === "r" ? "\r" : char === "t" ? "\t" : char);
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") { escaped = true; continue; }
+    if (char === '"') {
+      let j = cursor + 1;
+      while (j < text.length && /\s/.test(text[j])) j++;
+      const next = text[j];
+      if (j >= text.length || next === "," || next === "}") break;
+    }
+    chars.push(char);
+  }
+  return chars.join("").trim();
+}
+
+function parseLooseJson(text: string): Record<string, unknown> | null {
+  for (const candidate of [text, repairLooseJson(text)]) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
+}
+
+// Renders leftover JSON as readable markdown when no reply field can be recovered — a
+// structured blob is still never shown raw.
+function jsonToMarkdown(value: unknown, depth = 0): string {
+  const label = (key: string) =>
+    key.replace(/[_-]+/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/^./, (c) => c.toUpperCase());
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        const rendered = jsonToMarkdown(item, depth + 1);
+        return rendered ? `- ${rendered.replace(/\n/g, " ")}` : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, val]) => {
+        const rendered = jsonToMarkdown(val, depth + 1);
+        if (!rendered) return "";
+        if (depth === 0) return `### ${label(key)}\n\n${rendered}`;
+        return rendered.includes("\n") ? `**${label(key)}**\n${rendered}` : `**${label(key)}:** ${rendered}`;
+      })
+      .filter(Boolean)
+      .join("\n\n");
+  }
+  return "";
+}
+
 // ─── resolveContent ───────────────────────────────────────────────────────────
 // message.content may be a raw JSON blob from the AI when the backend fallback
 // stored the full structured response as-is. Extract reply + testcases from it.
@@ -225,19 +341,33 @@ function resolveContent(message: ZyraChatMessage): { text: string; testcases: Zy
 
   const trimmed = text.trim();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        if (typeof parsed.reply === "string" && parsed.reply) text = parsed.reply;
-        if (!reasoning && typeof parsed.reasoningSummary === "string" && parsed.reasoningSummary) {
-          reasoning = parsed.reasoningSummary;
-        }
-        if (Array.isArray(parsed.testcases) && parsed.testcases.length > 0 && testcases.length === 0) {
-          testcases = parsed.testcases as ZyraChatTestcaseRow[];
-        }
+    const parsed = parseLooseJson(trimmed);
+    if (parsed) {
+      if (typeof parsed.reply === "string" && parsed.reply.trim()) {
+        text = parsed.reply.trim();
+      } else {
+        // No reply field — render whatever the envelope does carry, minus the plumbing keys.
+        const rest = { ...parsed };
+        delete rest.action;
+        delete rest.actionType;
+        delete rest.operations;
+        delete rest.testcases;
+        delete rest.reasoningSummary;
+        text = jsonToMarkdown(rest) || text;
       }
-    } catch {
-      // Not JSON — use content as-is
+      if (!reasoning && typeof parsed.reasoningSummary === "string" && parsed.reasoningSummary) {
+        reasoning = parsed.reasoningSummary;
+      }
+      if (Array.isArray(parsed.testcases) && parsed.testcases.length > 0 && testcases.length === 0) {
+        testcases = parsed.testcases as ZyraChatTestcaseRow[];
+      }
+    } else {
+      // Unparseable even after repair — pull the fields out textually rather than
+      // falling through and rendering the raw envelope.
+      const salvagedReply = salvageJsonField(trimmed, "reply");
+      const salvagedReasoning = salvageJsonField(trimmed, "reasoningSummary");
+      if (salvagedReply) text = salvagedReply;
+      if (!reasoning && salvagedReasoning) reasoning = salvagedReasoning;
     }
   }
 
