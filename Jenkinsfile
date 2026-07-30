@@ -92,8 +92,8 @@ pipeline {
 
             sleep 20
             docker compose ps
-            curl -fsS http://127.0.0.1:1011/health || true
-            curl -fsS -o /dev/null -w 'frontend_local:%{http_code}\\n' http://127.0.0.1:1010/ || true
+            curl -fsS http://127.0.0.1:1021/health || true
+            curl -fsS -o /dev/null -w 'frontend_local:%{http_code}\\n' http://127.0.0.1:1020/ || true
             echo Deploy finished
           "
         '''
