@@ -4,29 +4,13 @@
 #   docker-compose up --build -d
 #   docker compose up --build -d
 #
+# Database: set DATABASE_URL / DATABASE_USER / DATABASE_PASSWORD in .env
+# (e.g. Neon). No local Postgres container.
+#
 # App URLs:
 #   Frontend: http://localhost:1010
 #   Backend:  http://localhost:1011/health
 services:
-  postgres:
-    # pgvector/pgvector:pg16 is a drop-in postgres:16 image with the pgvector extension
-    # prebuilt (needed for Zyra's knowledge-base embedding search, migration V54).
-    image: pgvector/pgvector:pg16
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-tesbo}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
-    volumes:
-      - tesbo_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -47,13 +31,10 @@ services:
     build:
       context: ./Tesbo-Backend-Nest
     restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-tesbo}
-      DATABASE_USER: ${POSTGRES_USER:-postgres}
-      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_USER: ${DATABASE_USER}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
     command: ["npm", "run", "migrate"]
 
   backend:
@@ -61,17 +42,15 @@ services:
       context: ./Tesbo-Backend-Nest
     restart: unless-stopped
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
       migrator:
         condition: service_completed_successfully
     environment:
       PORT: 7000
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-tesbo}
-      DATABASE_USER: ${POSTGRES_USER:-postgres}
-      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_USER: ${DATABASE_USER}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:1010}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:1010,http://127.0.0.1:1010,http://localhost:3000,http://127.0.0.1:3000}
@@ -157,6 +136,5 @@ services:
       start_period: 30s
 
 volumes:
-  tesbo_pgdata:
   tesbo_redisdata:
   backend_uploads:
