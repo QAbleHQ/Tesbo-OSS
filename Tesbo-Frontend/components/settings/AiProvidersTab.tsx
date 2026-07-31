@@ -8,10 +8,17 @@ import {
   createWorkspaceAiKey,
   deleteWorkspaceAiKey,
   allocateWorkspaceAiKeyToProject,
+  listProviderModels,
+  listAiProviders,
+  type AiProviderOption,
+  type ProviderModelOption,
   type WorkspaceAiKey,
   type WorkspaceAiProjectAllocation,
 } from "@/lib/api";
 import { Button, Card, Field, FieldLabel, Input, Select } from "@/components/ui";
+
+/** Sentinel option that switches the model dropdown to free-text entry. */
+const MANUAL_MODEL_VALUE = "__manual__";
 
 export default function AiProvidersTab() {
   const [workspaceRole, setWorkspaceRole] = useState<string>("member");
@@ -32,21 +39,36 @@ export default function AiProvidersTab() {
   const [deletingKeyId, setDeletingKeyId] = useState<string | null>(null);
   const [allocatingProjectId, setAllocatingProjectId] = useState<string | null>(null);
 
+  const [providerCatalog, setProviderCatalog] = useState<AiProviderOption[]>([]);
+  const [modelOptions, setModelOptions] = useState<ProviderModelOption[]>([]);
+  const [modelsFromProvider, setModelsFromProvider] = useState(false);
+  const [modelHint, setModelHint] = useState("");
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [manualModelEntry, setManualModelEntry] = useState(false);
+
   const canManageKeys = workspaceRole === "owner";
   const providerValue = newProvider === "custom" ? newCustomProvider.trim().toLowerCase() : newProvider;
-  const modelOptions =
-    newProvider === "anthropic"
-      ? ["claude-sonnet-4-6", "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022"]
-      : newProvider === "openai"
-        ? ["gpt-4o", "gpt-4.1", "gpt-4.1-mini"]
-        : [];
+  const catalogProvider = providerCatalog.find((p) => p.id === providerValue);
+  // Base URL is asked for when it can't be derived: user-defined gateways, per-resource
+  // hosts like Azure, and self-hosted runtimes whose default is only a localhost guess.
+  const showBaseUrl = newProvider === "custom" || Boolean(catalogProvider?.requiresBaseUrl) || Boolean(catalogProvider?.defaultBaseUrl);
+  // Only warn about an unrecognised model when the list actually came from the provider —
+  // against the curated fallback a valid model would look wrong.
+  const modelNotOffered =
+    modelsFromProvider && newDefaultModel.trim() !== "" && !modelOptions.some((m) => m.id === newDefaultModel.trim());
 
   const loadData = useCallback(async () => {
     try {
-      const [workspace, aiData] = await Promise.all([getWorkspace(), listWorkspaceAiKeys()]);
+      const [workspace, aiData, catalog] = await Promise.all([
+        getWorkspace(),
+        listWorkspaceAiKeys(),
+        // Failure here only costs the prefills — the form still works with free text.
+        listAiProviders().catch(() => ({ providers: [] })),
+      ]);
       setWorkspaceRole((workspace.role || "member").toLowerCase());
       setKeys(aiData.keys || []);
       setProjects(aiData.projects || []);
+      setProviderCatalog(catalog.providers || []);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load AI providers.");
@@ -57,6 +79,49 @@ export default function AiProvidersTab() {
 
   useEffect(() => { void loadData(); }, [loadData]);
 
+  // Ask the provider which models this key can actually reach, so the list can never
+  // offer a retired or unauthorised model. Debounced because the key arrives keystroke
+  // by keystroke. The server answers with a curated fallback rather than failing when
+  // the provider has no /v1/models route (custom gateways, Bedrock, Vertex).
+  useEffect(() => {
+    if (!canManageKeys || !providerValue) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      setLoadingModels(true);
+      try {
+        const res = await listProviderModels({
+          provider: providerValue,
+          apiKey: newApiKey.trim() || undefined,
+          baseUrl: newBaseUrl.trim() || undefined,
+        });
+        if (cancelled) return;
+        setModelOptions(res.models);
+        setModelsFromProvider(res.source === "live");
+        setModelHint(res.reason);
+      } catch {
+        if (cancelled) return;
+        // Our own API is unreachable — keep whatever list is on screen rather than
+        // blanking it out and stranding the user with no suggestions.
+        setModelsFromProvider(false);
+        setModelHint("Couldn't reach the server to load the model list.");
+      } finally {
+        if (!cancelled) setLoadingModels(false);
+      }
+    }, 500);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [canManageKeys, providerValue, newApiKey, newBaseUrl]);
+
+  // Keep the selection honest about what the provider actually offers. A seeded default
+  // the provider doesn't serve gets cleared so the dropdown reflects real state rather
+  // than holding a value it can't display — and can't silently save one that would 404.
+  // Manual entries are exempt: those are deliberate and often unlistable.
+  useEffect(() => {
+    if (manualModelEntry || modelOptions.length === 0) return;
+    setNewDefaultModel((current) =>
+      current && !modelOptions.some((model) => model.id === current) ? "" : current
+    );
+  }, [modelOptions, manualModelEntry]);
+
   async function handleCreateKey(e: React.FormEvent) {
     e.preventDefault();
     if (!canManageKeys) return;
@@ -64,7 +129,9 @@ export default function AiProvidersTab() {
     setMessage(null);
     setError(null);
     try {
-      const isKnownProvider = ["openai", "anthropic"].includes(providerValue);
+      // Catalog providers derive auth from their wire server-side; only user-defined
+      // gateways need explicit header/scheme overrides sent along.
+      const isKnownProvider = catalogProvider !== undefined;
       await createWorkspaceAiKey({
         name: newName.trim(),
         provider: providerValue,
@@ -78,8 +145,9 @@ export default function AiProvidersTab() {
       setNewName("");
       setNewCustomProvider("");
       setNewApiKey("");
-      setNewDefaultModel(newProvider === "anthropic" ? "claude-sonnet-4-6" : "gpt-4o");
-      setNewBaseUrl("");
+      setNewDefaultModel(catalogProvider?.defaultModel ?? "");
+      setNewBaseUrl(catalogProvider?.defaultBaseUrl ?? "");
+      setManualModelEntry(false);
       setNewAuthHeaderName("Authorization");
       setNewAuthScheme("Bearer");
       setMessage("Workspace AI key added.");
@@ -192,27 +260,52 @@ export default function AiProvidersTab() {
                 value={newProvider}
                 onChange={(e) => {
                   const next = e.target.value;
+                  const definition = providerCatalog.find((p) => p.id === next);
                   setNewProvider(next);
-                  setNewDefaultModel(next === "anthropic" ? "claude-sonnet-4-6" : next === "openai" ? "gpt-4o" : "");
+                  // Reset model and base URL to the new provider's defaults — carrying
+                  // the previous provider's values over would fail on the first call.
+                  setNewDefaultModel(definition?.defaultModel ?? "");
+                  setNewBaseUrl(definition?.defaultBaseUrl ?? "");
+                  setModelOptions([]);
+                  setManualModelEntry(false);
                 }}
                 disabled={saving}
               >
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
+                {/* Keeps the current selection visible while the catalog is in flight. */}
+                {providerCatalog.length === 0 && <option value={newProvider}>{newProvider}</option>}
+                {providerCatalog.map((provider) => (
+                  <option key={provider.id} value={provider.id}>{provider.label}</option>
+                ))}
                 <option value="custom">Custom provider</option>
               </Select>
             </Field>
             {newProvider === "custom" && (
-              <>
-                <Field>
-                  <FieldLabel>Provider name</FieldLabel>
-                  <Input value={newCustomProvider} onChange={(e) => setNewCustomProvider(e.target.value)} placeholder="groq, together, ollama" disabled={saving} />
-                </Field>
-                <Field>
-                  <FieldLabel>API base URL</FieldLabel>
-                  <Input value={newBaseUrl} onChange={(e) => setNewBaseUrl(e.target.value)} placeholder="https://api.example.com/v1" disabled={saving} />
-                </Field>
-              </>
+              <Field>
+                <FieldLabel>Provider name</FieldLabel>
+                <Input value={newCustomProvider} onChange={(e) => setNewCustomProvider(e.target.value)} placeholder="perplexity, cerebras, custom-gateway" disabled={saving} />
+              </Field>
+            )}
+            {showBaseUrl && (
+              <Field>
+                <FieldLabel>
+                  API base URL{catalogProvider?.requiresBaseUrl ? "" : " (optional)"}
+                </FieldLabel>
+                <Input
+                  value={newBaseUrl}
+                  onChange={(e) => setNewBaseUrl(e.target.value)}
+                  placeholder={
+                    catalogProvider?.wire === "azure"
+                      ? "https://<resource>.openai.azure.com"
+                      : catalogProvider?.defaultBaseUrl || "https://api.example.com/v1"
+                  }
+                  disabled={saving}
+                />
+                {catalogProvider?.wire === "azure" && (
+                  <p className="mt-1 text-xs text-[var(--muted)]">
+                    Azure routes by deployment name, so enter your deployment as the model below. Append ?api-version=... to pin a contract version.
+                  </p>
+                )}
+              </Field>
             )}
             <Field className="sm:col-span-2">
               <FieldLabel>API key</FieldLabel>
@@ -220,22 +313,74 @@ export default function AiProvidersTab() {
                 type="password"
                 value={newApiKey}
                 onChange={(e) => setNewApiKey(e.target.value)}
-                placeholder={newProvider === "anthropic" ? "sk-ant-..." : "sk-..."}
+                placeholder={
+                  catalogProvider?.optionalApiKey
+                    ? "Leave blank if the server is unauthenticated"
+                    : newProvider === "anthropic"
+                      ? "sk-ant-..."
+                      : "sk-..."
+                }
                 disabled={saving}
               />
             </Field>
             <Field className="sm:col-span-2">
               <FieldLabel>Default model</FieldLabel>
-              <Input
-                list="workspace-ai-model-options"
-                value={newDefaultModel}
-                onChange={(e) => setNewDefaultModel(e.target.value)}
-                placeholder={newProvider === "custom" ? "Custom model name" : "Select or type a model name"}
-                disabled={saving}
-              />
-              <datalist id="workspace-ai-model-options">
-                {modelOptions.map((model) => <option key={model} value={model} />)}
-              </datalist>
+              {/* A real dropdown whenever we have models to offer. Falls back to free
+                  text when discovery found nothing, and always keeps a manual escape
+                  hatch — Azure deployment names and private gateways never appear in
+                  any list we can fetch. */}
+              {modelOptions.length > 0 && !manualModelEntry ? (
+                <Select
+                  value={modelOptions.some((m) => m.id === newDefaultModel) ? newDefaultModel : ""}
+                  onChange={(e) => {
+                    if (e.target.value === MANUAL_MODEL_VALUE) {
+                      setManualModelEntry(true);
+                      setNewDefaultModel("");
+                      return;
+                    }
+                    setNewDefaultModel(e.target.value);
+                  }}
+                  disabled={saving || loadingModels}
+                >
+                  <option value="">
+                    {loadingModels ? "Loading models..." : "Select a model"}
+                  </option>
+                  {modelOptions.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.displayName === model.id ? model.id : `${model.displayName} (${model.id})`}
+                    </option>
+                  ))}
+                  <option value={MANUAL_MODEL_VALUE}>Enter a model name manually...</option>
+                </Select>
+              ) : (
+                <Input
+                  value={newDefaultModel}
+                  onChange={(e) => setNewDefaultModel(e.target.value)}
+                  placeholder={catalogProvider?.wire === "azure" ? "Your Azure deployment name" : "Model name"}
+                  disabled={saving}
+                />
+              )}
+              <p className="mt-1 text-xs text-[var(--muted)]">
+                {loadingModels
+                  ? "Loading models this key can access..."
+                  : modelNotOffered
+                    ? `"${newDefaultModel.trim()}" isn't in this key's model list — it may be retired or outside the account's access.`
+                    : modelsFromProvider
+                      ? `${modelOptions.length} model${modelOptions.length === 1 ? "" : "s"} available to this key, newest first.`
+                      : modelHint || "Add an API key to load the models it can access."}
+                {manualModelEntry && modelOptions.length > 0 && (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      className="underline hover:no-underline"
+                      onClick={() => { setManualModelEntry(false); setNewDefaultModel(""); }}
+                    >
+                      Choose from the list instead
+                    </button>
+                  </>
+                )}
+              </p>
             </Field>
             {newProvider === "custom" && (
               <>
@@ -250,7 +395,16 @@ export default function AiProvidersTab() {
               </>
             )}
             <div className="sm:col-span-2">
-              <Button type="submit" disabled={saving || !providerValue || (newProvider === "custom" && !newBaseUrl.trim())}>
+              <Button
+                type="submit"
+                disabled={
+                  saving ||
+                  !providerValue ||
+                  // Mirrors the server rule: a base URL is mandatory wherever it can't be derived.
+                  ((newProvider === "custom" || Boolean(catalogProvider?.requiresBaseUrl)) && !newBaseUrl.trim()) ||
+                  (!catalogProvider?.optionalApiKey && !newApiKey.trim())
+                }
+              >
                 {saving ? "Adding key..." : "Add workspace AI key"}
               </Button>
             </div>
