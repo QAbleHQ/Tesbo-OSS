@@ -6164,7 +6164,9 @@ export class LegacyService implements OnModuleInit {
       this.existingTestcaseSnapshot(projectId, message, ""),
       this.zyraAiAllocation(projectId),
       this.zyraChatProjectSnapshot(projectId),
-      this.jiraSnapshot(projectId, mentionedJiraKeys),
+      // Relevance-matched, not just explicitly-named: a request that never types an issue key still
+      // needs the tickets it is about (see relevantJiraSnapshot).
+      this.relevantJiraSnapshot(projectId, message, mentionedJiraKeys),
       this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }))
     ]);
     const knowledge = [...folderKnowledge, ...(ragKnowledge.length ? ragKnowledge : knowledgeFallback)];
@@ -6237,8 +6239,9 @@ export class LegacyService implements OnModuleInit {
         ? (knowledgeForChat.map((item) => `${item.title}\n${item.content}`).join("\n\n") || "No knowledge-base notes.")
         : "Knowledge base access is disabled for Zyra in this project — do not rely on or claim knowledge-base context.",
       "",
-      "Jira tickets explicitly mentioned by the user:",
-      mentionedJira.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n") || "No explicit Jira issue key was mentioned or found in the local Jira cache.",
+      "Jira tickets relevant to this request (keys the user named, plus the closest matches from the synced Jira cache). Every synced ticket is also mirrored into the knowledge base above as a 'KEY: summary' document, so Jira context can reach you through either section:",
+      mentionedJira.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n")
+        || "No Jira ticket matched this request. Do not conclude Jira is disconnected from this — say so only if the project snapshot shows no Jira tickets at all.",
       "",
       "Existing testcases:",
       existingTestcases.map((tc) => `${tc.externalId} | ${tc.title} | ${tc.priority} | ${tc.status}\n${tc.description}\nSteps: ${tc.stepsSummary}`).join("\n\n") || "No existing testcases.",
@@ -6293,7 +6296,9 @@ export class LegacyService implements OnModuleInit {
             suites: projectSnapshot.suites,
             conversation: this.zyraTranscript(chronologicalHistory),
             routedSuite: this.routedZyraSuite(raw, projectSnapshot.suites),
-            routedCount: { requestedCount: raw.requestedCount, exhaustive: raw.exhaustive === true }
+            routedCount: { requestedCount: raw.requestedCount, exhaustive: raw.exhaustive === true },
+            // Already resolved for this turn — reuse instead of a second lookup.
+            jira: mentionedJira
           });
           return this.applyStorageGateToGenerated(decision, capabilities);
         } catch (err) {
@@ -6527,12 +6532,16 @@ export class LegacyService implements OnModuleInit {
     suites: Array<{ id: string; name: string }>;
     conversation?: string;
     routedSuite?: { id?: string; name?: string } | null;
+    jira?: Array<{ key: string; summary: string; description: string }>;
   }): Promise<ZyraChatDecision> {
-    const jira = await this.jiraSnapshot(params.projectId, params.jiraIssueKeys);
+    // Prefer the Jira context already gathered for this turn (explicit keys plus relevance-matched
+    // tickets); fall back to an explicit-key lookup only when a caller supplied none.
+    const jira = params.jira ?? await this.relevantJiraSnapshot(params.projectId, params.message, params.jiraIssueKeys);
     // The router resolved the suite from the whole conversation ("put them in Login", "same suite
     // as before"); substring-matching the raw message is only the fallback for when it named none.
     const matchedSuite = this.resolveRoutedZyraSuite(params.routedSuite, params.suites)
       || this.matchZyraSuiteByName(params.message, params.suites);
+    const jiraFromKnowledge = this.countZyraJiraSourcedKnowledge(params.knowledge);
     const aiResult = await this.generateZyraWithProvider({
       provider: params.provider,
       model: params.model,
@@ -6576,7 +6585,18 @@ export class LegacyService implements OnModuleInit {
       ].filter(Boolean).join(" ")
     });
     return {
-      reply: `I used the AI provider to generate ${aiResult.drafts.length} testcase candidate(s) after reading ${jira.length} Jira ticket(s), ${params.knowledge.length} knowledge-base item(s), and ${params.existingTestcases.length} nearby testcase(s).${matchedSuite ? ` Placing them in the "${matchedSuite.name}" suite.` : ""}`,
+      // Report sources honestly: Jira tickets are mirrored into the knowledge base, so a bare
+      // "0 Jira ticket(s)" alongside 20 knowledge items reads as "Jira isn't connected" when in fact
+      // most of those items were Jira tickets.
+      reply: [
+        `I generated ${aiResult.drafts.length} test case(s) after reading`,
+        [
+          `${params.knowledge.length} knowledge-base item(s)${jiraFromKnowledge ? ` (${jiraFromKnowledge} mirrored from Jira)` : ""}`,
+          `${jira.length} Jira ticket(s) read directly`,
+          `${params.existingTestcases.length} existing test case(s) to avoid duplicating coverage`
+        ].join(", "),
+        `.${matchedSuite ? ` Placing them in the "${matchedSuite.name}" suite.` : ""}`
+      ].join(" ").replace(" .", "."),
       reasoningSummary: `AI generation used ${params.provider}/${params.model}. It considered Jira keys ${params.jiraIssueKeys.length ? params.jiraIssueKeys.join(", ") : "none explicitly mentioned"}, knowledge-base context, existing coverage for duplicate avoidance, and Zyra memory. Tokens: input ${aiResult.usage.input}, output ${aiResult.usage.output}.`,
       actionType: "create",
       operations: aiResult.drafts.map((draft) => ({
@@ -6609,19 +6629,23 @@ export class LegacyService implements OnModuleInit {
     knowledge: Array<{ title: string; content: string }>;
     existingTestcases: ZyraGenerationInput["existingTestcases"];
     suites: Array<{ id: string; name: string; testCaseCount: number }>;
+    jira: Array<{ key: string; summary: string; description: string }>;
   }> {
-    const [knowledgeFallback, ragKnowledge, folderKnowledge, existingTestcases, suites] = await Promise.all([
+    const [knowledgeFallback, ragKnowledge, folderKnowledge, existingTestcases, suites, jira] = await Promise.all([
       this.knowledgeSnapshot(projectId),
       this.ragRetrieval.retrieveKnowledgeContext(projectId, message),
       this.knowledgeFolderSnapshot(projectId, message, jiraIssueKeys),
       this.existingTestcaseSnapshot(projectId, message, ""),
-      this.projectSuiteSummaries(projectId)
+      this.projectSuiteSummaries(projectId),
+      // Relevance-matched, not just explicitly-named — see relevantJiraSnapshot.
+      this.relevantJiraSnapshot(projectId, message, jiraIssueKeys)
     ]);
     const knowledge = [...folderKnowledge, ...(ragKnowledge.length ? ragKnowledge : knowledgeFallback)];
     return {
       knowledge: capabilities.knowledgeBase ? knowledge : [],
       existingTestcases,
-      suites
+      suites,
+      jira
     };
   }
 
@@ -6659,6 +6683,7 @@ export class LegacyService implements OnModuleInit {
     suites: Array<{ id: string; name: string }>;
     conversation?: string;
     routedSuite?: { id?: string; name?: string } | null;
+    jira?: Array<{ key: string; summary: string; description: string }>;
   }): Promise<ZyraChatDecision> {
     let scenarios: string[] = [];
     try {
@@ -6691,7 +6716,8 @@ export class LegacyService implements OnModuleInit {
         requestedCount: 10,
         suites: params.suites,
         conversation: params.conversation,
-        routedSuite: params.routedSuite
+        routedSuite: params.routedSuite,
+        jira: params.jira
       });
     }
 
@@ -6710,7 +6736,8 @@ export class LegacyService implements OnModuleInit {
       requestedCount: firstBatch.length,
       suites: params.suites,
       conversation: params.conversation,
-      routedSuite: params.routedSuite
+      routedSuite: params.routedSuite,
+      jira: params.jira
     });
 
     if (!remaining.length) return decision;
@@ -6790,7 +6817,7 @@ export class LegacyService implements OnModuleInit {
         const jiraIssueKeys = normalizeJsonArray(plan.jiraIssueKeys).map(String);
         // Re-read the sources for every batch: existing coverage grows as earlier batches land, so
         // this is also what stops batch N from duplicating what batch N-1 just wrote.
-        const { knowledge, existingTestcases, suites } = await this.zyraGenerationContext(
+        const { knowledge, existingTestcases, suites, jira } = await this.zyraGenerationContext(
           projectId,
           `${originalMessage}\n${batch.join("\n")}`,
           jiraIssueKeys,
@@ -6806,6 +6833,7 @@ export class LegacyService implements OnModuleInit {
           knowledge,
           existingTestcases,
           jiraIssueKeys,
+          jira,
           requestedCount: batch.length,
           suites,
           // Carried in the plan so every batch files into the suite the user asked for, not just
@@ -7074,7 +7102,23 @@ export class LegacyService implements OnModuleInit {
       });
     } catch (error) {
       const failedAt = new Date().toISOString();
-      const detail = error instanceof Error ? error.message : "Zyra failed to generate testcase drafts.";
+      // Nest builds HttpExceptions from an object payload, so `error.message` is the generic
+      // status text ("Bad Request Exception") and the real cause — provider status, invalid
+      // JSON, revoked key — is only in getResponse(). Reading `.message` here made every
+      // failure indistinguishable in the activity log. extractAiErrorMessage unwraps it, the
+      // same way the Zyra chat paths already do.
+      const summary = this.extractAiErrorMessage(error) || "Zyra failed to generate testcase drafts.";
+      // `error` alone is often still generic ("Claude testcase generation failed"); the provider's
+      // own text lives in `detail`. Keep both so the activity log names the actual cause.
+      const payload = typeof (error as { getResponse?: () => unknown })?.getResponse === "function"
+        ? (error as { getResponse: () => unknown }).getResponse()
+        : null;
+      const providerDetail = payload && typeof payload === "object"
+        ? String((payload as Record<string, unknown>).detail || "")
+        : "";
+      const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
+      // Nothing logged this before, so a failed task left no server-side trace at all.
+      this.logger.error(`Zyra task ${taskId} (project ${projectId}) failed: ${detail}`, error instanceof Error ? error.stack : undefined);
       const activity = [{ actor: "agent", stage: "todo", title: "Generation failed", detail, createdAt: failedAt }];
       await this.db.query(
         "UPDATE ai_generation_requests SET task_status = 'todo', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
@@ -7628,6 +7672,83 @@ export class LegacyService implements OnModuleInit {
       status: String(row.status || "Draft"),
       stepsSummary: JSON.stringify(normalizeJsonArray(row.steps)).slice(0, 800)
     }));
+  }
+
+  // Words that carry no selectivity in a QA request — "generate test cases covering the login flow"
+  // is only really about "login". Without stripping these, term matching against tickets or
+  // testcases matches almost everything and the relevance ordering becomes noise.
+  // Held as STEMS and matched against suffix-stripped candidates, so "cover", "covers", "covering"
+  // and "coverage" all collapse to one entry. Enumerating inflections by hand is what made the old
+  // intent regexes wrong ("generate" matched, "generating" did not) — not repeating it here.
+  private static readonly ZYRA_STOPWORD_STEMS = new Set([
+    "test", "testcase", "case", "generat", "creat", "writ", "draft", "pleas", "cover", "coverag",
+    "scenario", "suite", "flow", "verif", "validat", "check", "should", "would", "could", "about",
+    "with", "from", "into", "need", "want", "make", "give", "show", "list", "them", "this", "that",
+    "these", "those", "there", "their", "have", "been", "will", "more", "some", "also", "use",
+    "using", "base"
+  ]);
+
+  private isZyraStopword(word: string): boolean {
+    if (LegacyService.ZYRA_STOPWORD_STEMS.has(word)) return true;
+    for (const suffix of ["ing", "age", "ed", "es", "s", "e", "y"]) {
+      if (word.length > suffix.length + 2 && word.endsWith(suffix)) {
+        if (LegacyService.ZYRA_STOPWORD_STEMS.has(word.slice(0, -suffix.length))) return true;
+      }
+    }
+    return false;
+  }
+
+  private zyraSearchTerms(text: string, limit = 8): string[] {
+    const words = String(text || "").toLowerCase().split(/[^a-z0-9]+/);
+    const terms = words.filter((word) => word.length > 3 && !this.isZyraStopword(word));
+    return Array.from(new Set(terms)).slice(0, limit);
+  }
+
+  // Jira context for generation. jiraSnapshot only ever returns tickets whose keys were typed into
+  // the message, which meant "generate test cases for the login flow" read ZERO tickets even with
+  // Jira connected and every ticket synced — Zyra depended entirely on the Jira mirror happening to
+  // surface through knowledge-base retrieval. This adds the deliberate step: explicit keys first
+  // (with jiraSnapshot's live-API fallback), then the most relevant synced tickets to fill up to
+  // `limit`. Relevance is required, not padded — an unrelated ticket is worse than no ticket.
+  private async relevantJiraSnapshot(
+    projectId: string,
+    message: string,
+    mentionedKeys: string[],
+    limit = 8
+  ): Promise<Array<{ key: string; summary: string; description: string }>> {
+    const explicit = mentionedKeys.length ? await this.jiraSnapshot(projectId, mentionedKeys) : [];
+    if (explicit.length >= limit) return explicit.slice(0, limit);
+    const terms = this.zyraSearchTerms(message);
+    if (!terms.length) return explicit;
+    const res = await this.db.query(
+      `SELECT jira_issue_key, summary, description
+       FROM jira_tickets
+       WHERE project_id = $1
+         AND (lower(summary) LIKE ANY($2::text[])
+              OR lower(coalesce(description, '')) LIKE ANY($2::text[])
+              OR lower(coalesce(labels, '')) LIKE ANY($2::text[]))
+       ORDER BY CASE WHEN lower(summary) LIKE ANY($2::text[]) THEN 0 ELSE 1 END,
+                jira_updated_at DESC NULLS LAST
+       LIMIT $3`,
+      [projectId, terms.map((term) => `%${term}%`), limit]
+    ).catch(() => ({ rows: [] as Body[] }));
+    const seen = new Set(explicit.map((item) => item.key));
+    const matched = res.rows
+      .map((row) => ({
+        key: String(row.jira_issue_key || ""),
+        summary: String(row.summary || ""),
+        description: String(row.description || "").slice(0, 4000)
+      }))
+      .filter((item) => item.key && !seen.has(item.key));
+    return [...explicit, ...matched].slice(0, limit);
+  }
+
+  // Jira tickets are mirrored into the knowledge base by the integration sync, titled "KEY: summary"
+  // (see IntegrationSyncDocumentBuilder). Counting them makes the "sources read" line in a reply
+  // honest: reporting "0 Jira ticket(s)" while a dozen retrieved knowledge items were Jira tickets
+  // reads as "Jira is not connected", which is the wrong conclusion.
+  private countZyraJiraSourcedKnowledge(knowledge: Array<{ title: string }>): number {
+    return knowledge.filter((item) => /^[A-Z][A-Z0-9]+-\d+\s*:/.test(String(item.title || "").trim())).length;
   }
 
   private async jiraSnapshot(projectId: string, keys: string[]): Promise<Array<{ key: string; summary: string; description: string }>> {
@@ -8728,6 +8849,7 @@ export class LegacyService implements OnModuleInit {
     conversation?: string;
     routedSuite?: { id?: string; name?: string } | null;
     routedCount?: { requestedCount?: unknown; exhaustive?: boolean };
+    jira?: Array<{ key: string; summary: string; description: string }>;
   }): Promise<ZyraChatDecision> {
     const plan = this.chatTestcasePlan(params.message, params.projectTestcaseRange, params.routedCount);
     if (plan.testcaseRange === "all") {
@@ -8744,7 +8866,8 @@ export class LegacyService implements OnModuleInit {
         jiraIssueKeys: params.jiraIssueKeys,
         suites: params.suites,
         conversation: params.conversation,
-        routedSuite: params.routedSuite
+        routedSuite: params.routedSuite,
+        jira: params.jira
       });
     }
     return this.generateZyraChatTestcasesWithAi({
@@ -8760,6 +8883,7 @@ export class LegacyService implements OnModuleInit {
       suites: params.suites,
       conversation: params.conversation,
       routedSuite: params.routedSuite,
+      jira: params.jira,
       ...plan
     });
   }

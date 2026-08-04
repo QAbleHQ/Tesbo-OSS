@@ -59,6 +59,8 @@ type Internals = {
     existingTestcases: Array<Record<string, unknown>>,
     reason: string
   ) => { reply: string; actionType: string; operations: unknown[]; testcases: unknown[] };
+  zyraSearchTerms: (text: string, limit?: number) => string[];
+  countZyraJiraSourcedKnowledge: (knowledge: Array<{ title: string }>) => number;
 };
 
 function internals(svc: LegacyService): Internals {
@@ -261,6 +263,53 @@ describe("Zyra chat AI routing", () => {
     it("does not treat pipe-prefixed prose without a separator row as a table", () => {
       const notATable = "| this is not really a table\n| just some piped lines";
       expect(internals(svc).stripZyraTestcaseTables(notATable, false)).toBe(notATable);
+    });
+  });
+
+  describe("Jira context selection", () => {
+    it("keeps only the selective words from a QA request", () => {
+      // Without stopwords every ticket matches on "test"/"cases"/"coverage" and relevance is noise.
+      expect(internals(svc).zyraSearchTerms("generate test cases covering the login flow"))
+        .toEqual(["login"]);
+      expect(internals(svc).zyraSearchTerms("please create test case coverage for checkout and refunds"))
+        .toEqual(["checkout", "refunds"]);
+    });
+
+    it("returns no terms when the request is all filler, so nothing irrelevant is matched", () => {
+      expect(internals(svc).zyraSearchTerms("please generate some test cases")).toEqual([]);
+    });
+
+    it("collapses inflections through the stem list, not a hand-written form list", () => {
+      for (const filler of ["cover", "covers", "covering", "coverage", "generate", "generating", "generated", "cases", "testcases", "scenarios", "validate", "verify"]) {
+        expect(internals(svc).zyraSearchTerms(`${filler} login`)).toEqual(["login"]);
+      }
+    });
+
+    it("does not over-stem a real domain word into a stopword", () => {
+      // "checkout" must survive even though "check" is filler.
+      expect(internals(svc).zyraSearchTerms("test the checkout")).toEqual(["checkout"]);
+      expect(internals(svc).zyraSearchTerms("cases for password reset")).toEqual(["password", "reset"]);
+    });
+
+    it("caps the term list", () => {
+      const terms = internals(svc).zyraSearchTerms("alpha bravo charlie delta echo foxtrot golf hotel india juliet", 4);
+      expect(terms).toHaveLength(4);
+    });
+
+    it("counts Jira tickets mirrored into the knowledge base", () => {
+      // The sync writes them as "KEY: summary" documents, so a reply can report them honestly
+      // instead of saying "0 Jira ticket(s)" while most retrieved items were Jira tickets.
+      const count = internals(svc).countZyraJiraSourcedKnowledge([
+        { title: "TTM-164: Authentication & Login" },
+        { title: "TTM-89: Section F — AI-Powered Test Generation" },
+        { title: "Release checklist" },
+        { title: "Zyra AI Memory" }
+      ]);
+      expect(count).toBe(2);
+    });
+
+    it("does not count an ordinary note that merely mentions a key", () => {
+      expect(internals(svc).countZyraJiraSourcedKnowledge([{ title: "Notes about TTM-164 login" }])).toBe(0);
     });
   });
 

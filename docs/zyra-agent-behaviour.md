@@ -53,7 +53,17 @@ Before Zyra proposes or authors anything it grounds itself in, in this order of 
    capability — off means the model is told it has no KB access and must not claim otherwise.
 2. **Existing test cases** (`existingTestcaseSnapshot`) — coverage answers must come from these, not
    from guesses, and new cases must fill gaps rather than duplicate them.
-3. **Jira tickets** named in the message, the project snapshot, and the suite list.
+3. **Jira tickets** (`relevantJiraSnapshot`): keys named in the message (with a live-API fallback for
+   keys not yet synced), **plus the most relevant tickets from the synced cache** — a request that
+   never types an issue key still needs the tickets it is about. Relevance is required, never padded:
+   an unrelated ticket is worse than no ticket. Terms are stemmed against a stopword stem list, so
+   "generate test cases covering the login flow" searches for `login`, not for `test`/`coverage`.
+4. The project snapshot and suite list.
+
+Note that the integration sync **also mirrors every Jira ticket into the knowledge base** as a
+`KEY: summary` document, so Jira context reaches Zyra through both the KB retrieval and the dedicated
+Jira slot. Any "sources read" line must count both (`countZyraJiraSourcedKnowledge`) — reporting
+"0 Jira ticket(s)" next to 20 knowledge items reads as "Jira is disconnected", which is wrong.
 
 The same gatherer runs for the interactive turn **and for every background batch**. Batches re-read
 context so batch N sees what batches 1..N-1 just wrote and does not duplicate it.
@@ -134,3 +144,5 @@ is written before the operations run, so nothing else compares the claim to the 
 | 2026-07-31 | Zero-target `move_to_suite` records activity instead of returning silently. | A suite was created and left empty with no audit trail while the reply announced a successful save. |
 | 2026-07-31 | Batches re-gather RAG/KB context and carry the routed suite. | Batches 2..N used a plain recency snapshot with no RAG and no capability gate, drifting from batch 1's sources. |
 | 2026-07-31 | Generation failure after successful routing degrades to the router's answer. | A truncated generation response returned a bare "AI unavailable" and discarded an otherwise good turn. |
+| 2026-07-31 | Jira context is relevance-matched from the synced cache, not only from issue keys typed in the message (`relevantJiraSnapshot`). The "sources read" line now counts Jira tickets mirrored into the KB. | `jiraSnapshot` returned `[]` whenever no key was typed, so "generate test cases for the login flow" read 0 tickets with Jira connected and 83 tickets synced — and the reply's bare "0 Jira ticket(s)" read as a broken integration. |
+| 2026-07-31 | `processZyraTask`'s failure handler unwraps the thrown `HttpException` payload (`extractAiErrorMessage` + the payload's `detail`) and logs the failure server-side. | The handler read `error.message`, which Nest sets to the generic status text for object-payload exceptions, so every Tasks failure recorded the literal string "Bad Request Exception" — a revoked key, a rate-limited provider, and truncated JSON were indistinguishable, and nothing was logged. The Zyra chat paths already used `extractAiErrorMessage`; only the Tasks path did not. |
