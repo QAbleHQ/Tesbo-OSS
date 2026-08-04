@@ -147,6 +147,18 @@ export class LegacyController {
     return this.legacy.createAiKey(req.userId, body);
   }
 
+  @Get("/api/workspace/ai-providers")
+  aiProviders() {
+    return this.legacy.listAiProviders();
+  }
+
+  // POST, not GET: the settings form calls this with an unsaved API key in the body,
+  // which must not end up in a URL, a proxy log, or the browser history.
+  @Post("/api/workspace/ai-keys/models")
+  listProviderModels(@Req() req: AuthenticatedRequest, @Body() body: Record<string, any>) {
+    return this.legacy.listProviderModels(req.userId, body);
+  }
+
   @Delete("/api/workspace/ai-keys/:keyId")
   deleteAiKey(@Req() req: AuthenticatedRequest, @Param("keyId") keyId: string) {
     return this.legacy.deleteAiKey(req.userId, keyId);

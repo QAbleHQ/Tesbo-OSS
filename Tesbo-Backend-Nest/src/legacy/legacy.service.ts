@@ -115,6 +115,9 @@ type ZyraChatDecision = {
   testcases: Body[];
 };
 
+// What the AI router decided this request is (intentFromZyraModelAction). There is no keyword
+// classifier producing these — the model reads the request in the context of the conversation and
+// the project, and the system dispatches on its answer.
 type ZyraChatIntent = "answer" | "example" | "list" | "create" | "update" | "archive" | "suite" | "jira_pending_testcases";
 
 // Configurable Zyra capabilities (per project, stored under project.settings.zyraAgent.capabilities).
@@ -289,34 +292,205 @@ function verifyOAuthState(raw: string, provider: IntegrationProvider, organizati
   }
 }
 
+// ─── AI provider catalog ─────────────────────────────────────────────────────
+// Adding a provider is a registry entry, not a new branch. Request code dispatches
+// on `wire` alone, and three wires cover everything we support:
+//   openai    — POST /v1/chat/completions, GET /v1/models, Authorization: Bearer.
+//               Most vendors below are wire-identical to OpenAI and need no code.
+//   anthropic — POST /v1/messages, x-api-key + anthropic-version, after_id paging.
+//   azure     — OpenAI's body shape, but api-key auth, an api-version query param,
+//               and *deployment names* in the path rather than model ids.
+type ProviderWire = "openai" | "anthropic" | "azure";
+
+interface ProviderDefinition {
+  label: string;
+  wire: ProviderWire;
+  /** null = use the wire's own default host. A string prefills the settings form. */
+  defaultBaseUrl: string | null;
+  /** Per-deployment hosts can't be guessed, so the user must supply one. */
+  requiresBaseUrl?: boolean;
+  /** Local runtimes accept any key, or none at all. */
+  optionalApiKey?: boolean;
+  /** Seeds the settings form. Empty where only the operator knows the name. */
+  defaultModel: string;
+  /**
+   * Only used when live discovery is unavailable. Deliberately short: a stale id
+   * here recreates the retired-model 404 this whole mechanism exists to prevent,
+   * and every provider below serves /v1/models, so this is a rarely-taken path.
+   */
+  fallbackModels: string[];
+}
+
+const ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6";
+const OPENAI_DEFAULT_MODEL = "gpt-4o";
+// Azure pins its data-plane contract by date. Override per key by putting
+// ?api-version=... on the stored base URL.
+const AZURE_DEFAULT_API_VERSION = "2024-10-21";
+
+const PROVIDER_CATALOG: Record<string, ProviderDefinition> = {
+  openai: {
+    label: "OpenAI",
+    wire: "openai",
+    defaultBaseUrl: null,
+    defaultModel: OPENAI_DEFAULT_MODEL,
+    fallbackModels: [OPENAI_DEFAULT_MODEL, "gpt-4.1", "gpt-4.1-mini"]
+  },
+  anthropic: {
+    label: "Anthropic (Claude)",
+    wire: "anthropic",
+    defaultBaseUrl: null,
+    defaultModel: ANTHROPIC_DEFAULT_MODEL,
+    fallbackModels: [ANTHROPIC_DEFAULT_MODEL, "claude-haiku-4-5"]
+  },
+  google: {
+    label: "Google (Gemini)",
+    wire: "openai",
+    // Gemini's OpenAI-compatible surface, not the native generateContent API —
+    // it keeps Gemini on the same wire as everything else.
+    defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    defaultModel: "gemini-2.0-flash",
+    fallbackModels: []
+  },
+  groq: {
+    label: "Groq",
+    wire: "openai",
+    defaultBaseUrl: "https://api.groq.com/openai/v1",
+    defaultModel: "llama-3.3-70b-versatile",
+    fallbackModels: []
+  },
+  mistral: {
+    label: "Mistral",
+    wire: "openai",
+    defaultBaseUrl: "https://api.mistral.ai/v1",
+    defaultModel: "mistral-large-latest",
+    fallbackModels: []
+  },
+  deepseek: {
+    label: "DeepSeek",
+    wire: "openai",
+    defaultBaseUrl: "https://api.deepseek.com/v1",
+    defaultModel: "deepseek-chat",
+    fallbackModels: []
+  },
+  xai: {
+    label: "xAI (Grok)",
+    wire: "openai",
+    defaultBaseUrl: "https://api.x.ai/v1",
+    defaultModel: "",
+    fallbackModels: []
+  },
+  openrouter: {
+    label: "OpenRouter",
+    wire: "openai",
+    defaultBaseUrl: "https://openrouter.ai/api/v1",
+    // OpenRouter addresses models as vendor/model across hundreds of options,
+    // so discovery matters more here than a seeded default.
+    defaultModel: "",
+    fallbackModels: []
+  },
+  together: {
+    label: "Together AI",
+    wire: "openai",
+    defaultBaseUrl: "https://api.together.xyz/v1",
+    defaultModel: "",
+    fallbackModels: []
+  },
+  fireworks: {
+    label: "Fireworks AI",
+    wire: "openai",
+    defaultBaseUrl: "https://api.fireworks.ai/inference/v1",
+    defaultModel: "",
+    fallbackModels: []
+  },
+  ollama: {
+    label: "Ollama (self-hosted)",
+    wire: "openai",
+    defaultBaseUrl: "http://localhost:11434/v1",
+    optionalApiKey: true,
+    defaultModel: "",
+    fallbackModels: []
+  },
+  lmstudio: {
+    label: "LM Studio (self-hosted)",
+    wire: "openai",
+    defaultBaseUrl: "http://localhost:1234/v1",
+    optionalApiKey: true,
+    defaultModel: "",
+    fallbackModels: []
+  },
+  vllm: {
+    label: "vLLM (self-hosted)",
+    wire: "openai",
+    defaultBaseUrl: "http://localhost:8000/v1",
+    optionalApiKey: true,
+    defaultModel: "",
+    fallbackModels: []
+  },
+  "azure-openai": {
+    label: "Azure OpenAI",
+    wire: "azure",
+    // https://<resource>.openai.azure.com — per-resource, so it can't be defaulted.
+    defaultBaseUrl: null,
+    requiresBaseUrl: true,
+    // Azure routes by deployment name, which the operator chooses; there is no
+    // meaningful default and discovery returns deployments rather than model ids.
+    defaultModel: "",
+    fallbackModels: []
+  }
+};
+
+function providerDefinition(provider: string): ProviderDefinition | null {
+  return PROVIDER_CATALOG[String(provider || "").trim().toLowerCase()] || null;
+}
+
+/** Unknown providers are user-defined gateways, which are OpenAI-wire by convention. */
+function providerWire(provider: string): ProviderWire {
+  return providerDefinition(provider)?.wire || "openai";
+}
+
+function isCatalogProvider(provider: string): boolean {
+  return providerDefinition(provider) !== null;
+}
+
+/** The effective base URL: an explicit override, else the catalog default. */
+function resolveProviderBaseUrl(provider: string, storedBaseUrl?: string | null): string | null {
+  const explicit = String(storedBaseUrl || "").trim();
+  if (explicit) return trimTrailingSlashes(explicit);
+  return providerDefinition(provider)?.defaultBaseUrl ?? null;
+}
+
 function normalizeProviderModel(provider: string, model?: string | null): string {
   const value = String(model || "").trim();
-  if (provider === "anthropic") {
+  if (providerWire(provider) === "anthropic") {
     const aliases: Record<string, string> = {
-      "": "claude-sonnet-4-6",
-      "claude-sonnet": "claude-sonnet-4-6",
-      "claude-sonnet-4": "claude-sonnet-4-6",
-      "claude-4-sonnet": "claude-sonnet-4-6",
-      "sonnet": "claude-sonnet-4-6",
-      "sonnet-4": "claude-sonnet-4-6",
-      "claude-sonnet-4-20250514": "claude-sonnet-4-6",
-      "claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
-      "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
-      "claude-3-7-sonnet": "claude-3-7-sonnet-20250219"
+      "": ANTHROPIC_DEFAULT_MODEL,
+      "claude-sonnet": ANTHROPIC_DEFAULT_MODEL,
+      "claude-sonnet-4": ANTHROPIC_DEFAULT_MODEL,
+      "claude-4-sonnet": ANTHROPIC_DEFAULT_MODEL,
+      "sonnet": ANTHROPIC_DEFAULT_MODEL,
+      "sonnet-4": ANTHROPIC_DEFAULT_MODEL,
+      "claude-sonnet-4-20250514": ANTHROPIC_DEFAULT_MODEL,
+      // Retired snapshots — Anthropic 404s these ("model: <id>"), so remap rather
+      // than pass them through: workspaces that saved one before it was retired
+      // keep working instead of failing every AI call.
+      "claude-3.5-sonnet": ANTHROPIC_DEFAULT_MODEL,
+      "claude-3-5-sonnet": ANTHROPIC_DEFAULT_MODEL,
+      "claude-3-5-sonnet-20241022": ANTHROPIC_DEFAULT_MODEL,
+      "claude-3-7-sonnet": ANTHROPIC_DEFAULT_MODEL,
+      "claude-3-7-sonnet-20250219": ANTHROPIC_DEFAULT_MODEL
     };
     return aliases[value.toLowerCase()] || value;
   }
-  return value || "gpt-4o";
+  return value || providerDefinition(provider)?.defaultModel || OPENAI_DEFAULT_MODEL;
 }
 
-function anthropicModelCandidates(model?: string | null): string[] {
-  const normalized = normalizeProviderModel("anthropic", model);
-  return Array.from(new Set([
-    normalized,
-    "claude-sonnet-4-6",
-    "claude-3-7-sonnet-20250219",
-    "claude-3-5-sonnet-20241022"
-  ].filter(Boolean)));
+function providerModelCandidates(provider: string, model?: string | null): string[] {
+  const normalized = normalizeProviderModel(provider, model);
+  // Every entry must be a currently-served model. A retired id burns a candidate
+  // slot on a guaranteed 404 and, because the retry loop only reports the *last*
+  // status, buries the real failure behind "model: <retired id>".
+  const seed = providerDefinition(provider)?.defaultModel || "";
+  return Array.from(new Set([normalized, seed].filter(Boolean)));
 }
 
 function trimTrailingSlashes(value: string): string {
@@ -350,6 +524,70 @@ function normalizeAnthropicMessagesUrl(baseUrl?: string | null): string {
   if (trimmed.endsWith("/messages")) return trimmed;
   if (trimmed.endsWith("/v1")) return `${trimmed}/messages`;
   return `${trimmed}/v1/messages`;
+}
+
+function normalizeModelsListUrl(provider: string, baseUrl?: string | null): string {
+  const resolved = resolveProviderBaseUrl(provider, baseUrl);
+  if (providerWire(provider) === "azure") {
+    // Azure serves deployments, not model ids — a deployment name is what the chat
+    // path actually addresses, so that list is the one worth showing.
+    return azureDataPlaneUrl(resolved || "", "deployments");
+  }
+  if (!resolved) {
+    return providerWire(provider) === "anthropic"
+      ? "https://api.anthropic.com/v1/models"
+      : "https://api.openai.com/v1/models";
+  }
+  if (resolved.endsWith("/models")) return resolved;
+  if (resolved.endsWith("/v1")) return `${resolved}/models`;
+  return `${resolved}/v1/models`;
+}
+
+// Azure addresses everything under /openai on a per-resource host and requires an
+// api-version on every data-plane call. Honour one already present on the stored
+// base URL so a workspace can pin a contract version without a schema change.
+function azureDataPlaneUrl(baseUrl: string, suffix: string): string {
+  const [rawRoot, rawQuery = ""] = String(baseUrl || "").split("?");
+  const params = new URLSearchParams(rawQuery);
+  if (!params.get("api-version")) params.set("api-version", AZURE_DEFAULT_API_VERSION);
+  const root = trimTrailingSlashes(rawRoot).replace(/\/openai$/, "");
+  return `${root}/openai/${suffix}?${params.toString()}`;
+}
+
+function providerFallbackModels(provider: string): string[] {
+  return providerDefinition(provider)?.fallbackModels || [];
+}
+
+/**
+ * Chat endpoint for the OpenAI and Azure wires. `model` is only consulted for Azure,
+ * which routes by deployment name in the path rather than by a body field.
+ * The anthropic wire has its own endpoint — see normalizeAnthropicMessagesUrl.
+ */
+function providerChatUrl(provider: string, baseUrl?: string | null, model?: string): string {
+  const resolved = resolveProviderBaseUrl(provider, baseUrl);
+  if (providerWire(provider) === "azure") {
+    return azureDataPlaneUrl(resolved || "", `deployments/${encodeURIComponent(String(model || ""))}/chat/completions`);
+  }
+  return normalizeChatCompletionsUrl(resolved);
+}
+
+function normalizeAnthropicMessagesUrlFor(provider: string, baseUrl?: string | null): string {
+  return normalizeAnthropicMessagesUrl(resolveProviderBaseUrl(provider, baseUrl));
+}
+
+// /v1/models returns every served model, including embeddings, audio and image
+// endpoints that can't answer a chat request. Keep only the conversational ones.
+//
+// The exclusion list is provider-agnostic and safe everywhere. The positive allowlist
+// is NOT: it encodes OpenAI's own naming, so it may only be applied to OpenAI itself.
+// Every other OpenAI-wire provider names models freely (llama-3.3-70b-versatile,
+// mistral-large, deepseek-chat), and matching them against gpt/o-series prefixes
+// would filter the entire catalogue away and report "no chat-capable models".
+function isChatCapableModelId(provider: string, id: string): boolean {
+  const value = id.toLowerCase();
+  if (providerWire(provider) === "anthropic") return value.startsWith("claude");
+  if (/embedding|audio|realtime|image|tts|whisper|moderation|transcribe|rerank|dall-e|guard/.test(value)) return false;
+  return provider === "openai" ? /^(gpt|o[1-4]|chatgpt)/.test(value) : true;
 }
 
 @Injectable()
@@ -522,6 +760,18 @@ export class LegacyService implements OnModuleInit {
     return headers;
   }
 
+  // Single place that knows how each wire authenticates. Custom providers keep their
+  // explicit header/scheme overrides; catalog providers get their wire's convention.
+  private providerAuthHeaders(provider: string, apiKey: string, authHeaderName: string | null, authScheme: string | null): Record<string, string> {
+    const wire = providerWire(provider);
+    if (wire === "anthropic") return this.buildAnthropicAuthHeaders(apiKey, authHeaderName, authScheme);
+    if (wire === "azure") {
+      // Azure authenticates with a bare api-key header — not Bearer.
+      return { "Content-Type": "application/json", [authHeaderName || "api-key"]: apiKey };
+    }
+    return this.buildBearerAuthHeaders(apiKey, authHeaderName, authScheme);
+  }
+
   private isProviderAuthError(status: number, message?: string): boolean {
     if (status === 401 || status === 403) return true;
     return /invalid x-api-key|authentication_error|invalid[_ ]api[_ ]key|incorrect api key|unauthorized|permission_error|forbidden/i.test(String(message || ""));
@@ -530,7 +780,7 @@ export class LegacyService implements OnModuleInit {
   // Turn a raw provider HTTP failure into a clear, actionable message for the user.
   // Returns "" when the failure isn't a recognized auth/permission/rate-limit case.
   private describeProviderError(provider: string, status: number, rawMessage?: string): string {
-    const label = provider === "anthropic" ? "Anthropic (Claude)" : provider === "openai" ? "OpenAI" : (provider || "AI provider");
+    const label = providerDefinition(provider)?.label || provider || "AI provider";
     const message = String(rawMessage || "");
     if (status === 401 || /invalid x-api-key|authentication_error|invalid[_ ]api[_ ]key|incorrect api key|unauthorized/i.test(message)) {
       return `The ${label} API key is invalid or has been revoked. Update it in Workspace → Integrations, then use "Test connection" to verify.`;
@@ -1167,17 +1417,25 @@ export class LegacyService implements OnModuleInit {
     const apiKey = String(body.apiKey || "").trim();
     const provider = String(body.provider || "openai").trim().toLowerCase();
     const baseUrl = String(body.baseUrl || "").trim() || null;
-    // For known providers (openai, anthropic) the auth method is well-defined by the SDK —
-    // store null so the generation code can apply the correct provider-specific defaults.
-    // Only custom providers need explicit auth_header_name / auth_scheme overrides.
-    const isKnownProvider = ["openai", "anthropic"].includes(provider);
-    const authHeaderName = isKnownProvider ? null : (String(body.authHeaderName || "").trim() || null);
-    const authScheme = isKnownProvider ? null : (String(body.authScheme || "").trim() || null);
+    // A catalog provider's auth method is defined by its wire, so store null and let
+    // providerAuthHeaders apply the convention. Only user-defined gateways need
+    // explicit auth_header_name / auth_scheme overrides.
+    const definition = providerDefinition(provider);
+    const authHeaderName = definition ? null : (String(body.authHeaderName || "").trim() || null);
+    const authScheme = definition ? null : (String(body.authScheme || "").trim() || null);
     if (!name) throw new BadRequestException({ error: "name is required" });
-    if (!apiKey) throw new BadRequestException({ error: "apiKey is required" });
     if (!provider) throw new BadRequestException({ error: "provider is required" });
-    if (!["openai", "anthropic"].includes(provider) && !baseUrl) {
-      throw new BadRequestException({ error: "baseUrl is required for custom providers" });
+    // Self-hosted runtimes (Ollama, LM Studio, vLLM) commonly run unauthenticated.
+    if (!apiKey && !definition?.optionalApiKey) throw new BadRequestException({ error: "apiKey is required" });
+    // A base URL is needed whenever it can't be derived: user-defined gateways, and
+    // catalog entries that are per-resource rather than a shared host (Azure).
+    const needsBaseUrl = definition ? Boolean(definition.requiresBaseUrl) : true;
+    if (needsBaseUrl && !baseUrl && !definition?.defaultBaseUrl) {
+      throw new BadRequestException({
+        error: definition
+          ? `baseUrl is required for ${definition.label}`
+          : "baseUrl is required for custom providers"
+      });
     }
     const res = await this.db.query(
       `INSERT INTO workspace_ai_keys (organization_id, name, provider, api_key, default_model, base_url, auth_header_name, auth_scheme, created_by)
@@ -1200,6 +1458,141 @@ export class LegacyService implements OnModuleInit {
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     await this.db.query("DELETE FROM workspace_ai_keys WHERE id = $1 AND organization_id = $2", [keyId, workspace.id]);
     return { ok: true };
+  }
+
+  // The provider catalog, for the settings form: base URLs to prefill, which fields are
+  // required, and the seed model. Read-only and secret-free, so any member may fetch it.
+  listAiProviders() {
+    return {
+      providers: Object.entries(PROVIDER_CATALOG).map(([id, definition]) => ({
+        id,
+        label: definition.label,
+        wire: definition.wire,
+        defaultBaseUrl: definition.defaultBaseUrl,
+        requiresBaseUrl: Boolean(definition.requiresBaseUrl),
+        optionalApiKey: Boolean(definition.optionalApiKey),
+        defaultModel: definition.defaultModel
+      }))
+    };
+  }
+
+  // Live model discovery. Both Anthropic and OpenAI serve GET /v1/models, it costs no
+  // tokens, and it returns only what this key can actually reach — so the picker can
+  // never offer a retired or unauthorised model the way a hardcoded list could.
+  // Always resolves: on any failure it degrades to the curated list rather than
+  // blocking the settings form.
+  async listProviderModels(userId: string | null | undefined, body: Body) {
+    const workspace = await this.workspace(userId);
+    if (this.normalizeRole(workspace.role) !== "owner") {
+      throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
+    }
+    const provider = String(body.provider || "").trim().toLowerCase();
+    if (!provider) throw new BadRequestException({ error: "provider is required" });
+
+    let apiKey = String(body.apiKey || "").trim();
+    let baseUrl = String(body.baseUrl || "").trim() || null;
+    let authHeaderName = String(body.authHeaderName || "").trim() || null;
+    let authScheme = String(body.authScheme || "").trim() || null;
+
+    // Editing a saved key: the browser only ever holds the masked value, so resolve the
+    // real secret from the row instead of making the user retype it to see the list.
+    const keyId = String(body.keyId || "").trim();
+    if (!apiKey && keyId) {
+      const stored = await this.db.query(
+        `SELECT api_key, base_url, auth_header_name, auth_scheme FROM workspace_ai_keys
+         WHERE id = $1 AND organization_id = $2`,
+        [keyId, workspace.id]
+      );
+      const row = stored.rows[0];
+      if (!row) throw new NotFoundException({ error: "AI key not found" });
+      apiKey = String(row.api_key || "");
+      baseUrl = baseUrl || row.base_url || null;
+      authHeaderName = authHeaderName || row.auth_header_name || null;
+      authScheme = authScheme || row.auth_scheme || null;
+    }
+
+    const fallback = providerFallbackModels(provider).map((id) => ({ id, displayName: id }));
+    // Self-hosted runtimes serve /v1/models unauthenticated, so an absent key is not a
+    // reason to skip discovery for them — it is for everyone else.
+    if (!apiKey && !providerDefinition(provider)?.optionalApiKey) {
+      return { models: fallback, source: "fallback", reason: "Add an API key to load the models it can access." };
+    }
+
+    try {
+      const served = await this.fetchProviderModels(provider, apiKey, baseUrl, authHeaderName, authScheme);
+      const models = served.filter((item) => isChatCapableModelId(provider, item.id));
+      if (models.length) return { models, source: "live", reason: "" };
+      return { models: fallback, source: "fallback", reason: "The provider returned no chat-capable models." };
+    } catch (err) {
+      // A custom gateway or a platform like Bedrock/Vertex won't serve /v1/models at all.
+      // That's expected, not an error worth failing the form over.
+      return { models: fallback, source: "fallback", reason: this.extractAiErrorMessage(err) };
+    }
+  }
+
+  private buildBearerAuthHeaders(apiKey: string, authHeaderName: string | null, authScheme: string | null): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const name = authHeaderName || "Authorization";
+    const scheme = authScheme == null ? "Bearer" : String(authScheme).trim();
+    headers[name] = scheme ? `${scheme} ${apiKey}` : apiKey;
+    return headers;
+  }
+
+  private async fetchProviderModels(
+    provider: string,
+    apiKey: string,
+    baseUrl: string | null,
+    authHeaderName: string | null,
+    authScheme: string | null
+  ): Promise<Array<{ id: string; displayName: string }>> {
+    const url = normalizeModelsListUrl(provider, baseUrl);
+    const headers = this.providerAuthHeaders(provider, apiKey, authHeaderName, authScheme);
+
+    const rows: Body[] = [];
+    let cursor = "";
+    // Anthropic pages this endpoint with after_id/has_more — not the page/next_page
+    // cursor its other endpoints use. Cap the walk so a gateway that always reports
+    // has_more can't spin here; other providers return the whole list in one response.
+    for (let page = 0; page < 5; page += 1) {
+      // Merge into any query the URL already carries — Azure pins ?api-version= there,
+      // and blindly appending "?..." would produce a second, malformed query string.
+      const [root, existingQuery = ""] = url.split("?");
+      const query = new URLSearchParams(existingQuery);
+      query.set("limit", "100");
+      if (cursor) query.set("after_id", cursor);
+      const res = await fetch(`${root}?${query.toString()}`, { method: "GET", headers });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({} as Body)) as Body;
+        const raw = String(errBody.error?.message || errBody.error || res.status);
+        throw new Error(this.describeProviderError(provider, res.status, raw) || raw);
+      }
+      const data = await res.json() as Body;
+      const batch = normalizeJsonArray(data.data);
+      rows.push(...batch);
+      if (providerWire(provider) !== "anthropic" || !data.has_more || !batch.length) break;
+      cursor = String(batch[batch.length - 1]?.id || "");
+      if (!cursor) break;
+    }
+
+    // Anthropic dates are ISO strings, OpenAI's are unix seconds — normalise both so the
+    // newest generation sorts to the top and users land on it by default.
+    const releasedAt = (row: Body): number => {
+      const raw = row?.created_at ?? row?.created;
+      if (typeof raw === "number") return raw * 1000;
+      const parsed = Date.parse(String(raw || ""));
+      return Number.isFinite(parsed) ? parsed : 0;
+    };
+
+    // Returns everything the key is served, unfiltered — callers narrow it themselves.
+    // Membership checks need the complete list: a deliberately configured model that the
+    // picker's chat-only filter hides is still perfectly reachable.
+    return rows
+      .filter((row) => String(row?.id || "").trim())
+      .sort((a, b) => releasedAt(b) - releasedAt(a))
+      .map((row) => ({
+        id: String(row.id).trim(),
+        displayName: String(row.display_name || row.id).trim()
+      }));
   }
 
   async allocateAiKey(userId: string | null | undefined, body: Body) {
@@ -5473,13 +5866,31 @@ export class LegacyService implements OnModuleInit {
     const model = normalizeProviderModel(provider, key.default_model);
     const start = performance.now();
     try {
-      if (provider === "anthropic") {
-        const headers = this.buildAnthropicAuthHeaders(key.api_key, key.auth_header_name, key.auth_scheme);
-        const res = await fetch(normalizeAnthropicMessagesUrl(key.base_url), {
+      // For first-party providers on the default endpoint, probe /v1/models instead of
+      // burning an inference call: it validates the key AND proves the configured model
+      // is still served, which is exactly the failure an inference probe reports late
+      // and obscurely. Custom gateways may not implement it, so they keep the old path.
+      if (isCatalogProvider(provider)) {
+        const served = await this.fetchProviderModels(provider, String(key.api_key || ""), key.base_url, key.auth_header_name, key.auth_scheme);
+        const latencyMs = Math.round(performance.now() - start);
+        if (served.length && !served.some((item) => item.id === model)) {
+          return {
+            ok: false,
+            provider,
+            model,
+            error: `This key can't reach "${model}" — it may have been retired or the account lacks access. Pick another model in Workspace → Integrations.`,
+            latencyMs
+          };
+        }
+        return { ok: true, provider, model, latencyMs };
+      }
+      if (providerWire(provider) === "anthropic") {
+        const headers = this.providerAuthHeaders(provider, key.api_key, key.auth_header_name, key.auth_scheme);
+        const res = await fetch(normalizeAnthropicMessagesUrlFor(provider, key.base_url), {
           method: "POST",
           headers,
           body: JSON.stringify({
-            model: anthropicModelCandidates(model)[0],
+            model: providerModelCandidates(provider, model)[0],
             max_tokens: 5,
             messages: [{ role: "user", content: "hi" }]
           })
@@ -5491,11 +5902,8 @@ export class LegacyService implements OnModuleInit {
         }
         return { ok: true, provider, model, latencyMs: Math.round(performance.now() - start) };
       }
-      const authHeaders: Record<string, string> = { "Content-Type": "application/json" };
-      const authHeaderName = key.auth_header_name || "Authorization";
-      const authScheme = key.auth_scheme == null ? "Bearer" : String(key.auth_scheme);
-      authHeaders[authHeaderName] = authScheme ? `${authScheme} ${String(key.api_key || "")}` : String(key.api_key || "");
-      const res = await fetch(normalizeChatCompletionsUrl(provider === "openai" ? null : key.base_url), {
+      const authHeaders = this.providerAuthHeaders(provider, String(key.api_key || ""), key.auth_header_name, key.auth_scheme);
+      const res = await fetch(providerChatUrl(provider, key.base_url, model), {
         method: "POST",
         headers: authHeaders,
         body: JSON.stringify({ model, max_tokens: 5, messages: [{ role: "user", content: "hi" }] })
@@ -5644,7 +6052,7 @@ export class LegacyService implements OnModuleInit {
         sessionId,
         projectId,
         uid,
-        decision.reply,
+        this.finalizeZyraChatReply(decision, applied, testcases),
         decision.reasoningSummary,
         decision.actionType,
         JSON.stringify(testcases),
@@ -5726,12 +6134,18 @@ export class LegacyService implements OnModuleInit {
     return this.zyraChatSession(projectId, sessionId);
   }
 
+  // One AI call understands the request, then the system executes it. There is deliberately no
+  // keyword router in front of the model: a regex table cannot tell "start generating" from
+  // "generate", or know that "save it" means create-these when the cases were never written and
+  // move-these when they were. What the model gets instead of a keyword hint is *state* — which
+  // of its own previous turns actually persisted testcases (see zyraTranscript) — and what the
+  // system does with the answer is validated, capability-gated, and reconciled against reality
+  // (applyZyraChatOperations, reconcileZyraReply). The model decides; it never writes.
   private async buildZyraChatDecision(projectId: string, userId: string, sessionId: string, message: string): Promise<ZyraChatDecision> {
-    const intent = this.detectZyraChatIntent(message);
     const mentionedJiraKeys = this.extractJiraIssueKeys(message);
     const [history, knowledgeFallback, ragKnowledge, folderKnowledge, existingTestcases, allocation, projectSnapshot, mentionedJira, lastCompletedPlanRes] = await Promise.all([
       this.db.query(
-        `SELECT role, content, reasoning_summary, testcases
+        `SELECT role, content, reasoning_summary, action_type, testcases
          FROM zyra_chat_messages
          WHERE session_id = $1 AND project_id = $2
          ORDER BY created_at DESC
@@ -5750,14 +6164,18 @@ export class LegacyService implements OnModuleInit {
       this.existingTestcaseSnapshot(projectId, message, ""),
       this.zyraAiAllocation(projectId),
       this.zyraChatProjectSnapshot(projectId),
-      this.jiraSnapshot(projectId, mentionedJiraKeys),
+      // Relevance-matched, not just explicitly-named: a request that never types an issue key still
+      // needs the tickets it is about (see relevantJiraSnapshot).
+      this.relevantJiraSnapshot(projectId, message, mentionedJiraKeys),
       this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }))
     ]);
     const knowledge = [...folderKnowledge, ...(ragKnowledge.length ? ragKnowledge : knowledgeFallback)];
     const lastCompletedPlanCount = normalizeJsonArray((lastCompletedPlanRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).length;
+    // Oldest-first: the transcript handed to the model must read in conversation order.
+    const chronologicalHistory = [...history.rows].reverse();
     const key = allocation.key;
     if (!key) {
-      return this.aiUnavailableForZyraChat(existingTestcases.length, allocation.reason);
+      return this.zyraDegradedDecision(message, existingTestcases, allocation.reason);
     }
 
     const provider = String(key.provider || "openai").toLowerCase();
@@ -5766,48 +6184,12 @@ export class LegacyService implements OnModuleInit {
     const capabilities = this.normalizeZyraCapabilities(zyraAgentSettings.capabilities);
     const projectTestcaseRange = String(zyraAgentSettings.testcaseRange || "1-10");
     const knowledgeForChat = capabilities.knowledgeBase ? knowledge : [];
-
-    // Hard capability gates — Zyra declines an action whose capability is disabled in settings.
-    if ((intent === "update" || intent === "archive") && !capabilities.testcaseStorage) {
-      return this.zyraCapabilityDisabled("testcaseStorage", existingTestcases.length);
-    }
-    if (intent === "suite" && !capabilities.suiteOperations) {
-      return this.zyraCapabilityDisabled("suiteOperations", existingTestcases.length);
-    }
-    if (intent === "create") {
-      if (!capabilities.generation) return this.zyraCapabilityDisabled("generation", existingTestcases.length);
-      try {
-        const decision = await this.generateZyraChatCreateDecision({
-          projectId,
-          userId,
-          sessionId,
-          provider,
-          model,
-          key,
-          message,
-          knowledge: knowledgeForChat,
-          existingTestcases,
-          jiraIssueKeys: mentionedJiraKeys,
-          projectTestcaseRange,
-          suites: projectSnapshot.suites
-        });
-        return this.applyStorageGateToGenerated(decision, capabilities);
-      } catch (err) {
-        const detail = this.extractAiErrorMessage(err);
-        // If the AI returned prose instead of JSON drafts the intent was likely analytical,
-        // not generative. Fall through to the main model path so the user gets a useful
-        // answer rather than a parse-error string.
-        if (!detail.includes("invalid JSON") && !detail.includes("no testcase drafts")) {
-          await this.logProjectActivity(projectId, userId, "zyra_chat_ai_failed", "zyra_chat", sessionId, "Zyra chat", { message: detail });
-          return this.aiUnavailableForZyraChat(existingTestcases.length, detail);
-        }
-        // For invalid JSON / no drafts: fall through so the main model below can answer analytically.
-      }
-    }
     const context = [
       "You are Zyra, an expert test engineer and edge-case designer for this product.",
       "Your workflow is: understand the user's query, decide which project context is needed, choose exactly one supported action, then return a structured plan.",
       `Enabled capabilities for this project — generation (author new testcases): ${capabilities.generation ? "ON" : "OFF"}; knowledge base access: ${capabilities.knowledgeBase ? "ON" : "OFF"}; testcase storage (create/update/archive/bulk): ${capabilities.testcaseStorage ? "ON" : "OFF"}; suite operations (create/move): ${capabilities.suiteOperations ? "ON" : "OFF"}.`,
+      `Configured test case volume for this project: "${projectTestcaseRange}" (${this.testcaseRangeConfig(projectTestcaseRange).instruction}). This is the default when the user does not ask for a specific number — do not promise or propose a count that contradicts it, and do not report requestedCount unless the user actually named one.`,
+      "Before proposing or authoring anything, ground yourself in the context below: the knowledge base (semantic retrieval plus any folder the user named), the Jira tickets, and the existing testcases. Coverage answers must be based on the existing testcases shown, never guessed; new testcases must fill gaps in that coverage rather than duplicate it. Say which sources you used in reasoningSummary.",
       "If the user asks for an action whose capability is OFF, do NOT emit those operations — choose action 'answer' and briefly say that capability is disabled in Zyra settings and how to enable it. Never silently substitute a different mutation (e.g. do not create testcases when storage or generation is OFF).",
       "Supported actions:",
       "- answer: answer product, feature, test strategy, or knowledge-base questions conversationally.",
@@ -5818,6 +6200,9 @@ export class LegacyService implements OnModuleInit {
       "- archive: archive an existing testcase when the user asks to remove/delete/archive testcase coverage. IMPORTANT: before archiving, always describe which testcases will be archived and explicitly ask the user to confirm (e.g. 'I found TC-5 Login Test. Should I archive it? Reply yes to confirm.'). Only include archive operations if the user's current message is a clear confirmation (yes, confirm, go ahead, proceed) after you already proposed what would be archived in the prior assistant turn.",
       "- create_suite: create a new test suite (a folder/group for testcases) when the user asks to create/add a suite, folder, or group. Put the suite name in operation.suiteName.",
       "- move_to_suite: move/assign EXISTING testcases into a suite when the user asks to move/assign/organize/group/put existing testcases into a suite. The target suite goes in operation.suiteName (it is created automatically if it does not already exist, so you do not need a separate create_suite op for the same suite). List the testcases to move in operation.externalIds (use the external IDs shown under 'Existing suites' / 'Existing testcases'), set operation.allExisting=true when the user means every existing testcase, or set operation.fromLastPlan=true when the user refers to 'all'/'the N cases' from a recent generation batch (see 'Most recently generated batch' below) — fromLastPlan is exact and does not depend on you correctly recalling every external ID from earlier in the conversation, so prefer it over externalIds whenever the user is clearly referring to a just-generated batch rather than naming specific unrelated testcases.",
+      "CRITICAL: there is no draft buffer in this system. Choosing 'create' writes the testcases to the repository immediately; choosing 'answer' stores NOTHING, however many testcases your reply text lists. So never present testcases as 'ready to save' or 'pending', and never ask 'would you like me to save these?' — if the user wants testcases, choose 'create' now and say they are saved, otherwise do not enumerate them at all.",
+      "A short confirmation of an offer you made in your previous turn ('yes', 'yes please', 'go ahead', 'do it', 'please start generating', 'save it', 'save them into <suite>') is a create request: choose 'create', and set suiteName/suiteId on the create operation when a suite is named.",
+      "Only use move_to_suite for testcases that appear under 'Existing suites'/'Existing testcases' below, or in the most recently generated batch. If the user asks you to save or file testcases that so far only appeared as text in this chat, those testcases DO NOT EXIST yet — choose 'create' with the suite named on the create operation, never move_to_suite.",
       "CRITICAL: moving or assigning existing testcases into a suite is NEVER a create action. Do not generate, draft, or duplicate testcases for a move/assign/organize request — only emit move_to_suite operations that reference the existing testcases. Use create only when the user explicitly asks to author brand-new testcases.",
       "When the user asks to create a suite AND move existing testcases into it in one message, return a single move_to_suite operation with the suiteName (the suite is auto-created) — or a create_suite plus move_to_suite — but never any create operations.",
       "Use the project snapshot to choose the action. If the query asks for numbers from Jira/testcase links, choose jira_pending_testcases instead of guessing.",
@@ -5826,13 +6211,15 @@ export class LegacyService implements OnModuleInit {
       "Only create/update/archive when the user clearly asks for a repository mutation. Otherwise suggest what could be done without mutating anything.",
       "Do not reveal hidden chain-of-thought. Provide a concise reasoningSummary with observable factors and action steps.",
       "Treat remove/delete requests as archive operations unless the user clearly names an existing app delete control.",
-      `Detected local intent hint: ${intent}. Follow the user's actual wording if it is clearer than this hint.`,
+      "A hypothetical or exploratory question ('what would happen if…', 'should we remove…', 'how many could we archive') is always action 'answer' with empty operations. Only act when the user is asking for the action itself.",
+      "You are the only thing that decides what this request means — there is no keyword matcher behind you, and an 'answer' costs the user their request. Read the whole conversation: resolve pronouns ('it', 'those', 'them'), confirmations ('yes', 'go ahead', 'please start generating'), and follow-ups ('now put them in a suite') against what was actually said and done. Each assistant turn in the transcript below is annotated with what it actually persisted, so use those annotations — not your own earlier wording — to decide whether testcases the user is referring to already exist.",
+      "For a create request also report how many testcases the user asked for: set requestedCount to that number when they named one (in digits or words, e.g. 'fifteen' -> 15), and set exhaustive=true when they asked for everything ('all possible cases', 'as many as you can', 'full coverage'). Leave requestedCount null and exhaustive false when they did not say — the project's configured range is used then.",
       "Return ONLY a single valid JSON object — no markdown fences, no text before or after the JSON:",
-      "{\"reply\":\"\",\"reasoningSummary\":\"\",\"action\":\"answer|list|jira_pending_testcases|create|update|archive|create_suite|move_to_suite\",\"actionType\":\"answer|create|update|archive|suite|mixed\",\"operations\":[{\"type\":\"create|update|archive|create_suite|move_to_suite\",\"testcaseId\":\"\",\"externalId\":\"\",\"externalIds\":[],\"allExisting\":false,\"fromLastPlan\":false,\"suiteName\":\"\",\"suiteId\":\"\",\"draft\":{},\"fields\":{},\"reason\":\"\"}],\"testcases\":[{}]}",
+      "{\"reply\":\"\",\"reasoningSummary\":\"\",\"action\":\"answer|list|jira_pending_testcases|create|update|archive|create_suite|move_to_suite\",\"actionType\":\"answer|create|update|archive|suite|mixed\",\"requestedCount\":null,\"exhaustive\":false,\"operations\":[{\"type\":\"create|update|archive|create_suite|move_to_suite\",\"testcaseId\":\"\",\"externalId\":\"\",\"externalIds\":[],\"allExisting\":false,\"fromLastPlan\":false,\"suiteName\":\"\",\"suiteId\":\"\",\"draft\":{},\"fields\":{},\"reason\":\"\"}],\"testcases\":[{}]}",
       "REPLY FIELD RULES — reply is rendered as markdown in a chat UI, must be human-readable:",
       "  - Use ## for main headings, ### for subsections, **bold** for emphasis, - for bullets, 1. for numbered steps.",
       "  - For comparisons or tabular data use markdown table syntax: | Heading | Heading |\\n|---|---|\\n| value | value |",
-      "  - When testcase rows are in the testcases array the UI already renders them in a table — only write a brief summary in reply (e.g. 'Created 3 test cases covering the checkout flow.'). Do NOT duplicate testcase data as a markdown table in reply.",
+      "  - TEST CASES GO IN THE testcases ARRAY, NEVER IN reply. The UI renders that array as a table with id, title, priority, status and steps. reply gets a one-or-two-line summary only (e.g. 'Created 3 test cases covering the checkout flow.'). A markdown table of test cases in reply is stripped out before the user sees it, so writing one loses the content — put the rows in the array instead. Tables of other things (coverage per module, Jira comparisons) are fine in reply.",
       "  - NEVER put raw JSON, object/array literals, code blocks, or placeholder text like <string> in reply.",
       "  - JSON STRING ESCAPING IS MANDATORY: every double quote inside reply must be written as \\\" and every line break as \\n. An unescaped quote or a literal newline makes the whole response unparseable. Prefer 'single quotes' for quoted phrases so this cannot happen.",
       "  - Be direct — skip filler openers like 'Certainly!', 'Sure!', or 'Here is your answer:'.",
@@ -5841,8 +6228,8 @@ export class LegacyService implements OnModuleInit {
       "Existing suites (use these names/ids for move_to_suite; reuse an existing suite instead of duplicating it):",
       projectSnapshot.suites.length ? projectSnapshot.suites.map((s) => `${s.name} (id: ${s.id}, ${s.testCaseCount} testcase(s))`).join("\n") : "No suites yet.",
       "",
-      "Most recently generated batch (use move_to_suite with fromLastPlan=true to reference all of these together):",
-      lastCompletedPlanCount ? `${lastCompletedPlanCount} testcase(s) tracked from the last generation batch in this session.` : "No tracked batch yet in this session.",
+      "Most recently generated batch (already saved to the repository; use move_to_suite with fromLastPlan=true to reference all of these together):",
+      lastCompletedPlanCount ? `${lastCompletedPlanCount} testcase(s) tracked from the last generation batch in this session.` : "No tracked batch yet in this session — nothing has been generated and saved here, so there is no batch to move or file.",
       "",
       "Project snapshot:",
       JSON.stringify(projectSnapshot),
@@ -5852,31 +6239,23 @@ export class LegacyService implements OnModuleInit {
         ? (knowledgeForChat.map((item) => `${item.title}\n${item.content}`).join("\n\n") || "No knowledge-base notes.")
         : "Knowledge base access is disabled for Zyra in this project — do not rely on or claim knowledge-base context.",
       "",
-      "Jira tickets explicitly mentioned by the user:",
-      mentionedJira.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n") || "No explicit Jira issue key was mentioned or found in the local Jira cache.",
+      "Jira tickets relevant to this request (keys the user named, plus the closest matches from the synced Jira cache). Every synced ticket is also mirrored into the knowledge base above as a 'KEY: summary' document, so Jira context can reach you through either section:",
+      mentionedJira.map((item) => `${item.key}: ${item.summary}\n${item.description}`).join("\n\n")
+        || "No Jira ticket matched this request. Do not conclude Jira is disconnected from this — say so only if the project snapshot shows no Jira tickets at all.",
       "",
       "Existing testcases:",
       existingTestcases.map((tc) => `${tc.externalId} | ${tc.title} | ${tc.priority} | ${tc.status}\n${tc.description}\nSteps: ${tc.stepsSummary}`).join("\n\n") || "No existing testcases.",
       "",
-      "Recent chat:",
-      history.rows.reverse().map((row) => {
-        let content = String(row.content || "");
-        const trimmed = content.trim();
-        if (trimmed.startsWith("{")) {
-          try {
-            const parsed = JSON.parse(trimmed);
-            if (typeof parsed?.reply === "string" && parsed.reply) content = parsed.reply;
-          } catch { /* not JSON — use as-is */ }
-        }
-        return `${row.role}: ${content}`;
-      }).join("\n") || "No prior chat."
+      "Recent chat (each assistant turn is annotated with what it actually wrote to the repository —",
+      "trust the annotation over the wording of the reply, which may describe testcases that were never saved):",
+      this.zyraTranscript(chronologicalHistory)
     ].join("\n");
 
     try {
-      const raw = provider === "anthropic"
+      const raw = providerWire(provider) === "anthropic"
         ? await this.zyraChatWithAnthropic(key, model, context, message)
         : await this.zyraChatWithOpenAi(key, model, context, message);
-      const modelIntent = this.intentFromZyraModelAction(raw.action, intent);
+      const modelIntent = this.intentFromZyraModelAction(raw.action, raw.actionType);
       if (modelIntent === "jira_pending_testcases") {
         const toolDecision = await this.analyzeZyraJiraTestcaseCoverage(projectId);
         return this.finalizeZyraToolDecisionWithAi({
@@ -5897,27 +6276,50 @@ export class LegacyService implements OnModuleInit {
       }
       if (modelIntent === "create") {
         if (!capabilities.generation) return this.zyraCapabilityDisabled("generation", existingTestcases.length);
-        const decision = await this.generateZyraChatCreateDecision({
-          projectId,
-          userId,
-          sessionId,
-          provider,
-          model,
-          key,
-          message,
-          knowledge: knowledgeForChat,
-          existingTestcases,
-          jiraIssueKeys: mentionedJiraKeys,
-          projectTestcaseRange,
-          suites: projectSnapshot.suites
-        });
-        return this.applyStorageGateToGenerated(decision, capabilities);
+        // The router picked create but does not author the drafts — generation is its own call with
+        // the full range instructions and draft schema. It gets the conversation so far so a
+        // confirmation ("yes, save those") produces the cases the user was shown, and the suite the
+        // router resolved so they land in it directly.
+        try {
+          const decision = await this.generateZyraChatCreateDecision({
+            projectId,
+            userId,
+            sessionId,
+            provider,
+            model,
+            key,
+            message,
+            knowledge: knowledgeForChat,
+            existingTestcases,
+            jiraIssueKeys: mentionedJiraKeys,
+            projectTestcaseRange,
+            suites: projectSnapshot.suites,
+            conversation: this.zyraTranscript(chronologicalHistory),
+            routedSuite: this.routedZyraSuite(raw, projectSnapshot.suites),
+            routedCount: { requestedCount: raw.requestedCount, exhaustive: raw.exhaustive === true },
+            // Already resolved for this turn — reuse instead of a second lookup.
+            jira: mentionedJira
+          });
+          return this.applyStorageGateToGenerated(decision, capabilities);
+        } catch (err) {
+          // Generation is a second call and can fail on its own (truncated JSON, no usable drafts)
+          // after the router already succeeded. The router's reply is in hand, so degrade to that
+          // answer instead of discarding a good turn — but never claim testcases were produced.
+          const detail = this.extractAiErrorMessage(err);
+          await this.logProjectActivity(projectId, userId, "zyra_chat_ai_failed", "zyra_chat", sessionId, "Zyra chat", { message: detail, stage: "generation" });
+          const answer = this.normalizeZyraChatDecision(raw, message, existingTestcases, "answer");
+          return {
+            ...answer,
+            reply: `⚠️ I couldn't produce the test cases this time (${detail}) — nothing was saved. Try again, or narrow the request to fewer cases.\n\n${answer.reply}`,
+            reasoningSummary: `Generation failed after routing (${detail}). ${answer.reasoningSummary}`
+          };
+        }
       }
       return this.normalizeZyraChatDecision(raw, message, existingTestcases, modelIntent);
     } catch (err) {
       const errorDetail = this.extractAiErrorMessage(err);
-      await this.logProjectActivity(projectId, userId, "zyra_chat_ai_failed", "zyra_chat", sessionId, "Zyra chat", { message: errorDetail });
-      return this.aiUnavailableForZyraChat(existingTestcases.length, errorDetail);
+      await this.logProjectActivity(projectId, userId, "zyra_chat_ai_failed", "zyra_chat", sessionId, "Zyra chat", { message: errorDetail, stage: "routing" });
+      return this.zyraDegradedDecision(message, existingTestcases, errorDetail);
     }
   }
 
@@ -5938,7 +6340,20 @@ export class LegacyService implements OnModuleInit {
     // turn that both creates testcases and moves them (fromLastPlan:true) works in one shot,
     // instead of only seeing last_completed_plan from a prior turn (see resolveZyraMoveTargets).
     const createdThisTurn: string[] = [];
-    for (const op of allowed.slice(0, 10)) {
+    // A per-turn ceiling still bounds a model that emits junk, but it used to sit at 10 — below
+    // what a single legitimate generation batch produces (chatTestcasePlan allows up to 25), so
+    // asking for 15 test cases saved 10 of them and said 15. Truncation is now both rarer and
+    // reported, never silent.
+    const dropped = allowed.length - Math.min(allowed.length, LegacyService.ZYRA_CHAT_MAX_OPERATIONS);
+    if (dropped > 0) {
+      activity.push({
+        actor: "agent",
+        title: "Skipped some operations",
+        detail: `${dropped} operation(s) beyond the ${LegacyService.ZYRA_CHAT_MAX_OPERATIONS}-per-message limit were not applied.`,
+        createdAt: new Date().toISOString()
+      });
+    }
+    for (const op of allowed.slice(0, LegacyService.ZYRA_CHAT_MAX_OPERATIONS)) {
       if (op.type === "create" && op.draft) {
         // A create op may name a target suite directly (op.suiteId / op.suiteName) so a new
         // testcase can land in the right suite in the same step, mirroring how the Task-based
@@ -6014,7 +6429,18 @@ export class LegacyService implements OnModuleInit {
           : await this.resolveOrCreateSuiteByName(projectId, String(op.suiteName));
         if (!suite) continue;
         const targets = await this.resolveZyraMoveTargets(projectId, sessionId, op, suite.id, createdThisTurn);
-        if (!targets.length) continue;
+        if (!targets.length) {
+          // resolveOrCreateSuiteByName above may have just created the suite, so bailing silently
+          // here left a new empty suite behind with no activity entry and no signal that the move
+          // matched nothing — while the model's reply still announced a successful save.
+          activity.push({
+            actor: "agent",
+            title: "No testcases matched",
+            detail: `Nothing was moved into "${suite.name}" — the requested testcases do not exist in this project yet.`,
+            createdAt: new Date().toISOString()
+          });
+          continue;
+        }
         const movedIds = targets.map((target) => target.id);
         await this.db.query(
           "UPDATE testcases SET suite_id = $2, updated_by = $4, updated_at = now() WHERE project_id = $1 AND id = ANY($3::uuid[]) AND deleted_at IS NULL",
@@ -6104,9 +6530,18 @@ export class LegacyService implements OnModuleInit {
     requestedCount: number;
     testcaseRange?: string;
     suites: Array<{ id: string; name: string }>;
+    conversation?: string;
+    routedSuite?: { id?: string; name?: string } | null;
+    jira?: Array<{ key: string; summary: string; description: string }>;
   }): Promise<ZyraChatDecision> {
-    const jira = await this.jiraSnapshot(params.projectId, params.jiraIssueKeys);
-    const matchedSuite = this.matchZyraSuiteByName(params.message, params.suites);
+    // Prefer the Jira context already gathered for this turn (explicit keys plus relevance-matched
+    // tickets); fall back to an explicit-key lookup only when a caller supplied none.
+    const jira = params.jira ?? await this.relevantJiraSnapshot(params.projectId, params.message, params.jiraIssueKeys);
+    // The router resolved the suite from the whole conversation ("put them in Login", "same suite
+    // as before"); substring-matching the raw message is only the fallback for when it named none.
+    const matchedSuite = this.resolveRoutedZyraSuite(params.routedSuite, params.suites)
+      || this.matchZyraSuiteByName(params.message, params.suites);
+    const jiraFromKnowledge = this.countZyraJiraSourcedKnowledge(params.knowledge);
     const aiResult = await this.generateZyraWithProvider({
       provider: params.provider,
       model: params.model,
@@ -6117,7 +6552,15 @@ export class LegacyService implements OnModuleInit {
       projectId: params.projectId,
       input: {
         story: params.message,
-        context: "Generated from Zyra chat after reading project knowledge, Jira ticket details, Zyra memory, and existing testcase coverage.",
+        context: [
+          "Generated from Zyra chat after reading project knowledge, Jira ticket details, Zyra memory, and existing testcase coverage.",
+          // The generator never sees the chat itself, so a confirmation ("yes, do it", "save
+          // those") would otherwise arrive as a story with no content. The conversation is passed
+          // whole and the model decides whether the request refers back to it.
+          params.conversation
+            ? `Conversation so far. If the user's request is a confirmation of, or a reference to, test cases already described in this conversation, generate exactly those — same titles, same order, same coverage — filling in complete steps and expected results. Otherwise treat this only as background:\n${params.conversation}`
+            : ""
+        ].filter(Boolean).join("\n\n"),
         acceptanceCriteria: "",
         feedback: "",
         knowledge: params.knowledge,
@@ -6142,12 +6585,26 @@ export class LegacyService implements OnModuleInit {
       ].filter(Boolean).join(" ")
     });
     return {
-      reply: `I used the AI provider to generate ${aiResult.drafts.length} testcase candidate(s) after reading ${jira.length} Jira ticket(s), ${params.knowledge.length} knowledge-base item(s), and ${params.existingTestcases.length} nearby testcase(s).${matchedSuite ? ` Placing them in the "${matchedSuite.name}" suite.` : ""}`,
+      // Report sources honestly: Jira tickets are mirrored into the knowledge base, so a bare
+      // "0 Jira ticket(s)" alongside 20 knowledge items reads as "Jira isn't connected" when in fact
+      // most of those items were Jira tickets.
+      reply: [
+        `I generated ${aiResult.drafts.length} test case(s) after reading`,
+        [
+          `${params.knowledge.length} knowledge-base item(s)${jiraFromKnowledge ? ` (${jiraFromKnowledge} mirrored from Jira)` : ""}`,
+          `${jira.length} Jira ticket(s) read directly`,
+          `${params.existingTestcases.length} existing test case(s) to avoid duplicating coverage`
+        ].join(", "),
+        `.${matchedSuite ? ` Placing them in the "${matchedSuite.name}" suite.` : ""}`
+      ].join(" ").replace(" .", "."),
       reasoningSummary: `AI generation used ${params.provider}/${params.model}. It considered Jira keys ${params.jiraIssueKeys.length ? params.jiraIssueKeys.join(", ") : "none explicitly mentioned"}, knowledge-base context, existing coverage for duplicate avoidance, and Zyra memory. Tokens: input ${aiResult.usage.input}, output ${aiResult.usage.output}.`,
       actionType: "create",
       operations: aiResult.drafts.map((draft) => ({
         type: "create",
+        // A suite the router named but that does not exist yet carries only a name — it is created
+        // on demand when the operation is applied (resolveOrCreateSuiteByName).
         suiteId: matchedSuite?.id,
+        suiteName: matchedSuite?.id ? undefined : matchedSuite?.name,
         draft: {
           ...draft,
           jiraIssueKey: params.jiraIssueKeys[0] || draft.jiraIssueKey || null
@@ -6158,8 +6615,45 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
+  // The context Zyra reads before authoring anything: knowledge base by folder name and by semantic
+  // (RAG) retrieval, with a recency snapshot as the floor, plus the existing testcases so coverage
+  // that already exists is not written twice. Shared by the interactive turn and by every
+  // background batch — batches 2..N used to gather a plain recency snapshot with no RAG and no
+  // capability gate, so a long generation silently drifted away from the sources batch 1 used.
+  private async zyraGenerationContext(
+    projectId: string,
+    message: string,
+    jiraIssueKeys: string[],
+    capabilities: ZyraCapabilities
+  ): Promise<{
+    knowledge: Array<{ title: string; content: string }>;
+    existingTestcases: ZyraGenerationInput["existingTestcases"];
+    suites: Array<{ id: string; name: string; testCaseCount: number }>;
+    jira: Array<{ key: string; summary: string; description: string }>;
+  }> {
+    const [knowledgeFallback, ragKnowledge, folderKnowledge, existingTestcases, suites, jira] = await Promise.all([
+      this.knowledgeSnapshot(projectId),
+      this.ragRetrieval.retrieveKnowledgeContext(projectId, message),
+      this.knowledgeFolderSnapshot(projectId, message, jiraIssueKeys),
+      this.existingTestcaseSnapshot(projectId, message, ""),
+      this.projectSuiteSummaries(projectId),
+      // Relevance-matched, not just explicitly-named — see relevantJiraSnapshot.
+      this.relevantJiraSnapshot(projectId, message, jiraIssueKeys)
+    ]);
+    const knowledge = [...folderKnowledge, ...(ragKnowledge.length ? ragKnowledge : knowledgeFallback)];
+    return {
+      knowledge: capabilities.knowledgeBase ? knowledge : [],
+      existingTestcases,
+      suites,
+      jira
+    };
+  }
+
   private static readonly ZYRA_PLAN_BATCH_SIZE = 5;
   private static readonly ZYRA_PLAN_MAX_SCENARIOS = 40;
+  // Matches the largest batch chatTestcasePlan will ask for, so a legitimate generation is never
+  // partially applied (see applyZyraChatOperations / normalizeZyraChatDecision).
+  private static readonly ZYRA_CHAT_MAX_OPERATIONS = 25;
 
   private zyraBatchMessage(originalMessage: string, batch: string[]): string {
     return [
@@ -6187,6 +6681,9 @@ export class LegacyService implements OnModuleInit {
     existingTestcases: ZyraGenerationInput["existingTestcases"];
     jiraIssueKeys: string[];
     suites: Array<{ id: string; name: string }>;
+    conversation?: string;
+    routedSuite?: { id?: string; name?: string } | null;
+    jira?: Array<{ key: string; summary: string; description: string }>;
   }): Promise<ZyraChatDecision> {
     let scenarios: string[] = [];
     try {
@@ -6217,7 +6714,10 @@ export class LegacyService implements OnModuleInit {
         existingTestcases: params.existingTestcases,
         jiraIssueKeys: params.jiraIssueKeys,
         requestedCount: 10,
-        suites: params.suites
+        suites: params.suites,
+        conversation: params.conversation,
+        routedSuite: params.routedSuite,
+        jira: params.jira
       });
     }
 
@@ -6234,7 +6734,10 @@ export class LegacyService implements OnModuleInit {
       existingTestcases: params.existingTestcases,
       jiraIssueKeys: params.jiraIssueKeys,
       requestedCount: firstBatch.length,
-      suites: params.suites
+      suites: params.suites,
+      conversation: params.conversation,
+      routedSuite: params.routedSuite,
+      jira: params.jira
     });
 
     if (!remaining.length) return decision;
@@ -6247,6 +6750,7 @@ export class LegacyService implements OnModuleInit {
         status: "running",
         originalMessage: params.message,
         jiraIssueKeys: params.jiraIssueKeys,
+        routedSuite: params.routedSuite || null,
         remainingScenarios: remaining,
         batchSize: LegacyService.ZYRA_PLAN_BATCH_SIZE,
         doneCount: firstBatch.length,
@@ -6310,11 +6814,15 @@ export class LegacyService implements OnModuleInit {
         const provider = String(allocation.key.provider || "openai").toLowerCase();
         const model = normalizeProviderModel(provider, allocation.key.default_model);
         const originalMessage = String(plan.originalMessage || "");
-        const [knowledge, existingTestcases, suites] = await Promise.all([
-          this.knowledgeSnapshot(projectId),
-          this.existingTestcaseSnapshot(projectId, originalMessage, ""),
-          this.projectSuiteSummaries(projectId)
-        ]);
+        const jiraIssueKeys = normalizeJsonArray(plan.jiraIssueKeys).map(String);
+        // Re-read the sources for every batch: existing coverage grows as earlier batches land, so
+        // this is also what stops batch N from duplicating what batch N-1 just wrote.
+        const { knowledge, existingTestcases, suites, jira } = await this.zyraGenerationContext(
+          projectId,
+          `${originalMessage}\n${batch.join("\n")}`,
+          jiraIssueKeys,
+          capabilities
+        );
         const decision = await this.generateZyraChatTestcasesWithAi({
           projectId,
           userId,
@@ -6324,9 +6832,13 @@ export class LegacyService implements OnModuleInit {
           message: this.zyraBatchMessage(originalMessage, batch),
           knowledge,
           existingTestcases,
-          jiraIssueKeys: normalizeJsonArray(plan.jiraIssueKeys).map(String),
+          jiraIssueKeys,
+          jira,
           requestedCount: batch.length,
-          suites
+          suites,
+          // Carried in the plan so every batch files into the suite the user asked for, not just
+          // the first — a routed suite id is not recoverable from the original message text.
+          routedSuite: (plan.routedSuite as { id?: string; name?: string } | null) || null
         });
         const gated = this.applyStorageGateToGenerated(decision, capabilities);
         const applied = await this.applyZyraChatOperations(projectId, userId, sessionId, gated.operations);
@@ -6335,9 +6847,15 @@ export class LegacyService implements OnModuleInit {
 
         const newDoneCount = doneCount + batch.length;
         const remaining = remainingScenarios.slice(batch.length);
-        const reply = remaining.length
-          ? `Here are ${testcases.length} more test case(s) — ${newDoneCount}/${totalCount} scenarios covered so far. Still working on the remaining ${remaining.length}; I'll post the next batch shortly.`
-          : `Here are the final ${testcases.length} test case(s) — all ${totalCount} scenarios are now covered. Feel free to review and let me know if you'd like any changes.`;
+        // Never announce a batch that wrote nothing — the same false-success trap the chat path had.
+        const reply = !testcases.length
+          ? [
+              `⚠️ This batch saved nothing — none of the ${batch.length} scenario(s) produced a stored test case.`,
+              remaining.length ? `Continuing with the remaining ${remaining.length}.` : "That was the last batch."
+            ].join(" ")
+          : remaining.length
+            ? `Here are ${testcases.length} more test case(s) — ${newDoneCount}/${totalCount} scenarios covered so far. Still working on the remaining ${remaining.length}; I'll post the next batch shortly.`
+            : `Here are the final ${testcases.length} test case(s) — all ${totalCount} scenarios are now covered. Feel free to review and let me know if you'd like any changes.`;
         await this.postZyraPlanMessage(projectId, sessionId, userId, reply, testcases, applied.activity);
 
         if (!remaining.length) {
@@ -6400,7 +6918,7 @@ export class LegacyService implements OnModuleInit {
       `Tool name: ${params.toolName}`,
       `Tool result JSON: ${JSON.stringify(params.toolDecision)}`
     ].join("\n");
-    const raw = params.provider === "anthropic"
+    const raw = providerWire(params.provider) === "anthropic"
       ? await this.zyraChatWithAnthropic(params.key, params.model, finalizePrompt, params.message)
       : await this.zyraChatWithOpenAi(params.key, params.model, finalizePrompt, params.message);
     return {
@@ -6584,7 +7102,23 @@ export class LegacyService implements OnModuleInit {
       });
     } catch (error) {
       const failedAt = new Date().toISOString();
-      const detail = error instanceof Error ? error.message : "Zyra failed to generate testcase drafts.";
+      // Nest builds HttpExceptions from an object payload, so `error.message` is the generic
+      // status text ("Bad Request Exception") and the real cause — provider status, invalid
+      // JSON, revoked key — is only in getResponse(). Reading `.message` here made every
+      // failure indistinguishable in the activity log. extractAiErrorMessage unwraps it, the
+      // same way the Zyra chat paths already do.
+      const summary = this.extractAiErrorMessage(error) || "Zyra failed to generate testcase drafts.";
+      // `error` alone is often still generic ("Claude testcase generation failed"); the provider's
+      // own text lives in `detail`. Keep both so the activity log names the actual cause.
+      const payload = typeof (error as { getResponse?: () => unknown })?.getResponse === "function"
+        ? (error as { getResponse: () => unknown }).getResponse()
+        : null;
+      const providerDetail = payload && typeof payload === "object"
+        ? String((payload as Record<string, unknown>).detail || "")
+        : "";
+      const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
+      // Nothing logged this before, so a failed task left no server-side trace at all.
+      this.logger.error(`Zyra task ${taskId} (project ${projectId}) failed: ${detail}`, error instanceof Error ? error.stack : undefined);
       const activity = [{ actor: "agent", stage: "todo", title: "Generation failed", detail, createdAt: failedAt }];
       await this.db.query(
         "UPDATE ai_generation_requests SET task_status = 'todo', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
@@ -6897,10 +7431,10 @@ export class LegacyService implements OnModuleInit {
   // since the caller wants a short prose/bullet answer, not a structured chat decision.
   private async summarizeForZyraMemory(provider: string, model: string, key: Body, prompt: string): Promise<string> {
     try {
-      if (provider === "anthropic") {
-        const chatUrl = normalizeAnthropicMessagesUrl(key.base_url);
-        const chatHeaders = this.buildAnthropicAuthHeaders(key.api_key, key.auth_header_name, key.auth_scheme);
-        for (const candidate of anthropicModelCandidates(model)) {
+      if (providerWire(provider) === "anthropic") {
+        const chatUrl = normalizeAnthropicMessagesUrlFor(provider, key.base_url);
+        const chatHeaders = this.providerAuthHeaders(provider, key.api_key, key.auth_header_name, key.auth_scheme);
+        for (const candidate of providerModelCandidates(provider, model)) {
           const res = await fetch(chatUrl, {
             method: "POST",
             headers: chatHeaders,
@@ -6913,11 +7447,8 @@ export class LegacyService implements OnModuleInit {
         }
         return "";
       }
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      const authHeader = String(key.auth_header_name || "Authorization");
-      const scheme = String(key.auth_scheme || "Bearer").trim();
-      headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
-      const res = await fetch(normalizeChatCompletionsUrl(key.base_url), {
+      const headers = this.providerAuthHeaders(provider, String(key.api_key || ""), key.auth_header_name, key.auth_scheme);
+      const res = await fetch(providerChatUrl(provider, key.base_url, model), {
         method: "POST",
         headers,
         body: JSON.stringify({ model, max_tokens: 220, messages: [{ role: "user", content: prompt }] })
@@ -7143,6 +7674,83 @@ export class LegacyService implements OnModuleInit {
     }));
   }
 
+  // Words that carry no selectivity in a QA request — "generate test cases covering the login flow"
+  // is only really about "login". Without stripping these, term matching against tickets or
+  // testcases matches almost everything and the relevance ordering becomes noise.
+  // Held as STEMS and matched against suffix-stripped candidates, so "cover", "covers", "covering"
+  // and "coverage" all collapse to one entry. Enumerating inflections by hand is what made the old
+  // intent regexes wrong ("generate" matched, "generating" did not) — not repeating it here.
+  private static readonly ZYRA_STOPWORD_STEMS = new Set([
+    "test", "testcase", "case", "generat", "creat", "writ", "draft", "pleas", "cover", "coverag",
+    "scenario", "suite", "flow", "verif", "validat", "check", "should", "would", "could", "about",
+    "with", "from", "into", "need", "want", "make", "give", "show", "list", "them", "this", "that",
+    "these", "those", "there", "their", "have", "been", "will", "more", "some", "also", "use",
+    "using", "base"
+  ]);
+
+  private isZyraStopword(word: string): boolean {
+    if (LegacyService.ZYRA_STOPWORD_STEMS.has(word)) return true;
+    for (const suffix of ["ing", "age", "ed", "es", "s", "e", "y"]) {
+      if (word.length > suffix.length + 2 && word.endsWith(suffix)) {
+        if (LegacyService.ZYRA_STOPWORD_STEMS.has(word.slice(0, -suffix.length))) return true;
+      }
+    }
+    return false;
+  }
+
+  private zyraSearchTerms(text: string, limit = 8): string[] {
+    const words = String(text || "").toLowerCase().split(/[^a-z0-9]+/);
+    const terms = words.filter((word) => word.length > 3 && !this.isZyraStopword(word));
+    return Array.from(new Set(terms)).slice(0, limit);
+  }
+
+  // Jira context for generation. jiraSnapshot only ever returns tickets whose keys were typed into
+  // the message, which meant "generate test cases for the login flow" read ZERO tickets even with
+  // Jira connected and every ticket synced — Zyra depended entirely on the Jira mirror happening to
+  // surface through knowledge-base retrieval. This adds the deliberate step: explicit keys first
+  // (with jiraSnapshot's live-API fallback), then the most relevant synced tickets to fill up to
+  // `limit`. Relevance is required, not padded — an unrelated ticket is worse than no ticket.
+  private async relevantJiraSnapshot(
+    projectId: string,
+    message: string,
+    mentionedKeys: string[],
+    limit = 8
+  ): Promise<Array<{ key: string; summary: string; description: string }>> {
+    const explicit = mentionedKeys.length ? await this.jiraSnapshot(projectId, mentionedKeys) : [];
+    if (explicit.length >= limit) return explicit.slice(0, limit);
+    const terms = this.zyraSearchTerms(message);
+    if (!terms.length) return explicit;
+    const res = await this.db.query(
+      `SELECT jira_issue_key, summary, description
+       FROM jira_tickets
+       WHERE project_id = $1
+         AND (lower(summary) LIKE ANY($2::text[])
+              OR lower(coalesce(description, '')) LIKE ANY($2::text[])
+              OR lower(coalesce(labels, '')) LIKE ANY($2::text[]))
+       ORDER BY CASE WHEN lower(summary) LIKE ANY($2::text[]) THEN 0 ELSE 1 END,
+                jira_updated_at DESC NULLS LAST
+       LIMIT $3`,
+      [projectId, terms.map((term) => `%${term}%`), limit]
+    ).catch(() => ({ rows: [] as Body[] }));
+    const seen = new Set(explicit.map((item) => item.key));
+    const matched = res.rows
+      .map((row) => ({
+        key: String(row.jira_issue_key || ""),
+        summary: String(row.summary || ""),
+        description: String(row.description || "").slice(0, 4000)
+      }))
+      .filter((item) => item.key && !seen.has(item.key));
+    return [...explicit, ...matched].slice(0, limit);
+  }
+
+  // Jira tickets are mirrored into the knowledge base by the integration sync, titled "KEY: summary"
+  // (see IntegrationSyncDocumentBuilder). Counting them makes the "sources read" line in a reply
+  // honest: reporting "0 Jira ticket(s)" while a dozen retrieved knowledge items were Jira tickets
+  // reads as "Jira is not connected", which is the wrong conclusion.
+  private countZyraJiraSourcedKnowledge(knowledge: Array<{ title: string }>): number {
+    return knowledge.filter((item) => /^[A-Z][A-Z0-9]+-\d+\s*:/.test(String(item.title || "").trim())).length;
+  }
+
   private async jiraSnapshot(projectId: string, keys: string[]): Promise<Array<{ key: string; summary: string; description: string }>> {
     const selectedKeys = Array.from(new Set(keys.map((key) => key.trim()).filter(Boolean)));
     if (!selectedKeys.length) return [];
@@ -7269,7 +7877,7 @@ export class LegacyService implements OnModuleInit {
     input: ZyraGenerationInput;
   }): Promise<ZyraAiResult> {
     const provider = String(params.provider || "openai").toLowerCase();
-    if (provider === "anthropic") return this.generateZyraWithAnthropic(params);
+    if (providerWire(provider) === "anthropic") return this.generateZyraWithAnthropic(params);
     return this.generateZyraWithOpenAi(params);
   }
 
@@ -7518,12 +8126,12 @@ export class LegacyService implements OnModuleInit {
   // shape (not the fixed Zyra chat decision schema) — used to plan the scenario todo list
   // for "all possible cases" generation without pulling in the full chat-decision prompt.
   private async zyraJsonCompletion(provider: string, model: string, key: Body, systemPrompt: string, userPrompt: string): Promise<Body> {
-    if (provider === "anthropic") {
-      const res = await fetch(normalizeAnthropicMessagesUrl(key.base_url), {
+    if (providerWire(provider) === "anthropic") {
+      const res = await fetch(normalizeAnthropicMessagesUrlFor(provider, key.base_url), {
         method: "POST",
-        headers: this.buildAnthropicAuthHeaders(key.api_key, key.auth_header_name, key.auth_scheme),
+        headers: this.providerAuthHeaders(provider, key.api_key, key.auth_header_name, key.auth_scheme),
         body: JSON.stringify({
-          model: anthropicModelCandidates(model)[0],
+          model: providerModelCandidates(provider, model)[0],
           max_tokens: 2000,
           system: [{ type: "text", text: systemPrompt }],
           messages: [{ role: "user", content: userPrompt }]
@@ -7540,11 +8148,8 @@ export class LegacyService implements OnModuleInit {
       if (!parsed) throw new Error("Anthropic returned no parseable JSON.");
       return parsed;
     }
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const authHeader = String(key.auth_header_name || "Authorization");
-    const scheme = String(key.auth_scheme || "Bearer").trim();
-    headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
-    const res = await fetch(normalizeChatCompletionsUrl(key.base_url), {
+    const headers = this.providerAuthHeaders(provider, String(key.api_key || ""), key.auth_header_name, key.auth_scheme);
+    const res = await fetch(providerChatUrl(provider, key.base_url, model), {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -7625,11 +8230,8 @@ export class LegacyService implements OnModuleInit {
     if (params.provider === "openai" && /^(gpt-5|gpt-4\.1)/.test(String(openAiBody.model))) {
       openAiBody.prompt_cache_retention = "24h";
     }
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const authHeaderName = params.authHeaderName || "Authorization";
-    const authScheme = params.authScheme == null ? "Bearer" : String(params.authScheme);
-    headers[authHeaderName] = authScheme ? `${authScheme} ${params.apiKey}` : params.apiKey;
-    const response = await fetch(normalizeChatCompletionsUrl(params.provider === "openai" ? null : params.baseUrl), {
+    const headers = this.providerAuthHeaders(params.provider, params.apiKey, params.authHeaderName ?? null, params.authScheme ?? null);
+    const response = await fetch(providerChatUrl(params.provider, params.baseUrl, String(openAiBody.model)), {
       method: "POST",
       headers,
       body: JSON.stringify(openAiBody)
@@ -7639,7 +8241,7 @@ export class LegacyService implements OnModuleInit {
       const rawMessage = String(body.error?.message || body.error || response.statusText);
       const friendly = this.describeProviderError(params.provider, response.status, rawMessage);
       throw new BadRequestException({
-        error: friendly || `${params.provider === "openai" ? "OpenAI" : params.provider} testcase generation failed`,
+        error: friendly || `${providerDefinition(params.provider)?.label || params.provider} testcase generation failed`,
         detail: rawMessage,
         ...(this.isProviderAuthError(response.status, rawMessage) ? { code: "ai_key_invalid" } : {})
       });
@@ -7671,7 +8273,7 @@ export class LegacyService implements OnModuleInit {
     let lastMessage = "";
     const anthropicUrl = normalizeAnthropicMessagesUrl(params.baseUrl);
     const anthropicHeaders = this.buildAnthropicAuthHeaders(params.apiKey, params.authHeaderName ?? null, params.authScheme ?? null);
-    for (const model of anthropicModelCandidates(params.model)) {
+    for (const model of providerModelCandidates(params.provider, params.model)) {
       const response = await fetch(anthropicUrl, {
         method: "POST",
         headers: anthropicHeaders,
@@ -7682,7 +8284,9 @@ export class LegacyService implements OnModuleInit {
           // mid-array and failing to parse. Scale with requestedCount instead, capped at
           // 16000 (the threshold above which the SDK guidance calls for streaming).
           max_tokens: Math.min(16000, 2000 + params.input.requestedCount * 1500),
-          temperature: 0.2,
+          // No temperature: Claude Sonnet 5 / Opus 5 / Opus 4.7+ reject a non-default
+          // sampling parameter with a 400, and the model picker can now surface those.
+          // It bought little anyway — temperature never guaranteed identical outputs.
           system: [
             {
               type: "text",
@@ -7797,11 +8401,9 @@ export class LegacyService implements OnModuleInit {
         { role: "user", content: message }
       ]
     };
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    const authHeader = String(key.auth_header_name || "Authorization");
-    const scheme = String(key.auth_scheme || "Bearer").trim();
-    headers[authHeader] = scheme ? `${scheme} ${key.api_key}` : String(key.api_key);
-    const res = await fetch(normalizeChatCompletionsUrl(key.base_url), {
+    const provider = String(key.provider || "openai").toLowerCase();
+    const headers = this.providerAuthHeaders(provider, String(key.api_key || ""), key.auth_header_name, key.auth_scheme);
+    const res = await fetch(providerChatUrl(provider, key.base_url, model), {
       method: "POST",
       headers,
       body: JSON.stringify(body)
@@ -7824,16 +8426,16 @@ export class LegacyService implements OnModuleInit {
     let lastStatus = "";
     const chatUrl = normalizeAnthropicMessagesUrl(key.base_url);
     const chatHeaders = this.buildAnthropicAuthHeaders(key.api_key, key.auth_header_name, key.auth_scheme);
-    for (const candidate of anthropicModelCandidates(model)) {
+    for (const candidate of providerModelCandidates(String(key.provider || "anthropic"), model)) {
       const body = {
         model: candidate,
         max_tokens: 2200,
-        system: context,
-        // Prefilling the opening brace stops Claude from wrapping the envelope in a
-        // conversational preamble or a markdown fence — it can only continue the JSON.
+        // Claude 4.6 and later reject a trailing assistant prefill with a 400, so the
+        // opening brace can't be forced any more. Ask for a bare envelope instead;
+        // parseModelJson still strips a markdown fence or preamble if one slips through.
+        system: `${context}\n\nRespond with the raw JSON envelope only — no markdown fence, no preamble, no trailing commentary.`,
         messages: [
-          { role: "user", content: message },
-          { role: "assistant", content: "{" }
+          { role: "user", content: message }
         ]
       };
       const res = await fetch(chatUrl, {
@@ -7855,9 +8457,7 @@ export class LegacyService implements OnModuleInit {
       }
       const data = await res.json() as Body;
       const rawText = normalizeJsonArray(data.content).map((item) => item?.text || "").join("\n").trim();
-      // The assistant prefill is stripped from the response, so put the brace back before parsing.
-      const content = rawText.startsWith("{") ? rawText : `{${rawText}`;
-      const parsed = this.parseModelJson(content || "{}");
+      const parsed = this.parseModelJson(rawText || "{}");
       if (parsed) return parsed;
       // AI returned prose instead of JSON — surface it as a plain answer so the
       // user sees the actual message rather than a SyntaxError string.
@@ -7878,6 +8478,9 @@ export class LegacyService implements OnModuleInit {
     return (text || fallback).slice(0, 5000);
   }
 
+  // `intent` here is the router's own decision (intentFromZyraModelAction), so this validates and
+  // shapes what the model asked for rather than second-guessing it: operations must be well-formed
+  // and reference something real, and rows are only returned for actions that display them.
   private normalizeZyraChatDecision(raw: Body, message: string, existingTestcases: ZyraGenerationInput["existingTestcases"], intent: ZyraChatIntent): ZyraChatDecision {
     const modelActionType = ["answer", "create", "update", "archive", "suite", "mixed"].includes(String(raw.actionType))
       ? String(raw.actionType) as ZyraChatDecision["actionType"]
@@ -7912,7 +8515,7 @@ export class LegacyService implements OnModuleInit {
         if (op.type === "move_to_suite") return (!!op.suiteName || !!op.suiteId) && (op.allExisting || op.fromLastPlan || !!op.externalIds?.length || !!op.testcaseIds?.length);
         return op.testcaseId || op.externalId; // update / archive
       })
-      .slice(0, 10);
+      .slice(0, LegacyService.ZYRA_CHAT_MAX_OPERATIONS);
     const testcases = tableIntent ? normalizeJsonArray(raw.testcases).slice(0, 25) : [];
     return {
       reply: this.sanitizeZyraReply(raw.reply, this.defaultZyraReply(message, existingTestcases)),
@@ -7923,85 +8526,137 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  private fallbackZyraChatDecision(message: string, knowledge: Array<{ title: string; content: string }>, existingTestcases: ZyraGenerationInput["existingTestcases"], intent: ZyraChatIntent): ZyraChatDecision {
-    if (intent === "create") {
-      return this.aiUnavailableForZyraChat(existingTestcases.length, "AI provider path was unavailable.");
-    }
-    if ((intent === "update" || intent === "archive") && existingTestcases[0]) {
-      const target = existingTestcases[0];
-      const type = intent === "archive" ? "archive" : "update";
+  // ─── Degraded mode ───────────────────────────────────────────────────────────
+  // Everything below runs ONLY when the AI is unreachable: no key allocated, the provider errored,
+  // or the response was unusable. It is not a router and never competes with the model for a live
+  // request (that ambiguity is what produced the "generated but never saved" bug — a keyword table
+  // decided the request meant "answer" and the model's reply was believed). Kept deliberately so
+  // an outage degrades to something useful instead of an error string.
+  private zyraDegradedDecision(
+    message: string,
+    existingTestcases: ZyraGenerationInput["existingTestcases"],
+    reason: string
+  ): ZyraChatDecision {
+    const intent = this.detectZyraChatIntent(message);
+    const note = `⚠️ Zyra's AI provider is unavailable right now (${reason}), so this is a best-effort answer from the test repository only — no test cases were generated or changed.`;
+    // Generation genuinely cannot happen without the provider — say so rather than pretending.
+    if (intent === "create" || intent === "update" || intent === "archive" || intent === "suite") {
       return {
-        reply: intent === "archive"
-          ? `I found ${target.externalId} as the closest matching testcase and archived it instead of permanently deleting it.`
-          : `I found ${target.externalId} as the closest matching testcase and marked it for review with Zyra context.`,
-        reasoningSummary: this.defaultReasoningSummary(existingTestcases.length),
-        actionType: type,
-        operations: [{
-          type,
-          externalId: target.externalId,
-          fields: { status: "In Review", priority: target.priority || "P2" },
-          reason: "Closest match from the current testcase repository context."
-        }],
-        testcases: [this.chatDraftRow(target, type === "archive" ? "archived" : "updated", "Closest match from repository context.")]
-      };
-    }
-    if (intent === "list") {
-      return {
-        reply: existingTestcases.length
-          ? `I found ${existingTestcases.length} related testcase(s). The table shows the strongest nearby coverage.`
-          : "I did not find matching testcase coverage in the current repository context.",
-        reasoningSummary: this.defaultReasoningSummary(existingTestcases.length),
+        reply: `${note}\n\nI can't ${intent === "create" ? "generate test cases" : "change the test repository"} until the provider is reachable. Check Settings → AI Providers, then ask me again.`,
+        reasoningSummary: `Degraded mode (${reason}). Refused a ${intent} request rather than mutating the repository without AI context.`,
         actionType: "answer",
         operations: [],
-        testcases: existingTestcases.slice(0, 8).map((tc) => this.chatDraftRow(tc, "covered", "Relevant existing coverage."))
+        testcases: []
+      };
+    }
+    // Read-only requests can still be served from the repository snapshot, as a table.
+    if (intent === "list" && existingTestcases.length) {
+      return {
+        reply: `${note}\n\nHere is the nearest existing coverage I could match.`,
+        reasoningSummary: `Degraded mode (${reason}). Listed ${existingTestcases.length} existing testcase(s) from repository context.`,
+        actionType: "answer",
+        operations: [],
+        testcases: existingTestcases.slice(0, 25).map((tc) => this.chatDraftRow(tc, "covered", "Existing coverage matched without AI."))
       };
     }
     return {
-      reply: this.defaultZyraReply(message, existingTestcases),
-      reasoningSummary: this.defaultReasoningSummary(existingTestcases.length),
+      reply: `${note}\n\n${this.defaultZyraReply(message, existingTestcases)}`,
+      reasoningSummary: `Degraded mode (${reason}). ${this.defaultReasoningSummary(existingTestcases.length)}`,
       actionType: "answer",
       operations: [],
       testcases: []
     };
   }
 
+  // Keyword intent detection. NOT the router — the AI decides live requests (see
+  // buildZyraChatDecision). This only shapes the degraded reply above, which is why the verb stems
+  // matter less here, but they are kept correct anyway.
   private detectZyraChatIntent(message: string): ZyraChatIntent {
     const lower = message.toLowerCase();
     const jiraWords = /\b(jira|ticket|tickets|story|stories|issue|issues)\b/.test(lower);
-    const pendingTestcaseWords = /\b(pending|missing|without|not covered|uncovered|need|needs|remaining)\b/.test(lower)
-      && /\b(testcase|test case|testcases|test cases|tests|coverage|writing)\b/.test(lower);
     const testcaseWords = /\b(testcase|test case|testcases|test cases|case|cases|coverage)\b/.test(lower);
-    const createWords = /\b(create|generate|add|write|draft|make|prepare|new)\b/.test(lower);
-    const updateWords = /\b(update|change|mark|revise|edit|modify|improve)\b/.test(lower);
-    const archiveWords = /\b(remove|delete|archive|drop|deprecate)\b/.test(lower);
+    const createWords = /\b(creat|generat|draft|prepar|author)\w*\b|\b(add|adds|added|adding|write|writes|writing|wrote|make|makes|making|new)\b/.test(lower);
+    const updateWords = /\b(updat|chang|revis|edit|modif|improv)\w*\b|\b(mark|marks|marked)\b/.test(lower);
+    const archiveWords = /\b(remov|delet|archiv|deprecat)\w*\b|\b(drop|drops|dropped)\b/.test(lower);
+    const saveWords = /\b(sav(e|es|ed|ing)|stor(e|es|ed|ing)|persist(s|ed|ing)?)\b/.test(lower);
     const listWords = /\b(show|list|which|what|find|display|compare|covered|covers|coverage|existing)\b/.test(lower);
     const exampleWords = /\b(example|sample|explain|how|why|what is|what are|walk me|describe)\b/.test(lower);
-    // "folder" alone is ambiguous — it means a testcase suite/folder in "create a suite/folder"
-    // phrasing, but means a knowledge-base folder in "knowledge base 'X' folder" phrasing. Only
-    // count folder/folders as a suite word when the message isn't talking about the knowledge base,
-    // so "get details from knowledge base 'EAD-11215' folder and create the test cases" is not
-    // misrouted to the suite intent and away from the create-testcases path.
+    // "folder" alone is ambiguous — a testcase suite in "create a folder" phrasing, a knowledge-base
+    // folder in "knowledge base 'X' folder" phrasing.
     const knowledgeBaseWords = /\bknowledge\s*base\b/.test(lower);
     const suiteWords = /\b(suite|suites)\b/.test(lower) || (/\b(folder|folders)\b/.test(lower) && !knowledgeBaseWords);
     const moveWords = /\b(move|moved|moving|assign|assigned|organi[sz]e|organi[sz]ed|group|grouped|regroup|categori[sz]e|reorgani[sz]e)\b/.test(lower);
-    // Analysis/review framing: user wants to UNDERSTAND gaps, not generate right now.
-    // e.g. "review KB and let me know what gaps we need to generate" → list/answer, not create.
     const analysisWords = /\b(review|analyse|analyze|gap|gaps|let me know|tell me|identify|what to|which to|what we need|which we need|what cases|which cases)\b/.test(lower);
 
-    if (jiraWords && pendingTestcaseWords) return "jira_pending_testcases";
-    // Suite work (create a suite, move/assign existing testcases into a suite) wins over create/update:
-    // "create a suite and move the existing testcases" must NOT be read as "create new testcases".
+    if (saveWords && !updateWords && !archiveWords) return "create";
     if (suiteWords || (moveWords && testcaseWords)) return "suite";
     if (archiveWords && testcaseWords) return "archive";
     if (updateWords && testcaseWords) return "update";
-    // When review/gap/analysis language is present alongside create words, the user is asking
-    // Zyra to analyse coverage and identify what to build — not to generate right now.
-    // Route to "list" so the main model can reason about the request and reply analytically.
     if (createWords && testcaseWords && analysisWords) return "list";
     if (createWords && testcaseWords) return "create";
     if (testcaseWords && listWords) return "list";
     if (exampleWords) return "example";
     return "answer";
+  }
+
+  // The conversation as the model should see it, with every assistant turn annotated by what it
+  // ACTUALLY wrote to the repository. This is the fact that makes "save it" resolvable: a reply
+  // enumerating 15 test cases and a reply that saved 15 test cases read identically as prose, and
+  // the model cannot tell them apart from its own words — so it is told. Persisted rows carry an
+  // id (chatTestcaseRow); rows that were only suggested do not (chatDraftRow).
+  private zyraTranscript(history: Body[]): string {
+    if (!history.length) return "No prior chat.";
+    return history.map((row) => {
+      let content = String(row?.content || "");
+      const trimmed = content.trim();
+      if (trimmed.startsWith("{")) {
+        try {
+          const parsed = JSON.parse(trimmed);
+          if (typeof parsed?.reply === "string" && parsed.reply) content = parsed.reply;
+        } catch { /* not JSON — use as-is */ }
+      }
+      if (String(row?.role) !== "assistant") return `user: ${content}`;
+      const rows = normalizeJsonArray(row?.testcases);
+      const saved = rows.filter((item) => item && (item as Body).id);
+      const externalIds = saved.map((item) => String((item as Body).externalId || "")).filter(Boolean);
+      const note = saved.length
+        ? `[saved ${saved.length} testcase(s) to the repository${externalIds.length ? `: ${externalIds.join(", ")}` : ""}]`
+        : "[saved nothing — any testcases named in this reply do not exist in the repository]";
+      return `assistant ${note}: ${content}`;
+    }).join("\n");
+  }
+
+  // Resolve the router's suite against reality: an id only counts if the suite exists, a name is
+  // matched case-insensitively to an existing suite, and a genuinely new name is passed through to
+  // be created on demand.
+  private resolveRoutedZyraSuite(
+    routed: { id?: string; name?: string } | null | undefined,
+    suites: Array<{ id: string; name: string }>
+  ): { id?: string; name: string } | null {
+    if (!routed) return null;
+    const byId = routed.id ? suites.find((suite) => suite.id === routed.id) : undefined;
+    if (byId) return { id: byId.id, name: byId.name };
+    const name = String(routed.name || "").trim();
+    if (!name) return null;
+    const byName = suites.find((suite) => suite.name.trim().toLowerCase() === name.toLowerCase());
+    return byName ? { id: byName.id, name: byName.name } : { name };
+  }
+
+  // The suite the router named for a create request, read off whichever operation carries one. An
+  // id it invented is dropped rather than trusted (see resolveRoutedZyraSuite); a name it invented
+  // is fine, because suites are created by name on demand.
+  private routedZyraSuite(raw: Body, suites: Array<{ id: string; name: string }>): { id?: string; name?: string } | null {
+    const op = normalizeJsonArray(raw?.operations).find((candidate) => {
+      const type = String((candidate as Body)?.type || "");
+      return (type === "create" || type === "move_to_suite" || type === "create_suite")
+        && ((candidate as Body)?.suiteId || (candidate as Body)?.suiteName);
+    }) as Body | undefined;
+    if (!op) return null;
+    const suiteId = op.suiteId ? String(op.suiteId).trim() : "";
+    const matchedById = suiteId ? suites.find((suite) => suite.id === suiteId) : undefined;
+    if (matchedById) return { id: matchedById.id, name: matchedById.name };
+    const suiteName = op.suiteName ? String(op.suiteName).trim().slice(0, 128) : "";
+    return suiteName ? { name: suiteName } : null;
   }
 
   private normalizeZyraCapabilities(raw: unknown): ZyraCapabilities {
@@ -8052,6 +8707,81 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
+  // Test cases belong in the structured rows the UI renders as a table — never in the chat bubble as
+  // markdown. A model that writes the table into `reply` produces cases the user can read but cannot
+  // open, run, or edit; in the reported session that markdown table WAS the entire deliverable and
+  // none of it existed in the repository. Tables that are not testcase listings (coverage summaries,
+  // Jira comparisons) are legitimate prose and are left untouched.
+  private stripZyraTestcaseTables(reply: string, hasRows: boolean): string {
+    const lines = reply.split("\n");
+    const kept: string[] = [];
+    let removed = false;
+    for (let i = 0; i < lines.length; ) {
+      if (!lines[i].trim().startsWith("|")) {
+        kept.push(lines[i]);
+        i += 1;
+        continue;
+      }
+      let end = i;
+      while (end < lines.length && lines[end].trim().startsWith("|")) end += 1;
+      const block = lines.slice(i, end);
+      if (this.isZyraTestcaseTable(block)) {
+        removed = true;
+      } else {
+        kept.push(...block);
+      }
+      i = end;
+    }
+    if (!removed) return reply;
+    const cleaned = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    if (hasRows) return cleaned;
+    // Nothing was saved and the only record of those cases was the markdown just removed — say what
+    // happened and how to actually get them, rather than leaving a table that implies they exist.
+    return [
+      cleaned,
+      "",
+      "_Those test cases were only described in chat — they were not saved to the repository. Ask me to generate them and they'll be created and shown in the table above._"
+    ].join("\n").trim();
+  }
+
+  private isZyraTestcaseTable(block: string[]): boolean {
+    if (block.length < 2) return false;
+    // A markdown table needs its separator row (|---|---|) within the first two lines.
+    if (!block.slice(0, 2).some((line) => /^\s*\|[\s:|-]+\|\s*$/.test(line))) return false;
+    const header = block[0].split("|").map((cell) => cell.trim().toLowerCase()).filter(Boolean);
+    const anchors = ["title", "scenario", "steps", "step", "expected", "test case", "testcase"];
+    const columns = ["title", "scenario", "steps", "step", "expected", "precondition", "preconditions", "priority", "severity", "type", "status", "area", "module", "id", "#", "test case", "testcase"];
+    const hasAnchor = header.some((cell) => anchors.some((anchor) => cell.includes(anchor)));
+    const matches = header.filter((cell) => columns.some((column) => cell.includes(column))).length;
+    return hasAnchor && matches >= 2;
+  }
+
+  // Everything a reply must satisfy before the user sees it: test cases live only in the table, and
+  // no claim of a mutation survives that the system did not actually perform.
+  private finalizeZyraChatReply(decision: ZyraChatDecision, applied: { testcases: Body[]; activity: Body[] }, renderedRows: Body[]): string {
+    const reconciled = this.reconcileZyraReply(decision, applied);
+    return this.stripZyraTestcaseTables(reconciled, renderedRows.length > 0);
+  }
+
+  // The reply is written by the model (or by the generator) BEFORE the operations are applied, and
+  // nothing used to compare the two — so a decision that promised a mutation and then persisted
+  // nothing was still reported as a success ("All 15 test cases have been saved into the Login
+  // suite" over zero written rows). Prefix an honest correction rather than let the claim stand.
+  private reconcileZyraReply(decision: ZyraChatDecision, applied: { testcases: Body[]; activity: Body[] }): string {
+    if (decision.actionType === "answer") return decision.reply;
+    if (applied.testcases.length) return decision.reply;
+    // Creating an empty suite touches no testcases and is still a complete success.
+    if (decision.operations.length && decision.operations.every((op) => op.type === "create_suite")) return decision.reply;
+    const detail = decision.operations.length
+      ? "The test cases it referred to do not exist in this project, so there was nothing to change."
+      : "I did not produce any test case operations for this request.";
+    return [
+      `⚠️ Nothing was saved. ${detail} Ask me to generate the test cases and I'll write them straight to the repository in the same step.`,
+      "",
+      decision.reply
+    ].join("\n");
+  }
+
   private aiUnavailableForZyraChat(existingCount: number, reason = "AI generation was not available for this chat request."): ZyraChatDecision {
     return {
       reply: reason,
@@ -8081,7 +8811,17 @@ export class LegacyService implements OnModuleInit {
   // always wins; otherwise an "all possible" / "exhaustive" style ask in the message maps to
   // the "all" range; otherwise this falls back to whatever range the user configured in
   // Zyra → Settings → Test case range, instead of a fixed small default that ignores it.
-  private chatTestcasePlan(message: string, projectTestcaseRange: string): { requestedCount: number; testcaseRange?: string } {
+  private chatTestcasePlan(
+    message: string,
+    projectTestcaseRange: string,
+    routed?: { requestedCount?: unknown; exhaustive?: boolean }
+  ): { requestedCount: number; testcaseRange?: string } {
+    // The router read the request in context — "fifteen", "a couple more than last time", "cover
+    // everything you can" — so its reading wins. The patterns below only cover the case where it
+    // reported nothing.
+    if (routed?.exhaustive) return { testcaseRange: "all", requestedCount: this.testcaseRangeConfig("all").requestedCount };
+    const routedCount = Number(routed?.requestedCount);
+    if (Number.isFinite(routedCount) && routedCount >= 1) return { requestedCount: Math.min(25, Math.floor(routedCount)) };
     const explicit = message.match(/\b(\d{1,2})\s+(?:testcases|test cases|tests|cases)\b/i);
     if (explicit) return { requestedCount: Math.max(1, Math.min(25, Number(explicit[1]))) };
     const lower = message.toLowerCase();
@@ -8106,8 +8846,12 @@ export class LegacyService implements OnModuleInit {
     jiraIssueKeys: string[];
     projectTestcaseRange: string;
     suites: Array<{ id: string; name: string }>;
+    conversation?: string;
+    routedSuite?: { id?: string; name?: string } | null;
+    routedCount?: { requestedCount?: unknown; exhaustive?: boolean };
+    jira?: Array<{ key: string; summary: string; description: string }>;
   }): Promise<ZyraChatDecision> {
-    const plan = this.chatTestcasePlan(params.message, params.projectTestcaseRange);
+    const plan = this.chatTestcasePlan(params.message, params.projectTestcaseRange, params.routedCount);
     if (plan.testcaseRange === "all") {
       return this.startZyraChatPlan({
         projectId: params.projectId,
@@ -8120,7 +8864,10 @@ export class LegacyService implements OnModuleInit {
         knowledge: params.knowledge,
         existingTestcases: params.existingTestcases,
         jiraIssueKeys: params.jiraIssueKeys,
-        suites: params.suites
+        suites: params.suites,
+        conversation: params.conversation,
+        routedSuite: params.routedSuite,
+        jira: params.jira
       });
     }
     return this.generateZyraChatTestcasesWithAi({
@@ -8134,20 +8881,28 @@ export class LegacyService implements OnModuleInit {
       existingTestcases: params.existingTestcases,
       jiraIssueKeys: params.jiraIssueKeys,
       suites: params.suites,
+      conversation: params.conversation,
+      routedSuite: params.routedSuite,
+      jira: params.jira,
       ...plan
     });
   }
 
-  private intentFromZyraModelAction(action: unknown, fallback: ZyraChatIntent): ZyraChatIntent {
-    const value = String(action || "").trim().toLowerCase();
-    if (value === "jira_pending_testcases") return "jira_pending_testcases";
-    if (value === "suite" || value === "create_suite" || value === "move_to_suite" || value === "list_suites") return "suite";
-    if (value === "create" || value === "create_testcases") return "create";
-    if (value === "update" || value === "update_testcases") return "update";
-    if (value === "archive" || value === "archive_testcases") return "archive";
-    if (value === "list" || value === "list_testcases") return "list";
-    if (value === "answer") return "answer";
-    return fallback;
+  // The router's action IS the routing decision. `actionType` is consulted only when `action` is
+  // missing or unrecognized, and an unusable response falls back to "answer" — never to a guess
+  // that mutates the repository.
+  private intentFromZyraModelAction(action: unknown, actionType?: unknown): ZyraChatIntent {
+    for (const candidate of [action, actionType]) {
+      const value = String(candidate || "").trim().toLowerCase();
+      if (value === "jira_pending_testcases") return "jira_pending_testcases";
+      if (value === "suite" || value === "create_suite" || value === "move_to_suite" || value === "list_suites") return "suite";
+      if (value === "create" || value === "create_testcases") return "create";
+      if (value === "update" || value === "update_testcases") return "update";
+      if (value === "archive" || value === "archive_testcases") return "archive";
+      if (value === "list" || value === "list_testcases") return "list";
+      if (value === "answer") return "answer";
+    }
+    return "answer";
   }
 
   private async projectSuiteSummaries(projectId: string): Promise<Array<{ id: string; name: string; testCaseCount: number }>> {

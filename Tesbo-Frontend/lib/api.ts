@@ -415,6 +415,50 @@ export async function deleteWorkspaceAiKey(keyId: string): Promise<void> {
   await api(`/api/workspace/ai-keys/${keyId}`, { method: "DELETE" });
 }
 
+export interface AiProviderOption {
+  id: string;
+  label: string;
+  wire: "openai" | "anthropic" | "azure";
+  /** Prefills the base-URL field; null means the provider's wire default is used. */
+  defaultBaseUrl: string | null;
+  requiresBaseUrl: boolean;
+  optionalApiKey: boolean;
+  defaultModel: string;
+}
+
+export async function listAiProviders(): Promise<{ providers: AiProviderOption[] }> {
+  return api<{ providers: AiProviderOption[] }>("/api/workspace/ai-providers");
+}
+
+export interface ProviderModelOption {
+  id: string;
+  displayName: string;
+}
+
+export interface ProviderModelsResponse {
+  models: ProviderModelOption[];
+  /** "live" when read from the provider, "fallback" when the curated list was used. */
+  source: "live" | "fallback";
+  /** Why the fallback was used; empty for "live". */
+  reason: string;
+}
+
+/** Lists the models a given key can actually reach. Never throws for provider-side
+ *  failures — it degrades to a curated list so the settings form stays usable. */
+export async function listProviderModels(data: {
+  provider: string;
+  apiKey?: string;
+  keyId?: string;
+  baseUrl?: string;
+  authHeaderName?: string;
+  authScheme?: string;
+}): Promise<ProviderModelsResponse> {
+  return api<ProviderModelsResponse>("/api/workspace/ai-keys/models", {
+    method: "POST",
+    body: data,
+  });
+}
+
 export async function allocateWorkspaceAiKeyToProject(data: {
   projectId: string;
   workspaceAiKeyId?: string;
