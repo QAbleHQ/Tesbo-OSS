@@ -19,7 +19,8 @@ pipeline {
   }
 
   environment {
-    REPO_URL    = 'https://github.com/QAbleHQ/Tesbo-Test-Manager-Private.git'
+    // Use SSH so prod deploy key works (HTTPS breaks non-interactive git fetch).
+    REPO_URL    = 'git@github.com:QAbleHQ/Tesbo-Test-Manager-Private.git'
     APP_HEALTH  = 'https://app.tesbo.io'
     DEPLOY_HOST = 'tesbo'
     DEPLOY_USER = 'root'
