@@ -9,7 +9,6 @@ import { ApiTokenService } from "../auth/api-token.service";
 import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
 import { IntegrationSyncService } from "../integration-sync/integration-sync.service";
-import { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import { CustomFieldsService } from "../custom-fields/custom-fields.service";
 
 /**
@@ -109,7 +108,6 @@ function makeService(dbOpts: Parameters<typeof makeDb>[0] = {}, emailOverrides: 
     {} as unknown as RagRetrievalService,
     {} as unknown as IntegrationSyncService,
     {} as unknown as ApiTokenService,
-    {} as unknown as PlanLimitsService,
     {} as unknown as CustomFieldsService
   );
   return { svc, db, query, txQuery, email };

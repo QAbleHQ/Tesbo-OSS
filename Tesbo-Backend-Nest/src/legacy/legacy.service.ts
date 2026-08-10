@@ -19,7 +19,6 @@ import { ApiTokenService } from "../auth/api-token.service";
 import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
 import { IntegrationSyncService } from "../integration-sync/integration-sync.service";
-import { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import { CustomFieldsService } from "../custom-fields/custom-fields.service";
 import { CustomFieldDefinitionDto } from "../custom-fields/custom-fields.types";
 
@@ -604,7 +603,6 @@ export class LegacyService implements OnModuleInit {
     private readonly ragRetrieval: RagRetrievalService,
     private readonly integrationSync: IntegrationSyncService,
     private readonly apiTokens: ApiTokenService,
-    private readonly planLimits: PlanLimitsService,
     @Inject(forwardRef(() => CustomFieldsService)) private readonly customFields: CustomFieldsService
   ) {}
 
@@ -1638,7 +1636,6 @@ export class LegacyService implements OnModuleInit {
     const name = String(body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "name is required" });
     const workspace = await this.workspace(uid);
-    await this.planLimits.assertCanCreateProject(workspace.id);
     const key = projectKey(String(body.key || name));
     const res = await this.db.transaction(async (client) => {
       const project = await client.query(
@@ -2009,9 +2006,8 @@ export class LegacyService implements OnModuleInit {
         ]
       );
       const row = res.rows[0];
-      // "skip-if-disabled": on a Launch-plan project this silently no-ops rather than
-      // throwing, so ordinary test case creation is never blocked by billing state.
-      await this.customFields.setValuesForTestCase(uid, projectId, row.id, body.customFieldValues || {}, client, "skip-if-disabled");
+      // Project access already checked above; avoid re-checking it here.
+      await this.customFields.setValuesForTestCase(uid, projectId, row.id, body.customFieldValues || {}, client, false);
       return row;
     });
     await this.logProjectActivity(projectId, uid, "testcase_created", "testcase", created.id, `${created.external_id} - ${created.title}`, { after: toCamel(created) });
@@ -2071,7 +2067,7 @@ export class LegacyService implements OnModuleInit {
       // Always called (even with an empty body.customFieldValues) so required-field
       // enforcement re-checks against currently-active-required fields using existing
       // stored values — correct for "field made required after the fact".
-      await this.customFields.setValuesForTestCase(uid, projectId, id, body.customFieldValues || {}, client, "skip-if-disabled");
+      await this.customFields.setValuesForTestCase(uid, projectId, id, body.customFieldValues || {}, client, false);
       return row;
     });
     await this.logProjectActivity(projectId, uid, "testcase_updated", "testcase", id, `${after?.external_id} - ${after?.title}`, {
@@ -2693,10 +2689,6 @@ export class LegacyService implements OnModuleInit {
       [bugId, projectId]
     );
     if (!bug.rows[0]) throw new NotFoundException({ error: "Bug not found" });
-    await this.planLimits.assertStorageAvailable(
-      bug.rows[0].organization_id,
-      files.reduce((sum, file) => sum + file.size, 0)
-    );
 
     const created: Body[] = [];
     for (const file of files) {
@@ -2758,10 +2750,6 @@ export class LegacyService implements OnModuleInit {
     );
     if (!execution.rows[0]) throw new NotFoundException({ error: "Execution not found" });
     const projectId = execution.rows[0].project_id;
-    await this.planLimits.assertStorageAvailable(
-      execution.rows[0].organization_id,
-      files.reduce((sum, file) => sum + file.size, 0)
-    );
 
     const created: Body[] = [];
     for (const file of files) {
@@ -4641,10 +4629,6 @@ export class LegacyService implements OnModuleInit {
     if (!folderId) throw new BadRequestException({ error: "folderId is required" });
     await this.kbFolder(projectId, folderId);
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
-    await this.planLimits.assertStorageAvailable(
-      project.organization_id,
-      files.reduce((sum, file) => sum + file.size, 0)
-    );
 
     // Files are held in memory (never touch disk) until the whole batch passes validation,
     // so a single unsupported file rejects the batch atomically with nothing left behind —
@@ -5126,7 +5110,6 @@ export class LegacyService implements OnModuleInit {
     const p = assertIntegrationProvider(provider);
     const workspace = await this.workspace(userId);
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage integrations" });
-    await this.planLimits.assertIntegrationAllowed(workspace.id, p);
     const code = String(body.code || "");
     if (!code) throw new BadRequestException({ error: "Authorization code is required." });
     verifyOAuthState(String(body.state || ""), p, workspace.id);

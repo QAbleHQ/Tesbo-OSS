@@ -38,28 +38,6 @@ export class AppConfigService {
   readonly s3SecretAccessKey = this.optionalString("S3_SECRET_ACCESS_KEY") || undefined;
   readonly s3ForcePathStyle = this.string("S3_FORCE_PATH_STYLE", "false").toLowerCase() === "true";
   readonly s3PresignedUrlTtlSeconds = this.integer("S3_PRESIGNED_URL_TTL_SECONDS", 300);
-  readonly stripeSecretKey = this.optionalString("STRIPE_SECRET_KEY");
-  readonly stripeWebhookSecret = this.optionalString("STRIPE_WEBHOOK_SECRET");
-  readonly stripePriceIdProMonthly = this.optionalString("STRIPE_PRICE_ID_PRO_MONTHLY");
-  readonly stripePriceIdProAnnual = this.optionalString("STRIPE_PRICE_ID_PRO_ANNUAL");
-  // India-registered Stripe accounts can't charge Indian-issued cards in a non-INR
-  // currency (RBI cross-border rule) — these are the INR equivalents of the two prices
-  // above, charged instead when the buyer is detected as being in India.
-  readonly stripePriceIdProMonthlyInr = this.optionalString("STRIPE_PRICE_ID_PRO_MONTHLY_INR");
-  readonly stripePriceIdProAnnualInr = this.optionalString("STRIPE_PRICE_ID_PRO_ANNUAL_INR");
-  // Forces the detected country (e.g. "IN") for every request. Local stacks and staging see only
-  // private IPs, which can't be geolocated, so without this the India price list is untestable.
-  // Must stay unset in production — it would hand INR pricing to every visitor.
-  readonly billingForceCountry = this.optionalString("BILLING_FORCE_COUNTRY");
-  // Only enable when an edge that OVERWRITES client-supplied country headers (Cloudflare,
-  // CloudFront, Vercel, Fastly) fronts the app. Otherwise a caller can forge cf-ipcountry: IN
-  // and buy the India price list from anywhere.
-  readonly trustProxyCountryHeader = this.string("TRUST_PROXY_COUNTRY_HEADER", "false").toLowerCase() === "true";
-  // Days of full Pro-level access a workspace keeps after its subscription ends, before Launch
-  // limits are enforced for real. 0 disables the grace window (immediate enforcement).
-  readonly planGraceDays = this.integer("PLAN_GRACE_DAYS", 30);
-  // Where "need more storage?" and other billing dead-ends point people.
-  readonly supportContactEmail = this.string("SUPPORT_CONTACT_EMAIL", "support@tryqable.com");
 
   private loadEnv(): Record<string, string | undefined> {
     const dotenvPath = this.findDotEnvPath();

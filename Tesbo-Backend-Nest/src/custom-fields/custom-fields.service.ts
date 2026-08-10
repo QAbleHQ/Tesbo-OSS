@@ -1,7 +1,6 @@
 import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import { randomBytes, randomUUID } from "crypto";
 import { DatabaseService } from "../database/database.service";
-import { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import { LegacyService } from "../legacy/legacy.service";
 import { buildCustomFieldFiltersSql } from "./custom-field-filters";
 import { applyDefaultIfMissing, isEmptyValue, validateAndNormalizeValue, validateConfigShape } from "./custom-field-validation";
@@ -59,13 +58,11 @@ function mapDefinitionRow(row: Body): CustomFieldDefinitionDto {
 export class CustomFieldsService {
   constructor(
     private readonly db: DatabaseService,
-    private readonly planLimits: PlanLimitsService,
     @Inject(forwardRef(() => LegacyService)) private readonly legacy: LegacyService
   ) {}
 
   private async requireConfigAccess(userId: string | null | undefined, projectId: string) {
     const project = await this.legacy.requireProjectAccess(userId, projectId);
-    await this.planLimits.assertCustomFieldsEnabled(project.organization_id);
     const callerRole = this.legacy.normalizeRole(project.caller_role);
     if (callerRole === "qa_engineer") {
       throw new ForbiddenException({ error: "QA Engineers cannot manage custom fields" });
@@ -387,13 +384,9 @@ export class CustomFieldsService {
   }
 
   /**
-   * Core value-write path. `mode` controls how the Pro-plan gate behaves:
-   * - "enforce" (dedicated PUT .../custom-field-values endpoint): a project-access check
-   *   is performed and a disabled plan throws the paywall 403.
-   * - "skip-if-disabled" (embedded in legacy.service.ts's createTestCase/updateTestCase,
-   *   invoked on every test case save regardless of whether the project uses custom
-   *   fields): a disabled plan silently no-ops instead of throwing, so ordinary test case
-   *   creation/editing on Launch-plan workspaces is never affected by this feature.
+   * Core value-write path. Called both from the dedicated PUT .../custom-field-values endpoint
+   * (with a project-access check) and embedded in legacy.service.ts's createTestCase/updateTestCase
+   * (project access already checked by the caller).
    */
   async setValuesForTestCase(
     actorId: string | null | undefined,
@@ -401,19 +394,10 @@ export class CustomFieldsService {
     testcaseId: string,
     values: Body,
     runner: QueryRunner = this.db,
-    mode: "enforce" | "skip-if-disabled" = "enforce"
+    checkAccess: boolean = true
   ): Promise<void> {
-    if (mode === "enforce") {
+    if (checkAccess) {
       await this.legacy.requireProjectAccess(actorId, projectId);
-    }
-
-    try {
-      const orgRes = await runner.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
-      const organizationId = orgRes.rows[0]?.organization_id;
-      if (organizationId) await this.planLimits.assertCustomFieldsEnabled(organizationId);
-    } catch (err) {
-      if (mode === "skip-if-disabled") return;
-      throw err;
     }
 
     const definitionsRes = await runner.query<Body>("SELECT * FROM custom_field_definitions WHERE project_id = $1", [projectId]);

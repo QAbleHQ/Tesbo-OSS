@@ -324,7 +324,6 @@ All keys are listed empty in `docker.env.example`. Fill only what you use:
 
 | Area | Examples |
 | --- | --- |
-| Billing | `STRIPE_*` |
 | Jira / Linear | `JIRA_*`, `LINEAR_*` |
 | S3 / files | `STORAGE_DRIVER=s3`, `S3_*` |
 | BetterBugs | `NEXT_PUBLIC_BETTERBUGS_*` |

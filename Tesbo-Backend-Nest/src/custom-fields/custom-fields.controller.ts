@@ -86,7 +86,7 @@ export class CustomFieldsController {
     @Param("testcaseId") testcaseId: string,
     @Body() body: { values: Record<string, unknown> }
   ) {
-    await this.customFields.setValuesForTestCase(req.userId, projectId, testcaseId, body?.values || {}, undefined, "enforce");
+    await this.customFields.setValuesForTestCase(req.userId, projectId, testcaseId, body?.values || {}, undefined, true);
     return { success: true };
   }
 }

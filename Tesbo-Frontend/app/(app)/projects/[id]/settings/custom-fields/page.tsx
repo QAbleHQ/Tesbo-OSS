@@ -6,17 +6,14 @@ import { useCallback, useEffect, useState } from "react";
 import { IconChevronRight, IconStack2 } from "@tabler/icons-react";
 import {
   authMe,
-  getBillingInfo,
   listCustomFieldDefinitions,
   listProjectMembers,
-  type BillingInfo,
   type CustomFieldDefinition,
 } from "@/lib/api";
 import { Button, Card } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 import CustomFieldDefinitionList from "@/components/customFields/CustomFieldDefinitionList";
 import CustomFieldDefinitionFormModal from "@/components/customFields/CustomFieldDefinitionFormModal";
-import PricingModal from "@/components/PricingModal";
 
 type ProjectMember = { userId: string; email: string; name: string; role: string; joinedAt: string };
 
@@ -34,13 +31,11 @@ export default function CustomFieldsSettingsPage() {
 
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
-  const [billingInfo, setBillingInfo] = useState<BillingInfo | null>(null);
   const [definitions, setDefinitions] = useState<CustomFieldDefinition[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<CustomFieldDefinition | null>(null);
-  const [pricingOpen, setPricingOpen] = useState(false);
 
   const loadDefinitions = useCallback(async () => {
     try {
@@ -62,7 +57,6 @@ export default function CustomFieldsSettingsPage() {
       }
       setCurrentUserId(me.userId);
       listProjectMembers(projectId).then(setProjectMembers).catch(() => {});
-      getBillingInfo().then(setBillingInfo).catch(() => {});
       loadDefinitions().catch(() => {});
     });
   }, [loadDefinitions, projectId, router]);
@@ -71,7 +65,6 @@ export default function CustomFieldsSettingsPage() {
     ? normalizeRole(projectMembers.find((m) => m.userId === currentUserId)?.role ?? "qa_engineer")
     : "qa_engineer";
   const canManage = currentUserRole === "owner" || currentUserRole === "manager";
-  const isPro = billingInfo?.plan === "pro";
 
   const header = (
     <PageHeader
@@ -102,29 +95,6 @@ export default function CustomFieldsSettingsPage() {
 
   return (
     <StandardPageLayout header={header}>
-      {!isPro && definitions.length === 0 && (
-        <Card className="p-5">
-          <h2 className="text-base font-semibold text-[var(--foreground)]">Custom fields are a Pro plan feature</h2>
-          <p className="mt-1.5 text-sm text-[var(--muted)]">
-            Create project-specific fields — risk level, automation candidate, supported platforms, and more — to capture the metadata your testing process needs.
-          </p>
-          <Button type="button" className="mt-3" onClick={() => setPricingOpen(true)}>
-            Upgrade to Pro
-          </Button>
-        </Card>
-      )}
-
-      {!isPro && definitions.length > 0 && (
-        <Card className="border-[var(--warning-border)] bg-[var(--warning-soft)] p-4">
-          <p className="text-sm text-[var(--warning-foreground)]">
-            This workspace is on the Launch plan. Existing custom fields and their values remain visible, but creating or editing custom fields requires Pro.{" "}
-            <button type="button" onClick={() => setPricingOpen(true)} className="font-medium underline">
-              Upgrade to Pro
-            </button>
-          </p>
-        </Card>
-      )}
-
       <div className="flex items-center justify-between">
         <p className="text-sm text-[var(--muted)]">Fields appear on this project&apos;s test cases in the order shown below.</p>
         <Button
@@ -133,7 +103,6 @@ export default function CustomFieldsSettingsPage() {
             setEditing(null);
             setFormOpen(true);
           }}
-          disabled={!isPro}
         >
           Add custom field
         </Button>
@@ -163,8 +132,6 @@ export default function CustomFieldsSettingsPage() {
           loadDefinitions();
         }}
       />
-
-      <PricingModal open={pricingOpen} onClose={() => setPricingOpen(false)} billingInfo={billingInfo} />
     </StandardPageLayout>
   );
 }

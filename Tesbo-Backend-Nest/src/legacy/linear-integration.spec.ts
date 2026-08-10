@@ -10,7 +10,6 @@ import type { RagIngestionService } from "../rag/rag-ingestion.service";
 import type { RagRetrievalService } from "../rag/rag-retrieval.service";
 import type { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import type { ApiTokenService } from "../auth/api-token.service";
-import type { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import type { CustomFieldsService } from "../custom-fields/custom-fields.service";
 
 // A key just needs to decode to 32 bytes for aes-256-gcm; this is a throwaway test-only key
@@ -85,7 +84,6 @@ function makeLegacy(db: DatabaseService): LegacyService {
     {} as unknown as RagRetrievalService,
     {} as unknown as IntegrationSyncService,
     {} as unknown as ApiTokenService,
-    { assertIntegrationAllowed: jest.fn().mockResolvedValue(undefined) } as unknown as PlanLimitsService,
     {} as unknown as CustomFieldsService
   );
 }
