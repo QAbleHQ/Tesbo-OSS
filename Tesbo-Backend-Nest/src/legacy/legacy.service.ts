@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -157,6 +157,47 @@ function slugify(value: string): string {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(?:^-)|(?:-$)/g, "")
     .slice(0, 64) || "workspace";
+}
+
+/** Slug candidates tried per workspace: the bare slug first, then suffixed retries. */
+const ORG_SLUG_ATTEMPTS = 5;
+
+/**
+ * Inserts a workspace, giving it a globally-unique slug even when the *name* is already taken.
+ *
+ * `organizations.slug` is UNIQUE across the whole install, but workspace names are not — and never
+ * should be. "QA", "Platform" and "Acme" get picked independently by unrelated signups all over the
+ * world. Inserting a bare slugify(name) meant the second such signup died on the unique constraint
+ * and surfaced to the user as a server error on an otherwise-valid workspace name.
+ *
+ * A workspace's identity is its UUID `id` plus its owner row in organization_members — never its
+ * name — so the slug is free to carry a random disambiguator. The bare slug is tried first so the
+ * first claimant keeps a readable handle; collisions fall back to `<name>-<6 hex>`. Nothing routes
+ * or looks up by slug (renaming a workspace already leaves the slug behind), so the suffix is
+ * invisible to the product.
+ *
+ * Each attempt runs inside a SAVEPOINT because both callers insert within a transaction, where a
+ * failed statement would otherwise poison every statement after it.
+ */
+async function insertOrganization(client: PoolClient, name: string, country: string | null): Promise<string> {
+  const base = slugify(name);
+  for (let attempt = 0; attempt < ORG_SLUG_ATTEMPTS; attempt++) {
+    // 57 chars + "-" + 6 hex keeps every candidate inside slug's VARCHAR(64).
+    const slug = attempt === 0 ? base : `${base.slice(0, 57).replace(/-$/, "")}-${randomBytes(3).toString("hex")}`;
+    await client.query("SAVEPOINT org_slug");
+    try {
+      const org = await client.query<{ id: string }>(
+        "INSERT INTO organizations (name, slug, country) VALUES ($1, $2, $3) RETURNING id",
+        [name, slug, country]
+      );
+      await client.query("RELEASE SAVEPOINT org_slug");
+      return org.rows[0].id;
+    } catch (error) {
+      await client.query("ROLLBACK TO SAVEPOINT org_slug");
+      if ((error as { code?: string })?.code !== "23505") throw error;
+    }
+  }
+  throw new ConflictException({ error: "Could not create the workspace right now. Please try again." });
 }
 
 /**
@@ -813,19 +854,16 @@ export class LegacyService implements OnModuleInit {
     const name = String(body.orgName || body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "orgName is required" });
     const res = await this.db.transaction(async (client) => {
-      const org = await client.query<{ id: string }>(
-        "INSERT INTO organizations (name, slug, country) VALUES ($1, $2, $3) RETURNING id",
-        [name, slugify(name), normalizeCountryCode(body.country)]
-      );
+      const organizationId = await insertOrganization(client, name, normalizeCountryCode(body.country));
       await client.query(
         "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'owner') ON CONFLICT DO NOTHING",
-        [org.rows[0].id, uid]
+        [organizationId, uid]
       );
       await client.query("UPDATE users SET active_organization_id = $1, updated_at = now() WHERE id = $2", [
-        org.rows[0].id,
+        organizationId,
         uid
       ]);
-      return org.rows[0].id;
+      return organizationId;
     });
     return { organizationId: res };
   }
@@ -837,25 +875,22 @@ export class LegacyService implements OnModuleInit {
     if (!orgName || !name) throw new BadRequestException({ error: "orgName and projectName are required" });
     const key = projectKey(String(body.projectKey || name));
     return this.db.transaction(async (client) => {
-      const org = await client.query<{ id: string }>(
-        "INSERT INTO organizations (name, slug, country) VALUES ($1, $2, $3) RETURNING id",
-        [orgName, slugify(orgName), normalizeCountryCode(body.country)]
-      );
+      const organizationId = await insertOrganization(client, orgName, normalizeCountryCode(body.country));
       await client.query("INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'owner')", [
-        org.rows[0].id,
+        organizationId,
         uid
       ]);
       const project = await client.query<{ id: string }>(
         `INSERT INTO projects (organization_id, key, name, description)
          VALUES ($1, $2, $3, $4) RETURNING id`,
-        [org.rows[0].id, key, name, body.projectDescription || body.description || ""]
+        [organizationId, key, name, body.projectDescription || body.description || ""]
       );
       await client.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner')", [
         project.rows[0].id,
         uid
       ]);
       await client.query("UPDATE users SET default_project_id = $1, updated_at = now() WHERE id = $2", [project.rows[0].id, uid]);
-      return { organizationId: org.rows[0].id, projectId: project.rows[0].id, projectKey: key };
+      return { organizationId, projectId: project.rows[0].id, projectKey: key };
     });
   }
 
