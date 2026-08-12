@@ -203,8 +203,9 @@ EOS
                 exit 1
               fi
               echo "    ${domain}: ${conf} -> 127.0.0.1:${port}"
-              if grep -qE 'proxy_pass[[:space:]]+http://127\.0\.0\.1:[0-9]+' "$conf"; then
-                sed -i -E "s|(proxy_pass[[:space:]]+http://127\\.0\\.0\\.1:)[0-9]+|\\1${port}|g" "$conf"
+              # Use [.] for dots — Groovy sh blocks reject backslash-dot escapes
+              if grep -qE 'proxy_pass[[:space:]]+http://127[.]0[.]0[.]1:[0-9]+' "$conf"; then
+                sed -i -E "s#(proxy_pass[[:space:]]+http://127[.]0[.]0[.]1:)[0-9]+#\\1${port}#g" "$conf"
               else
                 echo "No proxy_pass http://127.0.0.1:PORT in ${conf}"
                 exit 1
