@@ -130,3 +130,4 @@ This first release focuses on the core workflows needed to start managing QA wor
 7. Configure Jira and AI provider keys if your team wants Jira sync and Zyra testcase generation.
 
 - Stage deploy source branch shifted to dev (2026-08-12T07:57Z)
+- Verify stage deploy from dev branch post-Jenkins config (2026-08-12T08:14Z)
