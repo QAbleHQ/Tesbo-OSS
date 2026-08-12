@@ -4,8 +4,9 @@
 //
 // Blue/green stage deploy (zero-downtime cutover):
 //   - Live color keeps serving while the idle color is built + started
-//   - Health must pass on the NEW color before Nginx switches
-//   - On failure: leave Nginx on the old color (no public downtime)
+//   - Health must pass on the NEW color before host nginx (systemctl) switches
+//   - Path: Cloudflare -> SafeLine(fixed :1080/:1081) -> host nginx -> app ports
+//   - On failure: leave host nginx on the old color (no public downtime)
 //   - Never: docker compose down -v
 //
 // Ports:
@@ -182,45 +183,58 @@ EOS
               exit 1
             fi
 
-            echo "==> Target healthy; switching Nginx ${FRONTEND_DOMAIN}->${TARGET_FE}, ${BACKEND_DOMAIN}->${TARGET_BE}"
-            switch_nginx_port() {
+            echo "==> Target healthy; switching host nginx (systemctl) ${FRONTEND_DOMAIN}->${TARGET_FE}, ${BACKEND_DOMAIN}->${TARGET_BE}"
+            # Path: Cloudflare -> SafeLine (fixed 1080/1081) -> host nginx (systemctl) -> blue/green app ports.
+            # SafeLine upstreams stay on 1080/1081 forever; only host nginx proxy_pass flips colors.
+            switch_host_nginx_port() {
               domain="$1"
               port="$2"
               conf=""
               for candidate in \
                 "/etc/nginx/sites-available/${domain}" \
-                "/etc/nginx/sites-enabled/${domain}" \
-                "/etc/nginx/conf.d/${domain}.conf"; do
+                "/etc/nginx/sites-enabled/${domain}"; do
                 if [ -f "$candidate" ]; then
-                  conf="$candidate"
+                  conf="$(readlink -f "$candidate")"
                   break
                 fi
               done
               if [ -z "$conf" ]; then
-                echo "MISSING nginx site config for ${domain}"
+                echo "MISSING host nginx site config for ${domain}"
                 exit 1
               fi
-              conf="$(readlink -f "$conf")"
               echo "    ${domain}: ${conf} -> 127.0.0.1:${port}"
-              if grep -qE 'proxy_pass[[:space:]]+http://127\\.0\\.0\\.1:[0-9]+' "$conf"; then
+              if grep -qE 'proxy_pass[[:space:]]+http://127\.0\.0\.1:[0-9]+' "$conf"; then
                 sed -i -E "s|(proxy_pass[[:space:]]+http://127\\.0\\.0\\.1:)[0-9]+|\\1${port}|g" "$conf"
-              elif grep -qE 'proxy_pass[[:space:]]+http://localhost:[0-9]+' "$conf"; then
-                sed -i -E "s|(proxy_pass[[:space:]]+http://localhost:)[0-9]+|\\1${port}|g" "$conf"
               else
-                echo "No proxy_pass 127.0.0.1|localhost:PORT in ${conf}"
+                echo "No proxy_pass http://127.0.0.1:PORT in ${conf}"
                 exit 1
               fi
             }
 
-            if ! command -v nginx >/dev/null 2>&1; then
-              echo "ERROR: nginx not installed; cannot cut over without downtime risk"
+            switch_host_nginx_port "${FRONTEND_DOMAIN}" "${TARGET_FE}"
+            switch_host_nginx_port "${BACKEND_DOMAIN}" "${TARGET_BE}"
+
+            nginx -t
+            systemctl reload nginx
+
+            echo "==> Verifying host nginx cutover before stopping old stack"
+            edge_ok=0
+            i=1
+            while [ "$i" -le 12 ]; do
+              fe_code="$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: ${FRONTEND_DOMAIN}" "http://127.0.0.1:1080/" || true)"
+              be_code="$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: ${BACKEND_DOMAIN}" "http://127.0.0.1:1081/health" || true)"
+              echo "    host-nginx check #${i}: fe=${fe_code} be=${be_code}"
+              if [ "$fe_code" = "200" ] && [ "$be_code" = "200" ]; then
+                edge_ok=1
+                break
+              fi
+              sleep 2
+              i=$((i + 1))
+            done
+            if [ "$edge_ok" -ne 1 ]; then
+              echo "ERROR: host nginx still unhealthy after switch - NOT stopping old stack"
               exit 1
             fi
-
-            switch_nginx_port "${FRONTEND_DOMAIN}" "${TARGET_FE}"
-            switch_nginx_port "${BACKEND_DOMAIN}" "${TARGET_BE}"
-            nginx -t
-            nginx -s reload
 
             echo "${TARGET}" > "${ACTIVE_COLOR_FILE}"
             echo "==> ACTIVE_COLOR -> ${TARGET}"
@@ -244,14 +258,19 @@ EOS
       steps {
         sh '''
           set -eu
-          curl -fsS -o /dev/null -w "frontend:%{http_code}\\n" "${APP_HEALTH}/login" || \
-            curl -fsS -o /dev/null -w "frontend:%{http_code}\\n" "${APP_HEALTH}/" || true
-          curl -fsS "${API_HEALTH}/health" || true
-          echo
+          fe="$(curl -sS -o /dev/null -w "%{http_code}" "${APP_HEALTH}/login" || true)"
+          if [ "$fe" != "200" ]; then
+            fe="$(curl -sS -o /dev/null -w "%{http_code}" "${APP_HEALTH}/" || true)"
+          fi
+          be="$(curl -sS -o /dev/null -w "%{http_code}" "${API_HEALTH}/health" || true)"
+          echo "frontend:${fe}"
+          echo "backend:${be}"
           if [ -f "${ACTIVE_COLOR_FILE}" ]; then
             echo "Active color: $(cat "${ACTIVE_COLOR_FILE}")"
           fi
           echo "Site: ${APP_HEALTH}"
+          test "$fe" = "200" || { echo "Smoke failed: frontend HTTP ${fe}"; exit 1; }
+          test "$be" = "200" || { echo "Smoke failed: backend HTTP ${be}"; exit 1; }
         '''
       }
     }
