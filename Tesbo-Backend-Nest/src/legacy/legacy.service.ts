@@ -25,6 +25,9 @@ import { CustomFieldDefinitionDto } from "../custom-fields/custom-fields.types";
 
 type Body = Record<string, any>;
 
+/** The four buckets V67's bugs_severity_check allows, and the four the dashboard reports. */
+const BUG_SEVERITIES = ["Critical", "High", "Medium", "Low"] as const;
+
 export interface InvitationRow {
   id: string;
   organization_id: string;
@@ -211,6 +214,21 @@ function normalizeCountryCode(value: unknown): string | null {
   const code = String(value ?? "").trim().toUpperCase();
   return /^[A-Z]{2}$/.test(code) ? code : null;
 }
+
+/**
+ * Every id in this schema is a uuid column, so a malformed id reaches Postgres as a cast error
+ * (22P02) and surfaces to the caller as a 500. Ids that arrive from a URL or a request body are
+ * checked with this first, so "not-a-uuid" is answered the same way a well-formed id that doesn't
+ * exist is — a clean 404/400, not an internal error.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isUuid(value: unknown): boolean {
+  return UUID_RE.test(String(value ?? ""));
+}
+
+/** projects.key is varchar(32); derived keys use 16 and leave the rest for a uniqueness suffix. */
+const PROJECT_KEY_MAX_LENGTH = 32;
 
 function projectKey(value: string): string {
   return value
@@ -988,14 +1006,78 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  /**
+   * The settings screen's project-access matrix: the projects the caller administers, every
+   * workspace member, and the project role each member actually holds.
+   *
+   * Owner-and-manager only. It is the same roster the membership screens are gated on, and it also
+   * discloses which projects exist to someone who may be a member of none of them.
+   */
+  async workspaceProjectAccess(userId: string | null | undefined) {
+    const uid = this.requireUser(userId);
+    const workspace = await this.workspace(uid);
+    if (this.normalizeRole(workspace.role) === "qa_engineer")
+      throw new ForbiddenException({ error: "Only workspace owners and managers can view project access" });
+
+    const projects = await this.listProjects(uid);
+    const members = await this.workspaceMembers(uid);
+    const projectIds = projects.map((p) => String(p.id));
+
+    // Scoped to the projects the caller can already see, so the matrix never reveals a role on a
+    // project they have no access to themselves.
+    const assignments = projectIds.length
+      ? await this.db.query<{ user_id: string; project_id: string; role: string }>(
+          "SELECT user_id, project_id, role FROM project_members WHERE project_id = ANY($1::uuid[])",
+          [projectIds]
+        )
+      : { rows: [] as { user_id: string; project_id: string; role: string }[] };
+
+    const rolesByUser = new Map<string, Record<string, string>>();
+    for (const row of assignments.rows) {
+      const roles = rolesByUser.get(row.user_id) ?? {};
+      roles[row.project_id] = this.normalizeRole(row.role);
+      rolesByUser.set(row.user_id, roles);
+    }
+
+    // A member with no project access gets an empty map rather than a missing key, so "no access"
+    // is distinguishable from "roles weren't loaded" — which is exactly what the hard-coded `{}`
+    // this replaced made impossible.
+    return {
+      projects,
+      members: members.map((m) => ({ ...m, projectRoles: rolesByUser.get(String(m.userId)) ?? {} }))
+    };
+  }
+
   async addWorkspaceMember(userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const workspace = await this.workspace(uid);
+    // Adding a member outright is strictly more powerful than inviting one, so this endpoint cannot
+    // be looser than createInvitation: QA engineers are refused, a manager can only add QA
+    // engineers, and nobody grants owner. changeWorkspaceMemberRole already refuses promotion to
+    // owner — a gate only one of the two endpoints enforces is decoration.
+    const callerRole = this.normalizeRole(workspace.role);
+    if (callerRole === "qa_engineer")
+      throw new ForbiddenException({ error: "QA Engineers cannot add team members" });
+
     const email = String(body.email || "").trim().toLowerCase();
     const target = String(body.userId || "").trim();
-    const role = String(body.role || "member");
     if (!email && !target) throw new BadRequestException({ error: "email or userId is required" });
+    if (target && !isUuid(target)) throw new BadRequestException({ error: "userId is not a valid user id" });
+
+    const roleRaw = body.role === undefined || body.role === null || body.role === "" ? "qa_engineer" : body.role;
+    const role = this.parseRole(roleRaw);
+    if (!role) throw new BadRequestException({ error: `"${String(roleRaw)}" is not a role in this workspace` });
+    if (role === "owner") throw new ForbiddenException({ error: "The owner role cannot be granted" });
+    if (callerRole === "manager" && role !== "qa_engineer")
+      throw new ForbiddenException({ error: "Managers can only add QA Engineers" });
+
     const targetUserId = target || (await this.upsertUser(email));
+    if (target) {
+      // Adding by id skips upsertUser, so an id for an account that doesn't exist would only fail
+      // at the foreign key — a 500 where the caller should be told the user isn't there.
+      const exists = await this.db.query("SELECT 1 FROM users WHERE id = $1", [target]);
+      if (!exists.rows[0]) throw new NotFoundException({ error: "User not found" });
+    }
     await this.db.query(
       "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
       [workspace.id, targetUserId, role]
@@ -1007,6 +1089,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
     const workspace = await this.workspace(uid);
     if (uid === targetUserId) throw new BadRequestException({ error: "You cannot remove yourself" });
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
     // Protect the last owner
     const targetMember = await this.db.query<{ role: string; email: string }>(
       `SELECT om.role, u.email FROM organization_members om JOIN users u ON u.id = om.user_id
@@ -1057,6 +1140,23 @@ export class LegacyService implements OnModuleInit {
     if (n === "owner") return "owner";
     if (n === "manager" || n === "admin" || n === "test_manager") return "manager";
     return "qa_engineer";
+  }
+
+  /**
+   * The canonical role for a string supplied by a *caller*, or null when it isn't a role we have.
+   *
+   * normalizeRole() collapses anything unrecognised to qa_engineer. That is the right reading for a
+   * role already stored in the database, but the wrong one for input: a typo'd role in a promotion
+   * request would silently DEMOTE the member instead of failing, and an unknown role written
+   * verbatim to organization_members reads back as qa_engineer on every later check. Anything that
+   * takes a role from a request body parses it here and refuses null.
+   */
+  parseRole(role: unknown): "owner" | "manager" | "qa_engineer" | null {
+    const n = String(role ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+    if (n === "owner") return "owner";
+    if (n === "manager" || n === "admin" || n === "test_manager") return "manager";
+    if (n === "qa_engineer" || n === "qa" || n === "tester" || n === "member") return "qa_engineer";
+    return null;
   }
 
   // ─── Invitations ─────────────────────────────────────────────────────────────
@@ -1398,6 +1498,7 @@ export class LegacyService implements OnModuleInit {
     const callerRole = this.normalizeRole(workspace.role);
     if (callerRole !== "owner") throw new ForbiddenException({ error: "Only the owner can change roles" });
     if (uid === targetUserId) throw new BadRequestException({ error: "You cannot change your own role" });
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
 
     const target = await this.db.query<{ role: string; email: string }>(
       `SELECT om.role, u.email FROM organization_members om JOIN users u ON u.id = om.user_id
@@ -1408,7 +1509,10 @@ export class LegacyService implements OnModuleInit {
     const targetRole = this.normalizeRole(target.rows[0].role);
     if (targetRole === "owner") throw new ForbiddenException({ error: "Owner role cannot be changed" });
 
-    const normalized = this.normalizeRole(newRole);
+    // Parsed, not normalized: normalizeRole turns an unrecognised role into qa_engineer, so a typo
+    // in a promotion request used to demote the member it was meant to promote.
+    const normalized = this.parseRole(newRole);
+    if (!normalized) throw new BadRequestException({ error: `"${String(newRole)}" is not a role in this workspace` });
     if (normalized === "owner") throw new ForbiddenException({ error: "Cannot promote to owner" });
 
     await this.db.query(
@@ -1673,23 +1777,71 @@ export class LegacyService implements OnModuleInit {
     const name = String(body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "name is required" });
     const workspace = await this.workspace(uid);
+    // Creating a project is an administrative act, not part of authoring or executing tests. The
+    // projects list hides the button from a QA Engineer, but that is presentation — the rule has to
+    // hold for anyone posting to this route directly.
+    if (this.normalizeRole(workspace.role) === "qa_engineer")
+      throw new ForbiddenException({ error: "Only the workspace owner, admin, or manager can create projects" });
     await this.planLimits.assertCanCreateProject(workspace.id);
-    const key = projectKey(String(body.key || name));
-    const res = await this.db.transaction(async (client) => {
-      const project = await client.query(
-        `INSERT INTO projects (organization_id, key, name, description, project_type)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id, key, name, project_type, created_at`,
-        [workspace.id, key, name, body.description || "", body.projectType || "tesbox"]
-      );
-      await client.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner')", [
-        project.rows[0].id,
-        uid
-      ]);
-      await this.seedKnowledgeBaseDefaults(client, workspace.id, project.rows[0].id);
-      return project.rows[0];
-    });
+    const res = await this.insertProjectWithUniqueKey(workspace.id, uid, name, body);
     await this.logProjectActivity(res.id, uid, "project_created", "project", res.id, res.name, {});
     return toCamel(res);
+  }
+
+  /**
+   * Inserts a project under a key that is unique within the workspace.
+   *
+   * projectKey() strips a name down to at most 16 alphanumerics, and (organization_id, key) is
+   * UNIQUE — so any two names agreeing on that prefix derive the same key. "Mobile App Regression
+   * Payments" and "Mobile App Regression Search" are enough, and the second create used to surface
+   * the constraint violation as an unhandled 500. The next free numeric suffix is used instead,
+   * which keeps the key readable and inside the column's 32 characters.
+   *
+   * Archived projects keep their keys, so they count as taken here exactly as the unique index sees
+   * them. The retry exists because two concurrent creates can both read the same free key: rather
+   * than fail the second caller, re-derive and try again.
+   */
+  private async insertProjectWithUniqueKey(organizationId: string, uid: string, name: string, body: Body) {
+    for (let attempt = 1; ; attempt++) {
+      const key = await this.nextFreeProjectKey(organizationId, String(body.key || name));
+      try {
+        return await this.db.transaction(async (client) => {
+          const project = await client.query(
+            `INSERT INTO projects (organization_id, key, name, description, project_type)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id, key, name, project_type, created_at`,
+            [organizationId, key, name, body.description || "", body.projectType || "tesbox"]
+          );
+          await client.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner')", [
+            project.rows[0].id,
+            uid
+          ]);
+          await this.seedKnowledgeBaseDefaults(client, organizationId, project.rows[0].id);
+          return project.rows[0];
+        });
+      } catch (error) {
+        const isKeyCollision =
+          (error as { code?: string })?.code === "23505" &&
+          String((error as { constraint?: string })?.constraint || "").includes("key");
+        if (!isKeyCollision || attempt >= 3) throw error;
+      }
+    }
+  }
+
+  private async nextFreeProjectKey(organizationId: string, requested: string): Promise<string> {
+    const base = projectKey(requested);
+    const res = await this.db.query<{ key: string }>("SELECT key FROM projects WHERE organization_id = $1", [
+      organizationId
+    ]);
+    const taken = new Set(res.rows.map((row) => row.key));
+    if (!taken.has(base)) return base;
+    for (let n = 2; n <= 999; n++) {
+      const suffix = String(n);
+      const candidate = `${base.slice(0, PROJECT_KEY_MAX_LENGTH - suffix.length)}${suffix}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    // A thousand projects sharing one 16-character prefix is not a case worth refusing a create
+    // over — fall back to a random tail rather than raising.
+    return `${base.slice(0, PROJECT_KEY_MAX_LENGTH - 6)}${randomBytes(3).toString("hex").toUpperCase()}`;
   }
 
   private async seedKnowledgeBaseDefaults(client: PoolClient, organizationId: string, projectId: string) {
@@ -1714,6 +1866,10 @@ export class LegacyService implements OnModuleInit {
   // an action (e.g. addProjectMember) can reuse this instead of a second query.
   async requireProjectAccess(userId: string | null | undefined, projectId: string) {
     const uid = this.requireUser(userId);
+    // A malformed id gets the same answer as a well-formed one that doesn't exist: it isn't a
+    // project this caller can reach, and saying so costs nothing. Without this the uuid cast fails
+    // in Postgres and every project-scoped endpoint answers a typo with a 500.
+    if (!isUuid(projectId)) throw new NotFoundException({ error: "Project not found" });
     const workspace = await this.workspace(uid);
     const res = await this.db.query(
       `SELECT p.*, pm.role AS caller_role FROM projects p
@@ -1741,8 +1897,13 @@ export class LegacyService implements OnModuleInit {
     );
   }
 
+  // Membership alone is not enough to reconfigure a project. Every neighbouring administrative
+  // action — project members, knowledge-base writes, renaming the workspace — is owner-or-manager,
+  // and renaming a project is not part of authoring or executing tests.
   async updateProjectForUser(userId: string | null | undefined, id: string, body: Body) {
-    await this.requireProjectAccess(userId, id);
+    const project = await this.requireProjectAccess(userId, id);
+    if (this.normalizeRole(project.caller_role) === "qa_engineer")
+      throw new ForbiddenException({ error: "QA Engineers cannot change project settings" });
     await this.updateProject(id, body);
   }
 
@@ -1753,6 +1914,9 @@ export class LegacyService implements OnModuleInit {
   async deleteProjectForUser(userId: string | null | undefined, id: string) {
     const uid = this.requireUser(userId);
     const project = await this.requireProjectAccess(uid, id);
+    // The more damaging half of the same gate: archiving takes every child record with it.
+    if (this.normalizeRole(project.caller_role) === "qa_engineer")
+      throw new ForbiddenException({ error: "QA Engineers cannot archive a project" });
     await this.deleteProject(id);
     await this.logProjectActivity(id, uid, "project_archived", "project", id, project.name, {});
   }
@@ -1777,18 +1941,25 @@ export class LegacyService implements OnModuleInit {
 
     const targetUserId = String(body.userId || "");
     if (!targetUserId) throw new BadRequestException({ error: "userId is required" });
-    const requestedRole = this.normalizeRole(String(body.role || "qa_engineer"));
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
+    const requestedRole = this.parseRole(body.role === undefined || body.role === null || body.role === "" ? "qa_engineer" : body.role);
+    if (!requestedRole) throw new BadRequestException({ error: `"${String(body.role)}" is not a project role` });
     if (requestedRole === "owner") throw new ForbiddenException({ error: "Cannot assign the owner role" });
     if (callerRole === "manager" && requestedRole !== "qa_engineer")
       throw new ForbiddenException({ error: "Managers can only assign the QA Engineer role" });
 
+    // Scoped to the project's workspace on purpose. Resolving the target from `users` alone let any
+    // account in the system be dropped into a project by id, which made workspace membership — and
+    // with it the whole invitation flow — optional.
     const target = await this.db.query<{ email: string; role: string | null }>(
       `SELECT u.email, pm.role
-       FROM users u LEFT JOIN project_members pm ON pm.project_id = $1 AND pm.user_id = u.id
+       FROM users u
+       JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $3
+       LEFT JOIN project_members pm ON pm.project_id = $1 AND pm.user_id = u.id
        WHERE u.id = $2`,
-      [projectId, targetUserId]
+      [projectId, targetUserId, project.organization_id]
     );
-    if (!target.rows[0]) throw new NotFoundException({ error: "User not found" });
+    if (!target.rows[0]) throw new NotFoundException({ error: "That user is not a member of this workspace" });
     const existingRole = target.rows[0].role ? this.normalizeRole(target.rows[0].role) : null;
     if (existingRole === "owner") throw new ForbiddenException({ error: "The project owner's role cannot be changed" });
     if (existingRole && targetUserId === uid) throw new BadRequestException({ error: "You cannot change your own role" });
@@ -1816,6 +1987,7 @@ export class LegacyService implements OnModuleInit {
     const callerRole = this.normalizeRole(project.caller_role);
     if (callerRole === "qa_engineer") throw new ForbiddenException({ error: "QA Engineers cannot manage project members" });
     if (targetUserId === uid) throw new BadRequestException({ error: "You cannot remove yourself from the project" });
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
 
     const target = await this.db.query<{ email: string; role: string }>(
       `SELECT u.email, pm.role FROM project_members pm JOIN users u ON u.id = pm.user_id
@@ -2340,7 +2512,10 @@ export class LegacyService implements OnModuleInit {
               COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
               COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
               COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
+              -- settled result for this run. Leaving it out of every bucket made these counters sum
+              -- to less than total_cases.
+              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
        LEFT JOIN executions e ON e.cycle_item_id = ci.id
@@ -2368,7 +2543,10 @@ export class LegacyService implements OnModuleInit {
               COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
               COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
               COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
+              -- settled result for this run. Leaving it out of every bucket made these counters sum
+              -- to less than total_cases.
+              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
        LEFT JOIN executions e ON e.cycle_item_id = ci.id
@@ -2412,7 +2590,10 @@ export class LegacyService implements OnModuleInit {
               COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
               COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
               COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
+              -- settled result for this run. Leaving it out of every bucket made these counters sum
+              -- to less than total_cases.
+              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
        LEFT JOIN executions e ON e.cycle_item_id = ci.id
@@ -2535,6 +2716,30 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  /**
+   * The rows behind GET /api/cycles/:cycleId/export/csv, resolved through the run's project.
+   *
+   * The export used to take no caller at all: a whole run — case titles, external ids, actual
+   * results and the linked defect keys and URLs — came back to anyone holding a cycle id, with no
+   * session and from any workspace. It also answered a malformed id with a 500 (the uuid cast) and a
+   * well-formed unknown one with a header-only CSV, so a mistyped id downloaded an empty "report"
+   * instead of saying the run wasn't there.
+   *
+   * Note the rest of /api/cycles/* still has the original gap — executions(), getCycle(),
+   * updateCycle(), deleteCycle() and the cycle_items routes take no @Req() either, so these same
+   * rows remain readable through GET /api/cycles/:cycleId/executions. Closing that is a change
+   * across all of those handlers, not this one.
+   */
+  async exportCycleExecutions(userId: string | null | undefined, cycleId: string) {
+    const uid = this.requireUser(userId);
+    // Same answer for a malformed id as for one that doesn't exist — see requireProjectAccess.
+    if (!isUuid(cycleId)) throw new NotFoundException({ error: "Cycle not found" });
+    const cycle = await this.db.query<{ project_id: string }>("SELECT project_id FROM cycles WHERE id = $1", [cycleId]);
+    if (!cycle.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
+    await this.requireProjectAccess(uid, cycle.rows[0].project_id);
+    return this.executions(cycleId);
+  }
+
   async updateExecution(executionId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
     const before = await this.db.query(
@@ -2631,11 +2836,31 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
+  /**
+   * The severity a caller asked for, refused as caller error when it isn't one we have.
+   *
+   * V67's bugs_severity_check already stops an unknown value reaching the column, but a raw
+   * constraint violation surfaces as a 500 naming nothing. These are exactly the four buckets the
+   * project dashboard's bySeverity reports, so a fifth would also be counted by the bugs list and
+   * dropped by the dashboard.
+   */
+  private parseBugSeverity(severity: unknown): "Critical" | "High" | "Medium" | "Low" {
+    if (severity === undefined || severity === null || severity === "") return "Medium";
+    const match = BUG_SEVERITIES.find((s) => s.toLowerCase() === String(severity).trim().toLowerCase());
+    if (!match)
+      throw new BadRequestException({
+        error: `severity must be one of ${BUG_SEVERITIES.join(", ")}`,
+        field: "severity"
+      });
+    return match;
+  }
+
   async createBug(projectId: string, userId: string | null | undefined, body: Body) {
     // A link is required whenever the project actually has test cases/runs to link to — enforced
     // client-side (the UI only lets the field be empty when there's nothing to pick). An empty
     // array is accepted here so reporting a bug is never blocked in a project with no test runs yet.
     const links = normalizeJsonArray(body.links);
+    const severity = this.parseBugSeverity(body.severity);
 
     const bugId = await this.db.transaction(async (client) => {
       const res = await client.query(
@@ -2650,7 +2875,7 @@ export class LegacyService implements OnModuleInit {
           body.description || "",
           body.externalUrl || null,
           body.status || "Open",
-          body.severity || "Medium",
+          severity,
           userId || null,
           body.integrationProvider || null,
           body.integrationIssueKey || null,
@@ -2672,6 +2897,9 @@ export class LegacyService implements OnModuleInit {
   }
 
   async updateBug(bugId: string, body: Body) {
+    // Same refusal as createBug — an unknown severity on edit hit the same constraint and the same
+    // opaque 500. Absent/empty leaves the stored value alone via COALESCE, so it isn't parsed.
+    if (body.severity) this.parseBugSeverity(body.severity);
     await this.db.query(
       `UPDATE bugs SET title=COALESCE($2,title), description=COALESCE($3,description), external_url=COALESCE($4,external_url),
        status=COALESCE($5,status), severity=COALESCE($6,severity), integration_provider=COALESCE($7,integration_provider), integration_issue_key=COALESCE($8,integration_issue_key),
@@ -2713,6 +2941,27 @@ export class LegacyService implements OnModuleInit {
     await this.db.query("DELETE FROM bugs WHERE id = $1", [bugId]);
   }
 
+  // The client controls the uploaded filename completely, and it is only ever a display label —
+  // the storage key is built from ids plus a fresh uuid, taking nothing but the extension. So the
+  // name is normalised rather than trusted: directory components are stripped (a screenshot named
+  // `../../etc/passwd` is just `passwd`), control characters are dropped so they can't be smuggled
+  // into a Content-Disposition header, and the result is cut to fit file_name's varchar(255).
+  // Without that last step a long-but-legitimate name (240 chars is well inside the filesystem's
+  // own ceiling) makes Postgres reject the insert and the whole upload answers with a 500.
+  private static displayFileName(originalName: string, max = 255): string {
+    const base = path
+      .basename(String(originalName ?? "").replace(/\\/g, "/"))
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim();
+    if (!base || base === "." || base === "..") return "upload";
+    if (base.length <= max) return base;
+    // Keep the extension attached to the truncated stem — it is what tells the browser and the
+    // person downloading it what the file actually is.
+    const ext = path.extname(base);
+    return ext.length > 0 && ext.length < max ? `${base.slice(0, max - ext.length)}${ext}` : base.slice(0, max);
+  }
+
   // Bug evidence uploads — reuses the generic `attachments` table (entity_type='bug') rather
   // than a dedicated table, since it already models exactly this (project-scoped file metadata
   // pointing at a storage key), and nothing else in the app used it yet.
@@ -2722,14 +2971,17 @@ export class LegacyService implements OnModuleInit {
     bugId: string,
     files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
   ) {
+    // Uploading writes a file into the workspace's storage and bills it to that workspace's plan
+    // allowance, so it needs a caller who is a member of this project — existence of the bug row
+    // is not authorization.
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
-    const bug = await this.db.query(
-      "SELECT b.id, p.organization_id FROM bugs b JOIN projects p ON p.id = b.project_id WHERE b.id = $1 AND b.project_id = $2",
-      [bugId, projectId]
-    );
+    if (!isUuid(bugId)) throw new NotFoundException({ error: "Bug not found" });
+    const bug = await this.db.query("SELECT b.id FROM bugs b WHERE b.id = $1 AND b.project_id = $2", [bugId, projectId]);
     if (!bug.rows[0]) throw new NotFoundException({ error: "Bug not found" });
     await this.planLimits.assertStorageAvailable(
-      bug.rows[0].organization_id,
+      project.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
     );
 
@@ -2741,21 +2993,32 @@ export class LegacyService implements OnModuleInit {
       const res = await this.db.query(
         `INSERT INTO attachments (project_id, entity_type, entity_id, file_name, content_type, file_size, storage_path, uploaded_by)
          VALUES ($1, 'bug', $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [projectId, bugId, file.originalname, file.mimetype, file.size, storageKey, userId || null]
+        [projectId, bugId, LegacyService.displayFileName(file.originalname), file.mimetype, file.size, storageKey, uid]
       );
       created.push(toCamel(res.rows[0]));
     }
     return { list: created, total: created.length };
   }
 
-  private async bugAttachment(attachmentId: string): Promise<Body> {
-    const res = await this.db.query("SELECT * FROM attachments WHERE id = $1 AND entity_type = 'bug'", [attachmentId]);
+  // `scopeProjectId` keeps a lookup by attachment id from crossing into another project's
+  // evidence: the caller has already been authorized for that project, so the row has to
+  // belong to it too or it simply isn't found.
+  private async bugAttachment(attachmentId: string, scopeProjectId?: string): Promise<Body> {
+    if (!isUuid(attachmentId)) throw new NotFoundException({ error: "Attachment not found" });
+    const res = await this.db.query(
+      `SELECT * FROM attachments WHERE id = $1 AND entity_type = 'bug'
+       AND ($2::uuid IS NULL OR project_id = $2::uuid)`,
+      [attachmentId, scopeProjectId ?? null]
+    );
     if (!res.rows[0]) throw new NotFoundException({ error: "Attachment not found" });
     return res.rows[0];
   }
 
-  async getBugAttachmentAccess(attachmentId: string, inline: boolean) {
-    const file = await this.bugAttachment(attachmentId);
+  async getBugAttachmentAccess(projectId: string, userId: string | null | undefined, attachmentId: string, inline: boolean) {
+    // Bug evidence is confidential: an attachment id turning up in a link, a log line or an
+    // exported report must not be enough to hand the file to whoever holds it.
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const file = await this.bugAttachment(attachmentId, projectId);
     if (!file.storage_path || !(await this.storage.exists(file.storage_path))) {
       throw new NotFoundException({ error: "File content is not available" });
     }
@@ -2764,8 +3027,13 @@ export class LegacyService implements OnModuleInit {
     return { ...access, mimeType, originalFileName: file.file_name };
   }
 
-  async deleteBugAttachment(attachmentId: string) {
+  async deleteBugAttachment(attachmentId: string, userId?: string | null) {
+    // This route carries no project id, so the attachment's own project is what the caller is
+    // authorized against. It destroys the stored object as well as the row — an unauthorized
+    // caller here doesn't just read someone's evidence, they lose it for them.
+    const uid = this.requireUser(userId);
     const file = await this.bugAttachment(attachmentId);
+    await this.requireProjectAccess(uid, String(file.project_id));
     await this.storage.delete(file.storage_path);
     await this.db.query("DELETE FROM attachments WHERE id = $1", [attachmentId]);
     return { ok: true };
@@ -2775,6 +3043,24 @@ export class LegacyService implements OnModuleInit {
   // (entity_type='execution'), mirroring uploadBugAttachments. The execution routes are
   // nested under /api/cycles/:cycleId/executions/:executionId (no projectId in the path),
   // so the project is resolved via the cycle/cycle_item join instead of being passed in.
+  // Resolves the project (and org) that owns an execution, which is what both execution
+  // attachment routes authorize against — neither carries a projectId in its path. A malformed
+  // id is answered the same way as a well-formed one that doesn't exist, rather than being handed
+  // to Postgres to fail the uuid cast and turn a typo into a 500.
+  private async executionOwner(cycleId: string, executionId: string): Promise<Body> {
+    if (!isUuid(cycleId) || !isUuid(executionId)) throw new NotFoundException({ error: "Execution not found" });
+    const res = await this.db.query(
+      `SELECT e.id, c.project_id, p.organization_id FROM executions e
+       JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       JOIN cycles c ON c.id = ci.cycle_id
+       JOIN projects p ON p.id = c.project_id
+       WHERE e.id = $1 AND c.id = $2 AND e.deleted_at IS NULL`,
+      [executionId, cycleId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    return res.rows[0];
+  }
+
   async uploadExecutionAttachments(
     cycleId: string,
     actorId: string | null | undefined,
@@ -2783,18 +3069,13 @@ export class LegacyService implements OnModuleInit {
   ) {
     const uid = this.requireUser(actorId);
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
-    const execution = await this.db.query(
-      `SELECT e.id, c.project_id, p.organization_id FROM executions e
-       JOIN cycle_items ci ON ci.id = e.cycle_item_id
-       JOIN cycles c ON c.id = ci.cycle_id
-       JOIN projects p ON p.id = c.project_id
-       WHERE e.id = $1 AND c.id = $2 AND e.deleted_at IS NULL`,
-      [executionId, cycleId]
-    );
-    if (!execution.rows[0]) throw new NotFoundException({ error: "Execution not found" });
-    const projectId = execution.rows[0].project_id;
+    const execution = await this.executionOwner(cycleId, executionId);
+    const projectId = String(execution.project_id);
+    // Being signed in to the workspace isn't enough: attaching evidence to a run means writing
+    // into that project, so the caller has to be a member of it.
+    await this.requireProjectAccess(uid, projectId);
     await this.planLimits.assertStorageAvailable(
-      execution.rows[0].organization_id,
+      execution.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
     );
 
@@ -2806,7 +3087,7 @@ export class LegacyService implements OnModuleInit {
       const res = await this.db.query(
         `INSERT INTO attachments (project_id, entity_type, entity_id, file_name, content_type, file_size, storage_path, uploaded_by)
          VALUES ($1, 'execution', $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [projectId, executionId, file.originalname, file.mimetype, file.size, storageKey, uid]
+        [projectId, executionId, LegacyService.displayFileName(file.originalname), file.mimetype, file.size, storageKey, uid]
       );
       created.push(toCamel(res.rows[0]));
     }
@@ -2816,12 +3097,66 @@ export class LegacyService implements OnModuleInit {
     return { list: created, total: created.length };
   }
 
-  async listExecutionAttachments(executionId: string) {
+  async listExecutionAttachments(cycleId: string, userId: string | null | undefined, executionId: string) {
+    const uid = this.requireUser(userId);
+    const execution = await this.executionOwner(cycleId, executionId);
+    await this.requireProjectAccess(uid, String(execution.project_id));
+    // Columns are listed rather than SELECT *: storage_path is an internal storage key that no
+    // client needs and that shouldn't travel out of the backend.
     const res = await this.db.query(
-      "SELECT * FROM attachments WHERE entity_type = 'execution' AND entity_id = $1 ORDER BY created_at",
+      `SELECT id, project_id, entity_type, entity_id, file_name, content_type, file_size, uploaded_by, created_at
+       FROM attachments WHERE entity_type = 'execution' AND entity_id = $1 ORDER BY created_at`,
       [executionId]
     );
     return { list: res.rows.map(toCamel), total: res.rowCount };
+  }
+
+  /*
+   * The reporting endpoints, gated.
+   *
+   * Every aggregate below reads real project content — test case titles, bug titles and their
+   * external URLs, assignee names, suite names, per-run results — and until these wrappers existed
+   * their controller methods took no @Req() at all, so there was nothing to authorize against: any
+   * caller who knew (or guessed) a project id could read another workspace's entire reporting
+   * surface, with no session of any kind. requireProjectAccess() also rejects a malformed id, which
+   * is what stops `/api/projects/not-a-uuid/analytics` answering a typo with a 500 from the failed
+   * uuid cast.
+   *
+   * Reads only — the plan-limit write lock deliberately leaves reports readable on a locked project.
+   */
+  async projectAnalyticsForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.analytics(projectId);
+  }
+
+  async executionReportForUser(userId: string | null | undefined, projectId: string, query: Body) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.executionReport(projectId, query);
+  }
+
+  async requirementMatrixForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.requirementMatrix(projectId);
+  }
+
+  async repositorySummaryForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.repositorySummary(projectId);
+  }
+
+  async reportsOverviewForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.reportsOverview(projectId);
+  }
+
+  async reportsInsightsForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.reportsInsights(projectId);
+  }
+
+  async reportsTrendsForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.reportsTrends(projectId);
   }
 
   async executionReport(projectId: string, query: Body) {
@@ -3282,9 +3617,9 @@ export class LegacyService implements OnModuleInit {
       this.db.query<{ passed_recent: string; executed_recent: string; passed_prior: string; executed_prior: string }>(
         `SELECT
            COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '7 days')::int AS passed_recent,
-           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '7 days')::int AS executed_recent,
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status NOT IN ('Untested', 'Retest') AND e.executed_at >= now() - interval '7 days')::int AS executed_recent,
            COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS passed_prior,
-           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS executed_prior
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status NOT IN ('Untested', 'Retest') AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS executed_prior
          FROM executions e
          JOIN cycle_items ci ON ci.id = e.cycle_item_id
          JOIN cycles c ON c.id = ci.cycle_id
@@ -3299,8 +3634,11 @@ export class LegacyService implements OnModuleInit {
     }
     const openBugsTotal = Object.values(bySeverity).reduce((a, b) => a + b, 0);
 
-    const untested = counts.executionStatus.Untested || 0;
-    const executed = counts.executionTotal - untested;
+    // Retest leaves the denominator alongside Untested. A case sent back for retest has no settled
+    // result, so counting it as executed-but-not-passed silently dragged the headline pass rate down
+    // while changing nothing visible on the run itself.
+    const unsettled = (counts.executionStatus.Untested || 0) + (counts.executionStatus.Retest || 0);
+    const executed = counts.executionTotal - unsettled;
     const passRateValue = executed > 0 ? Math.round(((counts.executionStatus.Passed || 0) / executed) * 100) : null;
 
     const w = passRateWindows.rows[0];

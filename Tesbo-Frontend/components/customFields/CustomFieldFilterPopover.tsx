@@ -126,7 +126,7 @@ export default function CustomFieldFilterPopover({
                       {def?.name || "Unknown field"} {condition.operator.replace(/_/g, " ")}
                       {condition.value != null ? ` "${condition.value}"` : ""}
                     </span>
-                    <button type="button" onClick={() => removeCondition(index)} className="shrink-0 text-[var(--error)] hover:underline">
+                    <button type="button" onClick={() => removeCondition(index)} className="shrink-0 text-[var(--error-foreground)] hover:underline">
                       Remove
                     </button>
                   </div>

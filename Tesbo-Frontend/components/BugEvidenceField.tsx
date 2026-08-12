@@ -70,7 +70,7 @@ export default function BugEvidenceField({
                   className="flex items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-[13px]"
                 >
                   {downloadUrl ? (
-                    <a href={downloadUrl(att.id)} target="_blank" rel="noreferrer" className="text-[var(--brand-primary)] hover:underline truncate">
+                    <a href={downloadUrl(att.id)} target="_blank" rel="noreferrer" className="text-[var(--accent-light)] hover:underline truncate">
                       {att.fileName}
                     </a>
                   ) : (
@@ -79,7 +79,7 @@ export default function BugEvidenceField({
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-[var(--muted)]">{formatFileSize(att.fileSize)}</span>
                     {onRemoveExisting && (
-                      <button type="button" onClick={() => onRemoveExisting(att.id)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                      <button type="button" onClick={() => onRemoveExisting(att.id)} className="text-[var(--muted)] hover:text-[var(--error-foreground)]">
                         ✕
                       </button>
                     )}
@@ -98,7 +98,7 @@ export default function BugEvidenceField({
                   <span className="truncate">{file.name}</span>
                   <span className="flex items-center gap-2 shrink-0">
                     <span className="text-[var(--muted)]">{formatFileSize(file.size)}</span>
-                    <button type="button" onClick={() => removeStagedFile(index)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                    <button type="button" onClick={() => removeStagedFile(index)} className="text-[var(--muted)] hover:text-[var(--error-foreground)]">
                       ✕
                     </button>
                   </span>

@@ -62,14 +62,14 @@ export default function TagInput({
           {selectedTags.map((tag) => (
             <span
               key={tag}
-              className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2 py-1 text-xs text-[var(--brand-primary)]"
+              className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] px-2 py-1 text-xs text-[var(--accent-light)]"
             >
               {tag}
               <button
                 type="button"
                 onClick={() => removeTag(tag)}
                 aria-label={`Remove ${tag}`}
-                className="text-[var(--brand-primary)] hover:opacity-80"
+                className="text-[var(--accent-light)] hover:opacity-80"
               >
                 x
               </button>

@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, ForbiddenException, forwardRef,
 import { randomBytes, randomUUID } from "crypto";
 import { DatabaseService } from "../database/database.service";
 import { PlanLimitsService } from "../plan-limits/plan-limits.service";
-import { LegacyService } from "../legacy/legacy.service";
+import { isUuid, LegacyService } from "../legacy/legacy.service";
 import { buildCustomFieldFiltersSql } from "./custom-field-filters";
 import { applyDefaultIfMissing, isEmptyValue, validateAndNormalizeValue, validateConfigShape } from "./custom-field-validation";
 import {
@@ -18,6 +18,27 @@ import {
 type Body = Record<string, any>;
 
 const FIELD_TYPES: FieldType[] = ["text", "long_text", "boolean", "single_select", "multi_select", "number", "date"];
+
+/** custom_field_definitions.name is VARCHAR(160) — a longer one has to be refused, not attempted. */
+const NAME_MAX_LENGTH = 160;
+
+/**
+ * Answers "no such field" for an id Postgres could not even cast.
+ *
+ * Every lookup below compares `id = $1` against a uuid column, so a malformed id raises 22P02 and
+ * surfaces as a 500. A typo in a URL is not an internal error — it is a field this caller cannot
+ * reach, which is exactly what a well-formed id that doesn't exist gets.
+ */
+function requireDefinitionId(definitionId: string): void {
+  if (!isUuid(definitionId)) throw new NotFoundException({ error: "Custom field not found" });
+}
+
+function requireFieldName(name: string): void {
+  if (!name) throw new BadRequestException({ error: "name is required" });
+  if (name.length > NAME_MAX_LENGTH) {
+    throw new BadRequestException({ error: `name must be ${NAME_MAX_LENGTH} characters or fewer` });
+  }
+}
 
 const DEFINITION_SELECT = `
   SELECT d.*, EXISTS (SELECT 1 FROM custom_field_values v WHERE v.definition_id = d.id) AS is_used
@@ -87,6 +108,7 @@ export class CustomFieldsService {
 
   async getDefinition(userId: string | null | undefined, projectId: string, definitionId: string): Promise<CustomFieldDefinitionDto> {
     await this.legacy.requireProjectAccess(userId, projectId);
+    requireDefinitionId(definitionId);
     const res = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Custom field not found" });
     return mapDefinitionRow(res.rows[0]);
@@ -96,7 +118,7 @@ export class CustomFieldsService {
     await this.requireConfigAccess(userId, projectId);
 
     const name = String(body.name || "").trim();
-    if (!name) throw new BadRequestException({ error: "name is required" });
+    requireFieldName(name);
     const fieldType = body.fieldType as FieldType;
     if (!FIELD_TYPES.includes(fieldType)) throw new BadRequestException({ error: "Invalid fieldType" });
     const config = validateConfigShape(fieldType, body.config);
@@ -135,6 +157,7 @@ export class CustomFieldsService {
 
   async updateDefinition(userId: string | null | undefined, projectId: string, definitionId: string, body: Body): Promise<CustomFieldDefinitionDto> {
     await this.requireConfigAccess(userId, projectId);
+    requireDefinitionId(definitionId);
 
     const existingRes = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
     if (!existingRes.rows[0]) throw new NotFoundException({ error: "Custom field not found" });
@@ -147,7 +170,7 @@ export class CustomFieldsService {
     let name = existing.name;
     if (body.name !== undefined) {
       name = String(body.name || "").trim();
-      if (!name) throw new BadRequestException({ error: "name is required" });
+      requireFieldName(name);
       if (name.toLowerCase() !== existing.name.toLowerCase()) {
         const clash = await this.db.query(
           "SELECT 1 FROM custom_field_definitions WHERE project_id = $1 AND lower(name) = lower($2) AND status <> 'archived' AND id <> $3",
@@ -225,6 +248,7 @@ export class CustomFieldsService {
 
   async addOption(userId: string | null | undefined, projectId: string, definitionId: string, label: string): Promise<CustomFieldDefinitionDto> {
     await this.requireConfigAccess(userId, projectId);
+    requireDefinitionId(definitionId);
     const trimmed = String(label || "").trim();
     if (!trimmed) throw new BadRequestException({ error: "label is required" });
 
@@ -266,6 +290,7 @@ export class CustomFieldsService {
     active: boolean
   ): Promise<CustomFieldDefinitionDto> {
     await this.requireConfigAccess(userId, projectId);
+    requireDefinitionId(definitionId);
 
     return this.db.transaction(async (client) => {
       const res = await client.query(`SELECT * FROM custom_field_definitions WHERE id = $1 AND project_id = $2 FOR UPDATE`, [definitionId, projectId]);
@@ -324,6 +349,7 @@ export class CustomFieldsService {
 
   async setStatus(userId: string | null | undefined, projectId: string, definitionId: string, status: FieldStatus): Promise<CustomFieldDefinitionDto> {
     await this.requireConfigAccess(userId, projectId);
+    requireDefinitionId(definitionId);
     if (!["active", "inactive", "archived"].includes(status)) throw new BadRequestException({ error: "Invalid status" });
 
     const existingRes = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
@@ -348,6 +374,7 @@ export class CustomFieldsService {
 
   async deleteDefinition(userId: string | null | undefined, projectId: string, definitionId: string): Promise<void> {
     await this.requireConfigAccess(userId, projectId);
+    requireDefinitionId(definitionId);
 
     const existingRes = await this.db.query(`${DEFINITION_SELECT} WHERE d.id = $1 AND d.project_id = $2`, [definitionId, projectId]);
     if (!existingRes.rows[0]) throw new NotFoundException({ error: "Custom field not found" });
@@ -361,6 +388,7 @@ export class CustomFieldsService {
 
   async getValuesForTestCase(userId: string | null | undefined, projectId: string, testcaseId: string): Promise<CustomFieldValueDto[]> {
     await this.legacy.requireProjectAccess(userId, projectId);
+    if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
     const tc = await this.db.query("SELECT 1 FROM testcases WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL", [testcaseId, projectId]);
     if (!tc.rows[0]) throw new NotFoundException({ error: "Test case not found" });
 
@@ -405,6 +433,16 @@ export class CustomFieldsService {
   ): Promise<void> {
     if (mode === "enforce") {
       await this.legacy.requireProjectAccess(actorId, projectId);
+      // The caller reaches this route through a project they can see, but the test case id is their
+      // own input — without this it could name ANY test case in the deployment, including another
+      // workspace's, and this method would happily write values onto it. "skip-if-disabled" callers
+      // (createTestCase/updateTestCase) don't need the check: they resolved the row themselves.
+      if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
+      const owned = await this.db.query("SELECT 1 FROM testcases WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL", [
+        testcaseId,
+        projectId
+      ]);
+      if (!owned.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     }
 
     try {

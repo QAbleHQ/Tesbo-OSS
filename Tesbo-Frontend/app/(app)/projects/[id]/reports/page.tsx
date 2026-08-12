@@ -194,13 +194,13 @@ export default function ReportsPage() {
             <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
               {projectName && (
                 <>
-                  <button type="button" onClick={() => router.push("/projects")} className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]">
+                  <button type="button" onClick={() => router.push("/projects")} className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]">
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="font-medium text-[var(--brand-primary)]">Reports</span>
+              <span className="font-medium text-[var(--accent-light)]">Reports</span>
             </nav>,
             topBarStartEl
           )}

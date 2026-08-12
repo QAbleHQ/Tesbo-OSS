@@ -626,7 +626,7 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
                   <div key={field.key} className="flex items-center gap-3">
                     <label className="w-40 shrink-0 text-sm font-medium text-[var(--foreground)]">
                       {field.label}
-                      {field.required && <span className="ml-0.5 text-[var(--error)]">*</span>}
+                      {field.required && <span className="ml-0.5 text-[var(--error-foreground)]">*</span>}
                     </label>
                     <select
                       value={mapping[field.key] ?? ""}
@@ -653,7 +653,7 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
                       <div key={definition.id} className="flex items-center gap-3">
                         <label className="w-40 shrink-0 text-sm font-medium text-[var(--foreground)]">
                           {definition.name}
-                          {definition.required && <span className="ml-0.5 text-[var(--error)]">*</span>}
+                          {definition.required && <span className="ml-0.5 text-[var(--error-foreground)]">*</span>}
                         </label>
                         <select
                           value={customFieldMapping[definition.id] ?? ""}
@@ -722,14 +722,14 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
           {step === "result" && result && (
             <div className="space-y-4">
               <div className="flex items-center gap-3 rounded-xl border border-[var(--success-border)] bg-[var(--success-soft)] p-4">
-                <svg className="h-8 w-8 shrink-0 text-[var(--success)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg className="h-8 w-8 shrink-0 text-[var(--success-foreground)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 <div>
                   <p className="font-semibold text-[var(--success-foreground)]">
                     {result.imported} test case{result.imported !== 1 ? "s" : ""} imported successfully
                   </p>
-                  <p className="text-sm text-[var(--success)]">
+                  <p className="text-sm text-[var(--success-foreground)]">
                     Out of {result.total} total rows in the file.
                   </p>
                 </div>
@@ -751,8 +751,8 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
                       <tbody>
                         {result.errors.map((err, i) => (
                           <tr key={i} className="border-t border-[var(--error-border)]">
-                            <td className="px-3 py-1.5 text-[var(--error)]">{err.row}</td>
-                            <td className="px-3 py-1.5 text-[var(--error)]">{err.message}</td>
+                            <td className="px-3 py-1.5 text-[var(--error-foreground)]">{err.row}</td>
+                            <td className="px-3 py-1.5 text-[var(--error-foreground)]">{err.message}</td>
                           </tr>
                         ))}
                       </tbody>

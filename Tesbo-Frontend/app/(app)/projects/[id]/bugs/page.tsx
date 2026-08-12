@@ -160,7 +160,7 @@ function KanbanCard({
           </button>
           <button
             onClick={onDelete}
-            className="p-1 rounded text-[var(--muted)] hover:text-[var(--error)] hover:bg-[var(--error)]/10"
+            className="p-1 rounded text-[var(--muted)] hover:text-[var(--error-foreground)] hover:bg-[var(--error)]/10"
             title="Delete"
           >
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -198,7 +198,7 @@ function KanbanCard({
             target="_blank"
             rel="noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="text-[10px] text-[var(--brand-primary)] hover:underline truncate max-w-[120px]"
+            className="text-[10px] text-[var(--accent-light)] hover:underline truncate max-w-[120px]"
             title={bug.externalUrl}
           >
             Link
@@ -733,7 +733,7 @@ export default function BugsPage() {
                           >
                             <td>
                               <div className="flex flex-col gap-0.5 max-w-sm">
-                                <span className="text-sm font-medium text-[var(--brand-primary)] hover:underline break-words">
+                                <span className="text-sm font-medium text-[var(--accent-light)] hover:underline break-words">
                                   {b.title}
                                 </span>
                                 {b.externalUrl && (
@@ -742,7 +742,7 @@ export default function BugsPage() {
                                     target="_blank"
                                     rel="noreferrer"
                                     onClick={(e) => e.stopPropagation()}
-                                    className="text-xs text-[var(--muted-soft)] hover:text-[var(--brand-primary)] hover:underline truncate"
+                                    className="text-xs text-[var(--muted-soft)] hover:text-[var(--accent-light)] hover:underline truncate"
                                   >
                                     {b.externalUrl}
                                   </a>
@@ -818,7 +818,7 @@ export default function BugsPage() {
                                   variant="secondary"
                                   size="sm"
                                   onClick={() => setDeletingId(b.id)}
-                                  className="h-8 w-8 min-w-8 p-0 text-[var(--error)] hover:bg-[var(--error)]/10 hover:text-[var(--error)]"
+                                  className="h-8 w-8 min-w-8 p-0 text-[var(--error-foreground)] hover:bg-[var(--error)]/10 hover:text-[var(--error-foreground)]"
                                   title="Delete"
                                 >
                                   <svg
@@ -901,7 +901,7 @@ export default function BugsPage() {
                   href={viewBug.externalUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 text-sm text-[var(--brand-primary)] hover:underline break-all"
+                  className="inline-flex items-center gap-1.5 text-sm text-[var(--accent-light)] hover:underline break-all"
                 >
                   <svg
                     className="w-4 h-4 shrink-0"
@@ -929,7 +929,7 @@ export default function BugsPage() {
                   href={viewBug.betterbugsUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 text-sm text-[var(--brand-primary)] hover:underline break-all"
+                  className="inline-flex items-center gap-1.5 text-sm text-[var(--accent-light)] hover:underline break-all"
                 >
                   {viewBug.betterbugsUrl}
                 </a>
@@ -944,7 +944,7 @@ export default function BugsPage() {
                         href={getBugAttachmentDownloadUrl(projectId, att.id)}
                         target="_blank"
                         rel="noreferrer"
-                        className="text-sm text-[var(--brand-primary)] hover:underline break-all"
+                        className="text-sm text-[var(--accent-light)] hover:underline break-all"
                       >
                         {att.fileName}
                       </a>
@@ -1007,7 +1007,7 @@ export default function BugsPage() {
                   setDeletingId(viewBug.id);
                   setViewBug(null);
                 }}
-                className="!bg-transparent !text-[var(--error)] hover:!bg-[var(--error)]/10 hover:!opacity-100"
+                className="!bg-transparent !text-[var(--error-foreground)] hover:!bg-[var(--error)]/10 hover:!opacity-100"
               >
                 Delete Bug
               </Button>
@@ -1052,7 +1052,7 @@ export default function BugsPage() {
         <div className="space-y-4">
           <Field>
             <FieldLabel>
-              Bug Title <span className="text-[var(--error)]">*</span>
+              Bug Title <span className="text-[var(--error-foreground)]">*</span>
             </FieldLabel>
             <Input
               type="text"
@@ -1090,7 +1090,7 @@ export default function BugsPage() {
           />
           <Field>
             <FieldLabel>
-              Linked Test Case(s) &amp; Run(s) {hasTestRuns && <span className="text-[var(--error)]">*</span>}
+              Linked Test Case(s) &amp; Run(s) {hasTestRuns && <span className="text-[var(--error-foreground)]">*</span>}
             </FieldLabel>
             <TestCaseRunPicker projectId={projectId} value={createLinks} onChange={setCreateLinks} />
             {!hasTestRuns && (
@@ -1139,7 +1139,7 @@ export default function BugsPage() {
         <div className="space-y-4">
           <Field>
             <FieldLabel>
-              Bug Title <span className="text-[var(--error)]">*</span>
+              Bug Title <span className="text-[var(--error-foreground)]">*</span>
             </FieldLabel>
             <Input
               type="text"
@@ -1168,7 +1168,7 @@ export default function BugsPage() {
           />
           <Field>
             <FieldLabel>
-              Linked Test Case(s) &amp; Run(s) {hasTestRuns && <span className="text-[var(--error)]">*</span>}
+              Linked Test Case(s) &amp; Run(s) {hasTestRuns && <span className="text-[var(--error-foreground)]">*</span>}
             </FieldLabel>
             <TestCaseRunPicker projectId={projectId} value={editLinks} onChange={setEditLinks} />
             {!hasTestRuns && (

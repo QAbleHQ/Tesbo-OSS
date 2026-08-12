@@ -53,6 +53,7 @@ import { useTopBarSlots } from "@/components/TopBarSlots";
 import FileViewerModal from "@/components/knowledge-base/FileViewerModal";
 import { Menu, MenuItem } from "@/components/knowledge-base/Menu";
 import { FolderTreeNodeRow, flattenFolders, findAncestorIds, type FolderAction } from "@/components/knowledge-base/FolderTree";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
@@ -207,7 +208,7 @@ function formatDate(value: string): string {
 }
 
 function itemIcon(item: KnowledgeItem) {
-  if (item.type === "folder") return <IconFolder size={17} stroke={1.75} className="text-[var(--brand-primary)]" />;
+  if (item.type === "folder") return <IconFolder size={17} stroke={1.75} className="text-[var(--accent-light)]" />;
   if (item.type === "document") return <IconFileText size={17} stroke={1.75} className="text-[var(--info)]" />;
   return <IconFile size={17} stroke={1.75} className="text-[var(--muted)]" />;
 }
@@ -578,7 +579,7 @@ function KnowledgeBasePageInner() {
   );
 
   useEffect(() => {
-    const savedPanel = localStorage.getItem("tesbo_kb_tree_panel");
+    const savedPanel = readStoredValue("tesbo_kb_tree_panel");
     if (savedPanel === "closed") setTreePanelOpen(false);
     (async () => {
       const me = await authMe();
@@ -645,7 +646,7 @@ function KnowledgeBasePageInner() {
   function toggleTreePanel() {
     setTreePanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem("tesbo_kb_tree_panel", next ? "open" : "closed");
+      writeStoredValue("tesbo_kb_tree_panel", next ? "open" : "closed");
       return next;
     });
   }
@@ -844,14 +845,14 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="font-medium text-[var(--brand-primary)]">Knowledge base</span>
+              <span className="font-medium text-[var(--accent-light)]">Knowledge base</span>
             </nav>,
             topBarStartEl
           )}
@@ -939,7 +940,7 @@ function KnowledgeBasePageInner() {
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
-                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--brand-primary)]">{summary.folders}</div>
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--accent-light)]">{summary.folders}</div>
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Folders</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
@@ -955,7 +956,7 @@ function KnowledgeBasePageInner() {
         </div>
 
         {error && (
-          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
+          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)]">
             <span>{error}</span>
             <button onClick={() => setError(null)}><IconX size={16} /></button>
           </div>
@@ -968,10 +969,10 @@ function KnowledgeBasePageInner() {
               <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${treePanelOpen ? "justify-between" : "justify-center"}`}>
                 {treePanelOpen && (
                   <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                    <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                    <IconFolders size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                     Folders
                     {summary && (
-                      <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                      <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                         {summary.folders}
                       </span>
                     )}
@@ -983,7 +984,7 @@ function KnowledgeBasePageInner() {
                       type="button"
                       title="New folder"
                       onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
-                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                     >
                       <IconPlus size={14} stroke={2.5} />
                     </button>
@@ -1018,7 +1019,7 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
-                    className="mt-2 flex w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    className="mt-2 flex w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={13} stroke={2} /> New folder
                   </button>
@@ -1065,7 +1066,7 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => { setSearchQuery(""); setSearchInput(""); }}
-                    className="shrink-0 text-[12px] text-[var(--brand-primary)] hover:underline"
+                    className="shrink-0 text-[12px] text-[var(--accent-light)] hover:underline"
                   >
                     Clear
                   </button>
@@ -1253,7 +1254,7 @@ function KnowledgeBasePageInner() {
                     type="button"
                     onClick={() => setPage((prev) => Math.max(1, prev - 1))}
                     disabled={safePage === 1}
-                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                   >
                     Previous
                   </button>
@@ -1261,7 +1262,7 @@ function KnowledgeBasePageInner() {
                     type="button"
                     onClick={() => setPage((prev) => (prev >= totalPages ? prev : prev + 1))}
                     disabled={safePage >= totalPages}
-                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                   >
                     Next
                   </button>

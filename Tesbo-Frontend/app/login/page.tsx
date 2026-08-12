@@ -146,7 +146,7 @@ function LoginForm() {
         {!isInviteEmailLocked && (
           <p className="mt-6 text-center text-[13px] text-[var(--muted)]">
             Don&apos;t have an account?{" "}
-            <Link href="/signup" className="font-medium text-[var(--brand-primary)] hover:underline">
+            <Link href="/signup" className="font-medium text-[var(--accent-light)] hover:underline">
               Sign up
             </Link>
           </p>

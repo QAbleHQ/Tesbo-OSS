@@ -370,7 +370,7 @@ export default function ZyraSettingsPage() {
         {/* ── Save / actions bar ── */}
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface)] p-4">
           <span className="text-xs text-[var(--muted)]">
-            {saveError ? <span className="text-[var(--error)]">{saveError}</span> : dirty ? "You have unsaved changes." : "All changes saved."}
+            {saveError ? <span className="text-[var(--error-foreground)]">{saveError}</span> : dirty ? "You have unsaved changes." : "All changes saved."}
           </span>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={handleResetDefaults} disabled={saving}>Reset to defaults</Button>

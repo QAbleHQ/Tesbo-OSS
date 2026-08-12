@@ -54,9 +54,19 @@ export class LegacyController {
     ].join("\n");
   }
 
-  private sendWorkbook(res: Response, fileName: string, sheetName: string, rows: Record<string, unknown>[]) {
+  private sendWorkbook(
+    res: Response,
+    fileName: string,
+    sheetName: string,
+    rows: Record<string, unknown>[],
+    headers?: string[]
+  ) {
     const workbook = XLSX.utils.book_new();
-    const worksheet = XLSX.utils.json_to_sheet(rows);
+    // The header list is passed explicitly wherever the caller knows it: json_to_sheet otherwise
+    // derives the columns from the first row's keys, so exporting a project with no test cases
+    // produced a workbook with no header row at all — a blank sheet with nothing to fill in, while
+    // the CSV export of the same project still emitted its headers.
+    const worksheet = XLSX.utils.json_to_sheet(rows, headers ? { header: headers } : undefined);
     XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
     const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -121,10 +131,8 @@ export class LegacyController {
   }
 
   @Get("/api/workspace/project-access")
-  async projectAccess(@Req() req: AuthenticatedRequest) {
-    const projects = await this.legacy.listProjects(req.userId);
-    const members = await this.legacy.workspaceMembers(req.userId);
-    return { projects, members: members.map((m) => ({ ...m, projectRoles: {} })) };
+  projectAccess(@Req() req: AuthenticatedRequest) {
+    return this.legacy.workspaceProjectAccess(req.userId);
   }
 
   @Put("/api/workspace/project-access")
@@ -453,8 +461,12 @@ export class LegacyController {
   }
 
   @Get("/api/cycles/:cycleId/executions/:executionId/attachments")
-  listExecutionAttachments(@Param("executionId") executionId: string) {
-    return this.legacy.listExecutionAttachments(executionId);
+  listExecutionAttachments(
+    @Req() req: AuthenticatedRequest,
+    @Param("cycleId") cycleId: string,
+    @Param("executionId") executionId: string
+  ) {
+    return this.legacy.listExecutionAttachments(cycleId, req.userId, executionId);
   }
 
   @Post("/api/cycles/:cycleId/executions/bulk-assign")
@@ -541,8 +553,13 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/bugs/attachments/:attachmentId/download")
-  async downloadBugAttachment(@Res() res: Response, @Param("attachmentId") attachmentId: string) {
-    const access = await this.legacy.getBugAttachmentAccess(attachmentId, false);
+  async downloadBugAttachment(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+    @Param("projectId") projectId: string,
+    @Param("attachmentId") attachmentId: string
+  ) {
+    const access = await this.legacy.getBugAttachmentAccess(projectId, req.userId, attachmentId, false);
     if ("redirectUrl" in access) return res.redirect(302, access.redirectUrl);
     res.setHeader("Content-Type", access.mimeType);
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(access.originalFileName)}"`);
@@ -552,8 +569,8 @@ export class LegacyController {
   }
 
   @Delete("/api/bugs/attachments/:attachmentId")
-  deleteBugAttachment(@Param("attachmentId") attachmentId: string) {
-    return this.legacy.deleteBugAttachment(attachmentId);
+  deleteBugAttachment(@Req() req: AuthenticatedRequest, @Param("attachmentId") attachmentId: string) {
+    return this.legacy.deleteBugAttachment(attachmentId, req.userId);
   }
 
   @Get("/api/projects/:projectId/testcases/export/csv")
@@ -570,11 +587,22 @@ export class LegacyController {
   async exportXlsx(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Res() res: Response) {
     const definitions = await this.customFields.listActiveDefinitionsForColumns(req.userId, projectId);
     const rows = await this.legacy.exportTestCases(projectId, definitions);
-    this.sendWorkbook(res, "testcases.xlsx", "Test Cases", rows);
+    const headers = [...TESTCASE_EXPORT_BASE_HEADERS, ...definitions.map((d) => `cf_${d.key}`)];
+    this.sendWorkbook(res, "testcases.xlsx", "Test Cases", rows, headers);
   }
 
   @Get("/api/projects/:projectId/testcases/import/template")
-  template(@Query("format") format: string | undefined, @Res() res: Response) {
+  async template(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Query("format") format: string | undefined,
+    @Res() res: Response
+  ) {
+    // The payload is a constant, but the route is project-scoped and only ever linked to from a
+    // signed-in screen. Authorizing it keeps it consistent with every other route under
+    // /api/projects/:id — it was the one that answered with no session, and that served the same
+    // 200 for a project id that doesn't exist.
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     const rows = [
       {
         title: "Example login test",
@@ -592,29 +620,30 @@ export class LegacyController {
         component: "Login"
       }
     ];
+    const headers = Object.keys(rows[0]);
     if (format === "xlsx") {
-      this.sendWorkbook(res, "testcase-import-template.xlsx", "Test Cases", rows);
+      this.sendWorkbook(res, "testcase-import-template.xlsx", "Test Cases", rows, headers);
       return;
     }
-    const headers = Object.keys(rows[0]);
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", 'attachment; filename="testcase-import-template.csv"');
     res.send(this.rowsToCsv(headers, rows));
   }
 
-  @Post("/api/projects/:projectId/testcases/import/preview")
-  previewImport() {
-    return { uploadId: "local-upload", headers: [], previewRows: [], totalRows: 0 };
-  }
-
-  @Post("/api/projects/:projectId/testcases/import")
-  executeImport() {
-    return { imported: 0, errors: [] };
-  }
+  /*
+   * There is deliberately no POST .../testcases/import or .../import/preview here.
+   *
+   * Both used to exist as stubs that ignored their request body and hard-returned an empty success
+   * ({imported: 0}) to any caller, signed in or not — so anything trusting them imported nothing and
+   * was told it worked. Nothing called them: the import runs entirely in the browser
+   * (Tesbo-Frontend/components/ImportTestCasesModal.tsx parses the workbook and POSTs one
+   * createTestCase per row), which is where its behaviour is covered. If a server-side import is
+   * ever built, it belongs here — as a route that actually reads its body.
+   */
 
   @Get("/api/cycles/:cycleId/export/csv")
-  async exportCycle(@Param("cycleId") cycleId: string, @Res() res: Response) {
-    const rows = await this.legacy.executions(cycleId);
+  async exportCycle(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Res() res: Response) {
+    const rows = await this.legacy.exportCycleExecutions(req.userId, cycleId);
     const headers = ["externalId", "title", "status", "priority", "type", "actualResult", "executedAt", "defectKey", "defectUrl"];
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", 'attachment; filename="test-run.csv"');
@@ -622,8 +651,8 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/analytics")
-  projectAnalytics(@Param("projectId") projectId: string) {
-    return this.legacy.analytics(projectId);
+  projectAnalytics(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.projectAnalyticsForUser(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/dashboard")
@@ -637,33 +666,37 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/reports/execution")
-  executionReport(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.executionReport(projectId, query);
+  executionReport(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Query() query: Record<string, any>
+  ) {
+    return this.legacy.executionReportForUser(req.userId, projectId, query);
   }
 
   @Get("/api/projects/:projectId/reports/requirement-matrix")
-  matrix(@Param("projectId") projectId: string) {
-    return this.legacy.requirementMatrix(projectId);
+  matrix(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.requirementMatrixForUser(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/reports/repository-summary")
-  repositorySummary(@Param("projectId") projectId: string) {
-    return this.legacy.repositorySummary(projectId);
+  repositorySummary(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.repositorySummaryForUser(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/reports/overview")
-  reportsOverview(@Param("projectId") projectId: string) {
-    return this.legacy.reportsOverview(projectId);
+  reportsOverview(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.reportsOverviewForUser(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/reports/insights")
-  reportsInsights(@Param("projectId") projectId: string) {
-    return this.legacy.reportsInsights(projectId);
+  reportsInsights(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.reportsInsightsForUser(req.userId, projectId);
   }
 
   @Get("/api/projects/:projectId/reports/trends")
-  reportsTrends(@Param("projectId") projectId: string) {
-    return this.legacy.reportsTrends(projectId);
+  reportsTrends(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.reportsTrendsForUser(req.userId, projectId);
   }
 
   @Post("/api/projects/:projectId/ai/generate-testcases")

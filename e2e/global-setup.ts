@@ -1,9 +1,9 @@
 import { execSync } from "node:child_process";
-import { pbkdf2Sync, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { request, type APIRequestContext } from "@playwright/test";
 import { env } from "./utils/env";
+import { hashPasswordForSeed } from "./utils/password";
 
 const AUTH_DIR = path.join(__dirname, ".auth");
 const STATE_PATH = path.join(AUTH_DIR, "state.json");
@@ -14,6 +14,10 @@ const STATE_PATH_BILLING_API = path.join(AUTH_DIR, "state-billing-api.json");
 const CONTEXT_PATH_BILLING_API = path.join(AUTH_DIR, "context-billing-api.json");
 const STATE_PATH_BILLING_UI = path.join(AUTH_DIR, "state-billing-ui.json");
 const CONTEXT_PATH_BILLING_UI = path.join(AUTH_DIR, "context-billing-ui.json");
+const STATE_PATH_WORKSPACES = path.join(AUTH_DIR, "state-workspaces.json");
+const CONTEXT_PATH_WORKSPACES = path.join(AUTH_DIR, "context-workspaces.json");
+const STATE_PATH_SCREENS = path.join(AUTH_DIR, "state-screens.json");
+const CONTEXT_PATH_SCREENS = path.join(AUTH_DIR, "context-screens.json");
 
 // One tenant's worth of provisioning inputs — account A and account B (see utils/env.ts) each
 // pass their own set through the same provisioning/bootstrap logic below.
@@ -67,6 +71,29 @@ const billingUiAccount: Account = {
   name: env.billingUiName,
   orgName: env.billingUiOrgName,
   projectName: env.billingUiProjectName,
+  seedDirectly: true,
+};
+
+// Owns e2e/api/workspaces.spec.ts, which creates extra workspaces and would otherwise repoint a
+// shared account's active workspace mid-run — see env.workspacesEmail.
+const workspacesAccount: Account = {
+  email: env.workspacesEmail,
+  password: env.workspacesPassword,
+  name: env.workspacesName,
+  orgName: env.workspacesOrgName,
+  projectName: env.workspacesProjectName,
+  seedDirectly: true,
+};
+
+// Owns the screen-level suites (ui/projects-list, ui/navigation, ui/theme, ui/project-dashboard and
+// the project-dashboard describe in api/projects.spec.ts). Those need many projects at once and an
+// otherwise-empty project list — see env.screensEmail for why account A can't provide either.
+const screensAccount: Account = {
+  email: env.screensEmail,
+  password: env.screensPassword,
+  name: env.screensName,
+  orgName: env.screensOrgName,
+  projectName: env.screensProjectName,
   seedDirectly: true,
 };
 
@@ -138,16 +165,6 @@ async function provisionUserViaOtp(api: APIRequestContext, account: Account): Pr
     );
   }
   return true;
-}
-
-// Matches Tesbo-Backend-Nest/src/auth/password.service.ts's PasswordService.hashPassword
-// exactly (pbkdf2_sha256, 210000 iterations, 32-byte key) — if that format ever changes,
-// this needs to change with it.
-function hashPasswordForSeed(password: string): string {
-  const iterations = 210_000;
-  const salt = randomBytes(16);
-  const hash = pbkdf2Sync(password, salt, iterations, 32, "sha256");
-  return `pbkdf2_sha256$${iterations}$${salt.toString("base64url")}$${hash.toString("base64url")}`;
 }
 
 // Sidesteps OTP delivery entirely by inserting the user straight into Postgres — used when
@@ -286,11 +303,11 @@ async function setUpAccount(
 /**
  * Provisions a tenant whose absence must not fail the whole run.
  *
- * The payment suites need a workspace they're allowed to break, and they detect a missing context
- * file and skip themselves. So against a target where these tenants can't be created (a remote
- * environment with E2E_AUTO_PROVISION=false, say) the right outcome is "payment suites skipped",
- * not "every spec in the run fails during global setup". Any stale context file is removed so a
- * previous run's tenant can't be mistaken for this one's.
+ * The payment and workspace suites each need a workspace they're allowed to break, and they detect
+ * a missing context file and skip themselves. So against a target where these tenants can't be
+ * created (a remote environment with E2E_AUTO_PROVISION=false, say) the right outcome is "those
+ * suites skipped", not "every spec in the run fails during global setup". Any stale context file is
+ * removed so a previous run's tenant can't be mistaken for this one's.
  */
 async function setUpOptionalAccount(
   account: Account,
@@ -309,14 +326,54 @@ async function setUpOptionalAccount(
   }
 }
 
+/**
+ * Provisions the screens tenant and puts it on Pro.
+ *
+ * The Pro write is the point of this wrapper. PROJECT_LIMITS.launch is 2 (plan-limits.service.ts),
+ * and every screen suite that owns this tenant needs more projects than that live at once. Pro's
+ * project limit is null — unlimited — so the ceiling stops being something those suites have to
+ * choreograph around. Nothing else about the plan is exercised here; plan gating itself is the
+ * payment suites' job, against their own tenants.
+ *
+ * Failure removes the context file so the screen suites skip rather than fail: without the Pro
+ * write they'd hit a 403 partway through and report a plan limit as if it were a product bug.
+ */
+async function setUpScreensTenant(): Promise<void> {
+  try {
+    await setUpAccount(screensAccount, STATE_PATH_SCREENS, CONTEXT_PATH_SCREENS);
+    const { organizationId } = JSON.parse(fs.readFileSync(CONTEXT_PATH_SCREENS, "utf-8"));
+    setScreensTenantPlanToPro(organizationId);
+  } catch (error) {
+    fs.rmSync(CONTEXT_PATH_SCREENS, { force: true });
+    console.warn(
+      `[e2e] could not provision the screens tenant (${screensAccount.email}) — the projects-list, ` +
+        "navigation, theme and project-dashboard suites will skip. Underlying error: " +
+        (error instanceof Error ? error.message : String(error)),
+    );
+  }
+}
+
+function setScreensTenantPlanToPro(organizationId: string): void {
+  execSync(
+    `docker compose -f "${env.dockerComposeFile}" exec -T ${env.dbService} psql -U ${env.dbUser} -d ${env.dbName} -v ON_ERROR_STOP=1`,
+    {
+      input: `UPDATE organizations SET plan = 'pro', subscription_status = 'active', updated_at = now() WHERE id = '${organizationId.replace(/'/g, "''")}';`,
+      encoding: "utf-8",
+    },
+  );
+}
+
 export default async function globalSetup(): Promise<void> {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
   // Independent tenants, provisioned with separate APIRequestContexts so their session cookies
-  // never mix. Account B only backs the cross-tenant authorization suite, and the two billing
-  // tenants only back the payment suites — every other spec keeps using account A via the default
-  // storageState in playwright.config.ts.
+  // never mix. Account B only backs the cross-tenant authorization suite, the two billing tenants
+  // only back the payment suites, the workspaces tenant only backs the workspace-creation suite,
+  // and the screens tenant only backs the screen-level suites — every other spec keeps using
+  // account A via the default storageState in playwright.config.ts.
   await setUpAccount(accountA, STATE_PATH, CONTEXT_PATH);
   await setUpAccount(accountB, STATE_PATH_B, CONTEXT_PATH_B);
   await setUpOptionalAccount(billingApiAccount, STATE_PATH_BILLING_API, CONTEXT_PATH_BILLING_API, "billing API");
   await setUpOptionalAccount(billingUiAccount, STATE_PATH_BILLING_UI, CONTEXT_PATH_BILLING_UI, "billing UI");
+  await setUpOptionalAccount(workspacesAccount, STATE_PATH_WORKSPACES, CONTEXT_PATH_WORKSPACES, "workspaces");
+  await setUpScreensTenant();
 }

@@ -254,7 +254,7 @@ export default function ZyraTaskDetailPage() {
       }
     >
       {message && <p className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm">{message}</p>}
-      {error && <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">{error}</p>}
+      {error && <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">{error}</p>}
 
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -267,7 +267,7 @@ export default function ZyraTaskDetailPage() {
             {task.jiraIssueKeys.length > 0 && (
               <div className="mt-3 flex flex-wrap gap-2">
                 {task.jiraIssueKeys.map((key) => (
-                  <span key={key} className="rounded-full bg-[var(--brand-soft)] px-2.5 py-1 text-xs font-medium text-[var(--brand-primary)]">
+                  <span key={key} className="rounded-full bg-[var(--brand-soft)] px-2.5 py-1 text-xs font-medium text-[var(--accent-light)]">
                     {key}
                   </span>
                 ))}
@@ -287,7 +287,7 @@ export default function ZyraTaskDetailPage() {
             key={tab.key}
             type="button"
             onClick={() => setActiveTab(tab.key)}
-            className={`border-b-2 px-3 py-2 text-sm font-medium ${activeTab === tab.key ? "border-[var(--brand-primary)] text-[var(--brand-primary)]" : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"}`}
+            className={`border-b-2 px-3 py-2 text-sm font-medium ${activeTab === tab.key ? "border-[var(--brand-primary)] text-[var(--accent-light)]" : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"}`}
           >
             {tab.label}{tab.count != null ? ` (${tab.count})` : ""}
           </button>

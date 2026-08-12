@@ -13,10 +13,12 @@ const priorityConfig: Record<
   Priority,
   { label: string; color: string; Icon: React.ComponentType<{ size?: number; stroke?: number; className?: string }> }
 > = {
-  critical: { label: "Critical", color: "#A32D2D", Icon: IconChevronsUp },
-  high:     { label: "High",     color: "#D97C0A", Icon: IconChevronUp },
-  medium:   { label: "Medium",   color: "#185FA5", Icon: IconMinus },
-  low:      { label: "Low",      color: "#3B6D11", Icon: IconChevronDown },
+  // Theme tokens, not literal hexes: the fixed colours these carried never followed the theme, so
+  // three of the four sat at 1.96–2.23:1 in dark mode, and "High" was unreadable in light too.
+  critical: { label: "Critical", color: "var(--error-foreground)", Icon: IconChevronsUp },
+  high:     { label: "High",     color: "var(--warning-foreground)", Icon: IconChevronUp },
+  medium:   { label: "Medium",   color: "var(--status-notrun-text)", Icon: IconMinus },
+  low:      { label: "Low",      color: "var(--success-foreground)", Icon: IconChevronDown },
 };
 
 export type PriorityBadgeProps = Omit<HTMLAttributes<HTMLSpanElement>, "children"> & {
