@@ -1,0 +1,143 @@
+// Auto-deploy on dev + SonarQube scan before deploy.
+// Sonar secrets: Jenkins Managed file id = tesbo-test-manager-env
+// Sonar failure does NOT block deploy (catchError).
+//
+// Low-downtime deploy:
+//   - NEVER `docker compose down` / `docker-compose down` (that kills the site during build)
+//   - Build images first while old containers keep serving traffic
+//   - Then `up -d` swaps only changed services (redis usually stays up)
+//   - Expect a short blip (few seconds) when frontend/backend containers recreate
+// Never: docker compose down -v
+//
+// Source branch: dev. Target environment: stage (app-stage.tesbo.io). Prod uses Jenkinsfile -> app.tesbo.io.
+
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  environment {
+    REPO_URL         = 'https://github.com/QAbleHQ/Tesbo-Test-Manager-Private.git'
+    APP_HEALTH       = 'https://app-stage.tesbo.io'
+    API_HEALTH       = 'https://api-app-stage.tesbo.io'
+    DEPLOY_PATH      = '/root/devops/tesbo-test-manager-private-stage/Tesbo-Test-Manager-Private'
+    COMPOSE_PROJECT  = 'tesbo-private-stage'
+    FRONTEND_PORT    = '1010'
+    BACKEND_PORT     = '1011'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        script {
+          env.GIT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          echo "Pipeline ${env.GIT_SHA} -> stage deploy from dev branch ${env.DEPLOY_PATH}"
+        }
+      }
+    }
+
+    stage('SonarQube') {
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+          configFileProvider([
+            configFile(fileId: 'tesbo-test-manager-env', variable: 'TESBO_ENV_FILE')
+          ]) {
+            sh '''
+              set -eu
+              set -a
+              # shellcheck disable=SC1090
+              . "$TESBO_ENV_FILE"
+              set +a
+
+              test -n "${SONAR_HOST_URL:-}" || { echo "SONAR_HOST_URL missing in tesbo-test-manager-env"; exit 1; }
+              test -n "${SONAR_TOKEN:-}" || { echo "SONAR_TOKEN missing in tesbo-test-manager-env"; exit 1; }
+
+              echo "==> SonarQube scan -> ${SONAR_HOST_URL}"
+              docker run --rm \
+                -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
+                -e SONAR_TOKEN="${SONAR_TOKEN}" \
+                -v "${WORKSPACE}:/usr/src" \
+                -w /usr/src \
+                sonarsource/sonar-scanner-cli:11 \
+                -Dsonar.projectBaseDir=/usr/src
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Deploy stage') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'github-creds', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+          sh '''
+            set -eu
+            echo "==> Jenkins user: $(whoami)"
+            test -d "${DEPLOY_PATH}" || { echo "MISSING deploy path ${DEPLOY_PATH}"; exit 1; }
+            cd "${DEPLOY_PATH}"
+            test -f .env || { echo "MISSING .env - refusing to deploy"; exit 1; }
+
+            git remote set-url origin "${REPO_URL}"
+
+            ASKPASS=$(mktemp)
+            cat > "$ASKPASS" <<'EOS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s' "$GIT_USERNAME" ;;
+  *) printf '%s' "$GIT_PASSWORD" ;;
+esac
+EOS
+            chmod 700 "$ASKPASS"
+            GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git fetch origin dev:refs/remotes/origin/dev
+            rm -f "$ASKPASS"
+
+            git checkout -B dev origin/dev
+            git reset --hard origin/dev
+            git log -1 --oneline
+
+            echo "==> Building images (site stays UP)"
+            docker-compose -p "${COMPOSE_PROJECT}" build
+
+            echo "==> Rolling containers (no full down)"
+            docker-compose -p "${COMPOSE_PROJECT}" up -d --remove-orphans
+
+            sleep 20
+            docker-compose -p "${COMPOSE_PROJECT}" ps
+            curl -fsS "http://127.0.0.1:${BACKEND_PORT}/health" || true
+            curl -fsS -o /dev/null -w "frontend_local:%{http_code}\\n" "http://127.0.0.1:${FRONTEND_PORT}/" || true
+            echo Deploy finished
+          '''
+        }
+      }
+    }
+
+    stage('Smoke check') {
+      steps {
+        sh '''
+          set -eu
+          curl -fsS -o /dev/null -w "frontend:%{http_code}\\n" "${APP_HEALTH}/login" || \
+            curl -fsS -o /dev/null -w "frontend:%{http_code}\\n" "${APP_HEALTH}/" || true
+          curl -fsS "${API_HEALTH}/health" || true
+          echo
+          echo "Site: ${APP_HEALTH}"
+        '''
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "OK: ${env.GIT_SHA} deploy -> https://app-stage.tesbo.io"
+    }
+    unstable {
+      echo "Deploy may have succeeded but Sonar was UNSTABLE."
+    }
+    failure {
+      echo "Failed. Stage only - prod was not touched."
+    }
+  }
+}
