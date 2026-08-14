@@ -88,6 +88,11 @@ export class OtpService {
     await this.db.query("DELETE FROM sessions WHERE token_hash = $1", [this.hash(sessionToken)]);
   }
 
+  /** Signs the user out everywhere except the session identified by `keepToken`. */
+  async invalidateOtherSessions(userId: string, keepToken: string): Promise<void> {
+    await this.db.query("DELETE FROM sessions WHERE user_id = $1 AND token_hash != $2", [userId, this.hash(keepToken)]);
+  }
+
   private async isRateLimited(key: string): Promise<boolean> {
     const result = await this.db.query<{ locked_until: Date | null }>("SELECT locked_until FROM otp_rate_limit WHERE email = $1", [key]);
     const lockedUntil = result.rows[0]?.locked_until;

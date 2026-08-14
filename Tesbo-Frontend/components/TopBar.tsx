@@ -1,9 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { IconBell, IconSearch } from "@tabler/icons-react";
-import { authMe } from "@/lib/api";
+import { authMe, listProjects, type ProjectSummary } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+
+const MAX_RESULTS = 8;
 
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -13,8 +16,16 @@ function getInitials(name: string): string {
 }
 
 export default function TopBar() {
+  const router = useRouter();
   const [user, setUser] = useState<{ name: string | null; email: string | null } | null>(null);
   const { bindStart, bindEnd, filled } = useTopBarSlots();
+
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const searchBoxRef = useRef<HTMLLabelElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -26,6 +37,67 @@ export default function TopBar() {
     };
   }, []);
 
+  useEffect(() => {
+    listProjects().then(setProjects).catch(() => undefined);
+  }, []);
+
+  // ⌘K / Ctrl+K focuses the search box from anywhere, matching the shortcut hint shown in it.
+  useEffect(() => {
+    function handleShortcut(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        inputRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleOutsideClick(e: MouseEvent) {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [open]);
+
+  const results = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return projects
+      .filter((p) => [p.name, p.key, p.description ?? ""].some((field) => field.toLowerCase().includes(q)))
+      .slice(0, MAX_RESULTS);
+  }, [projects, query]);
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [query]);
+
+  function goToProject(p: ProjectSummary) {
+    setOpen(false);
+    setQuery("");
+    router.push(`/projects/${p.id}/dashboard`);
+  }
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (!open || results.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIndex((i) => Math.min(i + 1, results.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const chosen = results[activeIndex];
+      if (chosen) goToProject(chosen);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+      inputRef.current?.blur();
+    }
+  }
+
   const displayName = user?.name || user?.email || "";
 
   return (
@@ -35,16 +107,55 @@ export default function TopBar() {
         <div ref={bindStart} className="flex min-w-0 items-center" />
         {/* Default global search — only when no page has taken over the top bar. */}
         {!filled && (
-          <label className="flex h-8 w-[260px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[13px] text-[var(--muted-soft)] transition-colors focus-within:border-[var(--brand-primary)]">
+          <label
+            ref={searchBoxRef}
+            className="relative flex h-8 w-[260px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[13px] text-[var(--muted-soft)] transition-colors focus-within:border-[var(--brand-primary)]"
+          >
             <IconSearch size={14} stroke={1.75} className="shrink-0" />
             <input
+              ref={inputRef}
               type="text"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setOpen(true);
+              }}
+              onFocus={() => setOpen(true)}
+              onKeyDown={handleKeyDown}
               placeholder="Search projects…"
               className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
             />
-            <span className="shrink-0 rounded-[3px] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[11px] text-[var(--muted-soft)]">
-              ⌘K
-            </span>
+            {!query && (
+              <span className="shrink-0 rounded-[3px] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[11px] text-[var(--muted-soft)]">
+                ⌘K
+              </span>
+            )}
+
+            {open && query.trim() && (
+              <div className="absolute left-0 top-full z-40 mt-1 w-full max-w-[360px] rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
+                {results.length === 0 ? (
+                  <p className="px-3 py-2 text-[13px] text-[var(--muted-soft)]">No projects found</p>
+                ) : (
+                  results.map((p, idx) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        goToProject(p);
+                      }}
+                      onMouseEnter={() => setActiveIndex(idx)}
+                      className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors ${
+                        idx === activeIndex ? "bg-[var(--surface-secondary)]" : ""
+                      }`}
+                    >
+                      <span className="truncate text-[var(--foreground)]">{p.name}</span>
+                      <span className="shrink-0 font-mono text-[11px] uppercase text-[var(--muted-soft)]">{p.key}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
           </label>
         )}
       </div>

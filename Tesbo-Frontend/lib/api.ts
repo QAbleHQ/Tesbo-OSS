@@ -66,11 +66,16 @@ export async function authMe(): Promise<{
   email: string | null;
   name: string | null;
   isPlatformAdmin?: boolean;
+  hasPassword?: boolean;
 } | null> {
   try {
-    return await api<{ userId: string; email: string | null; name: string | null; isPlatformAdmin?: boolean }>(
-      "/api/auth/me"
-    );
+    return await api<{
+      userId: string;
+      email: string | null;
+      name: string | null;
+      isPlatformAdmin?: boolean;
+      hasPassword?: boolean;
+    }>("/api/auth/me");
   } catch {
     return null;
   }
@@ -135,6 +140,25 @@ export async function loginWithPassword(email: string, password: string): Promis
 
 export async function verifyOtp(email: string, code: string): Promise<{ ok: boolean; userId: string }> {
   return api("/api/auth/otp/verify", { method: "POST", body: { email, code } });
+}
+
+export async function requestPasswordReset(email: string): Promise<void> {
+  await api("/api/auth/password/forgot", { method: "POST", body: { email } });
+}
+
+export async function checkPasswordResetToken(token: string): Promise<{ valid: boolean }> {
+  return api(`/api/auth/password/reset/${encodeURIComponent(token)}`);
+}
+
+export async function resetPassword(token: string, password: string): Promise<{ ok: boolean }> {
+  return api("/api/auth/password/reset", { method: "POST", body: { token, password } });
+}
+
+export async function changePassword(currentPassword: string | null, newPassword: string): Promise<void> {
+  await api("/api/auth/password/change", {
+    method: "POST",
+    body: { currentPassword: currentPassword ?? undefined, newPassword }
+  });
 }
 
 export async function startSignup(data: { name: string; email: string; password: string }): Promise<void> {

@@ -42,9 +42,7 @@ export class SetupService {
     if (!body.email?.trim() || !body.password?.trim() || !body.orgName?.trim()) {
       throw new BadRequestException({ error: "email, password, and orgName are required" });
     }
-    if (body.password.length < 8) {
-      throw new BadRequestException({ error: "Password must be at least 8 characters" });
-    }
+    this.password.assertValidPassword(body.password);
 
     const email = body.email.trim().toLowerCase();
     const orgName = body.orgName.trim();

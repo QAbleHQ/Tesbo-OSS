@@ -49,7 +49,8 @@ function makeService(opts: {
     verifyOtpCode: jest.fn().mockResolvedValue(opts.otpVerifyResult ?? true)
   } as unknown as OtpService;
   const password = {
-    hashPassword: jest.fn((pw: string) => `hashed:${pw}`)
+    hashPassword: jest.fn((pw: string) => `hashed:${pw}`),
+    assertValidPassword: jest.fn()
   } as unknown as PasswordService;
   const auth = { signInUser: jest.fn().mockResolvedValue(undefined) } as unknown as AuthService;
   const audit = { log: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
@@ -106,7 +107,7 @@ describe("SignupService — invite-based registration", () => {
     it("rejects a missing name before ever touching the DB for the email check", async () => {
       const { svc, query } = makeService({ invitation: INVITE });
       await expect(svc.startInviteRegistration("raw-token", "  ", "supersecret", "1.2.3.4")).rejects.toMatchObject({
-        response: { error: "name is required" }
+        response: { error: "Name is required" }
       });
       expect(query.mock.calls.some((c) => String(c[0]).includes("SELECT id FROM users WHERE email"))).toBe(false);
     });
