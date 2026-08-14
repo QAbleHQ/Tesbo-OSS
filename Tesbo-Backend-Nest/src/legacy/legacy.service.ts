@@ -1719,7 +1719,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
     const project = await this.requireProjectAccess(uid, id);
     await this.deleteProject(id);
-    await this.logProjectActivity(id, uid, "project_archived", "project", id, project.name, {});
+    await this.logProjectActivity(id, uid, "project_deleted", "project", id, project.name, {});
   }
 
   // Read-only: any project member (any role) may list the roster.
@@ -2907,11 +2907,15 @@ export class LegacyService implements OnModuleInit {
 
   async analytics(projectId?: string, organizationId?: string) {
     const scopeValue = projectId ?? organizationId;
-    const projectsWhere = projectId ? " WHERE id = $1" : organizationId ? " WHERE organization_id = $1" : "";
+    const projectsWhere = projectId
+      ? " WHERE id = $1 AND archived_at IS NULL"
+      : organizationId
+        ? " WHERE organization_id = $1 AND archived_at IS NULL"
+        : " WHERE archived_at IS NULL";
     const childWhere = projectId
       ? " WHERE project_id = $1"
       : organizationId
-        ? " WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1)"
+        ? " WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
         : "";
     const values = scopeValue ? [scopeValue] : [];
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
@@ -2925,7 +2929,7 @@ export class LegacyService implements OnModuleInit {
           projectId
             ? " WHERE c.project_id = $1"
             : organizationId
-              ? " WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1)"
+              ? " WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
               : ""
         } GROUP BY e.status`,
         values
