@@ -8,6 +8,34 @@ The compose defaults of `:1010`/`:1011` belong to the open-source stack, not thi
 
 ---
 
+## MANDATORY: the database is always the `DATABASE_URL` in the repo-root `.env`
+
+**Never point anything at a local Postgres, for any reason.** This covers the backend, the migrator,
+the e2e suite's fixture and teardown SQL, and any one-off query typed while debugging. There is no
+exception for "just checking something" or "just validating this SQL".
+
+`docker-compose.yml` defines no postgres service, but a `tesbo-test-manager-private-postgres-1`
+container is still running on `:5442` with its own full, populated copy of the schema. That is what
+makes this rule necessary rather than obvious: anything that reaches for a local database *succeeds*.
+It connects, answers `SELECT 1`, and returns plausible rows — from a database the application has
+never written to. Nothing errors, so nothing gets noticed.
+
+It has already cost a day. The e2e psql helpers ran `psql -U postgres -d tesbo` against that
+container while the API read the `.env` database, so `dbControlAvailable()` reported true, fixtures
+landed where the API could not see them, and 22 tenant-owning suites died in `beforeAll` with
+`Provisioned <user> but the follow-up password login still failed` — a message that reads like an
+authentication bug and is not one.
+
+- Shell access: use the container as **transport only**, never as the database —
+  `docker compose exec -T postgres psql "$DATABASE_URL" -c '...'`.
+- In [e2e/](e2e/): `env.dbUrl` carries this value and [utils/psql.ts](e2e/utils/psql.ts) throws when
+  it is unset, rather than falling back to a local socket. Do not reintroduce that fallback.
+- The `.env` database is **shared infrastructure holding real workspaces**. Read freely; treat every
+  write as a production write, and keep destructive fixtures inside the disposable tenants the suite
+  provisions for that purpose.
+
+---
+
 ## MANDATORY: every feature or file change ships with end-to-end coverage
 
 A change to product behaviour is **not done** until it is proven by automated end-to-end tests in

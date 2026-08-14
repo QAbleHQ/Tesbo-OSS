@@ -19,7 +19,31 @@ import { env } from "./env";
  * unrelated, in a different test on each run. Passing argv removes the failure mode entirely.
  */
 
+/*
+ * The connection string every helper here goes through — always the stack's own DATABASE_URL.
+ *
+ * Refusing to run is the whole point. The compose file defines no postgres service, but an orphan
+ * container is still listening with its own populated copy of the schema, so a `-U postgres -d
+ * tesbo` fallback CONNECTS: it answers SELECT 1, returns plausible rows, and reports a database the
+ * API has never written to. dbControlAvailable() then says true, fixtures land somewhere the API
+ * cannot see, and suites fail later with "Provisioned <user> but the follow-up password login still
+ * failed" — which reads like an auth bug. A hard error here costs one confusing line instead of an
+ * afternoon. See the database rule at the top of the repo's CLAUDE.md.
+ */
+function connectionString(): string {
+  if (env.dbUrl) return env.dbUrl;
+  throw new Error(
+    "e2e psql helpers need the stack's DATABASE_URL and found none. Set DATABASE_URL (or " +
+      "E2E_DATABASE_URL) to the value the backend under test is booted from — the repo-root .env " +
+      "carries it. There is deliberately no local-postgres fallback: it would connect to the wrong " +
+      "database and silently pass.",
+  );
+}
+
 function run(sql: string, extraArgs: string[] = []): string {
+  // The container is transport only — it supplies the psql binary and the network path. What it is
+  // NOT is the database; that always comes from connectionString(). The argv-not-stdin rule above
+  // applies either way.
   return execFileSync(
     "docker",
     [
@@ -30,10 +54,7 @@ function run(sql: string, extraArgs: string[] = []): string {
       "-T",
       env.dbService,
       "psql",
-      "-U",
-      env.dbUser,
-      "-d",
-      env.dbName,
+      connectionString(),
       "-v",
       "ON_ERROR_STOP=1",
       ...extraArgs,

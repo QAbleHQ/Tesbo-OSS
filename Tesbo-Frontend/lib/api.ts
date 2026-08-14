@@ -1288,10 +1288,6 @@ export function getTemplateUrl(projectId: string, format: "csv" | "xlsx"): strin
   return `${API_BASE}/api/projects/${projectId}/testcases/import/template?format=${format}`;
 }
 
-// The import itself has no client here on purpose: ImportTestCasesModal parses the workbook in the
-// browser and creates each row through createTestCase, so there is nothing to POST an upload to.
-// The previewImport/executeImport helpers that used to live here pointed at backend stubs that
-// ignored their body and always answered {imported: 0}; both are gone.
 export interface ImportResult {
   imported: number;
   errors: { row: number; message: string }[];
@@ -1299,6 +1295,43 @@ export interface ImportResult {
   // Suites the import created a new child under — the caller should expand these in the
   // suite tree so imported subfolders aren't left collapsed and undiscovered.
   expandSuiteIds?: string[];
+}
+
+/**
+ * One mapped spreadsheet row, ready to insert. `rowNumber` is the line in the user's file, carried
+ * through so the server can report an error against the row they can actually go and look at.
+ */
+export interface ImportTestCaseRow {
+  rowNumber: number;
+  title: string;
+  description?: string;
+  preconditions?: string;
+  postconditions?: string;
+  steps?: { stepNumber: number; action: string; expectedResult: string }[];
+  testData?: string;
+  priority?: string;
+  severity?: string;
+  type?: string;
+  status?: string;
+  suite?: string;
+  component?: string;
+  // definitionId -> already-coerced value. The modal resolves select labels to option ids before
+  // sending, since it is the side that loaded the option lists to build the mapping UI.
+  customFieldValues?: Record<string, unknown>;
+}
+
+/**
+ * Commits a parsed import in one request.
+ *
+ * The modal used to POST createTestCase per row, which made a large file that many serial round
+ * trips — and had the browser paginate the entire project first just to spot duplicate titles. Both
+ * of those are the server's job now; the browser still parses the workbook and maps the columns.
+ */
+export async function importTestCases(
+  projectId: string,
+  data: { rows: ImportTestCaseRow[]; defaultSuiteId?: string }
+): Promise<ImportResult> {
+  return api<ImportResult>(`/api/projects/${projectId}/testcases/import`, { method: "POST", body: data });
 }
 
 export interface AutomationSession {

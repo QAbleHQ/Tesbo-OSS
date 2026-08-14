@@ -54,11 +54,15 @@ export type RbacTenantKind =
   | "integrations"
   // Wave 9 — Zyra, AI keys, MCP
   | "zyra"
+  | "zyra-ui"
   | "ai-keys"
   // Wave 10 — the tail: notifications, activity, API keys, external report ingest
   | "notifications"
   | "api-keys"
-  | "tesbo-reports";
+  | "tesbo-reports"
+  // Email delivery gating: needs an owner who can send an invite, in a workspace whose pending
+  // invites nobody else clears mid-test (api/invitations.spec.ts clears its own tenant's).
+  | "email-delivery";
 
 /** The three roles legacy.service.ts's normalizeRole() collapses every stored role into. */
 export type RbacRole = "owner" | "manager" | "qa_engineer";

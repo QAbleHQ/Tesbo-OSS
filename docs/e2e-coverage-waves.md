@@ -717,6 +717,17 @@ Beyond [CLAUDE.md](../CLAUDE.md)'s four phases:
   firing after the first assertion fails, and its tail then rejects with "Request context disposed"
   once `afterAll` tears the contexts down — noise that buries the one real failure. Use
   `Array<[string, () => Promise<APIResponse>]>` and await each in turn.
+- **The backend log is the mailbox — and the suite now enforces that it has to be.** Outside
+  production the backend runs `EMAIL_DELIVERY_MODE=log`
+  ([config/email-delivery.policy.ts](../Tesbo-Backend-Nest/src/config/email-delivery.policy.ts)):
+  OTP codes are printed and posted nowhere, and invite/billing email is posted only after Postmark
+  confirms the token belongs to a **sandbox** server, which delivers to nobody. So the OTP
+  log-scraping path in `global-setup.ts` is the normal path again, not a fallback for
+  "no token configured", and reading a code or an invite link means
+  [utils/backend-logs.ts](../e2e/utils/backend-logs.ts) — don't re-implement `docker compose logs`.
+  [api/email-delivery.spec.ts](../e2e/api/email-delivery.spec.ts) fails the run when the stack under
+  test could reach a real mailbox; if it does fail, fix the stack's config, never the assertion. This
+  is the guard against a repeat of the ~1100 bounces that got the Postmark account flagged.
 - Uploads: build bodies in memory with `FormData` + `Buffer`
   ([utils/uploads.ts](../e2e/utils/uploads.ts)). `FilesInterceptor("files", 10)` needs a repeated
   field name, which Playwright's object form of `multipart` cannot express. No committed binaries.

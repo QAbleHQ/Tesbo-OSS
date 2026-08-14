@@ -1,9 +1,10 @@
-import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { request, type APIRequestContext } from "@playwright/test";
+import { waitForOtpInLogs } from "./utils/backend-logs";
 import { env } from "./utils/env";
 import { hashPasswordForSeed } from "./utils/password";
+import { exec } from "./utils/psql";
 
 const AUTH_DIR = path.join(__dirname, ".auth");
 const STATE_PATH = path.join(AUTH_DIR, "state.json");
@@ -109,30 +110,12 @@ async function tryLogin(api: APIRequestContext, account: Account): Promise<boole
   return res.ok();
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Best-effort: returns null instead of throwing so the caller can fall back to a DB seed
-// when the OTP went out as a real email instead of landing in the container's stdout.
+// Best-effort: returns null instead of throwing so the caller can fall back to a DB seed when the
+// OTP went out as a real email instead of landing in the container's stdout. With the backend's
+// default EMAIL_DELIVERY_MODE=log that no longer happens — the code is printed whether or not a
+// Postmark token is configured — so this path, not the DB seed, is what normally runs.
 async function tryScrapeOtpFromDockerLogs(email: string): Promise<string | null> {
-  const pattern = new RegExp(`OTP for ${escapeRegExp(email)}: (\\d{6})`);
-  const deadline = Date.now() + 8_000;
-
-  while (Date.now() < deadline) {
-    try {
-      const logs = execSync(
-        `docker compose -f "${env.dockerComposeFile}" logs ${env.dockerService} --no-color --tail=500`,
-        { encoding: "utf-8" },
-      );
-      const match = logs.match(pattern);
-      if (match) return match[1];
-    } catch {
-      return null; // docker compose / the CLI itself isn't available here — don't keep retrying
-    }
-    await sleep(750);
-  }
-  return null;
+  return waitForOtpInLogs(email);
 }
 
 async function provisionUserViaOtp(api: APIRequestContext, account: Account): Promise<boolean> {
@@ -178,16 +161,20 @@ function provisionUserViaDatabaseSeed(account: Account): void {
     "ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash;";
 
   try {
-    execSync(
-      `docker compose -f "${env.dockerComposeFile}" exec -T ${env.dbService} psql -U ${env.dbUser} -d ${env.dbName} -v ON_ERROR_STOP=1`,
-      { input: sql, encoding: "utf-8" },
-    );
+    // Via the shared helper, so this seed lands in the database the API actually reads. It used to
+    // run `psql -U <user> -d <name>` against the compose postgres container, which on this stack is
+    // an orphan holding its own copy of the schema: the INSERT succeeded, the account was created
+    // somewhere the backend never looks, and the caller's follow-up login failed with credentials it
+    // had just written. That produced "Provisioned <email> but the follow-up password login still
+    // failed" for every tenant seeded this way. See the database rule in the repo's CLAUDE.md.
+    exec(sql);
   } catch (error) {
     throw new Error(
-      `Could not seed ${account.email} directly into Postgres via docker (service "${env.dbService}"). ` +
-        "This local-only fallback requires docker + the compose stack to be reachable from where these " +
-        "tests run. If you're targeting a remote environment, pre-create the user there and set " +
-        `E2E_TEST_EMAIL / E2E_TEST_PASSWORD (or the _B variants), or set E2E_AUTO_PROVISION=false. Underlying error: ${String(error)}`,
+      `Could not seed ${account.email} into the database the stack under test uses. This fallback ` +
+        "runs psql inside the compose stack, so it needs docker reachable from where these tests run " +
+        "and DATABASE_URL set to the backend's own database. If you're targeting a remote " +
+        "environment, pre-create the user there and set E2E_TEST_EMAIL / E2E_TEST_PASSWORD (or the " +
+        `_B variants), or set E2E_AUTO_PROVISION=false. Underlying error: ${String(error)}`,
     );
   }
 }
@@ -354,12 +341,10 @@ async function setUpScreensTenant(): Promise<void> {
 }
 
 function setScreensTenantPlanToPro(organizationId: string): void {
-  execSync(
-    `docker compose -f "${env.dockerComposeFile}" exec -T ${env.dbService} psql -U ${env.dbUser} -d ${env.dbName} -v ON_ERROR_STOP=1`,
-    {
-      input: `UPDATE organizations SET plan = 'pro', subscription_status = 'active', updated_at = now() WHERE id = '${organizationId.replace(/'/g, "''")}';`,
-      encoding: "utf-8",
-    },
+  // Same reason as provisionUserViaDatabaseSeed: this has to reach the backend's own database, or it
+  // upgrades a row the API will never read and the screens suites run against a Launch-plan tenant.
+  exec(
+    `UPDATE organizations SET plan = 'pro', subscription_status = 'active', updated_at = now() WHERE id = '${organizationId.replace(/'/g, "''")}';`,
   );
 }
 

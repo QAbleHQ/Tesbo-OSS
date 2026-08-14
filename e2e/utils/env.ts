@@ -55,17 +55,22 @@ function backendValue(key: string): string {
 }
 
 /*
- * The domain every address this suite invents lives at. It MUST be a real, mail-accepting one.
+ * The domain every address this suite invents lives at. Keep it a real, mail-accepting one.
  *
- * Signup, OTP and invite all send through EmailService, which posts to Postmark whenever
- * POSTMARK_API_TOKEN is set — and the token in the repo-root .env has repeatedly been a LIVE
- * server token. This suite used to mint addresses at `tesbo.local` / `tesbo-e2e.local`, domains
- * that do not exist, so every one of those sends was a real delivery attempt to nowhere: ~1100
- * bounces accumulated on the live server and got the sending account flagged.
+ * History: this suite used to mint addresses at `tesbo.local` / `tesbo-e2e.local`, domains that do
+ * not exist, while a LIVE Postmark token sat in the repo-root .env — so every signup, OTP and invite
+ * was a real delivery attempt to nowhere. ~1100 bounces accumulated and the sending account was
+ * flagged.
  *
- * mailinator.com is the deliberate choice: it accepts every address without bouncing, and its
- * inboxes are readable over a public API, which is what a spec that has to read a real
- * verification code needs. Keep local-parts to [a-z0-9-] so they're valid inbox names.
+ * The backend now refuses to deliver unless it is explicitly in EMAIL_DELIVERY_MODE=live against a
+ * Live Postmark server (see Tesbo-Backend-Nest/src/config/email-delivery.policy.ts, and the guard
+ * spec in e2e/api/email-delivery.spec.ts that fails the run if this stack could email real people).
+ * That, not this domain, is what makes a run bounce-proof.
+ *
+ * mailinator.com stays the default anyway, as the second line of defence for anything that reaches
+ * a mail server despite the above — it accepts every address without bouncing, and its inboxes are
+ * readable over a public API if a spec ever does need to read a real message. Keep local-parts to
+ * [a-z0-9-] so they remain valid inbox names.
  *
  * Note that Mailinator inboxes are PUBLIC. That's fine for throwaway tenants on a local stack;
  * don't point this at a domain whose mail matters, and don't rely on these addresses being
@@ -204,7 +209,22 @@ export const env = {
   dockerComposeFile:
     process.env.E2E_DOCKER_COMPOSE_FILE ?? path.resolve(__dirname, "../../docker-compose.yml"),
   dockerService: process.env.E2E_DOCKER_SERVICE ?? "backend",
+  // Only the container that supplies the psql binary and the network path. It is never the database
+  // itself — see dbUrl.
   dbService: process.env.E2E_DB_SERVICE ?? "postgres",
-  dbUser: process.env.E2E_DB_USER ?? process.env.POSTGRES_USER ?? "postgres",
-  dbName: process.env.E2E_DB_NAME ?? process.env.POSTGRES_DB ?? "tesbo",
+  /*
+   * The one database this suite is allowed to touch: whatever DATABASE_URL the stack under test is
+   * booted from.
+   *
+   * There is deliberately no E2E_DB_USER / E2E_DB_NAME pair any more. Those fed a `psql -U postgres
+   * -d tesbo` call against the compose postgres container, which on this stack is an orphan holding
+   * its own unrelated copy of the schema — so it connected, answered SELECT 1, and served a
+   * database the API had never written to. dbControlAvailable() reported true, fixtures landed
+   * where the API could not see them, and suites failed on assertions about rows that had genuinely
+   * been inserted, into the wrong server. Removing the pair removes the fallback that made that
+   * reachable; psql.ts throws when this is unset rather than guessing.
+   *
+   * The repo's CLAUDE.md carries this as a standing rule: no local database, for any reason.
+   */
+  dbUrl: backendValue("DATABASE_URL"),
 };

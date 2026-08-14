@@ -2,13 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  createSuite,
-  createTestCase,
   getTemplateUrl,
-  listTestCases,
-  listSuites,
+  importTestCases,
   listCustomFieldDefinitions,
   type ImportResult,
+  type ImportTestCaseRow,
   type CustomFieldDefinition,
 } from "@/lib/api";
 import { validateCustomFieldValue } from "@/components/customFields/customFieldTypes";
@@ -100,8 +98,6 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
   }, [open, projectId, reset]);
 
   const normalizeHeader = useCallback((value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ""), []);
-  const normalizeSuiteName = useCallback((value: string) => value.trim().replace(/\s+/g, " ").toLowerCase(), []);
-  const normalizeTitle = useCallback((value: string) => value.trim().replace(/\s+/g, " ").toLowerCase(), []);
 
   const autoMap = useCallback((headers: string[]) => {
     const map: Record<string, number> = {};
@@ -289,80 +285,20 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
     setImportError(null);
     try {
       const activeSheet = preview.sheets.find((sheet) => sheet.name === selectedSheetName) || preview.sheets[0];
-      const errors: { row: number; message: string }[] = [];
-      let imported = 0;
-      const existingTitles = new Set<string>();
-      let offset = 0;
-      const limit = 500;
-      while (true) {
-        const { list, total } = await listTestCases(projectId, { limit, offset });
-        for (const testcase of list) {
-          existingTitles.add(normalizeTitle(testcase.title));
-        }
-        offset += list.length;
-        if (list.length === 0 || offset >= total) break;
-      }
-      const importTitles = new Set<string>();
-      const suiteByName = new Map<string, string>();
-      // Suites a new child got created under during this run — the caller expands these in
-      // the suite tree afterward so an imported subfolder isn't left collapsed and unnoticed.
-      const expandSuiteIds = new Set<string>();
-      const suiteKey = (name: string, parentId: string | undefined) => `${parentId ?? "root"}::${normalizeSuiteName(name)}`;
-      if (mapping.suite != null) {
-        const existingSuites = await listSuites(projectId);
-        for (const suite of existingSuites) {
-          suiteByName.set(suiteKey(suite.name, suite.parentId ?? undefined), suite.id);
-        }
-      }
-      const resolveSuiteId = async (suiteName: string, parentId: string | undefined) => {
-        const normalized = normalizeSuiteName(suiteName);
-        if (!normalized) return parentId;
-        const cacheKey = suiteKey(suiteName, parentId);
-        const existingSuiteId = suiteByName.get(cacheKey);
-        if (existingSuiteId) return existingSuiteId;
-        const suite = await createSuite(projectId, { name: suiteName.trim(), parentId });
-        suiteByName.set(cacheKey, suite.id);
-        if (parentId) expandSuiteIds.add(parentId);
-        return suite.id;
-      };
-      // "Suite Name" resolves the top-level suite; "Component Name" (when mapped)
-      // resolves/creates a child suite (subfolder) nested under it. A row that leaves "Suite
-      // Name" blank falls back to whatever suite the user was browsing when they opened
-      // Import (defaultSuiteId) instead of dropping the row at the root — matching how "Add
-      // test case" already defaults to the currently open suite.
-      const resolveTestCaseSuiteId = async (suiteName: string, componentName: string) => {
-        if (!suiteName) {
-          if (!defaultSuiteId) return undefined;
-          if (!componentName) return defaultSuiteId;
-          expandSuiteIds.add(defaultSuiteId);
-          return resolveSuiteId(componentName, defaultSuiteId);
-        }
-        let suiteId = await resolveSuiteId(suiteName, undefined);
-        if (componentName) {
-          suiteId = await resolveSuiteId(componentName, suiteId);
-        }
-        return suiteId;
-      };
+      // Custom field cells are the one thing still checked here: the field types and select option
+      // labels were loaded in this component to build the mapping UI, so this is the side that can
+      // name the offending field in the message. Everything else — the required title, both
+      // duplicate checks, suite creation and the inserts — is decided in the one request below.
+      const localErrors: { row: number; message: string }[] = [];
+      const rows: ImportTestCaseRow[] = [];
+
       for (const [index, row] of activeSheet.rows.entries()) {
+        // The line the user sees in their own spreadsheet: past the header, and 1-based.
+        const rowNumber = activeSheet.headerRowIndex + index + 2;
         const valueFor = (field: string) => {
           const idx = mapping[field];
           return idx != null && idx >= 0 && idx < row.length ? String(row[idx] || "").trim() : "";
         };
-        const title = valueFor("title");
-        if (!title) {
-          errors.push({ row: activeSheet.headerRowIndex + index + 2, message: "Title is required" });
-          continue;
-        }
-        const normalizedTitle = normalizeTitle(title);
-        if (existingTitles.has(normalizedTitle)) {
-          errors.push({ row: activeSheet.headerRowIndex + index + 2, message: "Skipped duplicate title: already exists in this project" });
-          continue;
-        }
-        if (importTitles.has(normalizedTitle)) {
-          errors.push({ row: activeSheet.headerRowIndex + index + 2, message: "Skipped duplicate title: repeated in this import file" });
-          continue;
-        }
-        importTitles.add(normalizedTitle);
 
         const customFieldValues: Record<string, unknown> = {};
         let customFieldRowError: string | null = null;
@@ -382,7 +318,7 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
           }
         }
         if (customFieldRowError) {
-          errors.push({ row: activeSheet.headerRowIndex + index + 2, message: customFieldRowError });
+          localErrors.push({ row: rowNumber, message: customFieldRowError });
           continue;
         }
 
@@ -400,32 +336,39 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
               };
             }).filter((step) => step.action)
           : [];
-        try {
-          const suiteId = await resolveTestCaseSuiteId(valueFor("suite"), valueFor("component"));
-          await createTestCase(projectId, {
-            title,
-            description: valueFor("description"),
-            preconditions: valueFor("preconditions"),
-            postconditions: valueFor("postconditions"),
-            steps,
-            testData: valueFor("testData"),
-            priority: valueFor("priority") || "P2",
-            severity: valueFor("severity") || undefined,
-            type: valueFor("type") || "Functional",
-            status: valueFor("status") || "Draft",
-            component: valueFor("component") || undefined,
-            suiteId,
-            customFieldValues,
-          });
-          imported += 1;
-        } catch (err) {
-          errors.push({
-            row: activeSheet.headerRowIndex + index + 2,
-            message: err instanceof Error ? err.message : "Failed to import row",
-          });
-        }
+
+        rows.push({
+          rowNumber,
+          title: valueFor("title"),
+          description: valueFor("description"),
+          preconditions: valueFor("preconditions"),
+          postconditions: valueFor("postconditions"),
+          steps,
+          testData: valueFor("testData"),
+          priority: valueFor("priority") || "P2",
+          severity: valueFor("severity") || undefined,
+          type: valueFor("type") || "Functional",
+          status: valueFor("status") || "Draft",
+          suite: valueFor("suite"),
+          component: valueFor("component") || undefined,
+          customFieldValues,
+        });
       }
-      const res = { imported, errors, total: activeSheet.totalRows, expandSuiteIds: Array.from(expandSuiteIds) };
+
+      // Skipped rather than sent when every row was rejected above — the endpoint refuses an empty
+      // batch, and there is nothing left for it to do anyway.
+      const server = rows.length
+        ? await importTestCases(projectId, { rows, defaultSuiteId })
+        : { imported: 0, errors: [] as { row: number; message: string }[], expandSuiteIds: [] as string[] };
+
+      const res: ImportResult = {
+        imported: server.imported,
+        // The file's row count, not the batch's: rows rejected here never reached the server, and
+        // the result screen reads "N of M total rows in the file".
+        total: activeSheet.totalRows,
+        errors: [...localErrors, ...server.errors].sort((a, b) => a.row - b.row),
+        expandSuiteIds: server.expandSuiteIds ?? [],
+      };
       setResult(res);
       setStep("result");
       onImported(res);

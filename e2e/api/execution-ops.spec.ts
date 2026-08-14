@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
-import { exec, literal, scalar } from "../utils/psql";
+import { column, exec, literal, scalar } from "../utils/psql";
 import {
   anonymousContext,
   loginAs,
@@ -543,5 +543,126 @@ test.describe("execution bulk operations, schedules and share links", () => {
     // And the run is still there, under its own name.
     expect(scalar(`SELECT COUNT(*) FROM cycles WHERE id = ${literal(cycleId)};`)).toBe("1");
     expect(scalar(`SELECT name FROM cycles WHERE id = ${literal(cycleId)};`)).not.toBe("renamed by an outsider");
+  });
+
+  // ─── Adding a large selection to a run ────────────────────────────────────
+
+  /*
+   * The production incident this covers: a "select all" on a project with a couple of thousand cases
+   * POSTed one request that the backend served with three sequential round trips per case. It ran
+   * for minutes, Cloudflare cut it off at 100s with a 524, and the rows already committed stayed in
+   * the run.
+   *
+   * Seeded through psql rather than the API — the point is the size of the ADD, and paying 250
+   * sequential POSTs to set it up would dwarf the thing under test. This suite owns a disposable
+   * tenant, which is the only place bulk-seeding like this is allowed.
+   */
+  test("EXO-E-01 a large selection is added completely, and fast enough not to hit a proxy timeout", async () => {
+    const BATCH = 250;
+    const cycle = await asOwner.post(`/api/projects/${tenant!.mainProjectId}/cycles`, {
+      data: { name: stamp("bulk run") },
+      failOnStatusCode: false,
+    });
+    expect(cycle.status()).toBe(201);
+    const cycleId = (await cycle.json()).id;
+
+    exec(
+      `INSERT INTO testcases (project_id, external_id, title)
+       SELECT ${literal(tenant!.mainProjectId)}, 'E2EBULK-' || g, 'E2E ExecOps bulk ' || lpad(g::text, 4, '0')
+         FROM generate_series(1, ${BATCH}) AS g;`,
+    );
+    const testcaseIds = column(
+      `SELECT id FROM testcases WHERE project_id = ${literal(tenant!.mainProjectId)} ` +
+        "AND title LIKE 'E2E ExecOps bulk %' ORDER BY title;",
+    );
+    expect(testcaseIds, "seeding the bulk test cases").toHaveLength(BATCH);
+
+    const started = Date.now();
+    const res = await asOwner.post(`/api/cycles/${cycleId}/testcases`, {
+      data: { testcaseIds },
+      failOnStatusCode: false,
+    });
+    const elapsed = Date.now() - started;
+
+    expect(res.status(), `adding ${BATCH} cases answered ${res.status()}: ${await res.text()}`).toBeLessThan(400);
+
+    // Completeness first — the half-imported run is the symptom users actually reported.
+    expect(
+      scalar(`SELECT COUNT(*) FROM cycle_items WHERE cycle_id = ${literal(cycleId)};`),
+      "the run did not receive the whole selection",
+    ).toBe(String(BATCH));
+    expect(
+      scalar(
+        "SELECT COUNT(*) FROM executions e JOIN cycle_items ci ON ci.id = e.cycle_item_id " +
+          `WHERE ci.cycle_id = ${literal(cycleId)};`,
+      ),
+      "some cycle items were left without an execution",
+    ).toBe(String(BATCH));
+
+    // Ordering, over the whole batch. The rows are written by one statement now, so they share a
+    // created_at and `position` is the only thing carrying the caller's order — a regression there
+    // would leave the run's list shuffled. Asserted here rather than in cycles.spec.ts because these
+    // 250 fixtures cost one INSERT instead of 250 API round trips.
+    expect(
+      column(
+        `SELECT testcase_id FROM cycle_items WHERE cycle_id = ${literal(cycleId)} ORDER BY position, created_at;`,
+      ),
+      "the run's order does not match the order the cases were sent in",
+    ).toEqual(testcaseIds);
+
+    /*
+     * A generous ceiling, not a benchmark. The add is one statement now, so this lands in well under
+     * a second against a local database and a couple of seconds against a hosted one. The old
+     * per-case loop needed 3 x 250 = 750 sequential round trips, which blows past 30s on anything
+     * with real network latency — the condition that produced the 524. Widening this to make a red
+     * run green would be re-admitting exactly that bug.
+     */
+    expect(elapsed, `adding ${BATCH} cases took ${elapsed}ms`).toBeLessThan(30_000);
+  });
+
+  test("EXO-E-02 re-adding a large selection after a partial import does not duplicate it", async () => {
+    const BATCH = 40;
+    const cycle = await asOwner.post(`/api/projects/${tenant!.mainProjectId}/cycles`, {
+      data: { name: stamp("retry run") },
+      failOnStatusCode: false,
+    });
+    const cycleId = (await cycle.json()).id;
+
+    exec(
+      `INSERT INTO testcases (project_id, external_id, title)
+       SELECT ${literal(tenant!.mainProjectId)}, 'E2ERETRY-' || g, 'E2E ExecOps retry ' || lpad(g::text, 4, '0')
+         FROM generate_series(1, ${BATCH}) AS g;`,
+    );
+    const testcaseIds = column(
+      `SELECT id FROM testcases WHERE project_id = ${literal(tenant!.mainProjectId)} ` +
+        "AND title LIKE 'E2E ExecOps retry %' ORDER BY title;",
+    );
+
+    // Stand in for the partial import a timed-out request leaves behind: the first half is already
+    // in the run when the user hits "add" again with the full selection.
+    await asOwner.post(`/api/cycles/${cycleId}/testcases`, {
+      data: { testcaseIds: testcaseIds.slice(0, BATCH / 2) },
+      failOnStatusCode: false,
+    });
+    expect(scalar(`SELECT COUNT(*) FROM cycle_items WHERE cycle_id = ${literal(cycleId)};`)).toBe(String(BATCH / 2));
+
+    const retry = await asOwner.post(`/api/cycles/${cycleId}/testcases`, {
+      data: { testcaseIds },
+      failOnStatusCode: false,
+    });
+    expect(retry.status()).toBeLessThan(400);
+
+    // The retry completes the run instead of doubling the half that was already there.
+    expect(
+      scalar(`SELECT COUNT(*) FROM cycle_items WHERE cycle_id = ${literal(cycleId)};`),
+      "retrying after a partial import duplicated the cases that had already landed",
+    ).toBe(String(BATCH));
+    expect(
+      scalar(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM cycle_items WHERE cycle_id = " +
+          `${literal(cycleId)} GROUP BY testcase_id HAVING COUNT(*) > 1) d;`,
+      ),
+      "the run holds the same test case more than once",
+    ).toBe("0");
   });
 });

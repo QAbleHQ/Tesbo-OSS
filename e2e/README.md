@@ -33,8 +33,9 @@ npm run report             # open the last HTML report
 
 ## How auth works in these tests
 
-There's no API endpoint that returns a signup OTP — in dev (no `POSTMARK_API_TOKEN`
-configured) the code is only printed to the backend container's stdout. So:
+There's no API endpoint that returns a signup OTP. Outside production the backend runs with
+`EMAIL_DELIVERY_MODE=log` (the default), which prints the code to the backend container's stdout and
+never emails it — whether or not a `POSTMARK_API_TOKEN` is configured. So:
 
 - `global-setup.ts` runs once before any test. It first tries `POST
   /api/auth/password/login` with the configured smoke-test credentials

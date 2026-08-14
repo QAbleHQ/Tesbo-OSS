@@ -693,6 +693,34 @@ function KnowledgeBasePageInner() {
     }
   }
 
+  /*
+   * Deleting a folder is destructive and cascades, so the confirmation has to describe what will
+   * actually happen to THIS folder.
+   *
+   * Both delete paths used to be wrong, in opposite directions: the folder tree claimed "this folder
+   * contains documents/files" unconditionally, so emptying a folder and deleting it still warned
+   * about contents that weren't there; and the item table's row menu said only "it will be moved to
+   * trash", so deleting a full folder never mentioned that everything inside went with it. Asking
+   * the API what is in the folder makes one truthful message serve both.
+   *
+   * A failed lookup falls back to the cautious wording rather than the reassuring one — if we can't
+   * tell, the user should be warned, not soothed.
+   */
+  async function confirmFolderDelete(folderId: string, label: string): Promise<boolean> {
+    let hasContents = true;
+    try {
+      const contents = await listKnowledgeFolderItems(projectId, folderId);
+      hasContents = (contents.total ?? contents.items?.length ?? 0) > 0;
+    } catch {
+      hasContents = true;
+    }
+    return window.confirm(
+      hasContents
+        ? `Deleting "${label}" will also move all its contents to trash. Continue?`
+        : `Delete "${label}"? It will be moved to trash.`,
+    );
+  }
+
   async function handleFolderAction(action: FolderAction, folder: KnowledgeFolderTreeNode) {
     if (action === "create-subfolder") {
       setCreateFolderParent(folder.id);
@@ -702,7 +730,7 @@ function KnowledgeBasePageInner() {
     } else if (action === "move") {
       setMoveTarget({ kind: "folder", id: folder.id, excludeId: folder.id });
     } else if (action === "delete") {
-      if (!window.confirm(`This folder contains documents/files. Deleting "${folder.name}" will also move all contents to trash. Continue?`)) return;
+      if (!(await confirmFolderDelete(folder.id, folder.name))) return;
       setError(null);
       try {
         await deleteKnowledgeFolder(projectId, folder.id);
@@ -790,7 +818,11 @@ function KnowledgeBasePageInner() {
 
   async function handleDeleteItem(item: KnowledgeItem) {
     const label = itemLabel(item);
-    if (!window.confirm(`Delete "${label}"? It will be moved to trash.`)) return;
+    const confirmed =
+      item.type === "folder"
+        ? await confirmFolderDelete(item.id, label)
+        : window.confirm(`Delete "${label}"? It will be moved to trash.`);
+    if (!confirmed) return;
     setError(null);
     try {
       if (item.type === "document") await deleteKnowledgeDocument(projectId, item.id);

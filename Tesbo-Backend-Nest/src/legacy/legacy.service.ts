@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, forwardRef, HttpException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -20,7 +20,7 @@ import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
 import { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import { PlanLimitsService } from "../plan-limits/plan-limits.service";
-import { CustomFieldsService } from "../custom-fields/custom-fields.service";
+import { CustomFieldsService, CustomFieldWriteContext } from "../custom-fields/custom-fields.service";
 import { CustomFieldDefinitionDto } from "../custom-fields/custom-fields.types";
 
 type Body = Record<string, any>;
@@ -44,6 +44,63 @@ function normalizeTestcaseIdPrefix(value: unknown): string {
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "")
     .slice(0, 3);
+}
+
+/**
+ * Collapses a title or suite name to the form the import compares on: trimmed, inner runs of
+ * whitespace squeezed to one space, lowercased.
+ *
+ * Deliberately mirrors normalizeTitle/normalizeSuiteName in
+ * Tesbo-Frontend/components/ImportTestCasesModal.tsx character for character. The browser used to
+ * own both comparisons; it still shows the preview, so if the two ever drift a row would look like
+ * a duplicate on one side and a fresh title on the other.
+ */
+function normalizeImportName(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+/** Cache key for a suite, which an import identifies by name within its parent rather than by id. */
+function importSuiteKey(name: string, parentId: string | null): string {
+  return `${parentId ?? "root"}::${normalizeImportName(name)}`;
+}
+
+/** One spreadsheet row that passed validation, with its column values settled and its suite resolved. */
+interface PreparedImportRow {
+  rowNumber: number;
+  title: string;
+  description: string;
+  preconditions: string;
+  postconditions: string;
+  steps: unknown[];
+  testData: string;
+  priority: string;
+  severity: string | null;
+  type: string;
+  status: string;
+  /** Stored on the test case itself, and also the name of the subfolder it goes in. */
+  component: string | null;
+  suiteName: string;
+  componentName: string;
+  customFieldValues: Body;
+  /** The suite the component nests under: the row's own suite, or the folder the user had open. */
+  parentSuiteId: string | null;
+  /** Where the test case actually lands — the component's suite when it names one, else the parent. */
+  suiteId: string | null;
+}
+
+/** The parts of an import that are fixed for the whole request, threaded through its helpers. */
+interface ImportContext {
+  projectId: string;
+  uid: string;
+  organizationId: string;
+  idPrefix: string;
+  defaultSuiteId: string | null;
+  suiteIdByKey: Map<string, string>;
+  expandSuiteIds: Set<string>;
+  customFieldContext: CustomFieldWriteContext | null;
 }
 
 function parseSettings(raw: unknown): Body {
@@ -2045,6 +2102,28 @@ export class LegacyService implements OnModuleInit {
     await this.logProjectActivity(projectId, uid, "project_member_removed", "project_member", targetUserId, target.rows[0].email, { role: targetRole });
   }
 
+  /**
+   * Resolves a suite and confirms the caller may reach the project it belongs to.
+   *
+   * /api/suites/:suiteId is addressed by suite id with no project in the URL, so PATCH and DELETE
+   * have to resolve the project themselves. They did not, which meant anyone who could guess a suite
+   * id could rename it — or delete it, taking its test cases with it when mode=deleteTestcases.
+   */
+  private async requireSuiteAccess(userId: string | null | undefined, suiteId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    // Same answer for a malformed id as for one that doesn't exist — see requireProjectAccess.
+    if (!isUuid(suiteId)) throw new NotFoundException({ error: "Suite not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM suites WHERE id = $1", [suiteId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Suite not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  async listSuitesForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listSuites(projectId);
+  }
+
   async listSuites(projectId: string) {
     const res = await this.db.query(
       `SELECT s.id, s.parent_id, s.name, s.position, s.created_at, COUNT(t.id)::int AS test_case_count
@@ -2056,6 +2135,18 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  async createSuiteForUser(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.createSuite(projectId, body);
+  }
+
+  /**
+   * The insert itself, without a caller check.
+   *
+   * Kept unguarded for the three callers that have already decided access: the MCP tool (whose API
+   * token is bound to one project, see McpService), the Zyra chat flow, and CSV import — all of which
+   * authorized before they got here. Route traffic goes through createSuiteForUser.
+   */
   async createSuite(projectId: string, body: Body) {
     const name = String(body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "name is required" });
@@ -2066,19 +2157,32 @@ export class LegacyService implements OnModuleInit {
     return { ...toCamel(res.rows[0]), testCaseCount: 0 };
   }
 
-  async updateSuite(suiteId: string, body: Body) {
+  async updateSuite(userId: string | null | undefined, suiteId: string, body: Body) {
+    await this.requireSuiteAccess(userId, suiteId);
     await this.db.query(
       "UPDATE suites SET name = COALESCE($2, name), parent_id = $3, position = COALESCE($4, position), updated_at = now() WHERE id = $1",
       [suiteId, body.name ?? null, body.parentId ?? null, body.position ?? null]
     );
   }
 
-  async deleteSuite(suiteId: string, mode = "moveToDefault") {
+  async deleteSuite(userId: string | null | undefined, suiteId: string, mode = "moveToDefault") {
+    await this.requireSuiteAccess(userId, suiteId);
     if (mode === "deleteTestcases") await this.db.query("DELETE FROM testcases WHERE suite_id = $1", [suiteId]);
     else await this.db.query("UPDATE testcases SET suite_id = NULL WHERE suite_id = $1", [suiteId]);
     await this.db.query("DELETE FROM suites WHERE id = $1", [suiteId]);
   }
 
+  async listTestCasesForUser(userId: string | null | undefined, projectId: string, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listTestCases(projectId, query);
+  }
+
+  /**
+   * The rows themselves, without a caller check.
+   *
+   * Kept unguarded for the MCP tool, whose API token is already bound to a single project. Every row
+   * carries the project's custom field values, so route traffic goes through listTestCasesForUser.
+   */
   async listTestCases(projectId: string, query: Body) {
     const limit = pageNumber(query.limit, 100, 0, 500);
     const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
@@ -2204,16 +2308,118 @@ export class LegacyService implements OnModuleInit {
     });
   }
 
+  /**
+   * One test case, scoped to a project the caller can reach.
+   *
+   * The project id is not redundant with the test case id: it is what makes this answerable without
+   * a second round trip, and it means a case belonging to another project is "not found" here rather
+   * than readable by whoever guesses its uuid.
+   */
+  async getTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
+    const res = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL", [
+      testcaseId,
+      projectId
+    ]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+    return toCamel(res.rows[0]);
+  }
+
+  /**
+   * One test case by id alone, without a caller check.
+   *
+   * Kept unguarded for the Zyra chat flow, which re-reads a row it has just written through an
+   * already-authorized path. Route traffic goes through getTestCaseForUser.
+   */
   async getTestCase(id: string) {
     const res = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     return toCamel(res.rows[0]);
   }
 
+  /**
+   * Confirms the caller may reach this project AND that the case actually belongs to it.
+   *
+   * Both halves matter. requireUser alone — which is all these handlers used to do — lets any signed-in
+   * user edit or delete another tenant's case by uuid. Authorizing only the project in the URL is not
+   * enough either: the case id is separate input, so a caller could pass their own project alongside
+   * someone else's case id and have the check pass.
+   */
+  private async requireTestCaseAccess(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
+    const res = await this.db.query("SELECT id FROM testcases WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL", [
+      testcaseId,
+      projectId
+    ]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+  }
+
+  async createTestCaseForUser(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.createTestCase(projectId, userId, body);
+  }
+
+  async updateTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string, body: Body) {
+    await this.requireTestCaseAccess(userId, projectId, testcaseId);
+    return this.updateTestCase(testcaseId, userId, body);
+  }
+
+  async duplicateTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireTestCaseAccess(userId, projectId, testcaseId);
+    return this.duplicateTestCase(testcaseId, userId);
+  }
+
+  async deleteTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireTestCaseAccess(userId, projectId, testcaseId);
+    return this.deleteTestCase(testcaseId, userId);
+  }
+
+  /**
+   * The insert itself, without a project check.
+   *
+   * Kept unguarded for the callers that have already decided access: the MCP tool (token bound to one
+   * project), the Zyra chat flow, and CSV import. Route traffic goes through createTestCaseForUser.
+   */
   async createTestCase(projectId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
-    const externalId = body.externalId || (await this.nextExternalId(projectId, body.testcaseIdPrefix));
+    // nextExternalId reads MAX(trailing number) + 1 in a separate statement from the INSERT below,
+    // so two creates racing in the same project both read the same MAX and both try to write
+    // "<KEY>-TC-<n>". idx_testcases_project_external then rejects the loser, and the caller got a
+    // bare 500 — reachable by two people adding cases at once, a double-clicked Save, or an import
+    // running while someone types. Retry on exactly that collision, recomputing the id each time,
+    // which is the same shape insertProjectWithUniqueKey already uses for project keys.
+    //
+    // Only when the id was allocated for the caller: an externalId they supplied themselves that
+    // collides is their input to correct, and silently renumbering it would lose what they asked for.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.insertTestCase(projectId, uid, body);
+      } catch (error) {
+        const collided =
+          !body.externalId &&
+          (error as { code?: string })?.code === "23505" &&
+          String((error as { constraint?: string })?.constraint || "") === "idx_testcases_project_external";
+        if (!collided || attempt >= 5) throw error;
+      }
+    }
+  }
+
+  private async insertTestCase(projectId: string, uid: string, body: Body) {
     const created = await this.db.transaction(async (client) => {
+      // Serialize id allocation per project. Reading MAX(n)+1 and inserting are two statements, so
+      // without this every concurrent create in a project reads the same MAX and all but one lose to
+      // idx_testcases_project_external. Retrying alone does not converge: the losers re-read the same
+      // MAX together and collide again, which is why this lock — not the retry above — is the fix.
+      //
+      // Transaction-scoped, so it releases on COMMIT or ROLLBACK with no unlock to leak, and keyed on
+      // the project so creates in different projects never wait on each other. Skipped entirely when
+      // the caller pinned their own externalId, since nothing is being allocated.
+      if (!body.externalId) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`testcase-external-id:${projectId}`]);
+      }
+      const externalId = body.externalId || (await this.nextExternalId(projectId, body.testcaseIdPrefix, client));
       const res = await client.query(
         `INSERT INTO testcases
          (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
@@ -2260,6 +2466,479 @@ export class LegacyService implements OnModuleInit {
     });
     await this.logProjectActivity(projectId, uid, "testcase_created", "testcase", created.id, `${created.external_id} - ${created.title}`, { after: toCamel(created) });
     return toCamel(created);
+  }
+
+  /**
+   * Imports a whole file's worth of test cases in a fixed handful of database round trips.
+   *
+   * Each row used to be its own POST /testcases from the browser, and each of those ran a dozen
+   * statements of its own — the access check, the id allocation, the insert, the custom field writes,
+   * an activity log entry. On this deployment that is essentially the entire cost of the feature: the
+   * database is remote and answers a statement in roughly 290ms, against the ~3ms it spends actually
+   * running one, so a 500-row file spent something close to half an hour waiting on the network to
+   * repeat work that never varied per row.
+   *
+   * So nothing here is per row. Everything checkable without the database is checked in memory first,
+   * and what survives is written with a set-based statement per kind of thing: the suites, the test
+   * cases, their custom field values and the activity log entries each go in as one
+   * jsonb_to_recordset insert no matter how many rows the chunk holds.
+   *
+   * Row-level reporting is unchanged — a row that cannot be imported is named in `errors` and every
+   * other row still lands. Validation catches that up front. In the rare case where the batch insert
+   * itself is rejected, the chunk is rolled back and replayed a row at a time, so the responsible row
+   * is named instead of taking its thousand neighbours down with it.
+   */
+  async importTestCases(userId: string | null | undefined, projectId: string, body: Body) {
+    // Refuses outright rather than tying up a connection on a file nobody meant to send.
+    const MAX_ROWS = 20000;
+    // Rows per transaction. The statement count per chunk is fixed, so this no longer buys much time;
+    // it bounds how long the per-project id lock is held against other people adding test cases, and
+    // how large a single jsonb payload gets.
+    const CHUNK_SIZE = 1000;
+
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
+
+    const rows: Body[] = Array.isArray(body?.rows) ? body.rows : [];
+    if (!rows.length) throw new BadRequestException({ error: "rows must be a non-empty array" });
+    if (rows.length > MAX_ROWS) {
+      throw new BadRequestException({ error: `An import is limited to ${MAX_ROWS} rows per request.` });
+    }
+
+    // The suite the user had open when they hit Import, used as the parent for rows that leave the
+    // suite column blank. It arrives as client input like everything else, so it is confirmed to be a
+    // suite in THIS project before any row is parented to it.
+    let defaultSuiteId: string | null = null;
+    if (body?.defaultSuiteId) {
+      const candidate = String(body.defaultSuiteId);
+      const owned = isUuid(candidate)
+        ? await this.db.query("SELECT 1 FROM suites WHERE id = $1 AND project_id = $2", [candidate, projectId])
+        : { rows: [] };
+      if (!owned.rows[0]) throw new BadRequestException({ error: "defaultSuiteId is not a suite in this project" });
+      defaultSuiteId = candidate;
+    }
+
+    // One query in place of the client's paginated walk of the entire project, 500 rows per HTTP
+    // request. Titles come back raw and are normalized here rather than in SQL because Postgres's \s
+    // class and JavaScript's do not cover the same code points, and this set has to agree exactly
+    // with the browser's own duplicate preview.
+    const existingTitles = await this.db.query<{ title: string }>(
+      "SELECT title FROM testcases WHERE project_id = $1 AND deleted_at IS NULL",
+      [projectId]
+    );
+    const titlesInProject = new Set(existingTitles.rows.map((row) => normalizeImportName(row.title)));
+    const titlesInFile = new Set<string>();
+
+    const suiteRows = await this.db.query<{ id: string; parent_id: string | null; name: string }>(
+      "SELECT id, parent_id, name FROM suites WHERE project_id = $1",
+      [projectId]
+    );
+    const suiteIdByKey = new Map(suiteRows.rows.map((row) => [importSuiteKey(row.name, row.parent_id), row.id]));
+
+    // Null when the workspace's plan has custom fields switched off, which is the same "silently skip
+    // rather than block the import" answer createTestCase gives through its "skip-if-disabled" mode.
+    const customFieldContext = await this.customFields.loadWriteContext(projectId);
+
+    const settings = parseSettings(project.settings);
+    const idPrefix =
+      normalizeTestcaseIdPrefix(body?.testcaseIdPrefix) ||
+      normalizeTestcaseIdPrefix(settings.testcaseIdPrefix) ||
+      normalizeTestcaseIdPrefix(project.key) ||
+      "TC";
+
+    const errors: { row: number; message: string }[] = [];
+    const expandSuiteIds = new Set<string>();
+    let imported = 0;
+
+    const ctx: ImportContext = {
+      projectId,
+      uid,
+      organizationId: project.organization_id,
+      idPrefix,
+      defaultSuiteId,
+      suiteIdByKey,
+      expandSuiteIds,
+      customFieldContext
+    };
+
+    for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
+      const chunk = rows.slice(start, start + CHUNK_SIZE);
+
+      // Validated before a connection is even opened. None of it needs the database, and a chunk that
+      // turns out to be entirely invalid then costs no round trips at all.
+      const prepared: PreparedImportRow[] = [];
+      for (const [index, raw] of chunk.entries()) {
+        const outcome = this.prepareImportRow(raw, start + index, titlesInProject, titlesInFile, customFieldContext);
+        if (outcome.error) errors.push({ row: outcome.rowNumber, message: outcome.error });
+        else if (outcome.prepared) prepared.push(outcome.prepared);
+      }
+      if (!prepared.length) continue;
+
+      await this.db.transaction(async (client) => {
+        // The same lock createTestCase takes, held once for the chunk instead of once per row. It is
+        // what actually serialises id allocation for a project.
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`testcase-external-id:${projectId}`]);
+        // Re-read per chunk, not once for the import: the lock only lives as long as this
+        // transaction, so another writer can allocate ids between chunks.
+        const maxRes = await client.query<{ n: string }>(
+          "SELECT COALESCE(MAX((regexp_match(external_id, '\\d+$'))[1]::int), 0) AS n FROM testcases WHERE project_id = $1 AND external_id LIKE $2",
+          [projectId, `${idPrefix}-TC-%`]
+        );
+        const startNumber = Number(maxRes.rows[0]?.n || 0) + 1;
+
+        // Both caches are written to while the chunk is being inserted, so they are snapshotted to be
+        // put back if it rolls back — otherwise the replay below would resolve suite names to ids
+        // that the rollback has just taken away.
+        const suiteSnapshot = new Map(ctx.suiteIdByKey);
+        const expandSnapshot = new Set(ctx.expandSuiteIds);
+
+        await client.query("SAVEPOINT import_chunk");
+        try {
+          await this.resolveImportSuites(client, ctx, prepared);
+          const created = await this.insertImportChunk(client, ctx, prepared, startNumber);
+          await client.query("RELEASE SAVEPOINT import_chunk");
+          imported += created;
+        } catch (error) {
+          await client.query("ROLLBACK TO SAVEPOINT import_chunk");
+          await client.query("RELEASE SAVEPOINT import_chunk");
+          ctx.suiteIdByKey.clear();
+          for (const [key, id] of suiteSnapshot) ctx.suiteIdByKey.set(key, id);
+          ctx.expandSuiteIds.clear();
+          for (const id of expandSnapshot) ctx.expandSuiteIds.add(id);
+
+          // A batch insert is all or nothing, so anything that got past validation would otherwise
+          // cost the whole chunk. Replaying a row at a time is slow, but it only happens when
+          // something genuinely unexpected is in the file, and it is the only way to name the row
+          // responsible rather than failing its thousand neighbours alongside it.
+          this.logger.warn(
+            `Import batch of ${prepared.length} rows failed for project ${projectId}, replaying row by row: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          const replay = await this.insertImportRowsIndividually(client, ctx, prepared, startNumber);
+          imported += replay.imported;
+          errors.push(...replay.errors);
+        }
+      });
+    }
+
+    errors.sort((a, b) => a.row - b.row);
+    return { imported, total: rows.length, errors, expandSuiteIds: Array.from(expandSuiteIds) };
+  }
+
+  /**
+   * Everything about one spreadsheet row that can be decided without asking the database.
+   *
+   * Pulled ahead of the inserts on purpose. The batch insert below is all or nothing, so a cell that
+   * Postgres would reject has to be caught here — otherwise it is raised against the whole chunk and
+   * every other row in it pays for the replay needed to work out which cell was at fault.
+   */
+  private prepareImportRow(
+    raw: Body,
+    fallbackIndex: number,
+    titlesInProject: Set<string>,
+    titlesInFile: Set<string>,
+    customFieldContext: CustomFieldWriteContext | null
+  ): { rowNumber: number; error?: string; prepared?: PreparedImportRow } {
+    const reported = Number(raw?.rowNumber);
+    const rowNumber = Number.isFinite(reported) ? reported : fallbackIndex + 1;
+
+    const title = String(raw?.title ?? "").trim();
+    if (!title) return { rowNumber, error: "Title is required" };
+
+    const priority = String(raw?.priority ?? "").trim() || "P2";
+    const severity = String(raw?.severity ?? "").trim() || null;
+    const type = String(raw?.type ?? "").trim() || "Functional";
+    const status = String(raw?.status ?? "").trim() || "Draft";
+    const component = String(raw?.component ?? "").trim() || null;
+    const suiteName = String(raw?.suite ?? "").trim();
+
+    // Mirrors the column widths in the testcases and suites tables. A message naming the field beats
+    // a driver error naming a constraint.
+    const limits: [string, string | null, number][] = [
+      ["Title", title, 512],
+      ["Priority", priority, 8],
+      ["Severity", severity, 32],
+      ["Type", type, 32],
+      ["Status", status, 32],
+      ["Component", component, 255],
+      ["Suite", suiteName, 255]
+    ];
+    for (const [label, value, limit] of limits) {
+      if (value && value.length > limit) {
+        return { rowNumber, error: `${label} is longer than the ${limit} character limit` };
+      }
+    }
+
+    const normalizedTitle = normalizeImportName(title);
+    if (titlesInProject.has(normalizedTitle)) {
+      return { rowNumber, error: "Skipped duplicate title: already exists in this project" };
+    }
+    if (titlesInFile.has(normalizedTitle)) {
+      return { rowNumber, error: "Skipped duplicate title: repeated in this import file" };
+    }
+    // Claimed before the row is known to be importable, matching the browser's original order: a
+    // title that fails for some other reason still counts as spoken for, so a later identical row
+    // reads as a duplicate within the file rather than being attempted a second time.
+    titlesInFile.add(normalizedTitle);
+
+    let customFieldValues: Body = {};
+    if (customFieldContext) {
+      const { normalized, errors } = this.customFields.normalizeValues(raw?.customFieldValues || {}, customFieldContext);
+      if (errors.length) return { rowNumber, error: errors.map((entry) => entry.message).join("; ") };
+      customFieldValues = normalized;
+    }
+
+    return {
+      rowNumber,
+      prepared: {
+        rowNumber,
+        title,
+        description: String(raw?.description ?? ""),
+        preconditions: String(raw?.preconditions ?? ""),
+        postconditions: String(raw?.postconditions ?? ""),
+        steps: Array.isArray(raw?.steps) ? raw.steps : [],
+        testData: String(raw?.testData ?? ""),
+        priority,
+        severity,
+        type,
+        status,
+        component,
+        suiteName,
+        componentName: component ?? "",
+        customFieldValues,
+        parentSuiteId: null,
+        suiteId: null
+      }
+    };
+  }
+
+  /**
+   * Creates every suite the chunk names but does not have yet, in at most two statements, and settles
+   * which suite each row belongs in.
+   *
+   * Import files name suites by name rather than id, and the browser used to create them one POST at
+   * a time as it walked the rows. The whole chunk's names are known up front, so the missing ones go
+   * in one insert per level — the top-level suites first, since the components need their parents to
+   * exist before they can point at them.
+   */
+  private async resolveImportSuites(client: PoolClient, ctx: ImportContext, prepared: PreparedImportRow[]): Promise<void> {
+    const missingTop = new Map<string, string>();
+    for (const row of prepared) {
+      if (!row.suiteName) continue;
+      const key = importSuiteKey(row.suiteName, null);
+      if (!ctx.suiteIdByKey.has(key)) missingTop.set(key, row.suiteName);
+    }
+    if (missingTop.size) {
+      const created = await client.query<{ id: string; name: string }>(
+        `INSERT INTO suites (project_id, parent_id, name, position)
+         SELECT $1, NULL, v.name, 0 FROM jsonb_to_recordset($2::jsonb) AS v(name text)
+         RETURNING id, name`,
+        [ctx.projectId, JSON.stringify(Array.from(missingTop.values(), (name) => ({ name })))]
+      );
+      for (const row of created.rows) ctx.suiteIdByKey.set(importSuiteKey(row.name, null), row.id);
+    }
+
+    const missingChild = new Map<string, { parent_id: string; name: string }>();
+    for (const row of prepared) {
+      row.parentSuiteId = row.suiteName
+        ? ctx.suiteIdByKey.get(importSuiteKey(row.suiteName, null)) ?? null
+        : ctx.defaultSuiteId;
+      if (!row.componentName || !row.parentSuiteId) continue;
+      // A row that names a component but no suite nests under whatever the user had open, and that
+      // folder wants expanding afterwards whether or not the component itself turned out to be new.
+      if (!row.suiteName) ctx.expandSuiteIds.add(row.parentSuiteId);
+      const key = importSuiteKey(row.componentName, row.parentSuiteId);
+      if (!ctx.suiteIdByKey.has(key)) missingChild.set(key, { parent_id: row.parentSuiteId, name: row.componentName });
+    }
+    if (missingChild.size) {
+      const created = await client.query<{ id: string; parent_id: string; name: string }>(
+        `INSERT INTO suites (project_id, parent_id, name, position)
+         SELECT $1, v.parent_id, v.name, 0 FROM jsonb_to_recordset($2::jsonb) AS v(parent_id uuid, name text)
+         RETURNING id, parent_id, name`,
+        [ctx.projectId, JSON.stringify(Array.from(missingChild.values()))]
+      );
+      for (const row of created.rows) {
+        ctx.suiteIdByKey.set(importSuiteKey(row.name, row.parent_id), row.id);
+        ctx.expandSuiteIds.add(row.parent_id);
+      }
+    }
+
+    for (const row of prepared) {
+      row.suiteId =
+        row.componentName && row.parentSuiteId
+          ? ctx.suiteIdByKey.get(importSuiteKey(row.componentName, row.parentSuiteId)) ?? row.parentSuiteId
+          : row.parentSuiteId;
+    }
+  }
+
+  /**
+   * Writes a prepared chunk: the test cases, their custom field values and the activity log, as one
+   * statement each. Returns how many test cases landed.
+   *
+   * Rows are matched back to what came out of the insert by external id rather than by position —
+   * RETURNING makes no promise about ordering, and the ids are what the custom field values and audit
+   * rows have to hang off.
+   */
+  private async insertImportChunk(
+    client: PoolClient,
+    ctx: ImportContext,
+    prepared: PreparedImportRow[],
+    startNumber: number
+  ): Promise<number> {
+    const payload = prepared.map((row, index) => ({
+      external_id: `${ctx.idPrefix}-TC-${startNumber + index}`,
+      suite_id: row.suiteId,
+      title: row.title,
+      description: row.description,
+      preconditions: row.preconditions,
+      postconditions: row.postconditions,
+      steps: row.steps,
+      test_data: row.testData,
+      priority: row.priority,
+      severity: row.severity,
+      type: row.type,
+      status: row.status,
+      component: row.component
+    }));
+
+    const inserted = await client.query<Body>(
+      `INSERT INTO testcases
+         (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps,
+          test_data, priority, severity, type, status, component, created_by, updated_by)
+       SELECT $1, v.suite_id, v.external_id, v.title, v.description, v.preconditions, v.postconditions,
+              v.steps, v.test_data, v.priority, v.severity, v.type, v.status, v.component, $2, $2
+       FROM jsonb_to_recordset($3::jsonb) AS v(
+         external_id text, suite_id uuid, title text, description text, preconditions text,
+         postconditions text, steps jsonb, test_data text, priority text, severity text,
+         type text, status text, component text)
+       RETURNING *`,
+      [ctx.projectId, ctx.uid, JSON.stringify(payload)]
+    );
+
+    const createdByExternalId = new Map(inserted.rows.map((row) => [row.external_id, row]));
+    const auditRows: { action: string; entity_id: string; entity_name: string; diff: Body }[] = inserted.rows.map((row) => ({
+      action: "testcase_created",
+      entity_id: row.id,
+      entity_name: `${row.external_id} - ${row.title}`,
+      diff: { after: toCamel(row) }
+    }));
+
+    const valueRows: { definition_id: string; testcase_id: string; value: unknown }[] = [];
+    if (ctx.customFieldContext) {
+      for (const [index, row] of prepared.entries()) {
+        const created = createdByExternalId.get(payload[index].external_id);
+        if (!created) continue;
+        for (const { definitionId, value } of this.customFields.writableValuesForNewTestCase(row.customFieldValues)) {
+          valueRows.push({ definition_id: definitionId, testcase_id: created.id, value });
+          const definition = ctx.customFieldContext.definitionsById.get(definitionId);
+          auditRows.push({
+            action: "testcase_custom_field_updated",
+            entity_id: created.id,
+            entity_name: `${created.external_id} - ${created.title}`,
+            diff: {
+              fieldId: definitionId,
+              fieldKey: definition?.key,
+              fieldName: definition?.name,
+              before: null,
+              after: value
+            }
+          });
+        }
+      }
+    }
+
+    if (valueRows.length) {
+      await client.query(
+        `INSERT INTO custom_field_values (definition_id, testcase_id, value, created_by, updated_by)
+         SELECT v.definition_id, v.testcase_id, v.value, $1, $1
+         FROM jsonb_to_recordset($2::jsonb) AS v(definition_id uuid, testcase_id uuid, value jsonb)
+         ON CONFLICT (definition_id, testcase_id) DO UPDATE
+           SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+        [ctx.uid, JSON.stringify(valueRows)]
+      );
+    }
+
+    if (auditRows.length) {
+      // Both kinds of entry go in together — one statement for the chunk in place of
+      // logProjectActivity's insert per test case and per changed field.
+      await client.query(
+        `INSERT INTO audit_logs (project_id, actor_id, action, entity_type, entity_id, entity_name, diff, organization_id)
+         SELECT $1, $2, v.action, 'testcase', v.entity_id, v.entity_name, v.diff, $3
+         FROM jsonb_to_recordset($4::jsonb) AS v(action text, entity_id uuid, entity_name text, diff jsonb)`,
+        [ctx.projectId, ctx.uid, ctx.organizationId, JSON.stringify(auditRows)]
+      );
+    }
+
+    return inserted.rowCount ?? inserted.rows.length;
+  }
+
+  /**
+   * The slow path, taken only after a batch insert was rejected: the same rows again, one at a time,
+   * each inside its own SAVEPOINT so the failure can be pinned on the row that caused it.
+   *
+   * A chunk of one goes through exactly the same code as a chunk of a thousand, which is the point —
+   * there is no second implementation of the insert to keep in step with the first.
+   */
+  private async insertImportRowsIndividually(
+    client: PoolClient,
+    ctx: ImportContext,
+    prepared: PreparedImportRow[],
+    startNumber: number
+  ): Promise<{ imported: number; errors: { row: number; message: string }[] }> {
+    const errors: { row: number; message: string }[] = [];
+    let imported = 0;
+    let nextNumber = startNumber;
+
+    for (const row of prepared) {
+      const suiteSnapshot = new Map(ctx.suiteIdByKey);
+      const expandSnapshot = new Set(ctx.expandSuiteIds);
+      await client.query("SAVEPOINT import_row");
+      try {
+        await this.resolveImportSuites(client, ctx, [row]);
+        await this.insertImportChunk(client, ctx, [row], nextNumber);
+        await client.query("RELEASE SAVEPOINT import_row");
+        // Advanced only once the row is safely in, so a rejected row leaves no gap in the numbering.
+        nextNumber += 1;
+        imported += 1;
+      } catch (error) {
+        await client.query("ROLLBACK TO SAVEPOINT import_row");
+        await client.query("RELEASE SAVEPOINT import_row");
+        ctx.suiteIdByKey.clear();
+        for (const [key, id] of suiteSnapshot) ctx.suiteIdByKey.set(key, id);
+        ctx.expandSuiteIds.clear();
+        for (const id of expandSnapshot) ctx.expandSuiteIds.add(id);
+        errors.push({ row: row.rowNumber, message: this.importRowErrorMessage(ctx.projectId, row.rowNumber, error) });
+      }
+    }
+
+    return { imported, errors };
+  }
+
+  /**
+   * The one line the import result shows against a row that failed.
+   *
+   * Validation rejections carry a message written for the person importing, so those are passed
+   * through. Anything else is a driver or constraint error whose text describes our schema, not their
+   * spreadsheet — it gets logged and reported generically rather than shipped to the browser.
+   */
+  private importRowErrorMessage(projectId: string, rowNumber: number, error: unknown): string {
+    if (error instanceof HttpException) {
+      const response = error.getResponse() as
+        | string
+        | { error?: string; message?: unknown; errors?: { message?: string }[] };
+      if (typeof response === "string") return response;
+      if (response?.error) return String(response.error);
+      const fieldErrors = Array.isArray(response?.errors)
+        ? response.errors.map((entry) => entry?.message).filter(Boolean)
+        : [];
+      if (fieldErrors.length) return fieldErrors.join("; ");
+      if (response?.message) return String(response.message);
+    }
+    this.logger.warn(
+      `Import row ${rowNumber} failed for project ${projectId}: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return "Failed to import row";
   }
 
   async updateTestCase(id: string, actorId: string | null | undefined, body: Body) {
@@ -2399,6 +3078,7 @@ export class LegacyService implements OnModuleInit {
 
   async bulkUpdateTestCases(projectId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
+    await this.requireProjectAccess(uid, projectId);
     const ids = Array.isArray(body.testcaseIds) ? body.testcaseIds : [];
     if (!ids.length) return;
     await this.db.query(
@@ -2416,6 +3096,7 @@ export class LegacyService implements OnModuleInit {
 
   async bulkDeleteTestCases(projectId: string, actorId: string | null | undefined, ids: string[]) {
     const uid = this.requireUser(actorId);
+    await this.requireProjectAccess(uid, projectId);
     if (!ids.length) return;
     await this.db.query(
       "UPDATE testcases SET deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now() WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL",
@@ -2442,6 +3123,41 @@ export class LegacyService implements OnModuleInit {
     );
     const keys = res.rows.map((r) => r.linear_issue_key);
     return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.linear_issue_key, r.count])) };
+  }
+
+  /**
+   * Resolves a plan and confirms the caller may reach the project it belongs to.
+   *
+   * /api/plans/* is addressed by plan id with no project in the URL — get, update, delete, its items,
+   * its runs and its progress rollup all took no caller at all, so a guessed plan id exposed the
+   * project's test coverage and let anyone rewrite or delete the plan.
+   */
+  private async requirePlanAccess(userId: string | null | undefined, planId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    if (!isUuid(planId)) throw new NotFoundException({ error: "Plan not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM plans WHERE id = $1", [planId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Plan not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  /**
+   * Resolves a plan item's plan, then that plan's project.
+   *
+   * DELETE /api/plans/:planId/items/:itemId is authorized on the plan in the URL, but the item id is
+   * the thing being deleted — so the item has to be confirmed to belong to that plan, or a caller
+   * authorized for their own plan could delete an item out of someone else's.
+   */
+  private async requirePlanItemAccess(userId: string | null | undefined, planId: string, itemId: string) {
+    await this.requirePlanAccess(userId, planId);
+    if (!isUuid(itemId)) throw new NotFoundException({ error: "Plan item not found" });
+    const res = await this.db.query("SELECT id FROM plan_items WHERE id = $1 AND plan_id = $2", [itemId, planId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Plan item not found" });
+  }
+
+  async listPlansForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listPlans(projectId);
   }
 
   async listPlans(projectId: string) {
@@ -2481,7 +3197,8 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
-  async createPlan(projectId: string, body: Body) {
+  async createPlan(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const res = await this.db.query(
       "INSERT INTO plans (project_id, name, description, target_release, owner_id) VALUES ($1,$2,$3,$4,$5) RETURNING *",
       [projectId, body.name || "Untitled plan", body.description || "", body.targetRelease || null, body.ownerId || null]
@@ -2489,24 +3206,32 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
-  async getPlan(planId: string) {
+  async getPlan(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
     const res = await this.db.query("SELECT * FROM plans WHERE id = $1", [planId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Plan not found" });
     return toCamel(res.rows[0]);
   }
 
-  async updatePlan(planId: string, body: Body) {
+  async updatePlan(userId: string | null | undefined, planId: string, body: Body) {
+    await this.requirePlanAccess(userId, planId);
     await this.db.query(
       "UPDATE plans SET name=COALESCE($2,name), description=COALESCE($3,description), target_release=COALESCE($4,target_release), updated_at=now() WHERE id=$1",
       [planId, body.name || null, body.description || null, body.targetRelease || null]
     );
   }
 
-  async deletePlan(planId: string) {
+  async deletePlan(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
     await this.db.query("DELETE FROM plans WHERE id = $1", [planId]);
   }
 
-  async planItems(planId: string) {
+  async planItems(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
+    return this.planItemRows(planId);
+  }
+
+  private async planItemRows(planId: string) {
     const res = await this.db.query(
       `SELECT pi.*,
               t.external_id AS tc_external_id, t.title AS tc_title, t.priority AS tc_priority,
@@ -2531,7 +3256,8 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
-  async addPlanItem(planId: string, body: Body) {
+  async addPlanItem(userId: string | null | undefined, planId: string, body: Body) {
+    await this.requirePlanAccess(userId, planId);
     const res = await this.db.query(
       "INSERT INTO plan_items (plan_id, suite_id, testcase_id, position) VALUES ($1,$2,$3,$4) RETURNING *",
       [planId, body.suiteId || null, body.testcaseId || null, body.position || 0]
@@ -2539,11 +3265,17 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
-  async deletePlanItem(itemId: string) {
+  async deletePlanItem(userId: string | null | undefined, planId: string, itemId: string) {
+    await this.requirePlanItemAccess(userId, planId, itemId);
     await this.db.query("DELETE FROM plan_items WHERE id = $1", [itemId]);
   }
 
-  async planRuns(planId: string) {
+  async planRuns(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
+    return this.planRunRows(planId);
+  }
+
+  private async planRunRows(planId: string) {
     const res = await this.db.query(
       `SELECT c.*,
               COUNT(ci.id)::int AS total_cases,
@@ -2566,7 +3298,12 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
-  async planProgress(planId: string) {
+  async planProgress(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
+    return this.planProgressRollup(planId);
+  }
+
+  private async planProgressRollup(planId: string) {
     const res = await this.db.query<{
       run_count: number;
       total_cases: number;
@@ -2621,6 +3358,11 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
+  async listCyclesForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listCycles(projectId);
+  }
+
   async listCycles(projectId: string) {
     const res = await this.db.query(
       `SELECT c.*,
@@ -2644,6 +3386,17 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  async createCycleForUser(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.createCycle(projectId, body);
+  }
+
+  /**
+   * The insert itself, without a caller check.
+   *
+   * Kept unguarded for the MCP tool, whose API token is already bound to one project. Route traffic
+   * goes through createCycleForUser.
+   */
   async createCycle(projectId: string, body: Body) {
     const res = await this.db.query(
       `INSERT INTO cycles (project_id, plan_id, name, description, environment, build_version, release_name, owner_id)
@@ -2671,6 +3424,11 @@ export class LegacyService implements OnModuleInit {
    * exportCycleExecutions already recorded as an open gap. A run carries case titles, actual results
    * and linked defect keys, DELETE removes it outright, and share mints a public URL to it.
    */
+  /** requireCycleAccess for controller-level guards that have no service call to hang it off. */
+  async requireCycleAccessForUser(userId: string | null | undefined, cycleId: string): Promise<string> {
+    return this.requireCycleAccess(userId, cycleId);
+  }
+
   private async requireCycleAccess(userId: string | null | undefined, cycleId: string): Promise<string> {
     const uid = this.requireUser(userId);
     // Same answer for a malformed id as for one that doesn't exist — see requireProjectAccess.
@@ -2710,10 +3468,31 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
+  /**
+   * The rows behind a public share link.
+   *
+   * Deliberately NOT this.executions(): that projection carries the full test case body — steps,
+   * preconditions, postconditions, test data, description — plus the tester's actual_result, the
+   * assignee, and the linked defect key and URL. A share link is unauthenticated by design and gets
+   * forwarded into tickets and chats, so everything it returns should be treated as published.
+   *
+   * The columns below are exactly the six the share page renders (app/share/[token]/page.tsx): the
+   * status badge, the external id, the title, the priority and the type. Anything a future column
+   * needs has to be added here on purpose, which is the point — the previous shape leaked by default.
+   */
   async publicCycleExecutions(token: string) {
     const run = await this.db.query("SELECT id FROM cycles WHERE share_token = $1 AND share_enabled = true", [token]);
     if (!run.rows[0]) throw new NotFoundException({ error: "Shared run not found" });
-    return this.executions(run.rows[0].id);
+    const res = await this.db.query(
+      `SELECT e.id, e.status,
+              COALESCE(NULLIF(ci.snapshot_title, ''), NULLIF(t.title, ''), 'Untitled test case') AS title,
+              t.external_id, t.priority, t.type
+       FROM cycle_items ci JOIN executions e ON e.cycle_item_id = ci.id
+       LEFT JOIN testcases t ON t.id = ci.testcase_id AND t.deleted_at IS NULL
+       WHERE ci.cycle_id = $1 AND e.deleted_at IS NULL ORDER BY ci.position, ci.created_at`,
+      [run.rows[0].id]
+    );
+    return res.rows.map(toCamel);
   }
 
   async updateCycle(cycleId: string, userId: string | null | undefined, body: Body) {
@@ -2744,20 +3523,60 @@ export class LegacyService implements OnModuleInit {
     await this.db.query("DELETE FROM cycles WHERE id = $1", [cycleId]);
   }
 
+  /**
+   * Adds a selection of test cases to a run, as one statement.
+   *
+   * This used to loop over the selection and issue three sequential round trips per case — read the
+   * title, insert the cycle_item, insert its execution. The UI sends the whole selection in a single
+   * POST, so "select all" on a project with a couple of thousand cases became several thousand
+   * serialized queries and ran for minutes; in production Cloudflare gave up at its 100s proxy limit
+   * and the browser saw a 524.
+   *
+   * The timeout was the visible half. The loop also committed one case at a time, so a request that
+   * died partway left the cases it had already written behind — a run holding an arbitrary prefix of
+   * the selection, with nothing to say where it stopped. Doing the whole thing in one statement makes
+   * it atomic: the run either gains the full selection or none of it.
+   */
   async addCycleTestCases(cycleId: string, userId: string | null | undefined, body: Body) {
-    await this.requireCycleAccess(userId, cycleId);
-    const ids = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
-    for (const testcaseId of ids) {
-      const tc = await this.db.query<{ title: string }>("SELECT title FROM testcases WHERE id = $1 AND deleted_at IS NULL", [testcaseId]);
-      if (!tc.rows[0]) continue;
-      const item = await this.db.query<{ id: string }>(
-        "INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id",
-        [cycleId, testcaseId, tc.rows[0].title]
-      );
-      if (item.rows[0]) {
-        await this.db.query("INSERT INTO executions (cycle_item_id) VALUES ($1) ON CONFLICT DO NOTHING", [item.rows[0].id]);
-      }
-    }
+    const projectId = await this.requireCycleAccess(userId, cycleId);
+    const raw = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
+
+    // Malformed ids used to reach Postgres as `WHERE id = $1` against a uuid column and fail the
+    // request with a driver error; unknown ones were skipped. Both are dropped here so a single bad
+    // id in a large selection cannot 500 the whole add, and `= ANY($2::uuid[])` never sees a value
+    // it cannot cast.
+    const ids = [...new Set(normalizeJsonArray(raw).map((id) => String(id)).filter((id) => isUuid(id)))];
+    if (!ids.length) return { added: 0, skipped: normalizeJsonArray(raw).length };
+
+    const res = await this.db.query<{ id: string }>(
+      `WITH input AS (
+         SELECT id, ord FROM unnest($2::uuid[]) WITH ORDINALITY AS u(id, ord)
+       ),
+       base AS (
+         SELECT COALESCE(MAX(position), 0) AS pos FROM cycle_items WHERE cycle_id = $1
+       ),
+       ins AS (
+         -- t.project_id = $3 is a tenancy check, not a filter for convenience. The old lookup
+         -- resolved each case by id alone, so any authenticated caller could name a test case
+         -- belonging to another workspace and have this run adopt it — copying that tenant's title
+         -- into snapshot_title on the way. requireCycleAccess already resolved the run's project, so
+         -- scope the join to it and let a foreign id fall out with the unknown ones.
+         INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title, position)
+         SELECT $1, t.id, t.title, base.pos + i.ord
+           FROM input i
+           JOIN testcases t ON t.id = i.id AND t.deleted_at IS NULL AND t.project_id = $3
+           CROSS JOIN base
+         ON CONFLICT (cycle_id, testcase_id) DO NOTHING
+         RETURNING id
+       )
+       INSERT INTO executions (cycle_item_id)
+       SELECT id FROM ins
+       ON CONFLICT (cycle_item_id) DO NOTHING
+       RETURNING id`,
+      [cycleId, ids, projectId]
+    );
+
+    return { added: res.rows.length, skipped: normalizeJsonArray(raw).length - res.rows.length };
   }
 
   async removeCycleTestCase(cycleId: string, userId: string | null | undefined, testcaseId: string) {
@@ -2960,6 +3779,27 @@ export class LegacyService implements OnModuleInit {
       WHERE ${where}`;
   }
 
+  /**
+   * Resolves a bug and confirms the caller may reach the project it belongs to.
+   *
+   * /api/bugs/:bugId is addressed by bug id with no project in the URL. Read, update, delete and both
+   * link routes took no caller at all — a bug carries reproduction steps, severity and links to the
+   * executions that found it, and PATCH let anyone rewrite someone else's defect report.
+   */
+  private async requireBugAccess(userId: string | null | undefined, bugId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    if (!isUuid(bugId)) throw new NotFoundException({ error: "Bug not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM bugs WHERE id = $1", [bugId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Bug not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  async listBugsForUser(userId: string | null | undefined, projectId: string, query: Body = {}) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listBugs(projectId, query);
+  }
+
   async listBugs(projectId: string, query: Body = {}) {
     const filters = ["b.project_id = $1"];
     const values: any[] = [projectId];
@@ -3043,6 +3883,18 @@ export class LegacyService implements OnModuleInit {
     return this.getBug(bugId);
   }
 
+  async getBugForUser(userId: string | null | undefined, bugId: string) {
+    await this.requireBugAccess(userId, bugId);
+    return this.getBug(bugId);
+  }
+
+  /**
+   * One bug by id, without a caller check.
+   *
+   * Kept unguarded for the four callers that re-read a row they have just written through an
+   * already-authorized path (create, update, add link, remove link). Route traffic goes through
+   * getBugForUser.
+   */
   async getBug(bugId: string) {
     const res = await this.db.query(this.bugSelect("b.id = $1"), [bugId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Bug not found" });
@@ -3050,7 +3902,8 @@ export class LegacyService implements OnModuleInit {
     return { ...toCamel(row), links: normalizeJsonArray(row.links).map(toCamel), attachments: normalizeJsonArray(row.attachments).map(toCamel) };
   }
 
-  async updateBug(bugId: string, body: Body) {
+  async updateBug(userId: string | null | undefined, bugId: string, body: Body) {
+    await this.requireBugAccess(userId, bugId);
     // Same refusal as createBug — an unknown severity on edit hit the same constraint and the same
     // opaque 500. Absent/empty leaves the stored value alone via COALESCE, so it isn't parsed.
     if (body.severity) this.parseBugSeverity(body.severity);
@@ -3076,7 +3929,8 @@ export class LegacyService implements OnModuleInit {
     return this.getBug(bugId);
   }
 
-  async addBugLink(bugId: string, body: Body) {
+  async addBugLink(userId: string | null | undefined, bugId: string, body: Body) {
+    await this.requireBugAccess(userId, bugId);
     if (!body.testcaseId && !body.cycleId) throw new BadRequestException({ error: "testcaseId or cycleId is required." });
     await this.db.query(
       `INSERT INTO bug_links (bug_id, testcase_id, cycle_id, execution_id) VALUES ($1,$2,$3,$4)
@@ -3086,12 +3940,14 @@ export class LegacyService implements OnModuleInit {
     return this.getBug(bugId);
   }
 
-  async removeBugLink(bugId: string, linkId: string) {
+  async removeBugLink(userId: string | null | undefined, bugId: string, linkId: string) {
+    await this.requireBugAccess(userId, bugId);
     await this.db.query("DELETE FROM bug_links WHERE id = $1 AND bug_id = $2", [linkId, bugId]);
     return this.getBug(bugId);
   }
 
-  async deleteBug(bugId: string) {
+  async deleteBug(userId: string | null | undefined, bugId: string) {
+    await this.requireBugAccess(userId, bugId);
     await this.db.query("DELETE FROM bugs WHERE id = $1", [bugId]);
   }
 
@@ -9920,15 +10776,28 @@ export class LegacyService implements OnModuleInit {
     return res.rows[0].id;
   }
 
-  private async nextExternalId(projectId: string, requestedPrefix?: unknown): Promise<string> {
-    const project = await this.db.query<{ key: string; settings: unknown }>("SELECT key, settings FROM projects WHERE id = $1", [projectId]);
+  /**
+   * The next free `<KEY>-TC-<n>` for a project.
+   *
+   * `client` matters: when allocating for an insert, this must read through the SAME transaction that
+   * holds the advisory lock and will do the writing (see insertTestCase). Reading on the pool instead
+   * would read outside that lock and reintroduce the race it exists to close.
+   */
+  private async nextExternalId(projectId: string, requestedPrefix?: unknown, client?: PoolClient): Promise<string> {
+    // One concrete signature over either runner: PoolClient and DatabaseService both expose `query`,
+    // but their overload sets differ enough that TypeScript can't call the bare union.
+    const run = <T extends QueryResultRow>(text: string, values: unknown[]) =>
+      client ? client.query<T>(text, values as unknown[]) : this.db.query<T>(text, values);
+    const project = await run<{ key: string; settings: unknown }>("SELECT key, settings FROM projects WHERE id = $1", [projectId]);
     const settings = parseSettings(project.rows[0]?.settings);
     const key = normalizeTestcaseIdPrefix(requestedPrefix)
       || normalizeTestcaseIdPrefix(settings.testcaseIdPrefix)
       || normalizeTestcaseIdPrefix(project.rows[0]?.key)
       || "TC";
-    // Use MAX of the trailing numeric part to avoid collisions when IDs have gaps
-    const maxRes = await this.db.query<{ n: string }>(
+    // Use MAX of the trailing numeric part to avoid collisions when IDs have gaps.
+    // Counts soft-deleted rows too: the unique index does not exclude them, so skipping a deleted
+    // row's number would hand out an id that still exists and fail the insert.
+    const maxRes = await run<{ n: string }>(
       "SELECT COALESCE(MAX((regexp_match(external_id, '\\d+$'))[1]::int), 0) AS n FROM testcases WHERE project_id = $1 AND external_id LIKE $2",
       [projectId, `${key}-TC-%`]
     );

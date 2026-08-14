@@ -22,6 +22,22 @@ import { env } from "../utils/env";
 const ctxA = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.json"), "utf-8"));
 const ctxB = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context-b.json"), "utf-8"));
 
+/*
+ * The statuses that count as a refusal.
+ *
+ * Deliberately a set rather than a single code, matching the convention rbac.spec.ts settled on.
+ * Two product choices make a bare 403 the wrong assertion here:
+ *  - cross-tenant access answers 404, not 403 — requireProjectAccess treats "not yours" and "not
+ *    there" identically so that probing ids cannot confirm a resource exists (its own comment says
+ *    so). That is the stronger behaviour, so the test follows the product rather than the reverse.
+ *  - no session at all answers 400 "Authentication required", because the legacy service's
+ *    requireUser raises BadRequest rather than Unauthorized. 401 is the better HTTP semantic and is
+ *    worth changing, but it is a separate change across every legacy route, and billing.spec.ts /
+ *    import-export.spec.ts / rbac.spec.ts already record the current behaviour.
+ * What this suite is actually for is that access is REFUSED. The exact code is pinned elsewhere.
+ */
+const REFUSED = [400, 401, 403, 404];
+
 let asB: APIRequestContext;
 let anon: APIRequestContext;
 
@@ -42,7 +58,6 @@ test.afterAll(async () => {
 
 test.describe("test suites", () => {
   test("a different account can rename and delete another project's suite by ID", async ({ request }) => {
-    test.fail();
     // KNOWN GAP: updateSuite/deleteSuite (legacy.service.ts:1357,1362) take no userId at all —
     // not even a session is required, let alone project membership.
     const created = await (
@@ -56,10 +71,10 @@ test.describe("test suites", () => {
         data: { name: "Renamed by account B" },
         failOnStatusCode: false,
       });
-      expect(renameRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(renameRes.status());
 
       const deleteRes = await asB.delete(`/api/suites/${created.id}`, { failOnStatusCode: false });
-      expect(deleteRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(deleteRes.status());
     } finally {
       // deleteSuite() has no existence check, so a second delete of an already-gone suite is a
       // harmless no-op — this always runs, whether or not account B's delete above succeeded.
@@ -72,7 +87,6 @@ test.describe("test cases", () => {
   test("a different account can read, update, and delete another project's test case by ID", async ({
     request,
   }) => {
-    test.fail();
     // KNOWN GAP: getTestCase has no auth at all; updateTestCase/deleteTestCase only call
     // requireUser (any valid session), never checking the case's project against the caller.
     const created = await (
@@ -85,18 +99,18 @@ test.describe("test cases", () => {
       const getRes = await asB.get(`/api/projects/${ctxB.projectId}/testcases/${created.id}`, {
         failOnStatusCode: false,
       });
-      expect(getRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(getRes.status());
 
       const updateRes = await asB.put(`/api/projects/${ctxB.projectId}/testcases/${created.id}`, {
         data: { title: "Retitled by account B" },
         failOnStatusCode: false,
       });
-      expect(updateRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(updateRes.status());
 
       const deleteRes = await asB.delete(`/api/projects/${ctxB.projectId}/testcases/${created.id}`, {
         failOnStatusCode: false,
       });
-      expect(deleteRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(deleteRes.status());
     } finally {
       await request.delete(`/api/projects/${ctxA.projectId}/testcases/${created.id}`, {
         failOnStatusCode: false,
@@ -109,7 +123,6 @@ test.describe("test plans", () => {
   test("a different account can read, update, and delete another project's test plan by ID", async ({
     request,
   }) => {
-    test.fail();
     // KNOWN GAP: getPlan/updatePlan/deletePlan (legacy.service.ts:1658-1673) take no userId
     // at all — reachable with no session and no project-membership check.
     const created = await (
@@ -120,16 +133,16 @@ test.describe("test plans", () => {
 
     try {
       const getRes = await asB.get(`/api/plans/${created.id}`, { failOnStatusCode: false });
-      expect(getRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(getRes.status());
 
       const updateRes = await asB.patch(`/api/plans/${created.id}`, {
         data: { name: "Renamed by account B" },
         failOnStatusCode: false,
       });
-      expect(updateRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(updateRes.status());
 
       const deleteRes = await asB.delete(`/api/plans/${created.id}`, { failOnStatusCode: false });
-      expect(deleteRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(deleteRes.status());
     } finally {
       await request.delete(`/api/plans/${created.id}`, { failOnStatusCode: false });
     }
@@ -140,7 +153,6 @@ test.describe("test cycles / runs", () => {
   test("a different account can read, update, and delete another project's test cycle by ID", async ({
     request,
   }) => {
-    test.fail();
     // KNOWN GAP: getCycle/updateCycle/deleteCycle (legacy.service.ts:1729-1789) take no userId
     // at all — same shape of gap as test plans.
     const created = await (
@@ -151,25 +163,68 @@ test.describe("test cycles / runs", () => {
 
     try {
       const getRes = await asB.get(`/api/cycles/${created.id}`, { failOnStatusCode: false });
-      expect(getRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(getRes.status());
 
       const updateRes = await asB.patch(`/api/cycles/${created.id}`, {
         data: { name: "Renamed by account B" },
         failOnStatusCode: false,
       });
-      expect(updateRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(updateRes.status());
 
       const deleteRes = await asB.delete(`/api/cycles/${created.id}`, { failOnStatusCode: false });
-      expect(deleteRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(deleteRes.status());
     } finally {
       await request.delete(`/api/cycles/${created.id}`, { failOnStatusCode: false });
+    }
+  });
+
+  test("account B's own run cannot adopt a test case belonging to account A", async ({ request }) => {
+    /*
+     * A different shape from the rest of this file: account B is not reaching for account A's run,
+     * it is naming account A's TEST CASE while adding to a run it legitimately owns.
+     *
+     * addCycleTestCases used to resolve each id with `SELECT title FROM testcases WHERE id = $1`,
+     * scoped to nothing, even though requireCycleAccess had already established which project the
+     * run belonged to. The caller passed the run check, so the foreign case was inserted and its
+     * title copied into cycle_items.snapshot_title — a readable field from another tenant.
+     */
+    const foreignCase = await (
+      await request.post(`/api/projects/${ctxA.projectId}/testcases`, {
+        data: { title: `E2E IDOR Adopted Case ${Date.now()}` },
+      })
+    ).json();
+
+    const bRun = await (
+      await asB.post(`/api/projects/${ctxB.projectId}/cycles`, {
+        data: { name: `E2E IDOR Adopting Run ${Date.now()}` },
+      })
+    ).json();
+
+    try {
+      const addRes = await asB.post(`/api/cycles/${bRun.id}/testcases`, {
+        data: { testcaseIds: [foreignCase.id] },
+        failOnStatusCode: false,
+      });
+      // Skipping the foreign id is a valid answer, as is refusing outright — what must not happen is
+      // the case landing in B's run. Assert the state rather than the status code.
+      expect(addRes.status(), `answered ${addRes.status()}: ${await addRes.text()}`).toBeLessThan(500);
+
+      const executions = await (await asB.get(`/api/cycles/${bRun.id}/executions`)).json();
+      expect(
+        executions,
+        "account B's run adopted a test case from account A, snapshot title and all",
+      ).toHaveLength(0);
+    } finally {
+      await asB.delete(`/api/cycles/${bRun.id}`, { failOnStatusCode: false });
+      await request.delete(`/api/projects/${ctxA.projectId}/testcases/${foreignCase.id}`, {
+        failOnStatusCode: false,
+      });
     }
   });
 });
 
 test.describe("test executions", () => {
   test("a different account can update another project's test execution by ID", async ({ request }) => {
-    test.fail();
     // KNOWN GAP: updateExecution (legacy.service.ts:1822) calls requireUser (any valid
     // session) but never checks the execution's cycle/project against the caller.
     const cycle = await (
@@ -194,7 +249,7 @@ test.describe("test executions", () => {
         data: { status: "Failed", actualResult: "Overwritten by account B" },
         failOnStatusCode: false,
       });
-      expect(updateRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(updateRes.status());
     } finally {
       await request.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
       await request.delete(`/api/projects/${ctxA.projectId}/testcases/${testcase.id}`, {
@@ -206,7 +261,6 @@ test.describe("test executions", () => {
 
 test.describe("bugs", () => {
   test("a different account can read, update, and delete another project's bug by ID", async ({ request }) => {
-    test.fail();
     // KNOWN GAP: getBug/updateBug/deleteBug (legacy.service.ts:2044-2096) don't even call
     // requireUser — no session and no project-membership check.
     const created = await (
@@ -217,16 +271,16 @@ test.describe("bugs", () => {
 
     try {
       const getRes = await asB.get(`/api/bugs/${created.id}`, { failOnStatusCode: false });
-      expect(getRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(getRes.status());
 
       const updateRes = await asB.patch(`/api/bugs/${created.id}`, {
         data: { title: "Retitled by account B" },
         failOnStatusCode: false,
       });
-      expect(updateRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(updateRes.status());
 
       const deleteRes = await asB.delete(`/api/bugs/${created.id}`, { failOnStatusCode: false });
-      expect(deleteRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(deleteRes.status());
     } finally {
       await request.delete(`/api/bugs/${created.id}`, { failOnStatusCode: false });
     }
@@ -235,7 +289,6 @@ test.describe("bugs", () => {
   test("a completely unauthenticated request (no session at all) can read another project's bug", async ({
     request,
   }) => {
-    test.fail();
     // Worse than the cross-tenant case above: these routes don't require ANY session, so an
     // anonymous caller with no account at all can read/write bugs purely by guessing a UUID.
     const created = await (
@@ -246,7 +299,7 @@ test.describe("bugs", () => {
 
     try {
       const getRes = await anon.get(`/api/bugs/${created.id}`, { failOnStatusCode: false });
-      expect(getRes.status()).toBe(401);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(getRes.status());
     } finally {
       await request.delete(`/api/bugs/${created.id}`, { failOnStatusCode: false });
     }
@@ -255,7 +308,6 @@ test.describe("bugs", () => {
 
 test.describe("public share links", () => {
   test("a different account can toggle public sharing on another project's cycle", async ({ request }) => {
-    test.fail();
     // KNOWN GAP: shareCycle (legacy.service.ts:1735) takes no userId at all.
     const cycle = await (
       await request.post(`/api/projects/${ctxA.projectId}/cycles`, {
@@ -268,7 +320,7 @@ test.describe("public share links", () => {
         data: { enabled: true },
         failOnStatusCode: false,
       });
-      expect(shareRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(shareRes.status());
     } finally {
       await request.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
     }
@@ -277,7 +329,6 @@ test.describe("public share links", () => {
   test("the public share executions endpoint exposes internal fields the share page never displays", async ({
     request,
   }) => {
-    test.fail();
     // KNOWN GAP: publicCycleExecutions (legacy.service.ts:1756) reuses the same internal
     // executions() query as the authenticated route — full row data, not the 5 columns
     // /share/:token actually renders (externalId/title/priority/type/status).
@@ -322,18 +373,17 @@ test.describe("requirements / traceability", () => {
   test("a different account can read another project's requirement matrix and ticket summary", async ({
     request,
   }) => {
-    test.fail();
     // KNOWN GAP: requirementMatrix/requirementsSummary (legacy.service.ts:2276,5054) take a
     // projectId with no check that the caller belongs to it. Read-only — no fixture to clean up.
     const matrixRes = await asB.get(`/api/projects/${ctxA.projectId}/reports/requirement-matrix`, {
       failOnStatusCode: false,
     });
-    expect(matrixRes.status()).toBe(403);
+    expect(REFUSED, "must refuse a caller from another tenant").toContain(matrixRes.status());
 
     const summaryRes = await asB.get(`/api/projects/${ctxA.projectId}/tickets/summary`, {
       failOnStatusCode: false,
     });
-    expect(summaryRes.status()).toBe(403);
+    expect(REFUSED, "must refuse a caller from another tenant").toContain(summaryRes.status());
   });
 });
 
@@ -341,7 +391,6 @@ test.describe("knowledge base v1 (legacy)", () => {
   test("a different account can read, update, and delete another project's legacy knowledge base item", async ({
     request,
   }) => {
-    test.fail();
     // KNOWN GAP: getKnowledge/updateKnowledge/deleteKnowledge (legacy.service.ts:2961-2978)
     // take no project/userId context at all — superseded by KB v2, which does check.
     const created = await (
@@ -354,18 +403,18 @@ test.describe("knowledge base v1 (legacy)", () => {
       const getRes = await asB.get(`/api/projects/${ctxB.projectId}/knowledge-base/${created.id}`, {
         failOnStatusCode: false,
       });
-      expect(getRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(getRes.status());
 
       const updateRes = await asB.patch(`/api/projects/${ctxB.projectId}/knowledge-base/${created.id}`, {
         data: { title: "Retitled by account B" },
         failOnStatusCode: false,
       });
-      expect(updateRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(updateRes.status());
 
       const deleteRes = await asB.delete(`/api/projects/${ctxB.projectId}/knowledge-base/${created.id}`, {
         failOnStatusCode: false,
       });
-      expect(deleteRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(deleteRes.status());
     } finally {
       await request.delete(`/api/projects/${ctxA.projectId}/knowledge-base/${created.id}`, {
         failOnStatusCode: false,
@@ -378,7 +427,6 @@ test.describe("project members", () => {
   test("a caller can add themselves as owner of another project with no permission check", async ({
     request,
   }) => {
-    test.fail();
     // KNOWN GAP, worse than the rest: addProjectMember's controller method
     // (legacy.controller.ts:211) doesn't even take @Req() — it never looks at the caller's
     // identity, so this isn't even gated behind having a valid login session. Cleanup here
@@ -392,7 +440,7 @@ test.describe("project members", () => {
         data: { userId: me.userId, role: "owner" },
         failOnStatusCode: false,
       });
-      expect(addRes.status()).toBe(403);
+      expect(REFUSED, "must refuse a caller from another tenant").toContain(addRes.status());
     } finally {
       await request.delete(`/api/projects/${ctxA.projectId}/members/${me.userId}`, {
         failOnStatusCode: false,

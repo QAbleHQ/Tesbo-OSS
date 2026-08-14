@@ -275,35 +275,40 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/suites")
-  listSuites(@Param("projectId") projectId: string) {
-    return this.legacy.listSuites(projectId);
+  listSuites(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.listSuitesForUser(req.userId, projectId);
   }
 
   @Post("/api/projects/:projectId/suites")
-  createSuite(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createSuite(projectId, body);
+  createSuite(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createSuiteForUser(req.userId, projectId, body);
   }
 
   @Patch("/api/suites/:suiteId")
-  updateSuite(@Param("suiteId") suiteId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateSuite(suiteId, body);
+  updateSuite(@Req() req: AuthenticatedRequest, @Param("suiteId") suiteId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateSuite(req.userId, suiteId, body);
   }
 
   @Delete("/api/suites/:suiteId")
-  deleteSuite(@Param("suiteId") suiteId: string, @Query("mode") mode?: string) {
-    return this.legacy.deleteSuite(suiteId, mode);
+  deleteSuite(@Req() req: AuthenticatedRequest, @Param("suiteId") suiteId: string, @Query("mode") mode?: string) {
+    return this.legacy.deleteSuite(req.userId, suiteId, mode);
   }
 
   @Get("/api/projects/:projectId/testcases")
-  async listTestCases(@Param("projectId") projectId: string, @Query() query: Record<string, any>, @Res() res: Response) {
-    const result = await this.legacy.listTestCases(projectId, query);
+  async listTestCases(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Query() query: Record<string, any>,
+    @Res() res: Response
+  ) {
+    const result = await this.legacy.listTestCasesForUser(req.userId, projectId, query);
     res.setHeader("X-Total-Count", String(result.total));
     res.json(result.rows);
   }
 
   @Post("/api/projects/:projectId/testcases")
   createTestCase(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createTestCase(projectId, req.userId, body);
+    return this.legacy.createTestCaseForUser(req.userId, projectId, body);
   }
 
   @Get("/api/projects/:projectId/testcases/linked-jira-keys")
@@ -317,23 +322,40 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/testcases/:testcaseId")
-  getTestCase(@Param("testcaseId") testcaseId: string) {
-    return this.legacy.getTestCase(testcaseId);
+  getTestCase(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("testcaseId") testcaseId: string
+  ) {
+    return this.legacy.getTestCaseForUser(req.userId, projectId, testcaseId);
   }
 
   @Put("/api/projects/:projectId/testcases/:testcaseId")
-  updateTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateTestCase(testcaseId, req.userId, body);
+  updateTestCase(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("testcaseId") testcaseId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.updateTestCaseForUser(req.userId, projectId, testcaseId, body);
   }
 
   @Delete("/api/projects/:projectId/testcases/:testcaseId")
-  deleteTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string) {
-    return this.legacy.deleteTestCase(testcaseId, req.userId);
+  deleteTestCase(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("testcaseId") testcaseId: string
+  ) {
+    return this.legacy.deleteTestCaseForUser(req.userId, projectId, testcaseId);
   }
 
   @Post("/api/projects/:projectId/testcases/:testcaseId/duplicate")
-  duplicateTestCase(@Req() req: AuthenticatedRequest, @Param("testcaseId") testcaseId: string) {
-    return this.legacy.duplicateTestCase(testcaseId, req.userId);
+  duplicateTestCase(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("testcaseId") testcaseId: string
+  ) {
+    return this.legacy.duplicateTestCaseForUser(req.userId, projectId, testcaseId);
   }
 
   @Post("/api/projects/:projectId/testcases/bulk-update")
@@ -346,74 +368,83 @@ export class LegacyController {
     return this.legacy.bulkDeleteTestCases(projectId, req.userId, body.testcaseIds || []);
   }
 
+  @Post("/api/projects/:projectId/testcases/import")
+  importTestCases(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.importTestCases(req.userId, projectId, body);
+  }
+
   @Get("/api/projects/:projectId/plans")
-  listPlans(@Param("projectId") projectId: string) {
-    return this.legacy.listPlans(projectId);
+  listPlans(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.listPlansForUser(req.userId, projectId);
   }
 
   @Post("/api/projects/:projectId/plans")
-  createPlan(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createPlan(projectId, body);
+  createPlan(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createPlan(req.userId, projectId, body);
   }
 
   @Get("/api/plans/:planId")
-  getPlan(@Param("planId") planId: string) {
-    return this.legacy.getPlan(planId);
+  getPlan(@Req() req: AuthenticatedRequest, @Param("planId") planId: string) {
+    return this.legacy.getPlan(req.userId, planId);
   }
 
   @Patch("/api/plans/:planId")
-  updatePlan(@Param("planId") planId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updatePlan(planId, body);
+  updatePlan(@Req() req: AuthenticatedRequest, @Param("planId") planId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updatePlan(req.userId, planId, body);
   }
 
   @Delete("/api/plans/:planId")
-  deletePlan(@Param("planId") planId: string) {
-    return this.legacy.deletePlan(planId);
+  deletePlan(@Req() req: AuthenticatedRequest, @Param("planId") planId: string) {
+    return this.legacy.deletePlan(req.userId, planId);
   }
 
   @Get("/api/plans/:planId/items")
-  planItems(@Param("planId") planId: string) {
-    return this.legacy.planItems(planId);
+  planItems(@Req() req: AuthenticatedRequest, @Param("planId") planId: string) {
+    return this.legacy.planItems(req.userId, planId);
   }
 
   @Post("/api/plans/:planId/items")
-  addPlanItem(@Param("planId") planId: string, @Body() body: Record<string, any>) {
-    return this.legacy.addPlanItem(planId, body);
+  addPlanItem(@Req() req: AuthenticatedRequest, @Param("planId") planId: string, @Body() body: Record<string, any>) {
+    return this.legacy.addPlanItem(req.userId, planId, body);
   }
 
   @Delete("/api/plans/:planId/items/:itemId")
-  removePlanItem(@Param("itemId") itemId: string) {
-    return this.legacy.deletePlanItem(itemId);
+  removePlanItem(
+    @Req() req: AuthenticatedRequest,
+    @Param("planId") planId: string,
+    @Param("itemId") itemId: string
+  ) {
+    return this.legacy.deletePlanItem(req.userId, planId, itemId);
   }
 
   @Get("/api/plans/:planId/runs")
-  planRuns(@Param("planId") planId: string) {
-    return this.legacy.planRuns(planId);
+  planRuns(@Req() req: AuthenticatedRequest, @Param("planId") planId: string) {
+    return this.legacy.planRuns(req.userId, planId);
   }
 
   @Get("/api/plans/:planId/progress")
-  planProgress(@Param("planId") planId: string) {
-    return this.legacy.planProgress(planId);
+  planProgress(@Req() req: AuthenticatedRequest, @Param("planId") planId: string) {
+    return this.legacy.planProgress(req.userId, planId);
   }
 
   @Get("/api/projects/:projectId/cycles")
-  listCycles(@Param("projectId") projectId: string) {
-    return this.legacy.listCycles(projectId);
+  listCycles(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.listCyclesForUser(req.userId, projectId);
   }
 
   @Post("/api/projects/:projectId/cycles")
-  createCycle(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createCycle(projectId, body);
+  createCycle(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createCycleForUser(req.userId, projectId, body);
   }
 
   @Post("/api/projects/:projectId/cycles/from-plan")
-  createCycleFromPlan(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createCycle(projectId, body);
+  createCycleFromPlan(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createCycleForUser(req.userId, projectId, body);
   }
 
   @Post("/api/projects/:projectId/cycles/from-cases")
-  createCycleFromCases(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.createCycle(projectId, body);
+  createCycleFromCases(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.createCycleForUser(req.userId, projectId, body);
   }
 
   @Get("/api/cycles/:cycleId")
@@ -538,8 +569,8 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/bugs")
-  listBugs(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.listBugs(projectId, query);
+  listBugs(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.listBugsForUser(req.userId, projectId, query);
   }
 
   @Post("/api/projects/:projectId/bugs")
@@ -548,28 +579,28 @@ export class LegacyController {
   }
 
   @Get("/api/bugs/:bugId")
-  getBug(@Param("bugId") bugId: string) {
-    return this.legacy.getBug(bugId);
+  getBug(@Req() req: AuthenticatedRequest, @Param("bugId") bugId: string) {
+    return this.legacy.getBugForUser(req.userId, bugId);
   }
 
   @Patch("/api/bugs/:bugId")
-  updateBug(@Param("bugId") bugId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateBug(bugId, body);
+  updateBug(@Req() req: AuthenticatedRequest, @Param("bugId") bugId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateBug(req.userId, bugId, body);
   }
 
   @Delete("/api/bugs/:bugId")
-  deleteBug(@Param("bugId") bugId: string) {
-    return this.legacy.deleteBug(bugId);
+  deleteBug(@Req() req: AuthenticatedRequest, @Param("bugId") bugId: string) {
+    return this.legacy.deleteBug(req.userId, bugId);
   }
 
   @Post("/api/bugs/:bugId/links")
-  addBugLink(@Param("bugId") bugId: string, @Body() body: Record<string, any>) {
-    return this.legacy.addBugLink(bugId, body);
+  addBugLink(@Req() req: AuthenticatedRequest, @Param("bugId") bugId: string, @Body() body: Record<string, any>) {
+    return this.legacy.addBugLink(req.userId, bugId, body);
   }
 
   @Delete("/api/bugs/:bugId/links/:linkId")
-  removeBugLink(@Param("bugId") bugId: string, @Param("linkId") linkId: string) {
-    return this.legacy.removeBugLink(bugId, linkId);
+  removeBugLink(@Req() req: AuthenticatedRequest, @Param("bugId") bugId: string, @Param("linkId") linkId: string) {
+    return this.legacy.removeBugLink(req.userId, bugId, linkId);
   }
 
   @Post("/api/projects/:projectId/bugs/:bugId/attachments")
@@ -662,14 +693,17 @@ export class LegacyController {
   }
 
   /*
-   * There is deliberately no POST .../testcases/import or .../import/preview here.
+   * The import itself is POST .../testcases/import, declared next to the other bulk test case routes
+   * above. It reads its body: an earlier pair of stubs here ignored theirs and hard-returned
+   * {imported: 0} to any caller, signed in or not, so anything trusting them imported nothing and was
+   * told it worked.
    *
-   * Both used to exist as stubs that ignored their request body and hard-returned an empty success
-   * ({imported: 0}) to any caller, signed in or not — so anything trusting them imported nothing and
-   * was told it worked. Nothing called them: the import runs entirely in the browser
-   * (Tesbo-Frontend/components/ImportTestCasesModal.tsx parses the workbook and POSTs one
-   * createTestCase per row), which is where its behaviour is covered. If a server-side import is
-   * ever built, it belongs here — as a route that actually reads its body.
+   * The browser still parses the workbook and maps the columns
+   * (Tesbo-Frontend/components/ImportTestCasesModal.tsx) — only the commit is server-side. It used to
+   * POST one createTestCase per row, which is what made a large file take minutes.
+   *
+   * There is still no .../import/preview: the preview is built from the parsed workbook in the
+   * browser and never needed a round trip.
    */
 
   @Get("/api/cycles/:cycleId/export/csv")
@@ -691,8 +725,12 @@ export class LegacyController {
     return this.legacy.projectDashboardSummary(req.userId, projectId);
   }
 
+  // Still a stub returning zeros, but no longer one that answers a caller who has no business
+  // knowing whether this run exists — an unauthorized caller now gets the same 404 as for a run
+  // that isn't there. (That it fabricates a zeroed summary at all is a separate, open problem.)
   @Get("/api/cycles/:cycleId/report/summary")
-  cycleSummary() {
+  async cycleSummary(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string) {
+    await this.legacy.requireCycleAccessForUser(req.userId, cycleId);
     return { total: 0, passed: 0, failed: 0, blocked: 0, skipped: 0, untested: 0 };
   }
 
@@ -1141,7 +1179,8 @@ export class LegacyController {
   }
 
   @Post("/api/projects/:projectId/knowledge-base/upload")
-  uploadKnowledge() {
+  async uploadKnowledge(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return { error: "File uploads are not enabled in this endpoint yet" };
   }
 

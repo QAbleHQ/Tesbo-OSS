@@ -17,6 +17,15 @@ import {
 
 type Body = Record<string, any>;
 
+/**
+ * The project-scoped half of a value write — the field definitions, plus the fact that the plan gate
+ * already passed. Loaded once by loadWriteContext and reused across every row of a bulk write.
+ */
+export interface CustomFieldWriteContext {
+  definitions: Body[];
+  definitionsById: Map<string, Body>;
+}
+
 const FIELD_TYPES: FieldType[] = ["text", "long_text", "boolean", "single_select", "multi_select", "number", "date"];
 
 /** custom_field_definitions.name is VARCHAR(160) — a longer one has to be refused, not attempted. */
@@ -445,20 +454,57 @@ export class CustomFieldsService {
       if (!owned.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     }
 
+    const context = await this.loadWriteContext(projectId, runner, mode);
+    if (!context) return;
+    await this.setValuesWithContext(actorId, projectId, testcaseId, values, context, runner);
+  }
+
+  /**
+   * Reads the half of a value write that depends only on the project: whether the plan allows custom
+   * fields, and the project's field definitions.
+   *
+   * Split out so a bulk caller can read it once for a whole batch. The test case import used to reach
+   * setValuesForTestCase once per row and pay these three queries per row, on every import, including
+   * on projects that define no custom fields at all.
+   *
+   * Returns null only in "skip-if-disabled" mode, meaning "the plan has this switched off, write
+   * nothing"; "enforce" throws the paywall error instead.
+   */
+  async loadWriteContext(
+    projectId: string,
+    runner: QueryRunner = this.db,
+    mode: "enforce" | "skip-if-disabled" = "skip-if-disabled"
+  ): Promise<CustomFieldWriteContext | null> {
     try {
       const orgRes = await runner.query<{ organization_id: string }>("SELECT organization_id FROM projects WHERE id = $1", [projectId]);
       const organizationId = orgRes.rows[0]?.organization_id;
       if (organizationId) await this.planLimits.assertCustomFieldsEnabled(organizationId);
     } catch (err) {
-      if (mode === "skip-if-disabled") return;
+      if (mode === "skip-if-disabled") return null;
       throw err;
     }
 
     const definitionsRes = await runner.query<Body>("SELECT * FROM custom_field_definitions WHERE project_id = $1", [projectId]);
     const definitions = definitionsRes.rows;
-    if (!definitions.length && !Object.keys(values || {}).length) return;
-    const definitionsById = new Map(definitions.map((d) => [d.id, d]));
+    return { definitions, definitionsById: new Map(definitions.map((d) => [d.id, d])) };
+  }
 
+  /**
+   * Validates one test case's incoming values against the project's definitions, folds in the
+   * configured defaults, and enforces required fields — all in memory, touching no database.
+   *
+   * Separated from the write so the bulk import can validate a whole file up front and then insert
+   * every surviving row's values in a single statement. Against a remote database that is the whole
+   * game: a round trip costs far more than any of this arithmetic.
+   *
+   * `existing` is what the test case already holds, and is empty for a row being created.
+   */
+  normalizeValues(
+    values: Body,
+    context: CustomFieldWriteContext,
+    existing: Map<string, unknown> = new Map()
+  ): { normalized: Body; errors: { field: string; message: string }[] } {
+    const { definitions, definitionsById } = context;
     const errors: { field: string; message: string }[] = [];
     const normalized: Body = {};
 
@@ -488,16 +534,10 @@ export class CustomFieldsService {
       }
     }
 
-    const existingRes = await runner.query<{ definition_id: string; value: unknown }>(
-      "SELECT definition_id, value FROM custom_field_values WHERE testcase_id = $1",
-      [testcaseId]
-    );
-    const existingByDefinition = new Map(existingRes.rows.map((r) => [r.definition_id, r.value]));
-
     for (const definition of definitions) {
       if (definition.status !== "active") continue;
       if (Object.prototype.hasOwnProperty.call(values || {}, definition.id)) continue;
-      if (existingByDefinition.has(definition.id)) continue;
+      if (existing.has(definition.id)) continue;
       const fallback = applyDefaultIfMissing(definition.config || {}, definition.field_type);
       if (fallback !== undefined) normalized[definition.id] = fallback;
     }
@@ -506,9 +546,56 @@ export class CustomFieldsService {
       if (definition.status !== "active" || !definition.required) continue;
       const effective = Object.prototype.hasOwnProperty.call(normalized, definition.id)
         ? normalized[definition.id]
-        : existingByDefinition.get(definition.id);
+        : existing.get(definition.id);
       if (isEmptyValue(effective)) errors.push({ field: definition.id, message: `${definition.name} is required` });
     }
+
+    return { normalized, errors };
+  }
+
+  /**
+   * The subset of a brand new test case's normalized values that is actually worth a row.
+   *
+   * The single-row path reaches the same conclusion by comparing each value against what the test
+   * case already has and skipping the ones that did not change; on a row that has just been created
+   * everything it holds is null, so that reduces to "drop the empties". Kept here so the bulk import
+   * does not have to reimplement isEmptyValue's idea of empty.
+   */
+  writableValuesForNewTestCase(normalized: Body): { definitionId: string; value: unknown }[] {
+    return Object.entries(normalized || {})
+      .filter(([, value]) => !isEmptyValue(value))
+      .map(([definitionId, value]) => ({ definitionId, value }));
+  }
+
+  /**
+   * Validates and writes one test case's values against an already-loaded context.
+   *
+   * `testCaseIsNew` is the bulk import's shortcut: a row inserted moments ago in the same transaction
+   * cannot have values yet, so the read of its current ones is skipped rather than issued to come
+   * back empty.
+   */
+  async setValuesWithContext(
+    actorId: string | null | undefined,
+    projectId: string,
+    testcaseId: string,
+    values: Body,
+    context: CustomFieldWriteContext,
+    runner: QueryRunner = this.db,
+    options: { testCaseIsNew?: boolean } = {}
+  ): Promise<void> {
+    const { definitions, definitionsById } = context;
+    if (!definitions.length && !Object.keys(values || {}).length) return;
+
+    const existingByDefinition = new Map<string, unknown>();
+    if (!options.testCaseIsNew) {
+      const existingRes = await runner.query<{ definition_id: string; value: unknown }>(
+        "SELECT definition_id, value FROM custom_field_values WHERE testcase_id = $1",
+        [testcaseId]
+      );
+      for (const row of existingRes.rows) existingByDefinition.set(row.definition_id, row.value);
+    }
+
+    const { normalized, errors } = this.normalizeValues(values, context, existingByDefinition);
 
     if (errors.length) throw new BadRequestException({ errors });
 
