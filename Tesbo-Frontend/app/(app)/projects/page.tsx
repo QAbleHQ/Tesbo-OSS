@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
@@ -11,6 +11,7 @@ import {
   IconLayoutGrid,
   IconList,
   IconPlus,
+  IconSearch,
 } from "@tabler/icons-react";
 import { authMe, listProjects, listTestCases, listSuites, createProject, getWorkspace, listActivity, listProjectMembers, listTestRuns } from "@/lib/api";
 import type { ProjectSummary, ProjectType } from "@/lib/api";
@@ -155,10 +156,30 @@ function StatusBadge({ status }: { status: ProjectStatus }) {
   );
 }
 
-function ProjectsToolbar({ viewMode, onViewModeChange }: { viewMode: "grid" | "list"; onViewModeChange: (v: "grid" | "list") => void }) {
+function ProjectsToolbar({
+  viewMode,
+  onViewModeChange,
+  searchQuery,
+  onSearchChange,
+}: {
+  viewMode: "grid" | "list";
+  onViewModeChange: (v: "grid" | "list") => void;
+  searchQuery: string;
+  onSearchChange: (v: string) => void;
+}) {
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="flex items-center gap-2">
+        <label className="flex h-8 min-w-[200px] max-w-[280px] flex-1 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-2.5 text-[13px] text-[var(--muted-soft)] transition-colors focus-within:border-[var(--brand-primary)]">
+          <IconSearch size={14} stroke={1.75} className="shrink-0" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => onSearchChange(e.target.value)}
+            placeholder="Search projects by name or keyword"
+            className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
+          />
+        </label>
         <button
           type="button"
           className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
@@ -207,6 +228,7 @@ function ProjectsPageContent() {
   const [projects, setProjects] = useState<ProjectWithStats[]>([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
+  const [searchQuery, setSearchQuery] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createKey, setCreateKey] = useState("");
@@ -320,6 +342,14 @@ function ProjectsPageContent() {
     }
   }
 
+  const filteredProjects = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) return projects;
+    return projects.filter((p) =>
+      [p.name, p.key, p.description ?? ""].some((field) => field.toLowerCase().includes(query))
+    );
+  }, [projects, searchQuery]);
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -345,7 +375,16 @@ function ProjectsPageContent() {
           ) : null}
         />
       )}
-      filterBar={projects.length > 0 ? <ProjectsToolbar viewMode={viewMode} onViewModeChange={handleViewModeChange} /> : null}
+      filterBar={
+        projects.length > 0 ? (
+          <ProjectsToolbar
+            viewMode={viewMode}
+            onViewModeChange={handleViewModeChange}
+            searchQuery={searchQuery}
+            onSearchChange={setSearchQuery}
+          />
+        ) : null
+      }
     >
       {projects.length === 0 ? (
         <EmptyStateBlock
@@ -361,6 +400,13 @@ function ProjectsPageContent() {
               Create first project
             </Button>
           ) : null}
+        />
+      ) : null}
+
+      {projects.length > 0 && filteredProjects.length === 0 ? (
+        <EmptyStateBlock
+          title="No projects match your search"
+          description={`No projects found for "${searchQuery.trim()}". Try a different name or keyword.`}
         />
       ) : null}
 
@@ -413,17 +459,17 @@ function ProjectsPageContent() {
         </form>
       </Modal>
 
-      {projects.length > 0 && (
+      {filteredProjects.length > 0 && (
         <div className="mt-6">
           <div className="mb-4 flex items-center gap-2">
             <IconFolders size={15} stroke={1.75} className="text-[var(--muted-soft)]" />
             <span className="text-xs font-medium uppercase tracking-[0.06em] text-[var(--muted)]">Tesbo Test Manager Projects</span>
-            <span className="rounded-full bg-[var(--surface-secondary)] px-2 py-0.5 text-[11px] font-medium text-[var(--muted)]">{projects.length}</span>
+            <span className="rounded-full bg-[var(--surface-secondary)] px-2 py-0.5 text-[11px] font-medium text-[var(--muted)]">{filteredProjects.length}</span>
           </div>
 
           {viewMode === "grid" ? (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {projects.map((p) => {
+              {filteredProjects.map((p) => {
                 const color = projectColor(p.id);
                 return (
                   <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
@@ -495,7 +541,7 @@ function ProjectsPageContent() {
                 <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Team</div>
                 <div className="text-right text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Updated</div>
               </div>
-              {projects.map((p) => {
+              {filteredProjects.map((p) => {
                 const color = projectColor(p.id);
                 return (
                   <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
