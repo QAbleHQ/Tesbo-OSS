@@ -1804,7 +1804,7 @@ export class LegacyService implements OnModuleInit {
   async listSuites(projectId: string) {
     const res = await this.db.query(
       `SELECT s.id, s.parent_id, s.name, s.position, s.created_at, COUNT(t.id)::int AS test_case_count
-       FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id
+       FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id AND t.deleted_at IS NULL
        WHERE s.project_id = $1
        GROUP BY s.id ORDER BY s.position, s.name`,
       [projectId]

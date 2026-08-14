@@ -82,10 +82,9 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(diffMs / day)}d ago`;
 }
 
-// "Suites" on a project card counts top-level suites only — a sub-suite nested under
-// one shouldn't inflate the count a second time.
-function topLevelSuiteCount(suites: SuiteNode[]): number {
-  return suites.filter((s) => s.parentId === null).length;
+// "Total Suites" on a project card counts every suite — top-level and nested sub-suites alike.
+function totalSuiteCount(suites: SuiteNode[]): number {
+  return suites.length;
 }
 
 function getInitials(name: string): string {
@@ -510,8 +509,8 @@ function ProjectsPageContent() {
                             <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Test cases</div>
                           </div>
                           <div className="border-r border-[var(--border-subtle)] px-2 text-center">
-                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{topLevelSuiteCount(p.suites)}</div>
-                            <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Suites</div>
+                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{totalSuiteCount(p.suites)}</div>
+                            <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total Suites</div>
                           </div>
                           <div className="pl-2 text-center">
                             <div className="text-xl font-semibold tracking-tight" style={{ color: passRateTextColor(p.currentPassRate) }}>
@@ -538,11 +537,11 @@ function ProjectsPageContent() {
             <Card className="overflow-hidden p-0">
               <div
                 className="grid items-center gap-0 border-b border-[var(--border-subtle)] px-5 py-2.5"
-                style={{ gridTemplateColumns: "1fr 90px 70px 110px 160px 100px" }}
+                style={{ gridTemplateColumns: "1fr 90px 100px 110px 160px 100px" }}
               >
                 <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Project</div>
                 <div className="text-center text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Test cases</div>
-                <div className="text-center text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Suites</div>
+                <div className="text-center text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total Suites</div>
                 <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Pass rate</div>
                 <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Team</div>
                 <div className="text-right text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Updated</div>
@@ -553,7 +552,7 @@ function ProjectsPageContent() {
                   <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
                     <div
                       className="grid items-center gap-0 border-b border-[var(--border-subtle)] px-5 py-3 transition-colors last:border-b-0 hover:bg-[var(--surface-secondary)]"
-                      style={{ gridTemplateColumns: "1fr 90px 70px 110px 160px 100px" }}
+                      style={{ gridTemplateColumns: "1fr 90px 100px 110px 160px 100px" }}
                     >
                       <div className="flex min-w-0 items-center gap-2.5">
                         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-semibold text-white" style={{ background: color }}>
@@ -565,7 +564,7 @@ function ProjectsPageContent() {
                         </div>
                       </div>
                       <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.testCaseCount}</div>
-                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{topLevelSuiteCount(p.suites)}</div>
+                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{totalSuiteCount(p.suites)}</div>
                       <div>
                         {p.currentPassRate !== null ? (
                           <div className="flex items-center gap-2">
