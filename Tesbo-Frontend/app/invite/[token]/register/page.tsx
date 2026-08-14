@@ -13,6 +13,7 @@ import {
 } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
 import { Button, Card, CardBody, CardHeader, CardTitle, Field, FieldError, FieldLabel, FieldHint, Input } from "@/components/ui";
+import { NAME_MAX_LENGTH, PASSWORD_MAX_LENGTH, PASSWORD_RULES_HINT, validateName, validatePasswordValue } from "@/lib/validation";
 
 type Mode = "password" | "otp";
 type Step = "form" | "code";
@@ -67,8 +68,10 @@ export default function RegisterFromInvitePage() {
   async function handlePasswordFormSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
-    if (!name.trim()) { setError("Name is required"); return; }
-    if (password.length < 8) { setError("Password must be at least 8 characters"); return; }
+    const nameError = validateName(name, "Name");
+    if (nameError) { setError(nameError); return; }
+    const passwordError = validatePasswordValue(password);
+    if (passwordError) { setError(passwordError); return; }
     if (password !== confirmPassword) { setError("Passwords do not match"); return; }
     setSubmitting(true);
     try {
@@ -100,7 +103,8 @@ export default function RegisterFromInvitePage() {
   async function handleOtpFormSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
-    if (!name.trim()) { setError("Name is required"); return; }
+    const nameError = validateName(name, "Name");
+    if (nameError) { setError(nameError); return; }
     setSubmitting(true);
     try {
       await startInviteOtpRegistration(token, { name: name.trim() });
@@ -212,6 +216,7 @@ export default function RegisterFromInvitePage() {
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Your name"
                   disabled={submitting}
+                  maxLength={NAME_MAX_LENGTH}
                   autoFocus
                 />
               </Field>
@@ -237,7 +242,9 @@ export default function RegisterFromInvitePage() {
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="At least 8 characters"
                   disabled={submitting}
+                  maxLength={PASSWORD_MAX_LENGTH}
                 />
+                <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
               </Field>
 
               <Field>
@@ -304,6 +311,7 @@ export default function RegisterFromInvitePage() {
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Your name"
                   disabled={submitting}
+                  maxLength={NAME_MAX_LENGTH}
                   autoFocus
                 />
               </Field>

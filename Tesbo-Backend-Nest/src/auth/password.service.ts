@@ -1,6 +1,9 @@
-import { Injectable } from "@nestjs/common";
+import { BadRequestException, Injectable } from "@nestjs/common";
 import { pbkdf2Sync, randomBytes, timingSafeEqual } from "crypto";
 import { DatabaseService } from "../database/database.service";
+
+const MIN_LENGTH = 8;
+const MAX_LENGTH = 128;
 
 @Injectable()
 export class PasswordService {
@@ -8,6 +11,30 @@ export class PasswordService {
   private readonly keyLengthBytes = 32;
 
   constructor(private readonly db: DatabaseService) {}
+
+  /**
+   * The single source of truth for password policy — every path that sets a password
+   * (signup, invite registration, first-admin setup, change-password, reset-password)
+   * goes through hashPassword(), so this is the one place the rule can ever diverge.
+   */
+  assertValidPassword(password: string | undefined): void {
+    const value = password ?? "";
+    if (value.length < MIN_LENGTH) {
+      throw new BadRequestException({ error: `Password must be at least ${MIN_LENGTH} characters` });
+    }
+    if (value.length > MAX_LENGTH) {
+      throw new BadRequestException({ error: `Password must be at most ${MAX_LENGTH} characters` });
+    }
+    if (!/[a-z]/.test(value)) {
+      throw new BadRequestException({ error: "Password must include at least one lowercase letter" });
+    }
+    if (!/[A-Z]/.test(value)) {
+      throw new BadRequestException({ error: "Password must include at least one uppercase letter" });
+    }
+    if (!/[0-9]/.test(value)) {
+      throw new BadRequestException({ error: "Password must include at least one number" });
+    }
+  }
 
   async verifyLogin(rawEmail: string, password: string): Promise<string | null> {
     if (!rawEmail?.trim() || !password?.trim()) return null;
@@ -22,12 +49,27 @@ export class PasswordService {
   }
 
   hashPassword(password: string): string {
-    if (!password || password.length < 8) {
-      throw new Error("Password must be at least 8 characters");
-    }
+    this.assertValidPassword(password);
     const salt = randomBytes(16);
     const hash = pbkdf2Sync(password, salt, this.iterations, this.keyLengthBytes, "sha256");
     return `pbkdf2_sha256$${this.iterations}$${salt.toString("base64url")}$${hash.toString("base64url")}`;
+  }
+
+  async hasPassword(userId: string): Promise<boolean> {
+    const result = await this.db.query<{ password_hash: string | null }>("SELECT password_hash FROM users WHERE id = $1", [userId]);
+    return !!result.rows[0]?.password_hash;
+  }
+
+  async verifyCurrentPassword(userId: string, currentPassword: string): Promise<boolean> {
+    const result = await this.db.query<{ password_hash: string | null }>("SELECT password_hash FROM users WHERE id = $1", [userId]);
+    const hash = result.rows[0]?.password_hash;
+    if (!hash) return false;
+    return this.verifyPassword(currentPassword, hash);
+  }
+
+  async setPassword(userId: string, newPassword: string): Promise<void> {
+    const passwordHash = this.hashPassword(newPassword);
+    await this.db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [passwordHash, userId]);
   }
 
   private verifyPassword(password: string, storedHash: string): boolean {

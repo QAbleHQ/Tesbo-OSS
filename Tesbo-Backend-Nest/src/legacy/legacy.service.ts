@@ -15,6 +15,7 @@ import { DatabaseService } from "../database/database.service";
 import { StorageService } from "../storage/storage.service";
 import { encryptSecret, decryptSecret } from "../common/crypto.util";
 import { escapeHtml, jiraDescriptionToText } from "../common/integration-text.util";
+import { validatePersonName } from "../common/person-name.util";
 import { ApiTokenService } from "../auth/api-token.service";
 import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
@@ -1309,10 +1310,9 @@ export class LegacyService implements OnModuleInit {
   async registerFromInvitation(rawToken: string, body: Body) {
     const inv = await this.getInvitationRowOrThrow(rawToken);
 
-    const name = String(body.name || "").trim();
+    const name = validatePersonName(body.name, "Name");
     const pw = String(body.password || "").trim();
-    if (!name) throw new BadRequestException({ error: "name is required" });
-    if (!pw || pw.length < 8) throw new BadRequestException({ error: "password must be at least 8 characters" });
+    this.password.assertValidPassword(pw);
 
     // Ensure the email is not already taken
     const existingUser = await this.db.query<{ id: string }>("SELECT id FROM users WHERE email = $1", [inv.email]);

@@ -7,10 +7,12 @@ import { OtpService } from "../auth/otp.service";
 import { PasswordService } from "../auth/password.service";
 import { AppConfigService } from "../config/app-config.service";
 import { AuthenticatedRequest } from "../common/request.types";
+import { validatePersonName } from "../common/person-name.util";
 import { DatabaseService } from "../database/database.service";
 import { InvitationRow, LegacyService } from "./legacy.service";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL_MAX_LENGTH = 255;
 
 interface PendingSignupRow {
   id: string;
@@ -199,17 +201,18 @@ export class SignupService {
   private validateEmail(rawEmail: string | undefined): string {
     const email = (rawEmail ?? "").trim().toLowerCase();
     if (!email || !EMAIL_RE.test(email)) throw new BadRequestException({ error: "invalid email address" });
+    if (email.length > EMAIL_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Email must be at most ${EMAIL_MAX_LENGTH} characters` });
+    }
     return email;
   }
 
   private validateName(name: string | undefined): string {
-    const trimmed = (name ?? "").trim();
-    if (!trimmed) throw new BadRequestException({ error: "name is required" });
-    return trimmed;
+    return validatePersonName(name, "Name");
   }
 
   private validatePassword(password: string | undefined): void {
-    if (!password || password.trim().length < 8) throw new BadRequestException({ error: "password must be at least 8 characters" });
+    this.password.assertValidPassword(password);
   }
 
   private isUniqueViolation(error: unknown): boolean {
