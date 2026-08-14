@@ -42,7 +42,23 @@ export type RbacTenantKind =
   | "reports-ui"
   | "import-export"
   | "import-export-ui"
-  | "project-keys";
+  | "project-keys"
+  // Wave 5 — Knowledge Base v2
+  | "knowledge-base"
+  | "kb-comments"
+  | "kb-files"
+  | "kb-ui"
+  // Wave 7 — execution bulk ops, schedules, share links
+  | "exec-ops"
+  // Wave 8 — integrations (Jira / Linear), authorization and validation layer
+  | "integrations"
+  // Wave 9 — Zyra, AI keys, MCP
+  | "zyra"
+  | "ai-keys"
+  // Wave 10 — the tail: notifications, activity, API keys, external report ingest
+  | "notifications"
+  | "api-keys"
+  | "tesbo-reports";
 
 /** The three roles legacy.service.ts's normalizeRole() collapses every stored role into. */
 export type RbacRole = "owner" | "manager" | "qa_engineer";

@@ -223,6 +223,25 @@ function normalizeCountryCode(value: unknown): string | null {
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * A pagination parameter as a whole number inside its bounds, falling back when it isn't one.
+ *
+ * `Number("abc")` is NaN, and NaN survives Math.min/Math.max unchanged — so the previous
+ * `Math.max(1, Math.min(100, Number(query.limit || 25)))` passed NaN straight into a LIMIT clause and
+ * Postgres answered the request with an error. Every paginated endpoint could therefore be turned
+ * into a 500 by typing a word into a query string. Non-finite input now reads as "not supplied",
+ * which is the same thing a caller who omitted it gets.
+ *
+ * A limit of 0 is left alone rather than raised to 1: asking for the total without any rows is a
+ * legitimate request, and api/testcases.spec.ts pins it as the contract. Only a negative value and a
+ * non-number are corrected.
+ */
+export function pageNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  const base = Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+  return Math.min(Math.max(base, min), max);
+}
+
 export function isUuid(value: unknown): boolean {
   return UUID_RE.test(String(value ?? ""));
 }
@@ -686,6 +705,7 @@ export class LegacyService implements OnModuleInit {
 
   async revokeApiKey(userId: string | null | undefined, projectId: string, keyId: string) {
     await this.requireProjectAccess(userId, projectId);
+    if (!isUuid(keyId)) throw new NotFoundException({ error: "API key not found" });
     const removed = await this.apiTokens.revokeToken(projectId, keyId);
     if (!removed) throw new NotFoundException({ error: "API key not found" });
     return { ok: true };
@@ -719,6 +739,16 @@ export class LegacyService implements OnModuleInit {
       this.logger.log(`Resuming interrupted Zyra chat plan for session ${row.id} (${Number(plan?.doneCount) || 0}/${Number(plan?.totalCount) || 0} done)`);
       void this.continueZyraChatPlan(String(row.project_id), row.user_id ? String(row.user_id) : null, String(row.id), planId).catch(() => undefined);
     }
+  }
+
+  /**
+   * "There is a signed-in caller" on its own, for routes with nothing else to authorize against.
+   *
+   * requireUser is private; this is the same check exposed for the notification routes, which have no
+   * project or workspace in their URL to resolve.
+   */
+  requireSession(userId?: string | null): string {
+    return this.requireUser(userId);
   }
 
   private requireUser(userId?: string | null): string {
@@ -907,6 +937,11 @@ export class LegacyService implements OnModuleInit {
         project.rows[0].id,
         uid
       ]);
+      // The same seeding createProject does. Without it the workspace's FIRST project — the one
+      // every new signup lands in — has no knowledge_folders root, and the whole Knowledge Base is
+      // unusable there: the folder tree 404s ("root folder not found") and createKnowledgeFolder
+      // falls back to parent_folder_id = NULL, quietly making a second orphan root.
+      await this.seedKnowledgeBaseDefaults(client, organizationId, project.rows[0].id);
       await client.query("UPDATE users SET default_project_id = $1, updated_at = now() WHERE id = $2", [project.rows[0].id, uid]);
       return { organizationId, projectId: project.rows[0].id, projectKey: key };
     });
@@ -1737,6 +1772,8 @@ export class LegacyService implements OnModuleInit {
   async allocateAiKey(userId: string | null | undefined, body: Body) {
     const projectId = String(body.projectId || "");
     if (!projectId) throw new BadRequestException({ error: "projectId is required" });
+    // A malformed id must read as "no such project in this workspace", not as a failed uuid cast.
+    if (!isUuid(projectId)) throw new NotFoundException({ error: "Project not found" });
     const workspace = await this.workspace(userId);
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     const project = await this.db.query("SELECT id FROM projects WHERE id = $1 AND organization_id = $2", [projectId, workspace.id]);
@@ -2043,8 +2080,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   async listTestCases(projectId: string, query: Body) {
-    const limit = Math.min(Number(query.limit || 100), 500);
-    const offset = Number(query.offset || 0);
+    const limit = pageNumber(query.limit, 100, 0, 500);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const filters: string[] = ["project_id = $1", "deleted_at IS NULL"];
     const values: any[] = [projectId];
     for (const [param, column] of [
@@ -2387,7 +2424,8 @@ export class LegacyService implements OnModuleInit {
     await this.logProjectActivity(projectId, uid, "testcase_bulk_deleted", "testcase", null, null, { testcaseIds: ids });
   }
 
-  async linkedJiraKeys(projectId: string) {
+  async linkedJiraKeys(projectId: string, userId?: string | null) {
+    await this.requireProjectAccess(userId, projectId);
     const res = await this.db.query(
       "SELECT jira_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND jira_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY jira_issue_key",
       [projectId]
@@ -2396,7 +2434,8 @@ export class LegacyService implements OnModuleInit {
     return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.jira_issue_key, r.count])) };
   }
 
-  async linkedLinearKeys(projectId: string) {
+  async linkedLinearKeys(projectId: string, userId?: string | null) {
+    await this.requireProjectAccess(userId, projectId);
     const res = await this.db.query(
       "SELECT linear_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND linear_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY linear_issue_key",
       [projectId]
@@ -2623,13 +2662,34 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
-  async getCycle(cycleId: string) {
+  /**
+   * Resolves a run and confirms the caller may reach the project it belongs to.
+   *
+   * /api/cycles/* is addressed by cycle id with no project in the URL, so every handler here has to
+   * resolve the project itself. They did not: getCycle, updateCycle, deleteCycle, executions,
+   * shareCycle and the cycle_items routes took no caller at all, which the comment above
+   * exportCycleExecutions already recorded as an open gap. A run carries case titles, actual results
+   * and linked defect keys, DELETE removes it outright, and share mints a public URL to it.
+   */
+  private async requireCycleAccess(userId: string | null | undefined, cycleId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    // Same answer for a malformed id as for one that doesn't exist — see requireProjectAccess.
+    if (!isUuid(cycleId)) throw new NotFoundException({ error: "Cycle not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM cycles WHERE id = $1", [cycleId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  async getCycle(cycleId: string, userId?: string | null) {
+    await this.requireCycleAccess(userId, cycleId);
     const res = await this.db.query("SELECT * FROM cycles WHERE id = $1", [cycleId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
     return toCamel(res.rows[0]);
   }
 
-  async shareCycle(cycleId: string, body: Body) {
+  async shareCycle(cycleId: string, userId: string | null | undefined, body: Body) {
+    await this.requireCycleAccess(userId, cycleId);
     const enabled = body.enabled !== false;
     const existing = await this.db.query("SELECT id, share_token FROM cycles WHERE id = $1", [cycleId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
@@ -2656,7 +2716,8 @@ export class LegacyService implements OnModuleInit {
     return this.executions(run.rows[0].id);
   }
 
-  async updateCycle(cycleId: string, body: Body) {
+  async updateCycle(cycleId: string, userId: string | null | undefined, body: Body) {
+    await this.requireCycleAccess(userId, cycleId);
     await this.db.query(
       `UPDATE cycles SET name=COALESCE($2,name), description=COALESCE($3,description),
        environment=COALESCE($4,environment), build_version=COALESCE($5,build_version),
@@ -2678,11 +2739,13 @@ export class LegacyService implements OnModuleInit {
     );
   }
 
-  async deleteCycle(cycleId: string) {
+  async deleteCycle(cycleId: string, userId?: string | null) {
+    await this.requireCycleAccess(userId, cycleId);
     await this.db.query("DELETE FROM cycles WHERE id = $1", [cycleId]);
   }
 
-  async addCycleTestCases(cycleId: string, body: Body) {
+  async addCycleTestCases(cycleId: string, userId: string | null | undefined, body: Body) {
+    await this.requireCycleAccess(userId, cycleId);
     const ids = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
     for (const testcaseId of ids) {
       const tc = await this.db.query<{ title: string }>("SELECT title FROM testcases WHERE id = $1 AND deleted_at IS NULL", [testcaseId]);
@@ -2697,10 +2760,25 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
-  async removeCycleTestCase(cycleId: string, testcaseId: string) {
+  async removeCycleTestCase(cycleId: string, userId: string | null | undefined, testcaseId: string) {
+    await this.requireCycleAccess(userId, cycleId);
+    if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
     await this.db.query("DELETE FROM cycle_items WHERE cycle_id = $1 AND testcase_id = $2", [cycleId, testcaseId]);
   }
 
+  /** The guarded entry point for GET /api/cycles/:cycleId/executions. */
+  async executionsForUser(cycleId: string, userId: string | null | undefined) {
+    await this.requireCycleAccess(userId, cycleId);
+    return this.executions(cycleId);
+  }
+
+  /**
+   * The rows themselves, without a caller check.
+   *
+   * Kept unguarded for the two callers that have already decided access: exportCycleExecutions
+   * (which authorizes first) and publicCycleExecutions (which is reached through a share token and
+   * is deliberately public).
+   */
   async executions(cycleId: string) {
     const res = await this.db.query(
       `SELECT e.id, e.status, e.assignee_id, e.actual_result, e.executed_at, e.defect_key, e.defect_url,
@@ -2714,6 +2792,79 @@ export class LegacyService implements OnModuleInit {
       [cycleId]
     );
     return res.rows.map(toCamel);
+  }
+
+  /** The statuses executions.status accepts. Anything else is refused before it reaches Postgres. */
+  static readonly EXECUTION_STATUSES = ["Untested", "Passed", "Failed", "Blocked", "Skipped", "Retest"];
+
+  /**
+   * Resolves the executions a bulk request names, refusing the whole batch if any of them is not in
+   * this run.
+   *
+   * Atomic on purpose, like the knowledge-base upload: a partial application leaves the caller unable
+   * to tell which half of their selection took effect, and the UI offers these actions on a
+   * multi-select where "some of them" is not a state the user can see.
+   */
+  private async resolveBulkExecutions(cycleId: string, body: Body): Promise<string[]> {
+    const ids = normalizeJsonArray(body.executionIds).map((id) => String(id));
+    if (!ids.length) throw new BadRequestException({ error: "executionIds is required" });
+    if (!ids.every((id) => isUuid(id))) throw new NotFoundException({ error: "Execution not found" });
+    const res = await this.db.query<{ id: string }>(
+      `SELECT e.id FROM executions e JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       WHERE ci.cycle_id = $1 AND e.id = ANY($2::uuid[]) AND e.deleted_at IS NULL`,
+      [cycleId, ids]
+    );
+    if (res.rows.length !== ids.length) throw new NotFoundException({ error: "Execution not found" });
+    return res.rows.map((row) => row.id);
+  }
+
+  /**
+   * Sets one status across a selection of a run's executions.
+   *
+   * The controller method was `bulkStatus() {}` — an empty body that answered 2xx and changed
+   * nothing, so the UI's "mark selected as Passed" reported success and left every row Untested.
+   */
+  async bulkUpdateExecutionStatus(cycleId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireCycleAccess(uid, cycleId);
+    const status = String(body.status || "").trim();
+    if (!LegacyService.EXECUTION_STATUSES.includes(status)) {
+      throw new BadRequestException({
+        error: `status must be one of: ${LegacyService.EXECUTION_STATUSES.join(", ")}`
+      });
+    }
+    const executionIds = await this.resolveBulkExecutions(cycleId, body);
+    for (const executionId of executionIds) {
+      await this.updateExecution(executionId, uid, { status });
+    }
+    return { updated: executionIds.length, status };
+  }
+
+  /**
+   * Assigns a selection of a run's executions to one person.
+   *
+   * Also previously an empty method. The assignee has to be a member of the run's project: work
+   * assigned to someone who cannot open the project is an execution nobody can action.
+   */
+  async bulkAssignExecutions(cycleId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    const projectId = await this.requireCycleAccess(uid, cycleId);
+    const assigneeId = body.assigneeId === null || body.assigneeId === undefined ? null : String(body.assigneeId);
+    if (assigneeId !== null) {
+      if (!isUuid(assigneeId)) throw new NotFoundException({ error: "Assignee not found" });
+      const member = await this.db.query(
+        "SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2",
+        [projectId, assigneeId]
+      );
+      if (!member.rows[0]) {
+        throw new BadRequestException({ error: "The assignee must be a member of this project" });
+      }
+    }
+    const executionIds = await this.resolveBulkExecutions(cycleId, body);
+    for (const executionId of executionIds) {
+      await this.updateExecution(executionId, uid, { assigneeId });
+    }
+    return { updated: executionIds.length, assigneeId };
   }
 
   /**
@@ -2752,6 +2903,9 @@ export class LegacyService implements OnModuleInit {
       [executionId]
     );
     if (!before.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    // The execution was resolved but its project never was: a signed-in caller from any workspace
+    // could rewrite another team's result by execution id.
+    await this.requireProjectAccess(uid, before.rows[0].project_id);
     const res = await this.db.query(
       `UPDATE executions SET status=COALESCE($2,status), assignee_id=$3, actual_result=COALESCE($4,actual_result),
        executed_at=CASE WHEN $2 IS NULL THEN executed_at ELSE now() END, defect_key=COALESCE($5,defect_key),
@@ -3601,7 +3755,7 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(userId, projectId);
     const [counts, requirements, bugSeverity, activeRuns, addedThisWeek, passRateWindows] = await Promise.all([
       this.analytics(projectId),
-      this.requirementsSummary(projectId),
+      this.requirementsSummary(projectId, userId),
       this.db.query<{ severity: string; count: string }>(
         `SELECT severity, COUNT(*)::int AS count FROM bugs WHERE project_id = $1 AND status IN ('Open', 'Reopened') GROUP BY severity`,
         [projectId]
@@ -3674,8 +3828,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   async listActivity(projectId: string, query: Body) {
-    const limit = Math.min(Math.max(Number(query.limit || 30), 1), 100);
-    const offset = Math.max(Number(query.offset || 0), 0);
+    const limit = pageNumber(query.limit, 30, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const entityType = String(query.entityType || "").trim();
     const actorId = String(query.actorId || "").trim();
     const search = String(query.search || "").trim();
@@ -3930,8 +4084,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   private async listWorkspaceActivity(organizationId: string, query: Body) {
-    const limit = Math.min(Math.max(Number(query.limit || 30), 1), 100);
-    const offset = Math.max(Number(query.offset || 0), 0);
+    const limit = pageNumber(query.limit, 30, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const entityType = String(query.entityType || "").trim();
     const actorId = String(query.actorId || "").trim();
     const projectId = String(query.projectId || "").trim();
@@ -4034,7 +4188,17 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async listKnowledge(projectId: string, query: Body) {
+  /*
+   * The v1 flat notes surface, superseded by Knowledge Base v2 above but still routed.
+   *
+   * Every method here now takes the caller and resolves the project first. They previously took no
+   * caller at all — the controller methods had no @Req() — so an anonymous request could list any
+   * project's notes by id, rewrite one, or delete one, with no session and from any workspace. The
+   * item routes also resolve the item WITHIN the project: an id alone is not authority, or a member
+   * of one project could delete another project's note by guessing its id.
+   */
+  async listKnowledge(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const values: any[] = [projectId];
     const filters = ["project_id = $1"];
     if (query.type) {
@@ -4050,29 +4214,63 @@ export class LegacyService implements OnModuleInit {
   }
 
   async createKnowledge(projectId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
     const res = await this.db.query(
       `INSERT INTO knowledge_base_items (project_id, item_type, title, content, created_by)
        VALUES ($1, 'note', $2, $3, $4) RETURNING *`,
-      [projectId, body.title || "Untitled note", body.content || "", userId || null]
+      [projectId, body.title || "Untitled note", body.content || "", uid]
     );
     return toCamel(res.rows[0]);
   }
 
-  async getKnowledge(itemId: string) {
-    const res = await this.db.query("SELECT * FROM knowledge_base_items WHERE id = $1", [itemId]);
+  /**
+   * Resolves a v1 note inside the project the caller reached it through.
+   *
+   * Scoping to project_id is the load-bearing half: without it, holding an item id was enough to
+   * read, rewrite or delete a note belonging to any project in the deployment.
+   */
+  private async knowledgeItem(projectId: string, itemId: string): Promise<Body> {
+    if (!isUuid(itemId)) throw new NotFoundException({ error: "Knowledge base item not found" });
+    const res = await this.db.query("SELECT * FROM knowledge_base_items WHERE id = $1 AND project_id = $2", [
+      itemId,
+      projectId
+    ]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Knowledge base item not found" });
-    return toCamel(res.rows[0]);
+    return res.rows[0];
   }
 
-  async updateKnowledge(itemId: string, body: Body) {
+  async getKnowledge(projectId: string, userId: string | null | undefined, itemId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return toCamel(await this.knowledgeItem(projectId, itemId));
+  }
+
+  async updateKnowledge(projectId: string, userId: string | null | undefined, itemId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.knowledgeItem(projectId, itemId);
     await this.db.query(
       "UPDATE knowledge_base_items SET title=COALESCE($2,title), content=COALESCE($3,content), updated_at=now() WHERE id=$1",
       [itemId, body.title || null, body.content || null]
     );
   }
 
-  async deleteKnowledge(itemId: string) {
+  async deleteKnowledge(projectId: string, userId: string | null | undefined, itemId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.knowledgeItem(projectId, itemId);
     await this.db.query("DELETE FROM knowledge_base_items WHERE id = $1", [itemId]);
+  }
+
+  /**
+   * The v1 per-item file route, which has never served bytes — it returns an empty object.
+   *
+   * Kept routed for the old clients that still call it, but no longer answers without a session: an
+   * unauthenticated 200 on a project-scoped path is the shape that let bug 14 through, and a route
+   * that looks like it serves a file must not be the one exception.
+   */
+  async knowledgeItemFile(projectId: string, userId: string | null | undefined, itemId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.knowledgeItem(projectId, itemId);
+    return {};
   }
 
   // ─── Knowledge Base v2 (folders / documents / files) ──────────────────────────
@@ -4102,7 +4300,11 @@ export class LegacyService implements OnModuleInit {
     throw new ForbiddenException({ error: "You can only modify items you created" });
   }
 
+  // A malformed id gets the same answer as a well-formed one that doesn't exist. Without the guard
+  // the failed uuid cast surfaces as a 500, so a URL typo reads as a server fault — the same reason
+  // isUuid() guards the custom-field and attachment resolvers.
   private async kbFolder(projectId: string, folderId: string): Promise<Body> {
+    if (!isUuid(folderId)) throw new NotFoundException({ error: "Folder not found" });
     const res = await this.db.query(
       "SELECT * FROM knowledge_folders WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [folderId, projectId]
@@ -4324,6 +4526,9 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireOwnerOrManager(role);
+    // Restore resolves nothing first (a deleted row is invisible to kbFolder), so the uuid guard
+    // has to sit here rather than in the resolver.
+    if (!isUuid(folderId)) throw new NotFoundException({ error: "Folder not found" });
     const res = await this.db.query(
       "UPDATE knowledge_folders SET is_deleted = false, deleted_at = NULL, updated_by = $2, updated_at = now() WHERE id = $1 AND project_id = $3 RETURNING *",
       [folderId, uid, projectId]
@@ -4444,7 +4649,7 @@ export class LegacyService implements OnModuleInit {
         delete camelled.searchVector;
         return Object.assign(camelled, { type: "document" });
       }),
-      ...files.rows.map((row) => Object.assign(toCamel(row), { type: "file" }))
+      ...files.rows.map((row) => Object.assign(this.kbFileView(row), { type: "file" }))
     ];
 
     const search = String(query.search || "").trim().toLowerCase();
@@ -4503,6 +4708,7 @@ export class LegacyService implements OnModuleInit {
   }
 
   private async kbDocument(projectId: string, documentId: string): Promise<Body> {
+    if (!isUuid(documentId)) throw new NotFoundException({ error: "Document not found" });
     const res = await this.db.query(
       `SELECT ${LegacyService.KB_DOCUMENT_COLUMNS} FROM knowledge_documents WHERE id = $1 AND project_id = $2 AND is_deleted = false`,
       [documentId, projectId]
@@ -4664,6 +4870,7 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireOwnerOrManager(role);
+    if (!isUuid(documentId)) throw new NotFoundException({ error: "Document not found" });
     const res = await this.db.query(
       `UPDATE knowledge_documents SET is_deleted = false, deleted_at = NULL, updated_by = $2, updated_at = now()
        WHERE id = $1 AND project_id = $3 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
@@ -4753,6 +4960,8 @@ export class LegacyService implements OnModuleInit {
 
     const parentCommentId = body?.parentCommentId ? String(body.parentCommentId) : null;
     if (parentCommentId) {
+      if (!isUuid(parentCommentId))
+        throw new NotFoundException({ error: "The comment you're replying to no longer exists." });
       const parent = await this.db.query<{ id: string; parent_comment_id: string | null }>(
         "SELECT id, parent_comment_id FROM knowledge_document_comments WHERE id = $1 AND document_id = $2 AND is_deleted = false",
         [parentCommentId, documentId]
@@ -4800,6 +5009,7 @@ export class LegacyService implements OnModuleInit {
   async updateKnowledgeDocumentComment(projectId: string, userId: string | null | undefined, commentId: string, body: Body) {
     const uid = this.requireUser(userId);
     await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(commentId)) throw new NotFoundException({ error: "Comment not found" });
     const existing = await this.db.query<{ id: string; author_id: string | null; parent_comment_id: string | null; document_id: string }>(
       "SELECT id, author_id, parent_comment_id, document_id FROM knowledge_document_comments WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [commentId, projectId]
@@ -4836,6 +5046,7 @@ export class LegacyService implements OnModuleInit {
   async deleteKnowledgeDocumentComment(projectId: string, userId: string | null | undefined, commentId: string) {
     const uid = this.requireUser(userId);
     await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(commentId)) throw new NotFoundException({ error: "Comment not found" });
     const existing = await this.db.query<{ id: string; author_id: string | null }>(
       "SELECT id, author_id FROM knowledge_document_comments WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [commentId, projectId]
@@ -4927,10 +5138,26 @@ export class LegacyService implements OnModuleInit {
       this.logger.warn(`OCR skipped — no tessdata found at ${LegacyService.KB_TESSDATA_PATH}`);
       return null;
     }
+    /*
+     * errorHandler is not optional here, despite the try/catch around every caller.
+     *
+     * tesseract.js's worker message handler does `if (errorHandler) errorHandler(data); else throw
+     * Error(data)` (createWorker.js). That throw happens inside the worker's message callback, not
+     * inside the promise recognize() returns — so it lands as an uncaught exception and takes the
+     * whole Node process down. An image libpng cannot decode is enough to trigger it, which made
+     * uploading one slightly-corrupt PNG to a knowledge base a way for any project member to
+     * restart the API for everybody.
+     *
+     * With a handler installed, the same failure only rejects recognize(), which the caller's catch
+     * already turns into "no extractable text".
+     */
     const worker = await createWorker("eng", 1, {
       langPath: LegacyService.KB_TESSDATA_PATH,
       cachePath: LegacyService.KB_TESSDATA_PATH,
-      gzip: true
+      gzip: true,
+      errorHandler: (error: unknown) => {
+        this.logger.warn(`OCR worker reported an error: ${error instanceof Error ? error.message : String(error)}`);
+      }
     });
     try {
       const { data } = await worker.recognize(buffer);
@@ -4980,7 +5207,25 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
+  /**
+   * A knowledge file as it goes to a client, with the storage key removed.
+   *
+   * storage_key is the object's address inside the bucket. Handing it out contradicts the rule
+   * getAccessUrl states for itself ("Never expose storage_key/paths to the client directly") and
+   * undermines the download route's whole purpose: every read is supposed to pass through an
+   * access check first, and a caller holding the key can address the object without one wherever
+   * the bucket is reachable. file_name is dropped with it — it is the generated basename of that
+   * same key, not a name any user chose (original_file_name is the one the UI shows).
+   */
+  private kbFileView(row: Body): Body {
+    const camelled = toCamel(row);
+    delete camelled.storageKey;
+    delete camelled.fileName;
+    return camelled;
+  }
+
   private async kbFile(projectId: string, fileId: string): Promise<Body> {
+    if (!isUuid(fileId)) throw new NotFoundException({ error: "File not found" });
     const res = await this.db.query(
       "SELECT * FROM knowledge_files WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [fileId, projectId]
@@ -5044,7 +5289,7 @@ export class LegacyService implements OnModuleInit {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
         [project.organization_id, projectId, folderId, path.basename(storageKey), originalFileName, file.mimetype, ext, file.size, storageKey, uid, extractedText, extractionStatus]
       );
-      created.push(toCamel(res.rows[0]));
+      created.push(this.kbFileView(res.rows[0]));
       await this.logProjectActivity(projectId, uid, "uploaded", "knowledge_file", res.rows[0].id, originalFileName, {});
       if (isTranscribable) {
         // Embedding is enqueued once the transcript lands (transcribeKnowledgeFile), not here —
@@ -5061,7 +5306,7 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
     const file = await this.kbFile(projectId, fileId);
     const breadcrumb = await this.kbBreadcrumb(file.folder_id);
-    return { ...toCamel(file), breadcrumb };
+    return { ...this.kbFileView(file), breadcrumb };
   }
 
   async updateKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string, body: Body) {
@@ -5077,7 +5322,7 @@ export class LegacyService implements OnModuleInit {
       [fileId, nextName]
     );
     await this.logProjectActivity(projectId, uid, "renamed", "knowledge_file", fileId, nextName, {});
-    return toCamel(res.rows[0]);
+    return this.kbFileView(res.rows[0]);
   }
 
   async moveKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string, body: Body) {
@@ -5095,7 +5340,7 @@ export class LegacyService implements OnModuleInit {
       [fileId, folderId]
     );
     await this.logProjectActivity(projectId, uid, "moved", "knowledge_file", fileId, res.rows[0].original_file_name, {});
-    return toCamel(res.rows[0]);
+    return this.kbFileView(res.rows[0]);
   }
 
   async deleteKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string) {
@@ -5119,13 +5364,14 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireOwnerOrManager(role);
+    if (!isUuid(fileId)) throw new NotFoundException({ error: "File not found" });
     const res = await this.db.query(
       "UPDATE knowledge_files SET is_deleted = false, deleted_at = NULL, updated_at = now() WHERE id = $1 AND project_id = $2 RETURNING *",
       [fileId, projectId]
     );
     if (!res.rows[0]) throw new NotFoundException({ error: "File not found" });
     await this.logProjectActivity(projectId, uid, "restored", "knowledge_file", fileId, res.rows[0].original_file_name, {});
-    return toCamel(res.rows[0]);
+    return this.kbFileView(res.rows[0]);
   }
 
   // Resolves how to serve a file's bytes after the caller's own access check has passed:
@@ -5143,7 +5389,12 @@ export class LegacyService implements OnModuleInit {
     // directly (instead of redirecting to a presigned URL) avoids needing the storage bucket's
     // CORS policy to allow credentialed cross-origin requests.
     if (inline && LegacyService.KB_PLAINTEXT_EXTENSIONS.has(ext)) {
-      const buffer = await this.storage.getBuffer(file.storage_key);
+      // The exists() check above is a no-op on S3 (it answers true and lets the signed-URL request
+      // do the checking), so this branch — the only one that reads the bytes here rather than
+      // redirecting — is where a missing object actually surfaces. Without the catch it escapes as
+      // a 500, reporting a server fault for a file that is merely gone.
+      const buffer = await this.storage.getBuffer(file.storage_key).catch(() => null);
+      if (!buffer) throw new NotFoundException({ error: "File content is not available" });
       return { buffer, mimeType, originalFileName: file.original_file_name };
     }
     const access = await this.storage.getAccessUrl(file.storage_key, { filename: file.original_file_name, inline, contentType: mimeType });
@@ -5196,7 +5447,7 @@ export class LegacyService implements OnModuleInit {
          LIMIT 50`,
         [projectId, `%${q}%`]
       );
-      results.push(...res.rows.map((row) => Object.assign(toCamel(row), { type: "file" })));
+      results.push(...res.rows.map((row) => Object.assign(this.kbFileView(row), { type: "file" })));
     }
 
     const withBreadcrumb = await Promise.all(
@@ -5229,7 +5480,10 @@ export class LegacyService implements OnModuleInit {
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, doc.created_by, uid);
 
+    // versionId is client input, so a missing or malformed one must read as "no such version"
+    // rather than a failed uuid cast.
     const versionId = String(body.versionId || "");
+    if (!isUuid(versionId)) throw new NotFoundException({ error: "Version not found" });
     const version = await this.db.query(
       "SELECT * FROM knowledge_document_versions WHERE id = $1 AND document_id = $2",
       [versionId, documentId]
@@ -5619,7 +5873,29 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async jiraStatus(projectId: string) {
+  /*
+   * Every project-scoped integration method below takes the caller and resolves the project first.
+   *
+   * None of them did. Their controller methods had no @Req(), so the whole Jira/Linear surface
+   * answered anyone who knew a project id, with no session and from any workspace: the mirrored
+   * ticket store (issue keys, summaries, assignees and URLs from the customer's tracker) was
+   * readable, the project-to-remote-project mapping was rewritable, and jiraComment/linearComment
+   * posted to the customer's real Jira or Linear using the workspace's stored OAuth token.
+   */
+  async jiraStatus(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.jiraStatusForProject(projectId);
+  }
+
+  /**
+   * jiraStatus without the caller check, for internal callers that have already authorized.
+   *
+   * The Zyra helpers below reach this from a chat turn whose project access was resolved when the
+   * session was opened, and they hold no userId to re-check with. Keeping the unguarded body
+   * private — rather than leaving the public method unguarded, which is what it used to be — means
+   * every route still goes through the check.
+   */
+  private async jiraStatusForProject(projectId: string) {
     const connection = await this.getJiraConnection(projectId, false);
     if (!connection) return { connected: false, connectedProjects: [] };
     const projects = await this.db.query(
@@ -5641,7 +5917,8 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async jiraProjects(projectId: string) {
+  async jiraProjects(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
@@ -5660,7 +5937,8 @@ export class LegacyService implements OnModuleInit {
     })).filter((project) => project.id && project.key);
   }
 
-  async connectJiraProjects(projectId: string, body: Body) {
+  async connectJiraProjects(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, false);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const projects = normalizeJsonArray(body.projects)
@@ -5748,9 +6026,10 @@ export class LegacyService implements OnModuleInit {
     return { runs: await this.integrationSync.listRecentRuns(projectId) };
   }
 
-  async jiraTickets(projectId: string, query: Body) {
-    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
-    const offset = Math.max(0, Number(query.offset || 0));
+  async jiraTickets(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 25, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const search = String(query.search || "").trim();
     const filters = ["project_id = $1"];
     const values: any[] = [projectId];
@@ -5782,7 +6061,8 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel), total: count.rows[0]?.count ?? 0 };
   }
 
-  async jiraComment(projectId: string, body: Body) {
+  async jiraComment(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const issueKey = String(body.issueKey || body.jiraIssueKey || "").trim();
@@ -5808,7 +6088,8 @@ export class LegacyService implements OnModuleInit {
 
   // Live search against Jira (not the jira_tickets sync cache) — used by the bug-linking picker,
   // where a ticket filed moments ago may not have synced yet.
-  async jiraSearchIssues(projectId: string, query: Body) {
+  async jiraSearchIssues(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const mappings = await this.db.query(
@@ -5921,7 +6202,8 @@ export class LegacyService implements OnModuleInit {
   // Linear's API is GraphQL (not REST like Jira's) and its unit of work is a "team" rather than a
   // "project" — kept as separate methods/tables rather than forcing a shared shape onto both APIs.
 
-  async linearStatus(projectId: string) {
+  async linearStatus(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", false);
     if (!connection) return { connected: false, connectedProjects: [] };
@@ -5943,7 +6225,8 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async linearTeams(projectId: string) {
+  async linearTeams(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -5962,7 +6245,8 @@ export class LegacyService implements OnModuleInit {
     })).filter((team) => team.id && team.key);
   }
 
-  async connectLinearTeams(projectId: string, body: Body) {
+  async connectLinearTeams(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", false);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -5996,9 +6280,10 @@ export class LegacyService implements OnModuleInit {
     return this.startIntegrationSync(userId, projectId, "linear");
   }
 
-  async linearTickets(projectId: string, query: Body) {
-    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
-    const offset = Math.max(0, Number(query.offset || 0));
+  async linearTickets(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 25, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const search = String(query.search || "").trim();
     const filters = ["project_id = $1"];
     const values: any[] = [projectId];
@@ -6033,9 +6318,10 @@ export class LegacyService implements OnModuleInit {
   // Merged view for the Requirements page's "All Sources" tab — UNION ALL over jira_tickets and
   // linear_tickets into one shape (source discriminator + shared coverage flag), sharing one
   // pagination/search/filter pass instead of stitching two independently-paginated lists client-side.
-  async allTickets(projectId: string, query: Body) {
-    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
-    const offset = Math.max(0, Number(query.offset || 0));
+  async allTickets(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 25, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const search = String(query.search || "").trim();
     const combined = `
       SELECT id, 'jira' AS source, jira_issue_key AS key, summary, description, issue_type, status, priority,
@@ -6083,7 +6369,8 @@ export class LegacyService implements OnModuleInit {
   // Coverage/type/status aggregates for the Requirements page's stat strip + filter dropdown
   // options. Type/status are free-text synced verbatim from Jira/Linear (no fixed enum), so option
   // lists are derived from what's actually in the project rather than a hardcoded set.
-  async requirementsSummary(projectId: string) {
+  async requirementsSummary(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const bySource = async (table: "jira_tickets" | "linear_tickets", keyColumn: "jira_issue_key" | "linear_issue_key") => {
       const stats = await this.db.query(
         `SELECT COUNT(*)::int AS total,
@@ -6119,7 +6406,8 @@ export class LegacyService implements OnModuleInit {
     return { all, jira, linear };
   }
 
-  async linearComment(projectId: string, body: Body) {
+  async linearComment(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -6138,7 +6426,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   // Live search against Linear (not the linear_tickets sync cache) — same rationale as jiraSearchIssues.
-  async linearSearchIssues(projectId: string, query: Body) {
+  async linearSearchIssues(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -6177,7 +6466,16 @@ export class LegacyService implements OnModuleInit {
     return { list: results.slice(0, 20) };
   }
 
-  async zyraAgent(projectId: string) {
+  /*
+   * Every Zyra route below takes the caller and resolves the project first.
+   *
+   * None of the read routes did, and neither did settings, close-task or draft-delete: the
+   * controller methods had no @Req(). A chat session holds whatever the team told the agent about
+   * their product and a task holds the test cases it generated, and both were readable — and
+   * mutable — by anyone who knew a project id, from any workspace and with no session at all.
+   */
+  async zyraAgent(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const [project, allocation, usage, tasks] = await Promise.all([
       this.getProject(projectId),
       this.zyraAiAllocation(projectId),
@@ -6229,7 +6527,8 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async testZyraAiConnection(projectId: string): Promise<{ ok: boolean; provider: string; model: string; error?: string; latencyMs: number }> {
+  async testZyraAiConnection(projectId: string, userId: string | null | undefined): Promise<{ ok: boolean; provider: string; model: string; error?: string; latencyMs: number }> {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const allocation = await this.zyraAiAllocation(projectId);
     if (!allocation.key) {
       return { ok: false, provider: "none", model: "none", error: allocation.reason, latencyMs: 0 };
@@ -6292,7 +6591,9 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
-  async zyraTask(projectId: string, taskId: string) {
+  async zyraTask(projectId: string, userId: string | null | undefined, taskId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const res = await this.db.query(
       `SELECT id, requested_by, provider, model, user_story, acceptance_criteria, custom_prompt, style,
               requested_count, generated_count, generated_payload, saved_count, save_events, created_at, updated_at,
@@ -6306,7 +6607,8 @@ export class LegacyService implements OnModuleInit {
     return this.formatAiTask(res.rows[0]);
   }
 
-  async updateZyraSettings(projectId: string, body: Body) {
+  async updateZyraSettings(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const project = await this.getProject(projectId);
     const settings = this.parseProjectSettings(project.settings);
     const current = (settings.zyraAgent || {}) as Body;
@@ -6325,7 +6627,8 @@ export class LegacyService implements OnModuleInit {
     return { testcaseCount: requestedCount, testcaseRange, capabilities };
   }
 
-  async zyraChatSessions(projectId: string) {
+  async zyraChatSessions(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const res = await this.db.query(
       `SELECT id, project_id, user_id, title, created_at, updated_at, active_plan
        FROM zyra_chat_sessions
@@ -6337,7 +6640,9 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel) };
   }
 
-  async zyraChatSession(projectId: string, sessionId: string) {
+  async zyraChatSession(projectId: string, userId: string | null | undefined, sessionId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Chat session not found" });
     const session = await this.db.query(
       "SELECT id, project_id, user_id, title, created_at, updated_at, active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2",
       [sessionId, projectId]
@@ -6363,6 +6668,10 @@ export class LegacyService implements OnModuleInit {
   }
 
   async createZyraChatSession(projectId: string, userId: string | null | undefined, body: Body) {
+    // The caller was passed in but never checked: an anonymous request opened a session with a null
+    // user_id in any project by id, and a member of one project could open a chat in another.
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
     const title = String(body.title || "Zyra chat").trim().slice(0, 240) || "Zyra chat";
     const res = await this.db.query(
       `INSERT INTO zyra_chat_sessions (project_id, user_id, title)
@@ -6375,6 +6684,8 @@ export class LegacyService implements OnModuleInit {
 
   async sendZyraChatMessage(projectId: string, userId: string | null | undefined, sessionId: string, body: Body) {
     const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Zyra chat session not found" });
     const message = String(body.message || "").trim();
     if (!message) throw new BadRequestException({ error: "message is required" });
     const sessionRes = await this.db.query("SELECT * FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
@@ -6440,7 +6751,7 @@ export class LegacyService implements OnModuleInit {
     const item = toCamel(assistant.rows[0]);
     item.testcases = normalizeJsonArray(assistant.rows[0].testcases);
     item.activity = normalizeJsonArray(assistant.rows[0].activity);
-    return { message: item, session: await this.zyraChatSession(projectId, sessionId) };
+    return { message: item, session: await this.zyraChatSession(projectId, userId, sessionId) };
   }
 
   // Lets the user cut short a batched "all possible cases" plan. A batch already in flight
@@ -6450,6 +6761,8 @@ export class LegacyService implements OnModuleInit {
   // resumeZyraChatPlan — or just typing "continue" — can pick it back up later.
   async stopZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
     const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Zyra chat session not found" });
     const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
     if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
     const plan = sessionRes.rows[0].active_plan as Body | undefined;
@@ -6469,7 +6782,7 @@ export class LegacyService implements OnModuleInit {
         []
       );
     }
-    return this.zyraChatSession(projectId, sessionId);
+    return this.zyraChatSession(projectId, userId, sessionId);
   }
 
   private isZyraResumeIntent(message: string): boolean {
@@ -6481,12 +6794,14 @@ export class LegacyService implements OnModuleInit {
   // continueZyraChatPlan. No-ops quietly if there's nothing paused to resume.
   async resumeZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
     const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Zyra chat session not found" });
     const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
     if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
     const plan = sessionRes.rows[0].active_plan as Body | undefined;
     const remainingScenarios = normalizeJsonArray(plan?.remainingScenarios).map(String);
     if (!plan || plan.status !== "paused" || !remainingScenarios.length) {
-      return this.zyraChatSession(projectId, sessionId);
+      return this.zyraChatSession(projectId, userId, sessionId);
     }
     const planId = randomUUID();
     const doneCount = Number(plan.doneCount || 0);
@@ -6504,7 +6819,7 @@ export class LegacyService implements OnModuleInit {
       []
     );
     void this.continueZyraChatPlan(projectId, uid, sessionId, planId).catch(() => undefined);
-    return this.zyraChatSession(projectId, sessionId);
+    return this.zyraChatSession(projectId, userId, sessionId);
   }
 
   // One AI call understands the request, then the system executes it. There is deliberately no
@@ -7305,6 +7620,9 @@ export class LegacyService implements OnModuleInit {
 
   async aiGenerate(projectId: string, userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
+    // Resolved before the allocation lookup: without it a malformed project id reached a uuid column
+    // and answered with a 500, and any workspace member could spend another project's AI allowance.
+    await this.requireProjectAccess(uid, projectId);
     const allocation = await this.db.query(
       `SELECT k.provider, k.default_model, k.api_key, k.base_url, k.auth_header_name, k.auth_scheme
        FROM project_ai_key_allocations a
@@ -7500,9 +7818,10 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
-  async aiHistory(projectId: string, query: Body) {
-    const limit = Math.min(Number(query.limit || 50), 100);
-    const offset = Number(query.offset || 0);
+  async aiHistory(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 50, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const res = await this.db.query(
       `SELECT * FROM ai_generation_requests WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
       [projectId, limit, offset]
@@ -7510,7 +7829,9 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel) };
   }
 
-  async aiSave(projectId: string, requestId: string, body: Body) {
+  async aiSave(projectId: string, userId: string | null | undefined, requestId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(requestId)) throw new NotFoundException({ error: "Zyra task not found" });
     const savedAt = new Date().toISOString();
     const events = [{ suiteId: body.suiteId || null, testcaseIds: body.testcaseIds || [], savedAt }];
     const activity = [{
@@ -7530,9 +7851,11 @@ export class LegacyService implements OnModuleInit {
   }
 
   async zyraFeedback(projectId: string, userId: string | null | undefined, taskId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
-    const uid = this.requireUser(userId);
     const feedbackText = String(body.feedback || "").trim();
     const referenceNote = String(body.referenceNote || "").trim();
     const additionalJiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String).filter(Boolean);
@@ -7655,7 +7978,9 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async zyraDeleteDraft(projectId: string, taskId: string, draftIndex: number) {
+  async zyraDeleteDraft(projectId: string, userId: string | null | undefined, taskId: string, draftIndex: number) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT generated_payload FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     const drafts = normalizeJsonArray(existing.rows[0].generated_payload);
@@ -7682,7 +8007,9 @@ export class LegacyService implements OnModuleInit {
     return this.formatAiTask(res.rows[0]);
   }
 
-  async zyraCloseTask(projectId: string, taskId: string) {
+  async zyraCloseTask(projectId: string, userId: string | null | undefined, taskId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT id, task_status FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     const now = new Date().toISOString();
@@ -7704,6 +8031,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   async zyraSave(projectId: string, userId: string | null | undefined, taskId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     let suiteId = body.suiteId || null;
@@ -7775,7 +8104,7 @@ export class LegacyService implements OnModuleInit {
         touched.push(testcase);
       }
     }
-    await this.aiSave(projectId, taskId, { suiteId, testcaseIds: touched.map((item) => item.id) });
+    await this.aiSave(projectId, userId, taskId, { suiteId, testcaseIds: touched.map((item) => item.id) });
     return { savedCount: touched.length, suiteId, testcases: touched };
   }
 
@@ -9351,7 +9680,7 @@ export class LegacyService implements OnModuleInit {
          WHERE j.project_id = $1 AND l.jira_issue_key IS NULL`,
         [projectId]
       ).catch(() => ({ rows: [{}] as Body[] })),
-      this.jiraStatus(projectId).catch(() => ({ connected: false, connectedProjects: [] }))
+      this.jiraStatusForProject(projectId).catch(() => ({ connected: false, connectedProjects: [] }))
     ]);
     return {
       knowledgeCount: knowledge.rows.length + files.rows.length,
@@ -9372,7 +9701,7 @@ export class LegacyService implements OnModuleInit {
 
   private async analyzeZyraJiraTestcaseCoverage(projectId: string): Promise<ZyraChatDecision> {
     const [status, totals, pending] = await Promise.all([
-      this.jiraStatus(projectId).catch(() => ({ connected: false, connectedProjects: [] })),
+      this.jiraStatusForProject(projectId).catch(() => ({ connected: false, connectedProjects: [] })),
       this.db.query(
         `WITH linked AS (
            SELECT jira_issue_key, COUNT(*)::int AS testcase_count

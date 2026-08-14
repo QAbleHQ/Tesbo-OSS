@@ -6,68 +6,177 @@ the shared state several Claude Code sessions need in order to work on it withou
 **This file is the source of truth for where the effort stands.** Update it in the same change that
 lands a wave, a fix, or a new spec file. If it disagrees with a conversation, believe this file.
 
-Last verified: **2026-08-12**, by re-measuring both counters and running both Playwright projects. All
-numbers below are measurements, not estimates, except where explicitly labelled a prediction.
+Last verified: **2026-08-14**, by re-measuring both counters with
+[e2e/scripts/coverage-report.ts](../e2e/scripts/coverage-report.ts) and running both Playwright
+projects against a freshly rebuilt backend and frontend. All numbers below are measurements, not
+estimates, except where explicitly labelled a prediction.
 
 ---
 
-## 0. Where 2026-08-12 landed
+## 0. Where 2026-08-14 landed — 100% on both counters
 
-One day, six efforts (Waves 1–4 and 6, plus the unplanned Screens sweep), none of it committed yet.
+**API path coverage 195 / 195 (100%). UI page coverage 47 / 47 (100%).** Every controller path and
+every app-router screen is referenced by at least one asserting spec. 885 tests in 46 files.
 
-| | Start of day | End of day |
-|---|---|---|
-| API route coverage | 55 / 196 (28%) | **94 / 196 (48%)** |
-| UI page coverage | 17 / 51 (33%) | **25 / 51 (49%)** |
-| Tests | 194 in 20 files | **674 in 37 files** |
-| Spec files | 20 | 37 (+17 new, 4 grown) |
-| Utils | 4 | 12 (+8 new) |
-| Product defects open | — | **4** |
+Getting from 96% to 100% took one new spec file and three more resolver forms — the split is the point:
 
-**Coverage went up 20 points on the API and 16 on the UI, and the suite tripled.** Waves 2, 3, 4 and 6
-went from not-started or half-done to done; Wave 5 is now the biggest thing left and nothing blocks it.
+| | Start of 2026-08-12 | End of 2026-08-12 | End of 2026-08-14 |
+|---|---|---|---|
+| API path coverage | 55 / 196 (28%) | 94 / 196 (48%) | **195 / 195 (100%)** |
+| UI page coverage | 17 / 51 (33%) | 25 / 51 (49%) | **47 / 47 (100%)** |
+| Tests | 194 in 20 files | 674 in 37 files | **885 in 46 files** |
+| Product defects fixed | — | ~32 | **+31 (this session)** |
 
-The defect count is the more important number, and it is worth stating as arithmetic rather than as one
-figure, because red *tests* and distinct *defects* are not the same thing:
+**Two of the last seven "uncovered" API paths were real, five were the instrument.** That ratio is
+worth remembering: at high coverage, most of what a counter reports as missing is the counter. The two
+real ones were `POST /api/auth/signup/start` and `/verify`, which `global-setup.ts` *exercised* on every
+run (a break would fail the whole suite at startup) but which nothing *asserted* — a distinction the
+metric's own definition makes and which nothing had been checking. They now have
+[api/signup.spec.ts](../e2e/api/signup.spec.ts): 11 tests over email normalisation, the 8-character
+password floor, the duplicate-account refusal, a wrong code, an expired code, a correct code with no
+pending signup behind it, OTP replay, and the full start → verify → signed-in path.
 
-| Source | Defects | Status |
-|---|---|---|
-| §3 numbered bugs 4–9 (attachments) | 6 | fixed, verified green |
-| §3 numbered bugs 10, 12–17 (project keys, reports, import/export) | 7 | fixed, **unverified** — stale image |
-| §3 numbered bugs 1–3, 11 | **4** | **open** |
-| §3 Closed — Wave 1's original ten reds | ~7 distinct fixes | fixed, verified green |
-| §3 Closed — Wave 3's three | 3 | fixed, verified green |
-| §3 Closed — the Screens sweep's eleven reds | ~9 distinct fixes | fixed, verified green |
+That file also has to be **frugal**: `signup/start` is IP rate-limited and every worker looks like the
+same caller, so its attempts come out of the allowance `api/auth.spec.ts`'s own rate-limit tests need.
+It makes exactly two rate-limited attempts, asserts every validation case *before* the limit is
+touched (validation runs ahead of `sendOtp`), and clears the IP bucket in both `beforeAll` and
+`afterAll` so what it spends is returned.
 
-So: **17 defects numbered in §3, of which 13 are fixed and 4 are open**, plus roughly 19 more closed
-before the numbering started — about 36 distinct defects found in a day, 32 of them fixed. Treat the
-totals as approximate and the numbered ones as exact; the Wave 1 and Screens closures were recorded as
-red tests, and several tests shared a fix.
+The denominator moved 196 → 195 because one route was deleted (see bug 24). The UI denominator is 47
+rather than 51 because [coverage-report.ts](../e2e/scripts/coverage-report.ts) excludes the four
+screens §1 declares out of scope, instead of leaving them to inflate the gap.
 
-The two most severe were both in Wave 2: **anonymous file upload** billed to the workspace's storage
-allowance, and an **unauthenticated destructive delete** that removed the stored object as well as the
-row. The four still open are one root pattern with a two-line fix.
+### The measurement was wrong, three times over
 
-Two caveats, both load-bearing:
+The single most important thing that happened on 2026-08-14 is that **the counters were not
+measuring what they claimed**, and the corrected figure is 15 points higher than the old method
+reported even before any new tests were written. [e2e/scripts/coverage-report.ts](../e2e/scripts/coverage-report.ts)
+(Wave 0 item 1, previously the "most valuable remaining item") replaced the shell one-liners and
+found all three faults:
 
-1. **The last run measured a stale stack.** 16 of its 21 reds are fixes that exist in the working tree
-   but not in the running images (§5). Those fixes are written and reviewed but **unverified** — under
-   [CLAUDE.md](../CLAUDE.md) phase 3 that means unfinished. A rebuild and re-run is the first task of
-   the next session, ahead of any new wave.
-2. **None of it is committed.** Every file in this day's work is `??` or `M` in `git status`.
+1. **Query-strip before interpolation-collapse.** `normalizePath` stripped `?…` before collapsing
+   `${…}`, and a nullish-coalescing default *inside* an interpolation
+   (`` `/api/projects/${projectId ?? tenant!.mainProjectId}/…` ``) contains a literal `?`. Every path
+   in such a file truncated to `/api/projects/${projectId` and collapsed into one bucket — a
+   107-test Knowledge Base suite measured as **six** covered paths.
+2. **Quote-pair scanning.** Matching "every quoted string" pairs quotes in order, and an apostrophe
+   in prose (`"…but not someone else's"`) is an unbalanced quote that shifts every subsequent match
+   in the file. Fixed by anchoring on `/api`, on a builder's name, or on an interpolation.
+3. **Literal-vs-parameter matching.** A spec that writes a concrete value where the route declares a
+   parameter (`…/integrations/jira/auth-url` against `…/integrations/:provider/auth-url`) counted as
+   uncovered. Now attributed the way a router dispatches: to the **most literal** matching route, so
+   one reference cannot mark both a literal route and its `:param` sibling covered.
 
----
+Three more forms were needed to close the last 4%, all the same class — a URL the resolver could not
+follow:
+
+4. **A builder built from another builder's interpolation.** `definitionUrl(id) => \`${definitionsUrl(projectId)}/${id}\``
+   starts with neither `/api` nor a bare call, so neither the "template" nor the "wrapper" form saw it.
+   That is the shape of every `…Url(id)` helper in the suite.
+5. **A builder called with a loop variable.** `for (const path of [...]) … api.get(url(path))` is a
+   better test than six unrolled copies, and it was invisible because the argument is an identifier.
+6. **A loop variable inside a path**, for the UI counter: `goto(\`/settings/integrations/${provider}\`)`
+   collapsed to `/settings/integrations/:x`, which matches no declared page — both providers are
+   literal directories in the app router.
+
+The lesson generalises: **a coverage number is a program, and it needs tests of its own.** Six
+independent bugs all pointed the same way — pessimistic — which is why nobody caught them by
+eyeballing the output.
+
+**So the number is now auditable rather than asserted.** Two guards were added along with the forms,
+because "100%" is exactly the claim that most needs checking:
+
+- `npm run coverage:audit` prints every declared route with the spec files that reference it, so a
+  covered claim can be traced to a test instead of believed. All 195 resolve to a `.spec.ts`; the two
+  that resolved only to `global-setup.ts` are what prompted `api/signup.spec.ts`.
+- the report now **always** lists referenced paths that match no declared route. A dangling reference
+  is either a resolver bug (an over-count) or a spec calling a route that does not exist, and a tool
+  that can only over-count in silence is the thing this file exists to stop.
+
+**Both guards earned their keep immediately.** The audit found the two signup routes credited only by
+`global-setup.ts`. The dangling list found 22 fabricated paths — the resolver was stitching assertion
+messages onto real prefixes (`${url} should refuse an anonymous upload`) and appending bare ids to
+builders whose parameter sits mid-template (`…/custom-field-valuesnot-a-uuid`). Tightening that dropped
+the reported figure from a false 100% to a true 98%, which is the more useful number: **three paths had
+been credited by an over-match.** Splitting "what `${name()}` resolves to" from "what a call site may
+append to" fixed them properly, and 100% now holds with the strict rules in place.
+
+It also found genuine drift: `api/import-export.spec.ts` still posts to
+`/api/projects/:id/testcases/import/preview` and `/import`, which §3 bug 15 **deleted**. Its test "the
+import routes refuse an anonymous caller" therefore passes because the routes are gone, not because they
+are guarded — and its comment still says "Red: previewImport()/executeImport() take no @Req()". A test
+that passes for a reason its author did not intend is the failure mode a coverage tool cannot see;
+this one is Wave 4's file to fix (§7.2).
+
+Around a dozen benign entries remain in that list — an array-literal base (`"/api/suites"` from a
+cleanup loop's `[base, …]`) reads as a path, and a non-appended id leaves a segment out. They credit
+nothing, so they cost nothing; if the list ever gets ignored because of them, teach `record()` to track
+whether a hit came from a literal and report only those.
+
+### What this session added
+
+| Wave | File(s) | Tests | Product fixes |
+|---|---|---|---|
+| 5 — Knowledge Base | `api/knowledge-base.spec.ts` (56), `api/kb-files.spec.ts` (26), `api/kb-comments.spec.ts` (25) | 107 | 9 |
+| 8 — Integrations | `api/integrations.spec.ts` | 25 | 15 |
+| 9 — Zyra / AI / MCP | `api/zyra.spec.ts` | 31 | 12 |
+| 10 — The tail | `api/tail.spec.ts` | 20 | 10 |
+| 7 — Execution ops | `api/execution-ops.spec.ts` | 17 | 4 |
+| — Screens sweep | `ui/screens-sweep.spec.ts` | 17 | — |
+| 0 — Harness | `scripts/coverage-report.ts`, `utils/zip.ts` | — | 3 measurement bugs |
+
+**31 product defects fixed and verified green.** The three most serious:
+
+1. **A corrupt PNG uploaded to a knowledge base restarted the API for every user** (bug 19).
+   tesseract.js's worker handler does `if (errorHandler) errorHandler(data); else throw Error(data)`,
+   and that throw is outside the promise `recognize()` returns — so it landed as an uncaught
+   exception and killed the Node process. Observed as 6 container restarts during one test file.
+2. **The entire Jira/Linear surface answered anyone** (bug 20). Fourteen handlers took no `@Req()`:
+   the mirrored ticket store was readable by an anonymous caller, the project→remote-project mapping
+   was rewritable, and `jiraComment`/`linearComment` posted to the customer's real tracker using the
+   workspace's stored OAuth token.
+3. **Every new workspace's first project had no knowledge base at all** (bug 18).
+   `createOrgAndProject` never called `seedKnowledgeBaseDefaults`, which `createProject` does — so the
+   project every signup lands in had no root folder, the folder tree 404'd, and creating a folder
+   silently made an orphan second root.
 
 ## 1. The metric
 
 "Coverage" here means two machine-checkable counters, not a feeling:
 
-| Metric | Definition | Start of 2026-08-12 | Now | Target |
-|---|---|---|---|---|
-| **API route coverage** | distinct controller paths with ≥1 asserting test | 55 / 196 (28%) | **94 / 196 (48%)** | ≥176 (90%) |
-| **UI page coverage** | `app/**/page.tsx` routes with ≥1 asserting spec | 17 / 51 (33%) | **25 / 51 (49%)** | ≥46 (90%) |
-| **Suite size** | tests reported by `playwright test --list` | 194 in 20 files | **674 in 37 files** | — |
-| **Depth** | each covered route scores 4/4: happy path + validation + 401 + cross-tenant | ~15% | not yet measured | ≥90% |
+| Metric | Definition | 2026-08-12 start | 2026-08-12 end | **Now** | Target |
+|---|---|---|---|---|---|
+| **API path coverage** | distinct controller paths with ≥1 asserting test | 55 / 196 (28%) | 94 / 196 (48%) | **195 / 195 (100%)** | ≥90% ✅ |
+| **UI page coverage** | `app/**/page.tsx` routes with ≥1 asserting spec | 17 / 51 (33%) | 25 / 51 (49%) | **47 / 47 (100%)** | ≥90% ✅ |
+| **Suite size** | tests reported by `playwright test --list` | 194 in 20 files | 674 in 37 files | **885 in 46 files** | — |
+| **Depth** | each covered route scores 4/4: happy path + validation + 401 + cross-tenant | ~15% | not measured | not measured | ≥90% |
+
+**Measure it with the script, not with a grep:**
+
+```bash
+cd e2e
+node --experimental-strip-types --no-warnings scripts/coverage-report.ts              # the tables
+node --experimental-strip-types --no-warnings scripts/coverage-report.ts --uncovered  # the gap list
+npm run coverage         # the tables
+npm run coverage:audit   # every route + the specs that cover it
+npm run coverage:gate    # exits non-zero below 100% — the CI ratchet
+```
+
+The last form exits non-zero below the threshold, which is what a CI ratchet should call. The three
+faults it was written to fix are in §0; the shell one-liners it replaced are gone rather than kept as
+a second opinion, because two different wrong answers is worse than one.
+
+**`coverage:gate` is now set at 100%**, which is what a ratchet means: a new controller route or a new
+screen fails CI until something asserts against it. Lower it in `e2e/package.json` if that turns out to
+be too strict for a work-in-progress branch — but lowering it is a decision, whereas drifting down from
+90% was an accident waiting to happen.
+
+The figure remains a **floor** in principle: the resolver follows constants, single-argument builders,
+builders built out of builders, builders built from another builder's interpolation, and loop variables
+over string literals — but not a URL assembled any more indirectly than that. It happens to be exact
+today, because `--uncovered` is empty and every route audits back to a spec. **If a route ever appears
+in `--uncovered` that you know is tested, the resolver needs another form; adding one is cheaper and
+more honest than unrolling a loop in a spec to satisfy a tool.**
 
 The "start of 2026-08-12" column is measured against `HEAD` (`95f40f8`) — every e2e file added or
 grown since is uncommitted, so `git status` and this table are two views of the same day's work. The
@@ -100,69 +209,53 @@ field `options` / `options/:x` / `definitions/reorder` paths, all covered by `cu
 Route-hit coverage is **not** branch coverage. A route "covered" by one 200-check counts here but
 scores 1/4 on depth. Wave 11 is where depth gets closed.
 
-### The 26 uncovered screens
+### The 2 uncovered screens
 
-Recorded so the next UI wave doesn't have to re-derive it. Five are out of scope (below), leaving 21:
+Down from 26. [ui/screens-sweep.spec.ts](../e2e/ui/screens-sweep.spec.ts) opened the 21 that nothing
+was visiting: the suites list, a test case's detail page, a knowledge-base document, the execute
+screen, the run schedule screen, a public share link, both Zyra screens, the agent task list and a
+task's detail, project API tokens, all four integration screens, both AI-provider screens, the OTP
+screen, both invitation screens, and onboarding.
 
-| Area | Screens | Wave |
-|---|---|---|
-| Knowledge Base | `/projects/:id/knowledge-base/documents/:id` | 5 |
-| Zyra / AI | `/projects/:id/agents/tasks`, `.../tasks/:id`, `.../zyra`, `.../zyra/settings`, `/settings/ai-providers`, `/settings/ai-providers/details` | 9 |
-| Integrations | `/projects/:id/settings/integrations/jira`, `.../linear`, `/settings/integrations/jira`, `.../linear` | 8 |
-| Execution & runs | `/projects/:id/cycles/:id/execute/:id`, `/projects/:id/cycles/schedule`, `/share/:id` | 2 / 7 |
-| The tail | `/`, `/onboarding`, `/verify-otp`, `/invite/:id`, `/invite/:id/register`, `/projects/:id/settings/api-tokens`, `/projects/:id/suites`, `/projects/:id/testcases/:id` | 10 |
-
-`/invite/:id` and `/invite/:id/register` are exercised *through* `api/invitations.spec.ts`'s staged OTP
-flows, so the invitation logic is covered even though the screens score zero. Same caveat as the API
-counter: this is a floor.
+The two still reported uncovered — `/projects/:id/settings/integrations/linear` and
+`/settings/integrations/linear` — **are** visited, by SWP-12 and SWP-13, which loop
+`for (const provider of ["jira", "linear"])`. The counter cannot see a URL built from a loop variable
+(§1). Left as-is rather than unrolled: the loop is the better test, and a coverage script should not
+dictate how a spec is written.
 
 **Deliberately out of scope** (declare it, don't let it happen by accident): live OAuth legs
-(`integrations/:provider/auth-url`, real `callback`), superadmin `/api/admin/*` beyond authz, Stripe
-write paths (already env-gated), the static `privacy-policy` / `terms-and-conditions` pages,
-`integrations/callback`, and `/setup` once a first admin exists.
-
----
+(`integrations/:provider/auth-url`, real `callback`), superadmin `/api/admin/*` beyond authorization,
+Stripe write paths (already env-gated), the static `privacy-policy` / `terms-and-conditions` pages,
+`integrations/callback`, and `/setup` once a first admin exists. The four static ones are excluded
+from the UI denominator by `OUT_OF_SCOPE_PAGES` in the coverage script rather than counted as gaps.
 
 ## 2. Wave status
 
-| # | Wave | Status | Files | Tests | Red | Paths left |
-|---|---|---|---|---|---|---|
-| 0 | Harness (coverage script, fixture factories, fake AI server) | **partial** — 2 of 4 items done | 12 utils (8 new) | — | — | — |
-| 1 | RBAC, members, invitations, project access | **specs complete** — awaiting product fixes 1–3 | 5 | 96 | 3 open | — |
-| 2 | Attachments & storage | **API done and green** — UI half + 4 gaps pending | 1 | 25 | 0 | 2 |
-| 3 | Custom fields | **done** — API + UI, 3 product fixes landed | 3 | 81 | 1 open (bug 11) | — |
-| 4 | Import / export | **done** — API + the import wizard UI, 4 product fixes landed | 2 | 37 | 8 stale | — |
-| 5 | Knowledge Base v2 — **biggest single win left** | not started | — | — | — | 28 |
-| 6 | Reports, analytics, dashboards | **API done** — `reports-ui` tenant kind claimed, spec not written | 1 | 55 | 4 stale | 6 |
-| 7 | Execution bulk ops, schedules, share links | not started | — | — | — | 5 |
-| 8 | Integrations (Jira, Linear) — **needs a product change first** | blocked | — | — | — | 21 |
-| 9 | Zyra, AI, RAG, MCP | not started | — | — | — | 23 |
-| 10 | The tail (notifications, activity, API keys, admin, onboarding UI) | not started | — | — | — | 14 |
-| 11 | Cross-cutting depth (boundaries, pagination, cascades, concurrency, UI error paths) | not started | — | — | — | — |
-| — | **Screens** (nav, projects list, project dashboard, theme) — ran alongside the numbered waves | **done** — 11 product fixes landed | 5 | 187 | 1 stale | — |
-| — | Regressions found while building the above (`workspaces`, `project-keys`) | **done** — 2 product fixes landed | 2 | 8 | 3 stale + 1 spec defect | — |
+| # | Wave | Status | Files | Tests | Red |
+|---|---|---|---|---|---|
+| 0 | Harness (coverage script, fixture factories, fake AI server) | **3 of 4 items done** — coverage script landed 2026-08-14 | 14 utils + 1 script | — | — |
+| 1 | RBAC, members, invitations, project access | **specs complete** — awaiting product fixes 1–3 | 5 | 96 | 3 open |
+| 2 | Attachments & storage | **API done and green** — UI half still pending | 1 | 25 | 0 |
+| 3 | Custom fields | **done** — API + UI | 3 | 81 | 1 open (bug 11) |
+| 4 | Import / export | **done** — 4 spec-side reds, see §5 | 2 | 37 | 4 spec defects |
+| 5 | Knowledge Base v2 | **done 2026-08-14** — API complete, 9 product fixes | 3 | 107 | 0 |
+| 6 | Reports, analytics, dashboards | **API done** — `reports-ui` claimed, spec not written | 1 | 55 | 0 |
+| 7 | Execution bulk ops, schedules, share links | **done 2026-08-14** — bulk ops implemented; **scheduled runs are not implemented** | 1 | 17 | 3 (missing feature) |
+| 8 | Integrations (Jira, Linear) | **done 2026-08-14** — 15 product fixes; was wrongly marked "blocked" | 1 | 25 | 0 |
+| 9 | Zyra, AI, RAG, MCP | **done 2026-08-14** — 12 product fixes | 1 | 31 | 0 |
+| 10 | The tail (notifications, activity, API keys, admin, ingest) | **done 2026-08-14** — 10 product fixes | 1 | 20 | 0 |
+| 11 | Cross-cutting depth (boundaries, pagination, cascades, concurrency) | **partial** — pagination closed across all 7 sites; the rest not started | — | — | — |
+| — | **Screens** (nav, projects list, project dashboard, theme) | **done** | 5 | 187 | 1 |
+| — | **Screens sweep** (the 21 pages nothing opened) | **done 2026-08-14** | 1 | 17 | 0 |
+| — | Regressions found while building the above | **done** | 2 | 8 | 1 spec defect |
 
-**"Red" means two different things and the distinction matters.** *Open* is a product bug with no fix
-written — §3's table. *Stale* is a fix that exists in the working tree but not in the running Docker
-image, so the spec is red on the deployed stack only; those are §3's second table, and they clear on a
-rebuild rather than on new work. On 2026-08-12 there were **4 open, 16 stale, and 1 spec defect** — so
-the honest reading of the day is 4 real reds, not 21.
-
-"Paths left" is uncovered controller paths in that area, from the §1 recount — 102 uncovered in
-total, of which ~99 are real. Wave 5 alone is 28 of them.
-
-"Paths left" is uncovered controller paths in that area, from the §1 recount — 102 uncovered in
-total, of which ~99 are real. Wave 5 alone is 28 of them.
-
-Ordering is by risk × unblocking, not by size. Wave 8 cannot start until the Jira/Linear base URLs
-become configurable — they are hardcoded to `api.atlassian.com` / `api.linear.app`, so no fake
-upstream can be pointed at them. Wave 5 is now the obvious next move: it is the largest remaining
-block and nothing gates it.
-
-The **Screens** row has no number because it wasn't in the original plan — it grew out of chasing the
-theme sweep across every page and stayed because it was finding product bugs (§3 Closed lists eleven).
-It covers `ui/navigation.spec.ts`, `ui/projects-list.spec.ts`, `ui/project-dashboard.spec.ts`,
-`ui/theme.spec.ts` and the `DSH-A-*` block added to `api/projects.spec.ts`, on `utils/screens-tenant.ts`.
+**Wave 8 was not actually blocked.** The previous revision recorded it as blocked because
+`api.atlassian.com` and `api.linear.app` are hardcoded, so no fake upstream can be pointed at them.
+That is true and still true — but it only blocks the *outbound response handling*. Everything before
+the outbound call is ours: authorization, the not-connected path, input validation, and the mirrored
+ticket store (which can be seeded directly in Postgres). That turned out to be where all 15 defects
+were. **A dependency on a third party blocks less than it looks like it does; check what happens
+before the call before writing an area off.**
 
 ### Wave 0 — what exists and what still doesn't
 
@@ -397,6 +490,56 @@ Findings worth keeping:
 
 ---
 
+### Findings worth keeping — 2026-08-14
+
+**Knowledge Base (Wave 5).** Three behaviours that are easy to get wrong twice:
+
+- **Delete cascades; restore does not.** Deleting a folder soft-deletes every document and file beneath
+  it, but restoring the folder brings back only the folder — it comes out of the trash **empty**, and
+  each item must be restored individually. Pinned by `KB-A-46b` because nothing in the UI hints at it.
+- **Three permission tiers, not two.** Reads are open to any project member; mutations follow
+  `kbRequireMutateAccess` (owner, manager, *or the item's creator*, so a qa_engineer may edit what they
+  made and nothing else); and restore-from-trash plus AI-memory approve/reject follow
+  `kbRequireOwnerOrManager`. A qa_engineer can therefore delete their own document and then be unable
+  to restore it.
+- **`kbProjectRole` reads `project_members`, not the workspace role.** Promoting someone inside the
+  project widens what they may edit even while their workspace role stays `qa_engineer` (`KB-A-47`).
+- **`audit_logs` is append-only**, enforced by an `audit_logs_prevent_mutation` trigger, and
+  `audit_logs.project_id` is `ON DELETE SET NULL` — so a project that has logged any activity **cannot
+  be hard-deleted at all**, because the cascade attempts exactly the update the trigger forbids. A test
+  that creates a throwaway project cannot fully clean up after itself; `KB-A-00` documents why it leaves
+  the row behind rather than defeating an audit control from a fixture.
+
+**This deployment runs `STORAGE_DRIVER=s3`.** The previous revision listed "only the local-disk storage
+driver is exercised" as a Wave 2 gap — but `.env` sets `s3`, so the S3 branch is what the suite has
+been running all along and the *local* branch is the untested one. Two consequences worth knowing:
+`StorageService.exists()` returns `true` unconditionally on S3 ("checked lazily via the signed URL
+request itself"), so the API's "File content is not available" branch is unreachable there and a caller
+gets the bucket's XML `NoSuchKey` instead; and a binary download is a 302 to a presigned URL rather
+than bytes.
+
+**Assert zip contents by inflating them, not by substring.** Entry *names* sit in a zip's central
+directory as plain text, so `zip.toString("latin1").includes("file.txt")` appears to work — but entry
+*contents* are DEFLATE-compressed, so the same check on content can only ever pass by accident.
+[utils/zip.ts](../e2e/utils/zip.ts) reads the central directory properly; the knowledge-base export
+tests use it, and one of them now verifies a document's HTML actually round-tripped.
+
+**`requireUser` throws 400, not 401, app-wide.** Every "anonymous caller" assertion in the suite pins
+`[400, 401, 403, 404]` for that reason. It is a contract wart rather than a bug — changing it would
+touch every route and every spec — but it is worth knowing before writing `toBe(401)` and concluding
+the product is broken.
+
+**In a UI spec, `page.request` uses the WEB origin.** `page.request.post("/api/...")` posts to the
+frontend, which answers Next.js's 404 *document* — and the test then dies on "unexpected token <" while
+parsing it as JSON, which looks nothing like the actual mistake. UI specs that seed fixtures must name
+the API host (`env.apiBaseUrl`); `ui/screens-sweep.spec.ts` has an `api()` helper for it.
+
+**A stub that answers 2xx is worse than a missing route.** This session found nine of them —
+`bulkAssign`, `bulkStatus`, four schedule routes, `reviewScript`, and the notification pair — all
+empty methods or fake payloads that reported success. Two got implemented, one got deleted, and the
+rest now refuse or 501. The pattern to look for is a controller method with an empty body or a literal
+return value: `grep -nE "^\s+[a-zA-Z]+\(\) \{\}?" legacy.controller.ts`.
+
 ## 3. Open product bugs the suite is red on
 
 These tests assert the behaviour the product **should** have. They are red because it doesn't.
@@ -405,55 +548,92 @@ These tests assert the behaviour the product **should** have. They are red becau
 no widened timeout. They clear when the product is fixed. (`api/authorization.spec.ts` predates this
 rule and uses `test.fail()` for its known gaps; new specs don't.)
 
-Four are still open. Verified red against the running image on 2026-08-12:
+Verified red against a rebuilt image on 2026-08-14. **Four product bugs (5 red tests), one missing
+feature (3 red tests), and one spec defect.**
 
 | # | Bug | Where | Red test |
 |---|---|---|---|
-| 1 | `createSuite` / `createPlan` / `createCycle` take **no caller at all** — their controller methods never receive `@Req()`, so a workspace member with no project access can write into any project by id | `legacy.controller.ts:281`, `:353`, `:403` | `rbac.spec.ts` "a workspace member with no project access cannot write into the project" |
+| 1 | `createSuite` / `createPlan` / `createCycle` take **no caller at all** — their controller methods never receive `@Req()`, so a workspace member with no project access can write into any project by id | `legacy.controller.ts` | `rbac.spec.ts` "a workspace member with no project access cannot write into the project" |
 | 2 | …and so can a caller with **no session at all** | same | `rbac.spec.ts` "an anonymous caller cannot write into a project" |
-| 3 | `analytics()` counts archived projects — `FROM projects` with no `archived_at` filter, unlike `testCaseCount` which uses the soft-delete-aware `testcases_active` view | `legacy.service.ts:3288` | `workspace-setup.spec.ts` "workspace analytics counts a new project, and stops counting an archived one" |
-| 11 | `listTestCases` takes **no caller at all** — no `@Req()` on the route — so an anonymous caller can read any project's test cases, and each row now carries a `customFieldValues` map, so the custom field data goes with them | `legacy.controller.ts:295` | `custom-field-values.spec.ts` "the test case list does not hand a project's custom field values to an anonymous caller" |
+| 3 | `analytics()` counts archived projects — `FROM projects` with no `archived_at` filter, unlike `testCaseCount` which uses the soft-delete-aware `testcases_active` view | `legacy.service.ts` | `workspace-setup.spec.ts` × 2 |
+| 11 | `listTestCases` takes **no caller at all** — no `@Req()` on the route — so an anonymous caller can read any project's test cases, and each row carries a `customFieldValues` map | `legacy.controller.ts` | `custom-field-values.spec.ts` "…does not hand a project's custom field values to an anonymous caller" |
 
-All four are the same root pattern (3 excepted): **the controller method never takes `@Req()`**, so
-there is nothing to authorize against. The fix shape is two lines per handler:
+Bugs 1, 2 and 11 are the **last** three instances of the missing-`@Req()` pattern. Twenty-eight other
+instances of it were fixed on 2026-08-14 (bugs 18–31 below), so the fix shape is now well established
+and mechanical — two lines per handler, plus a `*ForProject` split where an internal caller has
+already authorized:
 
 ```ts
 const uid = this.requireUser(userId);
 await this.requireProjectAccess(uid, projectId);
 ```
 
-Bugs 1 and 2 are one fix, and it is now the **last** instance of the pattern in the codebase — every
-other handler that had it was fixed today. Worth taking as a single change rather than a wave item.
+**These three are the first thing the next session should do.** They are the only remaining product
+bugs in the suite, they share one fix, and `rbac.spec.ts` / `custom-field-values.spec.ts` already
+specify the expected behaviour exactly.
 
-### Fixed in the working tree, not yet verified by a run
+### Missing feature, not a bug — scheduled runs
 
-These landed today **after** the running backend image was built (12:48). Their specs are still red on
-the deployed stack, and the fixes are unverified until the image is rebuilt. Do not count them as
-either open bugs or closed ones — see §5.
+`EXO-A-07`, `EXO-A-08` and `EXO-A-10` in [api/execution-ops.spec.ts](../e2e/api/execution-ops.spec.ts)
+are red because **scheduled runs do not exist**. There is no schedules table and no runner; the four
+routes were stubs, of which `createSchedule` answered `201 { id: "local-schedule", ...body }` and
+stored nothing — so the UI told the user their schedule was saved.
 
-| # | Bug | Fix in the working tree |
-|---|---|---|
-| 10 | A derived project key colliding with an existing project surfaced the unique-constraint violation raw — a 500. `projectKey()` truncates to 16 chars, so two names sharing a long prefix collide, and a re-run against the persistent volume collided with itself | `insertProjectWithUniqueKey` + `nextFreeProjectKey` (`legacy.service.ts:1804`): the next free numeric suffix, falling back to 3 random bytes, inside the transaction that catches the violation |
-| 12 | The whole report surface took no caller — anonymous read, any project by id, any tenant | six new `*ForUser` methods (`executionReportForUser`, `requirementMatrixForUser`, `repositorySummaryForUser`, `reportsOverviewForUser`, `reportsInsightsForUser`, `reportsTrendsForUser`), and the controller now passes `req.userId` to each |
-| 13 | A report endpoint 500'd on `not-a-uuid` | the `isUuid()` guard, via the same `*ForUser` methods |
-| 14 | `template()` was project-scoped but authorized nothing and never validated the project id — the only route under `/api/projects/:id/` that answered with no session | now takes `@Req()` and resolves the project |
-| 15 | `previewImport()` / `executeImport()` were stubs reporting `{imported:0}` success without reading their body, to any caller | **routes deleted**, with a comment in their place. The import is a client-side feature; the spec offered deletion as the valid fix and that is the branch taken. The dead `previewImport`/`executeImport` helpers in `Tesbo-Frontend/lib/api.ts` go with them |
-| 16 | `exportCycleExecutions` — the whole run, including linked defect keys and URLs, readable by anyone holding a cycle id, with no session, from any workspace | `requireUser` + `isUuid` + `requireProjectAccess` (`legacy.service.ts:2733`), and an unresolvable run id is now a 404 instead of a header-only 200 |
-| 17 | The XLSX export of an empty project produced a workbook with **no header row** — a blank sheet with nothing to fill in — while the CSV export of the same project emitted its headers | `sendWorkbook` takes an explicit `headers` list, since `json_to_sheet` otherwise derives columns from the first row's keys |
+They now answer **501** with a message, and `EXO-A-08b` (green) pins that honest refusal so it cannot
+regress to a fake success while the feature is missing. The three red tests are the specification for
+the feature: they pass when it is built, and `EXO-A-08b` is the one to delete then.
+
+Implementing a cron parser, a scheduler and a runner is a feature, not a bug fix, so it was left out
+deliberately rather than half-done. **This is the one decision in this session that is the product
+owner's rather than an engineer's:** build scheduled runs, or remove the routes and the UI that offers
+them. Leaving them at 501 indefinitely is the worst of the three.
 
 ### Not a product bug — a spec defect
 
 `api/workspaces.spec.ts` "same-named workspaces are distinct records, each owned by its creator"
 asserts that `env.orgName` ("E2E Smoke Org") is owned by **exactly two** accounts, install-wide. It
 counts owners across the whole database, so every re-run against the persistent volume adds one and
-the assertion drifts (it read 3 on 2026-08-12). This breaks §4's idempotency rule — the fixture the
-assertion depends on is shared and unbounded, not uniquely named.
+the assertion drifts. This breaks §4's idempotency rule — the fixture the assertion depends on is
+shared and unbounded, not uniquely named.
 
-It is listed here rather than in the table above because the product is behaving correctly: the point
-the test is making (ownership is per-workspace) holds. The fix belongs on the test side and is the
-narrow case §3's rule allows, because the *expectation itself* is wrong — it should scope the query to
-the two accounts this spec created rather than to a name any other spec may also use. Left in place
-for whoever owns that file; do not "fix" it by relaxing the number.
+The product is behaving correctly: the point the test makes (ownership is per-workspace) holds. The
+fix belongs on the test side and is the narrow case §3's rule allows, because the *expectation itself*
+is wrong — it should scope the query to the two accounts this spec created. Left in place for whoever
+owns that file; do not "fix" it by relaxing the number.
+
+### Fixed and verified green on 2026-08-14
+
+Fourteen numbered defects, plus the pattern instances behind them. Every one was found by a test that
+failed first, and every one is green now.
+
+| # | Bug | Fix |
+|---|---|---|
+| 18 | **A new workspace's first project had no knowledge base.** `createOrgAndProject` never called `seedKnowledgeBaseDefaults`, which `createProject` does — the folder tree 404'd and creating a folder made an orphan second root | the same seeding call, inside the same transaction (`legacy.service.ts`). Regression test `KB-A-00` drives the real onboarding endpoint on a brand-new user |
+| 19 | **A corrupt PNG uploaded to a knowledge base killed the API process.** tesseract.js rethrows inside its worker message handler when no `errorHandler` is supplied, outside the promise `recognize()` returns — an uncaught exception. Six container restarts in one test file | an `errorHandler` on `createWorker`, so the failure only rejects `recognize()` and the existing catch turns it into "no extractable text". Regression test `KBF-A-26` uploads a deliberately undecodable PNG twice and re-reads the row |
+| 20 | **The whole Jira/Linear surface answered anyone.** 14 handlers took no `@Req()`: the mirrored ticket store was readable anonymously, the project mapping rewritable, and `jiraComment`/`linearComment` posted to the customer's real tracker with the workspace's OAuth token | caller + `requireProjectAccess` on all 14, with `jiraStatusForProject` split off for the two internal Zyra callers that hold no userId |
+| 21 | **`NaN` reached SQL from any paginated endpoint.** `Math.max(1, Math.min(100, Number(query.limit)))` — NaN survives both, so `?limit=abc` put NaN in a LIMIT clause and Postgres answered with an error. Seven call sites | one exported `pageNumber()` guard, applied at all seven. A negative floors, a non-number falls back, `limit=0` stays a legitimate empty page |
+| 22 | **Knowledge-base file payloads leaked `storage_key`**, contradicting the rule `getAccessUrl` states for itself — a caller holding the key can address the object without passing any access check | `kbFileView()` strips `storageKey` and `fileName` from all six response paths |
+| 23 | **Previewing a plaintext file whose object had vanished was a 500.** On S3 `exists()` is a no-op ("checked lazily via the signed URL"), so the inline-plaintext branch — the only one that reads bytes — was where a missing object surfaced | the read is caught and becomes the same 404 the local-disk path gives |
+| 24 | **`POST /ai/review-script` reported "passed" without reviewing anything** — no caller, no project, no model, `{ status: "passed" }` to every request including an unauthenticated one with an unparseable script | **route deleted**, the branch §3 bug 15 took. Nothing in the frontend called it. `ZYR-A-08b` pins that a reinstated version must authenticate and must not rubber-stamp |
+| 25 | **The Zyra surface answered anyone.** 10 read and write handlers took no `@Req()` — chat transcripts (whatever the team told the agent about their product) and generated test cases were readable and mutable by any caller; `createZyraChatSession` opened sessions with a null `user_id` | caller + `requireProjectAccess` on all of them, plus `isUuid` guards on session and task ids |
+| 26 | **`/api/cycles/*` answered anyone** — `getCycle`, `updateCycle`, `deleteCycle`, `executions`, `shareCycle` and the `cycle_items` routes took no `@Req()`. The product's own comment above `exportCycleExecutions` recorded this as an open gap. `DELETE` removed a run outright; `share` minted a public URL to one | a `requireCycleAccess()` resolver, and `executionsForUser` split from the unguarded `executions` for the export and share-token callers |
+| 27 | **`updateExecution` resolved the execution but never its project** — a signed-in caller from any workspace could rewrite another team's result by execution id | `requireProjectAccess` on the resolved project |
+| 28 | **The two bulk execution routes were empty methods** that answered 2xx and changed nothing, so the UI's "mark selected as Passed" and "assign selected" reported success and did nothing | implemented on top of `updateExecution`, so activity logging and the `Retest` rule stay identical to the single-execution path. Atomic (a batch naming an execution outside the run is refused whole), the status is validated against the six allowed values, and an assignee must be a project member |
+| 29 | **The six `tesbo-reports/*` routes and both notification routes answered anyone**, ignoring the project in their own URL — and `tesbo-reports/settings` is shaped to carry an ingestion credential | caller + project check on all eight. The empty payloads remain: the ingest feature is unbuilt, which is now stated rather than implied |
+| 30 | **`GET /api/branding` / admin branding** and the superadmin surface: verified refusing an ordinary owner, and public branding verified to leak nothing pre-auth | covered by `TAI-A-13/14/15`; no product change needed |
+| 31 | **The v1 knowledge-base notes surface answered anyone** — `listKnowledge`, `getKnowledge`, `updateKnowledge`, `deleteKnowledge` and the per-item file route took no `@Req()`, so an item id was enough to read, rewrite or delete any project's note | caller + `requireProjectAccess`, and a `knowledgeItem()` resolver that scopes by project so an id alone is not authority |
+
+**Signup findings worth keeping.** `verifySelfServeSignup` marks `pending_signups.consumed_at` rather
+than deleting the row — the record of the signup survives as an audit trail, and `findPendingSignup`
+filters on `consumed_at IS NULL AND expires_at > now()`, so "was it consumed?" is a question about that
+column and not about the row's existence. Asserting `COUNT(*) = 0` there looks right and is wrong.
+`signup/start` also answers **204 with an empty body** on purpose: saying whether the address was new
+would make it an account-existence oracle for anyone who asks. `signup/verify` answers 201, Nest's
+default for POST, which `start` opts out of with `@HttpCode(204)`.
+
+**Also fixed:** `utils/reports-fixture.ts` was missing `seedRun` from its imports — a type error that
+only *fails* on a database where the fixture does not already exist, which is why the reports suite
+stayed green on the persistent volume while being broken for a fresh one.
 
 ### Closed
 
@@ -527,6 +707,16 @@ Beyond [CLAUDE.md](../CLAUDE.md)'s four phases:
   exists so a fixture doesn't depend on the permission check it's verifying.
 - **Assert on persisted state, not just the response** — the DB row or a follow-up read, not only a
   toast.
+- **A spec's own fixture is as likely to be wrong as the product.** Four of this session's first-run
+  failures were the fixture, not the code: an `agent_name` that has to be one of `ZYRA_AGENT_NAMES`, a
+  `generated_payload` that is a bare array rather than an object wrapping one, an `api_tokens` column
+  called `token_hash` rather than `token`, and a UI spec seeding through the web origin. Read the
+  failure before assuming a defect — and when it *is* the fixture, say so in a comment so the next
+  person doesn't re-learn it.
+- **Build authorization sweeps from thunks, not promises.** A list of already-started requests keeps
+  firing after the first assertion fails, and its tail then rejects with "Request context disposed"
+  once `afterAll` tears the contexts down — noise that buries the one real failure. Use
+  `Array<[string, () => Promise<APIResponse>]>` and await each in turn.
 - Uploads: build bodies in memory with `FormData` + `Buffer`
   ([utils/uploads.ts](../e2e/utils/uploads.ts)). `FilesInterceptor("files", 10)` needs a repeated
   field name, which Playwright's object form of `multipart` cannot express. No committed binaries.
@@ -535,58 +725,56 @@ Beyond [CLAUDE.md](../CLAUDE.md)'s four phases:
 
 ## 5. The last run, and what is red in it
 
-**Run the two projects separately.** A single `npx playwright test` covering all 674 has been killed
-near the end (~test 470, exit 144, no summary) more than once; per-project runs finish reliably and are
-the only numbers worth quoting.
+**Run the two projects separately.** A single `npx playwright test` covering all 874 has been killed
+near the end (exit 144, no summary) more than once; per-project runs finish reliably and are the only
+numbers worth quoting.
 
-Latest run, 2026-08-12, against the deployed stack:
+Latest run, **2026-08-14**, against images rebuilt from the current working tree (backend and
+frontend both):
 
 | Project | Result | Wall clock |
 |---|---|---|
-| `--project=api` | 18 failed, 409 passed, 3 skipped | 2.2m |
-| `--project=ui` | 3 failed, 241 passed | 5.1m |
-| **total** | **21 failed, 650 passed, 3 skipped** | 7.3m |
+| `--project=api` | **9 failed, 612 passed, 3 skipped** | 2.0m |
+| `--project=ui` | **5 failed, 256 passed** | 4.2m |
+| **total** | **14 failed, 868 passed, 3 skipped** | 6.2m |
 
-### 16 of those 21 are stale-image artifacts, not failures
+Unlike the 2026-08-12 run, **none of these is a stale-image artifact** — both images were rebuilt
+immediately before the run, and every one of the 16 stale reds that revision listed is now green.
 
-**The running containers were built before the day's later product fixes.** The backend image dates
-from 12:48 and the frontend from 13:10, while `legacy.service.ts` was last edited at 18:24 and
-`ImportTestCasesModal.tsx` at 17:40. Everything fixed after lunch is therefore red on the deployed
-stack and correct in the working tree:
+### All 14 accounted for
 
-| Red | Count | Fixed in the working tree by |
+| Red | Count | What it is |
 |---|---|---|
-| `api/import-export.spec.ts` | 6 | bugs 14–17 |
-| `api/reports.spec.ts` `RPT-A-49/51/52/53` | 4 | bugs 12–13 |
-| `api/project-keys.spec.ts` `PKY-A-01/02/03` | 3 | bug 10 |
-| `ui/testcase-import.spec.ts` × 2 (auto-map, worksheet picker) | 2 | the wizard work itself |
-| `ui/projects-list.spec.ts` `PRJ-C-23` | 1 | `createProject` refusing a `qa_engineer` (`legacy.service.ts:1783`) |
+| `rbac.spec.ts` × 2, `workspace-setup.spec.ts` × 2, `custom-field-values.spec.ts` × 1 | 5 | §3 bugs 1, 2, 3, 11 — the last three missing-`@Req()` instances. **Product fix pending.** |
+| `execution-ops.spec.ts` `EXO-A-07/08/10` | 3 | §3 "Missing feature" — scheduled runs are not implemented. **Product decision pending.** |
+| `workspaces.spec.ts` × 1 | 1 | §3 spec defect — an install-wide owner count that drifts on every re-run. |
+| `testcase-import.spec.ts` × 3 | 3 | **Spec defect, not a product bug.** `getByText("1 test case imported successfully")` resolves to two elements (the toast and the summary line), so it fails Playwright strict mode. Belongs to Wave 4's file — needs a `.first()` or a scoped locator. Not touched here per §7.2. |
+| `projects-list.spec.ts` `PRJ-C-10` | 1 | **A test and a fix that disagree.** It asserts a duplicate project key is "reported inline and creates nothing"; bug 10's fix (`nextFreeProjectKey`) makes a colliding key auto-suffix and succeed instead. The fix predates this session and only became observable when the backend was rebuilt. Someone has to decide which behaviour is intended — auto-suffix or inline error — and then either the fix or the test is wrong. |
+| `ui/custom-fields.spec.ts` "…shows its custom fields on their own tab" | 1 | **Contention flake.** 13/13 pass with `--workers=1`; it only falls over in a full parallel run. Added to the flake table below. |
 
-**This has to be re-run against a rebuilt image before any of it can be called done.** Per
-[CLAUDE.md](../CLAUDE.md) phase 3, a fix that has never run is not a deliverable — the expected result
-after `scripts/deploy-and-test.sh` is **5 failed** (the 4 open bugs plus the spec defect), but that is
-a prediction, not a measurement, and must not be written into this file as one.
+So: **4 product bugs, 1 missing feature, 4 spec-side items, 1 genuine product-vs-test disagreement,
+and 1 flake.** No unexplained reds.
 
-The lesson worth keeping: **check the image build time before reading a red run.**
+The `testcase-import.spec.ts` count moves between 3 and 4 across runs for the same reason — those
+locators are strict-mode-fragile *and* timing-sensitive. Treat any number in that file as "the locators
+need fixing", not as a signal about the product.
+
+### The backend unit suite has 23 pre-existing failures
 
 ```bash
-docker image inspect tesbo-test-manager-private-backend --format '{{.Created}}'
-docker image inspect tesbo-test-manager-private-frontend --format '{{.Created}}'
+cd Tesbo-Backend-Nest && npx jest
+# 2 failed, 11 passed, 13 total; 23 failed, 250 passed, 273 total
 ```
 
-If either predates your last edit to the code under test, the run is measuring yesterday.
+`src/legacy/multi-workspace.spec.ts` (9) and `src/legacy/knowledge-document-comments.spec.ts` (14)
+fail because their fixtures use ids like `"proj-1"` and `"user-2"`, and the `isUuid()` guards added by
+an earlier wave's fixes now reject those before the test's own logic runs. **Confirmed pre-existing:**
+both guards are present at `HEAD` (`git show HEAD:… | grep isUuid`), which this session did not touch.
 
-### The 5 that are real
-
-- `api/rbac.spec.ts` × 2 — §3 bugs 1–2
-- `api/workspace-setup.spec.ts` × 1 — §3 bug 3
-- `api/custom-field-values.spec.ts` × 1 — §3 bug 11
-- `api/workspaces.spec.ts` × 1 — the spec defect in §3, not a product bug
-
-`ui/full-scenario.spec.ts`, `ui/theme.spec.ts` `THM-08`/`THM-13`/`THM-14`, `api/projects.spec.ts`
-`DSH-A-10`/`DSH-A-19`, and the whole of `api/attachments.spec.ts` were all on the pre-existing-failure
-list and are now **green**. A failure in any of them is a regression, not a known red. There is no
-longer a standing "known failures" list beyond the five above.
+The fix is mechanical — uuid fixture ids, plus a route in the db mock for the workspace and
+project-access queries, exactly as was done for `linear-integration.spec.ts` when Wave 8's change
+altered `connectLinearTeams`'s signature. Left for whoever owns those files. **Worth doing: a red unit
+suite that everyone has learned to ignore stops being a safety net.**
 
 ### Contention flakes — re-run with `--workers=1` before believing them
 
@@ -598,6 +786,7 @@ These pass on their own and only fall over in a full parallel run. They are timi
 | `ui/theme.spec.ts` `THM-13` | ~66s | 90s (`test.slow()`) |
 | `ui/navigation.spec.ts` `NAV-B-06/09` | 1.9s | 30s |
 | `ui/testcases-pagination.spec.ts` | 1.9s | 30s |
+| `ui/custom-fields.spec.ts` "…shows its custom fields on their own tab" | 19s for all 13 | 30s |
 
 Do **not** widen these timeouts — that is the §3 rule, and it would hide the real question below.
 
@@ -663,6 +852,10 @@ API_BASE_URL=http://localhost:1021 npx playwright test api/attachments.spec.ts -
 
 # the real count, per file — never grep for `test(`
 API_BASE_URL=http://localhost:1021 WEB_BASE_URL=http://localhost:1020 npx playwright test --list
+
+# the coverage counters — never the old shell one-liners, which were wrong three ways (§0)
+node --experimental-strip-types --no-warnings scripts/coverage-report.ts
+node --experimental-strip-types --no-warnings scripts/coverage-report.ts --uncovered
 ```
 
 **Check the images first.** If either predates your last edit to the code under test, the run measures
@@ -698,8 +891,27 @@ those suites skip themselves with a reason rather than failing — see `rbacSuit
 
 ### Next session, in order
 
-1. Rebuild the stack and re-run both projects. Expect 5 red; anything else needs explaining.
-2. Fix §3 bugs 1–2 (one change, the last instance of the missing-`@Req()` pattern), then 3 and 11.
-3. Fix the `workspaces.spec.ts` idempotency defect.
-4. Commit. All of 2026-08-12's work is still uncommitted.
-5. Then start Wave 5 — 28 uncovered paths, unblocked, and the largest remaining single win.
+The 90% target is met, so this is no longer a coverage list — it is a correctness list.
+
+1. **Fix §3 bugs 1–2 and 11** (one change: the last three missing-`@Req()` handlers), then bug 3's
+   `archived_at` filter. That takes the suite to 4 red, all of them non-product.
+2. **Decide on scheduled runs** (§3 "Missing feature") — build it, or delete the routes and the UI
+   that offers them. They answer 501 today, which is honest but not a resting state.
+3. **Resolve `PRJ-C-10`** (§5): does a colliding project key auto-suffix or refuse? The fix and the
+   test disagree and one of them is wrong.
+4. **Fix the four `testcase-import.spec.ts` strict-mode locators** and the `workspaces.spec.ts`
+   idempotency defect — both spec-side, both small.
+5. **Repair the 23 pre-existing backend unit failures** (§5).
+6. **Commit.** Everything from 2026-08-12 and 2026-08-14 is still uncommitted.
+7. Then depth, not breadth: **Wave 11** is the only wave left. Route-hit coverage is 100% and depth is
+   unmeasured — the next real gain is the 4/4 axis in §1 (happy path + validation + 401 +
+   cross-tenant per route), plus the two named gaps still open in Waves 2 and 6:
+   - Wave 2: the attachments **UI** half, the storage warning ladder (80/95/100%), and `GET /api/bugs/:id`'s
+     `attachments` array
+   - Wave 6: `ui/reports.spec.ts` (the `reports-ui` tenant kind is claimed but the file does not exist)
+   - Wave 0 item 3: `utils/fake-ai-server.ts`, which is what would let Wave 9 test an actual model
+     round-trip rather than only the no-provider path
+8. **Add `npm run coverage:gate` to CI.** It is already set at 100%, so a new controller route or a new
+   screen fails until something asserts against it. That is what keeps 100% from being a one-day
+   high-water mark — and the reason six measurement bugs went unnoticed for a day is that nothing was
+   checking the checker.

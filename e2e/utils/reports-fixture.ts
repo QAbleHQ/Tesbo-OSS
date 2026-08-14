@@ -4,6 +4,10 @@ import {
   listRunExecutions,
   seedBug,
   seedPlan,
+  // Used by the run-seeding loop below. It was missing from this list, which typechecks as an
+  // error but only *fails* on a database where the fixture doesn't already exist — the reason the
+  // reports suite stayed green on the persistent volume while being broken for a fresh one.
+  seedRun,
   seedSuite,
   seedTestCase,
   setExecutionResults,

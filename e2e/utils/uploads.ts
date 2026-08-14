@@ -28,6 +28,23 @@ export function textFile(name = "notes.txt", contents = "e2e attachment contents
   return { name, mimeType: "text/plain", body: Buffer.from(contents, "utf-8") };
 }
 
+/**
+ * A PNG with a valid header and a corrupt image payload — the shape a decoder rejects.
+ *
+ * Used to drive the failure path of anything that tries to READ an uploaded image rather than just
+ * store it (the knowledge base runs OCR over png/jpg on upload). A truncated download, a partial
+ * paste, or an image edited by a tool that miscomputed a chunk CRC all arrive looking like this, so
+ * it is an ordinary input rather than a hostile one — which is exactly why the server must survive
+ * it. See KBF-A-26.
+ */
+export function corruptPngFile(name = "corrupt.png"): UploadFile {
+  const body = Buffer.from(PNG_1PX);
+  // The IHDR chunk is left intact so the file is recognised as a PNG and reaches the decoder; the
+  // tail (IDAT payload and its CRC) is overwritten so decoding it fails.
+  body.fill(0x00, body.length - 12, body.length - 4);
+  return { name, mimeType: "image/png", body };
+}
+
 /** A file of exactly `bytes` length, for the size and storage-accounting cases. */
 export function sizedFile(name: string, bytes: number, mimeType = "application/octet-stream"): UploadFile {
   return { name, mimeType, body: Buffer.alloc(bytes, 0x61) };
@@ -41,6 +58,22 @@ export function sizedFile(name: string, bytes: number, mimeType = "application/o
  */
 export function filesForm(files: UploadFile[]): FormData {
   const form = new FormData();
+  for (const file of files) {
+    form.append("files", new Blob([new Uint8Array(file.body)], { type: file.mimeType }), file.name);
+  }
+  return form;
+}
+
+/**
+ * The same body with extra text fields alongside the files.
+ *
+ * The Knowledge Base upload route reads `folderId` off the multipart body rather than the URL
+ * (`body.folderId` in uploadKnowledgeFiles), so its files cannot be sent with filesForm() alone.
+ * Fields go first because the destination has to be readable before the file parts are consumed.
+ */
+export function filesFormWith(fields: Record<string, string>, files: UploadFile[]): FormData {
+  const form = new FormData();
+  for (const [key, value] of Object.entries(fields)) form.append(key, value);
   for (const file of files) {
     form.append("files", new Blob([new Uint8Array(file.body)], { type: file.mimeType }), file.name);
   }

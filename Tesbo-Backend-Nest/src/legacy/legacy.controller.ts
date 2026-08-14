@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  NotFoundException,
+  NotImplementedException,
   Param,
   Patch,
   Post,
@@ -305,13 +307,13 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/testcases/linked-jira-keys")
-  linkedJiraKeys(@Param("projectId") projectId: string) {
-    return this.legacy.linkedJiraKeys(projectId);
+  linkedJiraKeys(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.linkedJiraKeys(projectId, req.userId);
   }
 
   @Get("/api/projects/:projectId/testcases/linked-linear-keys")
-  linkedLinearKeys(@Param("projectId") projectId: string) {
-    return this.legacy.linkedLinearKeys(projectId);
+  linkedLinearKeys(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.linkedLinearKeys(projectId, req.userId);
   }
 
   @Get("/api/projects/:projectId/testcases/:testcaseId")
@@ -415,33 +417,33 @@ export class LegacyController {
   }
 
   @Get("/api/cycles/:cycleId")
-  getCycle(@Param("cycleId") cycleId: string) {
-    return this.legacy.getCycle(cycleId);
+  getCycle(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string) {
+    return this.legacy.getCycle(cycleId, req.userId);
   }
 
   @Patch("/api/cycles/:cycleId")
-  updateCycle(@Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateCycle(cycleId, body);
+  updateCycle(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateCycle(cycleId, req.userId, body);
   }
 
   @Delete("/api/cycles/:cycleId")
-  deleteCycle(@Param("cycleId") cycleId: string) {
-    return this.legacy.deleteCycle(cycleId);
+  deleteCycle(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string) {
+    return this.legacy.deleteCycle(cycleId, req.userId);
   }
 
   @Post("/api/cycles/:cycleId/testcases")
-  addCycleCases(@Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
-    return this.legacy.addCycleTestCases(cycleId, body);
+  addCycleCases(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
+    return this.legacy.addCycleTestCases(cycleId, req.userId, body);
   }
 
   @Delete("/api/cycles/:cycleId/testcases/:testcaseId")
-  removeCycleCase(@Param("cycleId") cycleId: string, @Param("testcaseId") testcaseId: string) {
-    return this.legacy.removeCycleTestCase(cycleId, testcaseId);
+  removeCycleCase(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Param("testcaseId") testcaseId: string) {
+    return this.legacy.removeCycleTestCase(cycleId, req.userId, testcaseId);
   }
 
   @Get("/api/cycles/:cycleId/executions")
-  executions(@Param("cycleId") cycleId: string) {
-    return this.legacy.executions(cycleId);
+  executions(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string) {
+    return this.legacy.executionsForUser(cycleId, req.userId);
   }
 
   @Patch("/api/cycles/:cycleId/executions/:executionId")
@@ -470,31 +472,60 @@ export class LegacyController {
   }
 
   @Post("/api/cycles/:cycleId/executions/bulk-assign")
-  bulkAssign() {}
-
-  @Post("/api/cycles/:cycleId/executions/bulk-status")
-  bulkStatus() {}
-
-  @Post("/api/cycles/:cycleId/share")
-  shareCycle(@Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
-    return this.legacy.shareCycle(cycleId, body);
+  bulkAssign(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
+    return this.legacy.bulkAssignExecutions(cycleId, req.userId, body);
   }
 
+  @Post("/api/cycles/:cycleId/executions/bulk-status")
+  bulkStatus(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
+    return this.legacy.bulkUpdateExecutionStatus(cycleId, req.userId, body);
+  }
+
+  @Post("/api/cycles/:cycleId/share")
+  shareCycle(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
+    return this.legacy.shareCycle(cycleId, req.userId, body);
+  }
+
+  /*
+   * Scheduled runs are NOT IMPLEMENTED. There is no schedules table and no runner; these four routes
+   * were stubs that answered 2xx — createSchedule handed back `{ id: "local-schedule", ...body }`
+   * without storing anything, and the list, update and delete routes did nothing at all. A schedule
+   * the user created, was told about, and can never see again is worse than a feature that says it
+   * isn't there.
+   *
+   * Implementing it is a feature (a cron parser, a scheduler, a runner), not a bug fix, so it is left
+   * out and recorded in docs/e2e-coverage-waves.md — see the red EXO-A-07/08/10 in
+   * e2e/api/execution-ops.spec.ts. What is fixed here is the part that is unambiguous: they no longer
+   * answer a caller with no session or no access to the project, and creating one no longer claims
+   * success. 501 is the honest status for "the route exists, the feature does not".
+   */
   @Get("/api/projects/:projectId/cycles/schedules")
-  schedules() {
+  async schedules(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return [];
   }
 
   @Post("/api/projects/:projectId/cycles/schedules")
-  createSchedule(@Body() body: Record<string, any>) {
-    return { id: "local-schedule", ...body };
+  async createSchedule(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Body() body: Record<string, any>
+  ) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
+    throw new NotImplementedException({ error: "Scheduled runs are not available yet" });
   }
 
   @Patch("/api/cycles/schedules/:scheduleId")
-  updateSchedule() {}
+  async updateSchedule(@Req() req: AuthenticatedRequest, @Param("scheduleId") scheduleId: string) {
+    await this.legacy.requireSession(req.userId);
+    throw new NotImplementedException({ error: "Scheduled runs are not available yet" });
+  }
 
   @Delete("/api/cycles/schedules/:scheduleId")
-  deleteSchedule() {}
+  async deleteSchedule(@Req() req: AuthenticatedRequest, @Param("scheduleId") scheduleId: string) {
+    await this.legacy.requireSession(req.userId);
+    throw new NotImplementedException({ error: "Scheduled runs are not available yet" });
+  }
 
   @Get("/api/public/shared-runs/:token")
   publicRun(@Param("token") token: string) {
@@ -704,39 +735,50 @@ export class LegacyController {
     return this.legacy.aiGenerate(projectId, req.userId, body);
   }
 
-  @Post("/api/projects/:projectId/ai/review-script")
-  reviewScript() {
-    return { status: "passed", summary: "", categories: [], validatedSteps: [] };
-  }
+  // REMOVED: POST /api/projects/:projectId/ai/review-script
+  //
+  // It was a stub that took no caller, resolved no project, called no model, and answered every
+  // request — including an unauthenticated one, and one carrying a script that cannot parse — with
+  // { status: "passed", categories: [], validatedSteps: [] }. An "AI review" that always reports a
+  // pass is worse than none: it is a green tick with nothing behind it.
+  //
+  // Deleted rather than implemented, for the same reason the import stubs were (§3 bug 15): nothing
+  // in Tesbo-Frontend calls it, so there is no feature to keep working — only a route that lied.
+  // Reinstate it alongside a real implementation, not before.
 
   @Get("/api/projects/:projectId/ai/generation-history")
-  aiHistory(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.aiHistory(projectId, query);
+  aiHistory(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.aiHistory(projectId, req.userId, query);
   }
 
   @Post("/api/projects/:projectId/ai/generation-history/:requestId/save")
-  aiSave(@Param("projectId") projectId: string, @Param("requestId") requestId: string, @Body() body: Record<string, any>) {
-    return this.legacy.aiSave(projectId, requestId, body);
+  aiSave(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("requestId") requestId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.aiSave(projectId, req.userId, requestId, body);
   }
 
   @Get("/api/projects/:projectId/agents/zyra")
-  zyraAgent(@Param("projectId") projectId: string) {
-    return this.legacy.zyraAgent(projectId);
+  zyraAgent(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.zyraAgent(projectId, req.userId);
   }
 
   @Get("/api/projects/:projectId/agents/zyra/test")
-  testZyraConnection(@Param("projectId") projectId: string) {
-    return this.legacy.testZyraAiConnection(projectId);
+  testZyraConnection(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.testZyraAiConnection(projectId, req.userId);
   }
 
   @Patch("/api/projects/:projectId/agents/zyra/settings")
-  updateZyraSettings(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateZyraSettings(projectId, body);
+  updateZyraSettings(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.updateZyraSettings(projectId, req.userId, body);
   }
 
   @Get("/api/projects/:projectId/agents/zyra/chat/sessions")
-  zyraChatSessions(@Param("projectId") projectId: string) {
-    return this.legacy.zyraChatSessions(projectId);
+  zyraChatSessions(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.zyraChatSessions(projectId, req.userId);
   }
 
   @Post("/api/projects/:projectId/agents/zyra/chat/sessions")
@@ -745,8 +787,8 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/agents/zyra/chat/sessions/:sessionId")
-  zyraChatSession(@Param("projectId") projectId: string, @Param("sessionId") sessionId: string) {
-    return this.legacy.zyraChatSession(projectId, sessionId);
+  zyraChatSession(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("sessionId") sessionId: string) {
+    return this.legacy.zyraChatSession(projectId, req.userId, sessionId);
   }
 
   @Post("/api/projects/:projectId/agents/zyra/chat/sessions/:sessionId/messages")
@@ -783,8 +825,8 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/agents/zyra/tasks/:taskId")
-  getZyraTask(@Param("projectId") projectId: string, @Param("taskId") taskId: string) {
-    return this.legacy.zyraTask(projectId, taskId);
+  getZyraTask(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("taskId") taskId: string) {
+    return this.legacy.zyraTask(projectId, req.userId, taskId);
   }
 
   @Post("/api/projects/:projectId/agents/zyra/tasks/:taskId/feedback")
@@ -798,13 +840,18 @@ export class LegacyController {
   }
 
   @Delete("/api/projects/:projectId/agents/zyra/tasks/:taskId/drafts/:draftIndex")
-  deleteZyraDraft(@Param("projectId") projectId: string, @Param("taskId") taskId: string, @Param("draftIndex") draftIndex: string) {
-    return this.legacy.zyraDeleteDraft(projectId, taskId, Number(draftIndex));
+  deleteZyraDraft(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("taskId") taskId: string,
+    @Param("draftIndex") draftIndex: string
+  ) {
+    return this.legacy.zyraDeleteDraft(projectId, req.userId, taskId, Number(draftIndex));
   }
 
   @Post("/api/projects/:projectId/agents/zyra/tasks/:taskId/close")
-  closeZyraTask(@Param("projectId") projectId: string, @Param("taskId") taskId: string) {
-    return this.legacy.zyraCloseTask(projectId, taskId);
+  closeZyraTask(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("taskId") taskId: string) {
+    return this.legacy.zyraCloseTask(projectId, req.userId, taskId);
   }
 
   @Post("/api/projects/:projectId/agents/zyra/tasks/:taskId/save")
@@ -1084,8 +1131,8 @@ export class LegacyController {
   // ─── Knowledge Base v1 (legacy flat notes/files — superseded by v2 above) ────
 
   @Get("/api/projects/:projectId/knowledge-base")
-  knowledge(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.listKnowledge(projectId, query);
+  knowledge(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.listKnowledge(projectId, req.userId, query);
   }
 
   @Post("/api/projects/:projectId/knowledge-base")
@@ -1099,23 +1146,28 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/knowledge-base/:itemId")
-  getKnowledge(@Param("itemId") itemId: string) {
-    return this.legacy.getKnowledge(itemId);
+  getKnowledge(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("itemId") itemId: string) {
+    return this.legacy.getKnowledge(projectId, req.userId, itemId);
   }
 
   @Patch("/api/projects/:projectId/knowledge-base/:itemId")
-  updateKnowledge(@Param("itemId") itemId: string, @Body() body: Record<string, any>) {
-    return this.legacy.updateKnowledge(itemId, body);
+  updateKnowledge(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("itemId") itemId: string,
+    @Body() body: Record<string, any>
+  ) {
+    return this.legacy.updateKnowledge(projectId, req.userId, itemId, body);
   }
 
   @Delete("/api/projects/:projectId/knowledge-base/:itemId")
-  deleteKnowledge(@Param("itemId") itemId: string) {
-    return this.legacy.deleteKnowledge(itemId);
+  deleteKnowledge(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("itemId") itemId: string) {
+    return this.legacy.deleteKnowledge(projectId, req.userId, itemId);
   }
 
   @Get("/api/projects/:projectId/knowledge-base/:itemId/file")
-  knowledgeFile() {
-    return {};
+  knowledgeFile(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Param("itemId") itemId: string) {
+    return this.legacy.knowledgeItemFile(projectId, req.userId, itemId);
   }
 
   // ── Workspace-scoped app integrations (Jira, Linear) ──
@@ -1150,18 +1202,18 @@ export class LegacyController {
   // ── Project-scoped Jira mapping/sync/tickets ──
 
   @Get("/api/projects/:projectId/jira/status")
-  jiraStatus(@Param("projectId") projectId: string) {
-    return this.legacy.jiraStatus(projectId);
+  jiraStatus(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.jiraStatus(projectId, req.userId);
   }
 
   @Get("/api/projects/:projectId/jira/projects")
-  jiraProjects(@Param("projectId") projectId: string) {
-    return this.legacy.jiraProjects(projectId);
+  jiraProjects(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.jiraProjects(projectId, req.userId);
   }
 
   @Post("/api/projects/:projectId/jira/projects")
-  connectJiraProjects(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.connectJiraProjects(projectId, body);
+  connectJiraProjects(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.connectJiraProjects(projectId, req.userId, body);
   }
 
   @Post("/api/projects/:projectId/jira/sync")
@@ -1170,35 +1222,35 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/jira/tickets")
-  jiraTickets(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.jiraTickets(projectId, query);
+  jiraTickets(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.jiraTickets(projectId, req.userId, query);
   }
 
   @Post("/api/projects/:projectId/jira/comment")
-  jiraComment(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.jiraComment(projectId, body);
+  jiraComment(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.jiraComment(projectId, req.userId, body);
   }
 
   @Get("/api/projects/:projectId/jira/search-issues")
-  jiraSearchIssues(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.jiraSearchIssues(projectId, query);
+  jiraSearchIssues(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.jiraSearchIssues(projectId, req.userId, query);
   }
 
   // ── Project-scoped Linear mapping/sync/tickets ──
 
   @Get("/api/projects/:projectId/linear/status")
-  linearStatus(@Param("projectId") projectId: string) {
-    return this.legacy.linearStatus(projectId);
+  linearStatus(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.linearStatus(projectId, req.userId);
   }
 
   @Get("/api/projects/:projectId/linear/teams")
-  linearTeams(@Param("projectId") projectId: string) {
-    return this.legacy.linearTeams(projectId);
+  linearTeams(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.linearTeams(projectId, req.userId);
   }
 
   @Post("/api/projects/:projectId/linear/teams")
-  connectLinearTeams(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.connectLinearTeams(projectId, body);
+  connectLinearTeams(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.connectLinearTeams(projectId, req.userId, body);
   }
 
   @Post("/api/projects/:projectId/linear/sync")
@@ -1219,30 +1271,30 @@ export class LegacyController {
   }
 
   @Get("/api/projects/:projectId/linear/tickets")
-  linearTickets(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.linearTickets(projectId, query);
+  linearTickets(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.linearTickets(projectId, req.userId, query);
   }
 
   @Post("/api/projects/:projectId/linear/comment")
-  linearComment(@Param("projectId") projectId: string, @Body() body: Record<string, any>) {
-    return this.legacy.linearComment(projectId, body);
+  linearComment(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.linearComment(projectId, req.userId, body);
   }
 
   @Get("/api/projects/:projectId/linear/search-issues")
-  linearSearchIssues(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.linearSearchIssues(projectId, query);
+  linearSearchIssues(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.linearSearchIssues(projectId, req.userId, query);
   }
 
   // ── Requirements page: cross-source (Jira + Linear) aggregates ──
 
   @Get("/api/projects/:projectId/tickets/summary")
-  requirementsSummary(@Param("projectId") projectId: string) {
-    return this.legacy.requirementsSummary(projectId);
+  requirementsSummary(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    return this.legacy.requirementsSummary(projectId, req.userId);
   }
 
   @Get("/api/projects/:projectId/tickets")
-  allTickets(@Param("projectId") projectId: string, @Query() query: Record<string, any>) {
-    return this.legacy.allTickets(projectId, query);
+  allTickets(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Query() query: Record<string, any>) {
+    return this.legacy.allTickets(projectId, req.userId, query);
   }
 
   @Get("/api/projects/:projectId/activity")
@@ -1265,13 +1317,26 @@ export class LegacyController {
     return this.legacy.workspaceActivitySummaryForUser(req.userId);
   }
 
+  /*
+   * Notifications are not implemented yet — there is no table behind them, so the list is empty and
+   * there is nothing to mark read. Both routes still take the caller: they previously took none at
+   * all, which meant "your notifications" was answerable without knowing who was asking, and
+   * mark-as-read reported success for any id to anybody.
+   *
+   * The empty list is a missing feature, recorded in docs/e2e-coverage-waves.md. The 404 below is the
+   * honest answer while it stays missing: no such notification exists.
+   */
   @Get("/api/notifications")
-  notifications() {
+  async notifications(@Req() req: AuthenticatedRequest) {
+    await this.legacy.requireSession(req.userId);
     return [];
   }
 
   @Post("/api/notifications/:id/read")
-  readNotification() {}
+  async readNotification(@Req() req: AuthenticatedRequest, @Param("id") id: string) {
+    await this.legacy.requireSession(req.userId);
+    throw new NotFoundException({ error: "Notification not found" });
+  }
 
   @Get("/api/admin/customers")
   customers(@Req() req: AuthenticatedRequest) {
@@ -1308,33 +1373,46 @@ export class LegacyController {
     return this.legacy.deleteAdmin(req.userId, adminId);
   }
 
+  /*
+   * The external Tesbo Reports ingest is not implemented — these six routes return empty lists and
+   * zeroed analytics. What they no longer do is answer without a caller: they took no @Req() and
+   * ignored the project in their own URL, so any request at all was served, and `settings` is shaped
+   * to carry an ingestion credential. The placeholder payloads are a missing feature, recorded in
+   * docs/e2e-coverage-waves.md; being readable by anyone was a defect regardless of what fills them.
+   */
   @Get("/api/projects/:projectId/tesbo-reports/runs")
-  tesboRuns() {
+  async tesboRuns(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return [];
   }
 
   @Get("/api/projects/:projectId/tesbo-reports/specs")
-  tesboSpecs() {
+  async tesboSpecs(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return [];
   }
 
   @Get("/api/projects/:projectId/tesbo-reports/tests")
-  tesboTests() {
+  async tesboTests(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return [];
   }
 
   @Get("/api/projects/:projectId/tesbo-reports/analytics")
-  tesboAnalytics() {
+  async tesboAnalytics(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return { totalRuns: 0, totalTests: 0, passRate: 0, byStatus: {}, runsByDay: [] };
   }
 
   @Get("/api/projects/:projectId/tesbo-reports/alerts")
-  tesboAlerts() {
+  async tesboAlerts(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return [];
   }
 
   @Get("/api/projects/:projectId/tesbo-reports/settings")
-  tesboSettings() {
+  async tesboSettings(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
+    await this.legacy.requireProjectAccess(req.userId, projectId);
     return { keepTrace: true, traceRetentionDays: 14, ingestionApiKey: "", alertsEnabled: false, shareByDefault: false };
   }
 }

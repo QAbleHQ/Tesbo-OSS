@@ -488,23 +488,41 @@ describe("LegacyService#linkedLinearKeys — issue-linking aggregate", () => {
   });
 });
 
+/*
+ * connectLinearTeams now takes the caller and resolves the project first — it previously took no
+ * caller at all, so anyone holding a project id could rewrite which Linear team feeds it. These
+ * tests therefore have to satisfy two queries the method makes before its own work starts: the
+ * caller's active workspace, and their membership of the project. Both are answered here so each
+ * test can keep saying what it is actually about.
+ */
+const CALLER_ID = "5f9c1f2e-6f3a-4a7e-8b21-000000000001";
+const PROJECT_ID = "5f9c1f2e-6f3a-4a7e-8b21-000000000002";
+
+function withProjectAccess(routes: Route[]): Route[] {
+  return [
+    { match: "JOIN organizations o ON o.id = u.active_organization_id", rows: [{ id: "org-1", role: "owner" }] },
+    { match: "JOIN project_members pm ON pm.project_id = p.id", rows: [{ id: PROJECT_ID, organization_id: "org-1", caller_role: "owner" }] },
+    ...routes
+  ];
+}
+
 describe("LegacyService#connectLinearTeams — per-project team mapping", () => {
   it("throws NotFoundException when Linear isn't connected for the project's workspace", async () => {
-    const { db } = makeDb([{ match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] }, { match: "FROM integration_connections WHERE organization_id", rows: [] }]);
+    const { db } = makeDb(withProjectAccess([{ match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] }, { match: "FROM integration_connections WHERE organization_id", rows: [] }]));
     const svc = makeLegacy(db);
-    const err = await rejection(svc.connectLinearTeams("proj-1", { projects: [{ id: "team-1", key: "ENG", name: "Engineering" }] }));
+    const err = await rejection(svc.connectLinearTeams(PROJECT_ID, CALLER_ID, { projects: [{ id: "team-1", key: "ENG", name: "Engineering" }] }));
     expect(err).toBeInstanceOf(NotFoundException);
   });
 
   it("disables the previous mapping and links the one well-formed team (drops entries missing id or key)", async () => {
-    const { db, calls } = makeDb([
+    const { db, calls } = makeDb(withProjectAccess([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
       { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
       { match: "UPDATE linear_project_mappings SET enabled = false", rows: [] },
       { match: "INSERT INTO linear_project_mappings", rows: [] }
-    ]);
+    ]));
     const svc = makeLegacy(db);
-    const res = await svc.connectLinearTeams("proj-1", {
+    const res = await svc.connectLinearTeams(PROJECT_ID, CALLER_ID, {
       projects: [
         { id: "team-1", key: "ENG", name: "Engineering" },
         { id: "", key: "BAD" }, // missing id -> dropped
@@ -516,22 +534,22 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
     // Disabled, not deleted: the outgoing mapping's tickets and mirrored KB documents still
     // reference it (V72).
     const disableCall = calls.find((c) => c.sql.includes("UPDATE linear_project_mappings SET enabled = false"));
-    expect(disableCall!.params).toEqual(["proj-1"]);
+    expect(disableCall!.params).toEqual([PROJECT_ID]);
     expect(calls.some((c) => c.sql.includes("DELETE FROM linear_project_mappings"))).toBe(false);
 
     const insertCalls = calls.filter((c) => c.sql.includes("INSERT INTO linear_project_mappings"));
     expect(insertCalls).toHaveLength(1);
-    expect(insertCalls[0].params).toEqual(["conn-1", "proj-1", "team-1", "ENG", "Engineering"]);
+    expect(insertCalls[0].params).toEqual(["conn-1", PROJECT_ID, "team-1", "ENG", "Engineering"]);
   });
 
   it("links zero teams (and still clears old mappings) when the request has no valid teams", async () => {
-    const { db, calls } = makeDb([
+    const { db, calls } = makeDb(withProjectAccess([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
       { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] },
       { match: "UPDATE linear_project_mappings SET enabled = false", rows: [] }
-    ]);
+    ]));
     const svc = makeLegacy(db);
-    const res = await svc.connectLinearTeams("proj-1", { projects: [] });
+    const res = await svc.connectLinearTeams(PROJECT_ID, CALLER_ID, { projects: [] });
     expect(res).toEqual({ linked: 0 });
     expect(calls.some((c) => c.sql.includes("INSERT INTO linear_project_mappings"))).toBe(false);
   });
@@ -539,13 +557,13 @@ describe("LegacyService#connectLinearTeams — per-project team mapping", () => 
   // V72 constrains a Tesbo project to exactly one Linear team (idx_linear_project_mappings_one_per_project),
   // so a multi-team request is rejected outright rather than silently linking the first.
   it("rejects a request carrying more than one team", async () => {
-    const { db, calls } = makeDb([
+    const { db, calls } = makeDb(withProjectAccess([
       { match: "FROM projects WHERE id", rows: [{ organization_id: "org-1" }] },
       { match: "FROM integration_connections WHERE organization_id", rows: [{ id: "conn-1", auth_method: "oauth" }] }
-    ]);
+    ]));
     const svc = makeLegacy(db);
     const err = await rejection(
-      svc.connectLinearTeams("proj-1", {
+      svc.connectLinearTeams(PROJECT_ID, CALLER_ID, {
         projects: [
           { id: "team-1", key: "ENG", name: "Engineering" },
           { id: "team-2", key: "OPS", name: "Operations" }
