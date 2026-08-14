@@ -82,6 +82,12 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(diffMs / day)}d ago`;
 }
 
+// "Suites" on a project card counts top-level suites only — a sub-suite nested under
+// one shouldn't inflate the count a second time.
+function topLevelSuiteCount(suites: SuiteNode[]): number {
+  return suites.filter((s) => s.parentId === null).length;
+}
+
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "U";
@@ -504,7 +510,7 @@ function ProjectsPageContent() {
                             <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Test cases</div>
                           </div>
                           <div className="border-r border-[var(--border-subtle)] px-2 text-center">
-                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{p.suites.length}</div>
+                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{topLevelSuiteCount(p.suites)}</div>
                             <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Suites</div>
                           </div>
                           <div className="pl-2 text-center">
@@ -559,7 +565,7 @@ function ProjectsPageContent() {
                         </div>
                       </div>
                       <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.testCaseCount}</div>
-                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.suites.length}</div>
+                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{topLevelSuiteCount(p.suites)}</div>
                       <div>
                         {p.currentPassRate !== null ? (
                           <div className="flex items-center gap-2">
