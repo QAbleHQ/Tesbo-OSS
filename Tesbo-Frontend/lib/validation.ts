@@ -38,3 +38,25 @@ export function validateEmailValue(value: string): string | null {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return "Enter a valid email address";
   return null;
 }
+
+// Mirrors Tesbo-Backend-Nest/src/legacy/legacy.service.ts (createProject / updateProject).
+// PROJECT_NAME_MAX_LENGTH matches the projects.name VARCHAR(255) column — going over that
+// isn't just a policy choice, the insert/update would otherwise fail outright.
+export const PROJECT_NAME_MIN_LENGTH = 3;
+export const PROJECT_NAME_MAX_LENGTH = 255;
+export const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
+
+export function validateProjectName(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "Project name is required";
+  if (trimmed.length < PROJECT_NAME_MIN_LENGTH) return `Project name must be at least ${PROJECT_NAME_MIN_LENGTH} characters`;
+  if (trimmed.length > PROJECT_NAME_MAX_LENGTH) return `Project name must be at most ${PROJECT_NAME_MAX_LENGTH} characters`;
+  return "";
+}
+
+export function validateProjectDescription(value: string): string {
+  if (value.trim().length > PROJECT_DESCRIPTION_MAX_LENGTH) {
+    return `Description must be at most ${PROJECT_DESCRIPTION_MAX_LENGTH} characters`;
+  }
+  return "";
+}

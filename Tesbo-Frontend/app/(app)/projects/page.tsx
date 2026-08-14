@@ -1,12 +1,11 @@
 "use client";
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   IconArrowsSort,
   IconChevronDown,
-  IconFilter,
   IconFolders,
   IconLayoutGrid,
   IconList,
@@ -21,6 +20,7 @@ import {
   Card,
   EmptyStateBlock,
   Field,
+  FieldError,
   FieldHint,
   FieldLabel,
   Input,
@@ -28,6 +28,12 @@ import {
   Textarea,
 } from "@/components/ui";
 import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
+import {
+  PROJECT_DESCRIPTION_MAX_LENGTH,
+  PROJECT_NAME_MAX_LENGTH,
+  validateProjectDescription,
+  validateProjectName,
+} from "@/lib/validation";
 
 type RunCounts = { passed: number; failed: number; blocked: number; total: number };
 type ProjectStatus = "active" | "configured" | "setup_required";
@@ -45,6 +51,34 @@ type ProjectWithStats = ProjectSummary & {
 const VIEW_STORAGE_KEY = "tesbo_projects_view";
 
 const PROJECT_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+
+type SortOption = "updated" | "name_asc" | "name_desc" | "created";
+
+const SORT_OPTIONS: Array<{ value: SortOption; label: string }> = [
+  { value: "updated", label: "Last updated" },
+  { value: "created", label: "Newest created" },
+  { value: "name_asc", label: "Name (A–Z)" },
+  { value: "name_desc", label: "Name (Z–A)" },
+];
+
+function sortProjects(projects: ProjectWithStats[], sortBy: SortOption): ProjectWithStats[] {
+  const sorted = [...projects];
+  switch (sortBy) {
+    case "name_asc":
+      return sorted.sort((a, b) => a.name.localeCompare(b.name));
+    case "name_desc":
+      return sorted.sort((a, b) => b.name.localeCompare(a.name));
+    case "created":
+      return sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    case "updated":
+    default:
+      return sorted.sort((a, b) => {
+        const aTime = new Date(a.lastActivityAt ?? a.createdAt).getTime();
+        const bTime = new Date(b.lastActivityAt ?? b.createdAt).getTime();
+        return bTime - aTime;
+      });
+  }
+}
 
 function hashSeed(seed: string): number {
   let h = 0;
@@ -161,16 +195,69 @@ function StatusBadge({ status }: { status: ProjectStatus }) {
   );
 }
 
+function SortMenu({ sortBy, onSortChange }: { sortBy: SortOption; onSortChange: (v: SortOption) => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const currentLabel = SORT_OPTIONS.find((o) => o.value === sortBy)?.label ?? "Last updated";
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleOutsideClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setIsOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [isOpen]);
+
+  return (
+    <div ref={menuRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setIsOpen((prev) => !prev)}
+        aria-expanded={isOpen}
+        className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
+      >
+        <IconArrowsSort size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+        Sort: {currentLabel}
+        <IconChevronDown size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
+      </button>
+      {isOpen && (
+        <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
+          {SORT_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => {
+                onSortChange(option.value);
+                setIsOpen(false);
+              }}
+              className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-[var(--surface-secondary)] ${
+                option.value === sortBy ? "text-[var(--brand-primary)]" : "text-[var(--foreground)]"
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProjectsToolbar({
   viewMode,
   onViewModeChange,
   searchQuery,
   onSearchChange,
+  sortBy,
+  onSortChange,
 }: {
   viewMode: "grid" | "list";
   onViewModeChange: (v: "grid" | "list") => void;
   searchQuery: string;
   onSearchChange: (v: string) => void;
+  sortBy: SortOption;
+  onSortChange: (v: SortOption) => void;
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
@@ -185,21 +272,7 @@ function ProjectsToolbar({
             className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
           />
         </label>
-        <button
-          type="button"
-          className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
-        >
-          <IconArrowsSort size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
-          Sort: Last updated
-          <IconChevronDown size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
-        </button>
-        <button
-          type="button"
-          className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
-        >
-          <IconFilter size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
-          Filter
-        </button>
+        <SortMenu sortBy={sortBy} onSortChange={onSortChange} />
       </div>
       <div className="flex items-center gap-0.5 rounded-[6px] bg-[var(--surface-secondary)] p-[3px]">
         <button
@@ -234,12 +307,15 @@ function ProjectsPageContent() {
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState<SortOption>("updated");
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createKey, setCreateKey] = useState("");
   const [createDescription, setCreateDescription] = useState("");
   const [createLoading, setCreateLoading] = useState(false);
   const [createError, setCreateError] = useState("");
+  const [createNameError, setCreateNameError] = useState("");
+  const [createDescriptionError, setCreateDescriptionError] = useState("");
   const [workspaceRole, setWorkspaceRole] = useState<string>("");
   const canCreateProject = workspaceRole === "owner" || workspaceRole === "admin" || workspaceRole === "manager";
 
@@ -323,8 +399,14 @@ function ProjectsPageContent() {
       setCreateError("Only workspace owner, admin, or manager can create projects.");
       return;
     }
-    if (!createName.trim()) {
-      setCreateError("Project name is required");
+    const nameError = validateProjectName(createName);
+    if (nameError) {
+      setCreateNameError(nameError);
+      return;
+    }
+    const descriptionError = validateProjectDescription(createDescription);
+    if (descriptionError) {
+      setCreateDescriptionError(descriptionError);
       return;
     }
     setCreateLoading(true);
@@ -339,6 +421,8 @@ function ProjectsPageContent() {
       setCreateName("");
       setCreateKey("");
       setCreateDescription("");
+      setCreateNameError("");
+      setCreateDescriptionError("");
       router.push(`/projects/${created.id}/dashboard`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Failed to create project");
@@ -349,11 +433,13 @@ function ProjectsPageContent() {
 
   const filteredProjects = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return projects;
-    return projects.filter((p) =>
-      [p.name, p.key, p.description ?? ""].some((field) => field.toLowerCase().includes(query))
-    );
-  }, [projects, searchQuery]);
+    const matched = !query
+      ? projects
+      : projects.filter((p) =>
+          [p.name, p.key, p.description ?? ""].some((field) => field.toLowerCase().includes(query))
+        );
+    return sortProjects(matched, sortBy);
+  }, [projects, searchQuery, sortBy]);
 
   if (loading) {
     return (
@@ -387,6 +473,8 @@ function ProjectsPageContent() {
             onViewModeChange={handleViewModeChange}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
+            sortBy={sortBy}
+            onSortChange={setSortBy}
           />
         ) : null
       }
@@ -415,7 +503,16 @@ function ProjectsPageContent() {
         />
       ) : null}
 
-      <Modal open={createOpen} onClose={() => !createLoading && setCreateOpen(false)} title="Create project">
+      <Modal
+        open={createOpen}
+        onClose={() => {
+          if (createLoading) return;
+          setCreateOpen(false);
+          setCreateNameError("");
+          setCreateDescriptionError("");
+        }}
+        title="Create project"
+      >
         <form onSubmit={handleCreate} className="space-y-5">
           <Field>
             <FieldLabel htmlFor="create-name">Name *</FieldLabel>
@@ -423,11 +520,17 @@ function ProjectsPageContent() {
                   id="create-name"
                   type="text"
                   value={createName}
-                  onChange={(e) => setCreateName(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setCreateName(value);
+                    if (createNameError && !validateProjectName(value)) setCreateNameError("");
+                  }}
                   placeholder="My Project"
                   disabled={createLoading}
+                  maxLength={PROJECT_NAME_MAX_LENGTH}
                   autoFocus
                 />
+            {createNameError && <FieldError>{createNameError}</FieldError>}
           </Field>
           <Field>
             <FieldLabel htmlFor="create-key">Key (optional)</FieldLabel>
@@ -447,14 +550,29 @@ function ProjectsPageContent() {
             <Textarea
                   id="create-desc"
                   value={createDescription}
-                  onChange={(e) => setCreateDescription(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setCreateDescription(value);
+                    if (createDescriptionError && !validateProjectDescription(value)) setCreateDescriptionError("");
+                  }}
                   rows={2}
                   disabled={createLoading}
+                  maxLength={PROJECT_DESCRIPTION_MAX_LENGTH}
                 />
+            {createDescriptionError && <FieldError>{createDescriptionError}</FieldError>}
           </Field>
           {createError && <p className="text-sm text-red-600">{createError}</p>}
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="secondary" onClick={() => !createLoading && setCreateOpen(false)}>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => {
+                if (createLoading) return;
+                setCreateOpen(false);
+                setCreateNameError("");
+                setCreateDescriptionError("");
+              }}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={createLoading}>

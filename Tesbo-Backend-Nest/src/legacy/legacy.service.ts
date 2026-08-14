@@ -180,6 +180,29 @@ function projectKey(value: string): string {
     .slice(0, 16) || "TESBO";
 }
 
+const PROJECT_NAME_MIN_LENGTH = 3;
+// Matches the projects.name VARCHAR(255) column — going over that isn't just a policy
+// choice, the insert/update would otherwise fail outright.
+const PROJECT_NAME_MAX_LENGTH = 255;
+const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
+
+/** Shared by createProject/updateProject. `name`/`description` undefined means "not being changed". */
+function validateProjectFields(name: string | undefined, description: string | undefined): void {
+  if (name !== undefined) {
+    const trimmed = name.trim();
+    if (!trimmed) throw new BadRequestException({ error: "Project name is required" });
+    if (trimmed.length < PROJECT_NAME_MIN_LENGTH) {
+      throw new BadRequestException({ error: `Project name must be at least ${PROJECT_NAME_MIN_LENGTH} characters` });
+    }
+    if (trimmed.length > PROJECT_NAME_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Project name must be at most ${PROJECT_NAME_MAX_LENGTH} characters` });
+    }
+  }
+  if (description !== undefined && description.trim().length > PROJECT_DESCRIPTION_MAX_LENGTH) {
+    throw new BadRequestException({ error: `Description must be at most ${PROJECT_DESCRIPTION_MAX_LENGTH} characters` });
+  }
+}
+
 function maskSecret(value: string): string {
   if (!value) return "********";
   const suffix = value.slice(-4);
@@ -1636,7 +1659,7 @@ export class LegacyService implements OnModuleInit {
   async createProject(userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const name = String(body.name || "").trim();
-    if (!name) throw new BadRequestException({ error: "name is required" });
+    validateProjectFields(name, body.description != null ? String(body.description) : undefined);
     const workspace = await this.workspace(uid);
     await this.planLimits.assertCanCreateProject(workspace.id);
     const key = projectKey(String(body.key || name));
@@ -1695,6 +1718,9 @@ export class LegacyService implements OnModuleInit {
   }
 
   async updateProject(id: string, body: Body) {
+    const name = body.name !== undefined ? String(body.name).trim() : undefined;
+    const description = body.description !== undefined ? String(body.description) : undefined;
+    validateProjectFields(name, description);
     await this.db.query(
       `UPDATE projects SET
        name = COALESCE($2, name),
@@ -1702,7 +1728,7 @@ export class LegacyService implements OnModuleInit {
        settings = COALESCE($4::jsonb, settings),
        updated_at = now()
        WHERE id = $1`,
-      [id, body.name ?? null, body.description ?? null, body.settings ? JSON.stringify(body.settings) : null]
+      [id, name ?? null, description ?? null, body.settings ? JSON.stringify(body.settings) : null]
     );
   }
 
