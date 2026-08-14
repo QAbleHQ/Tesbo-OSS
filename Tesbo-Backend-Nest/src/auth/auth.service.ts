@@ -118,6 +118,9 @@ export class AuthService {
       if (!currentPassword) throw new BadRequestException({ error: "current password required" });
       const valid = await this.password.verifyCurrentPassword(userId, currentPassword);
       if (!valid) throw new UnauthorizedException({ error: "invalid_current_password" });
+      if (newPassword === currentPassword) {
+        throw new BadRequestException({ error: "New password must be different from your current password" });
+      }
     }
 
     await this.password.setPassword(userId, newPassword);
