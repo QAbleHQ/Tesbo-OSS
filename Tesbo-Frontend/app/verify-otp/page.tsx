@@ -56,6 +56,7 @@ function VerifyOtpForm() {
     setError("");
     try {
       await requestOtp(email);
+      setCode("");
       setResendState("sent");
       setTimeout(() => setResendState("idle"), 4000);
     } catch (err) {
