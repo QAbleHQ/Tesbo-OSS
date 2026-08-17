@@ -3,7 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { getSetupStatus, loginWithPassword, requestOtp } from "@/lib/api";
+import { authMe, getSetupStatus, loginWithPassword, requestOtp } from "@/lib/api";
 import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { AuthModeToggle } from "@/components/auth/AuthModeToggle";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
@@ -34,12 +34,19 @@ function LoginForm() {
       .then((status) => {
         if (status.required) {
           router.replace("/setup");
+          return undefined;
+        }
+        return authMe();
+      })
+      .then((me) => {
+        if (me) {
+          router.replace(redirect || "/projects");
           return;
         }
         setCheckingSetup(false);
       })
       .catch(() => setCheckingSetup(false));
-  }, [router]);
+  }, [router, redirect]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -116,7 +123,12 @@ function LoginForm() {
 
           {!otpMode && (
             <Field>
-              <FieldLabel htmlFor="password">Password</FieldLabel>
+              <div className="flex items-center justify-between">
+                <FieldLabel htmlFor="password">Password</FieldLabel>
+                <Link href="/forgot-password" className="text-xs font-medium text-[var(--brand-primary)] hover:underline">
+                  Forgot password?
+                </Link>
+              </div>
               <PasswordInput
                 id="password"
                 autoComplete="current-password"

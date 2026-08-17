@@ -39,6 +39,8 @@ export class AppConfigService {
   readonly otpExpiryMinutes = this.integer("OTP_EXPIRY_MINUTES", 10);
   readonly otpMaxAttempts = this.integer("OTP_MAX_ATTEMPTS", 5);
   readonly otpRateLimitWindowMinutes = this.integer("OTP_RATE_LIMIT_WINDOW_MINUTES", 15);
+  readonly passwordLoginMaxAttempts = this.integer("PASSWORD_LOGIN_MAX_ATTEMPTS", 5);
+  readonly passwordLoginLockoutMinutes = this.integer("PASSWORD_LOGIN_LOCKOUT_MINUTES", 15);
   readonly sessionDays = this.integer("SESSION_DAYS", 30);
   readonly sessionCookieName = "tesbo_session";
   readonly corsAllowedOrigins = this.parseCorsAllowedOrigins();

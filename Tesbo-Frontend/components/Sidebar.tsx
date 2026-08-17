@@ -23,6 +23,7 @@ import {
   IconList,
   IconLayoutDashboard,
   IconFolders,
+  IconUserCircle,
 } from "@tabler/icons-react";
 import { getWorkspace, logout } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -87,7 +88,7 @@ type MenuIconName =
   | "home" | "sparkles" | "book" | "list" | "fileText" | "clipboard"
   | "play" | "bug" | "chart" | "activity" | "settings" | "users" | "plug"
   | "logout" | "chevronLeft" | "chevronRight" | "key"
-  | "dashboard" | "folders";
+  | "dashboard" | "folders" | "account";
 
 function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconName; className?: string }) {
   const props = { className, size: 20, stroke: 1.75 } as const;
@@ -111,6 +112,7 @@ function MenuIcon({ name, className = "h-[20px] w-[20px]" }: { name: MenuIconNam
     case "key":          return <IconKey {...props} />;
     case "dashboard":    return <IconLayoutDashboard {...props} />;
     case "folders":      return <IconFolders {...props} />;
+    case "account":      return <IconUserCircle {...props} />;
     default:             return null;
   }
 }
@@ -357,6 +359,13 @@ function SidebarContent() {
 
       {/* Footer */}
       <div className="space-y-1 border-t border-[var(--glass-border)] p-2.5">
+        <NavLink
+          href="/account"
+          label="Account"
+          icon="account"
+          active={pathname === "/account"}
+          collapsed={isCollapsed}
+        />
         {!isInSettings && !isInProject && (
           <NavLink
             href="/settings"

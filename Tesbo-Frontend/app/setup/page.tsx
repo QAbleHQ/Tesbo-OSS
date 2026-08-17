@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { createFirstAdmin, getSetupStatus } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input } from "@/components/ui";
+import { PASSWORD_MAX_LENGTH, PASSWORD_RULES_HINT, validatePasswordValue } from "@/lib/validation";
 
 type Step = "admin" | "organization" | "data";
 
@@ -40,8 +41,9 @@ export default function SetupPage() {
       setError("Admin email is required.");
       return;
     }
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters.");
+    const passwordError = validatePasswordValue(password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
     if (password !== confirmPassword) {
@@ -143,8 +145,9 @@ export default function SetupPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="Choose a password"
+                maxLength={PASSWORD_MAX_LENGTH}
               />
-              <FieldHint>Use at least 8 characters.</FieldHint>
+              <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
             </Field>
             <Field>
               <FieldLabel htmlFor="setup-confirm-password">Confirm password</FieldLabel>
@@ -155,6 +158,7 @@ export default function SetupPage() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Re-enter password"
+                maxLength={PASSWORD_MAX_LENGTH}
               />
             </Field>
             {error && <FieldError>{error}</FieldError>}

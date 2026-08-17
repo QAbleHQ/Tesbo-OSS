@@ -1,0 +1,157 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type { FormEvent } from "react";
+import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
+import { IconCircleCheck } from "@tabler/icons-react";
+import { checkPasswordResetToken, resetPassword } from "@/lib/api";
+import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
+import { Button, Field, FieldError, FieldHint, FieldLabel, PasswordInput } from "@/components/ui";
+import { PASSWORD_MAX_LENGTH, PASSWORD_RULES_HINT, validatePasswordValue } from "@/lib/validation";
+
+function AuthLoadingScreen() {
+  return (
+    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
+      <p className="text-sm text-white/40">Loading...</p>
+    </div>
+  );
+}
+
+export default function ResetPasswordPage() {
+  const params = useParams();
+  const router = useRouter();
+  const token = params.token as string;
+
+  const [checking, setChecking] = useState(true);
+  const [tokenValid, setTokenValid] = useState(false);
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    checkPasswordResetToken(token)
+      .then((res) => setTokenValid(res.valid))
+      .catch(() => setTokenValid(false))
+      .finally(() => setChecking(false));
+  }, [token]);
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    setError("");
+    const passwordError = validatePasswordValue(password);
+    if (passwordError) {
+      setError(passwordError);
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
+    setLoading(true);
+    try {
+      await resetPassword(token, password);
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reset password");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  if (checking) {
+    return <AuthLoadingScreen />;
+  }
+
+  if (done) {
+    return (
+      <AuthSplitShell>
+        <div className="auth-fade-slide text-center">
+          <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full border border-[rgba(123,110,224,.3)] bg-[rgba(123,110,224,.15)]">
+            <IconCircleCheck size={26} stroke={1.5} className="text-[var(--brand-primary)]" />
+          </div>
+          <div className="mb-2 text-[20px] font-bold tracking-tight text-[var(--foreground)]">Password reset</div>
+          <p className="mb-7 text-[13px] leading-relaxed text-[var(--muted)]">
+            Your password has been updated. You&apos;ve been signed out everywhere else — sign in again with your new password.
+          </p>
+          <Button
+            type="button"
+            fullWidth
+            onClick={() => router.push("/login")}
+            style={{ background: "linear-gradient(135deg, var(--cta-primary), var(--denim-200))" }}
+          >
+            Back to sign in
+          </Button>
+        </div>
+      </AuthSplitShell>
+    );
+  }
+
+  if (!tokenValid) {
+    return (
+      <AuthSplitShell>
+        <div className="auth-fade-slide text-center">
+          <div className="mb-2 text-[20px] font-bold tracking-tight text-[var(--foreground)]">Link expired</div>
+          <p className="mb-7 text-[13px] leading-relaxed text-[var(--muted)]">
+            This password reset link is invalid or has expired. Request a new one to continue.
+          </p>
+          <Link href="/forgot-password" className="text-[13px] font-medium text-[var(--brand-primary)] hover:underline">
+            Request a new link
+          </Link>
+        </div>
+      </AuthSplitShell>
+    );
+  }
+
+  return (
+    <AuthSplitShell>
+      <div className="auth-fade-slide">
+        <div className="mb-1 text-[22px] font-bold tracking-tight text-[var(--foreground)]">Set a new password</div>
+        <p className="mb-7 text-[13px] text-[var(--muted)]">Choose a new password for your account.</p>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <Field>
+            <FieldLabel htmlFor="password">New password</FieldLabel>
+            <PasswordInput
+              id="password"
+              autoComplete="new-password"
+              autoFocus
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="At least 8 characters"
+              disabled={loading}
+              maxLength={PASSWORD_MAX_LENGTH}
+            />
+            <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
+          </Field>
+
+          <Field>
+            <FieldLabel htmlFor="confirmPassword">Confirm new password</FieldLabel>
+            <PasswordInput
+              id="confirmPassword"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Re-enter your new password"
+              disabled={loading}
+              maxLength={PASSWORD_MAX_LENGTH}
+            />
+          </Field>
+
+          {error && <FieldError>{error}</FieldError>}
+
+          <Button
+            type="submit"
+            disabled={loading}
+            fullWidth
+            style={{ background: "linear-gradient(135deg, var(--cta-primary), var(--denim-200))" }}
+          >
+            {loading ? "Resetting..." : "Reset password"}
+          </Button>
+        </form>
+      </div>
+    </AuthSplitShell>
+  );
+}

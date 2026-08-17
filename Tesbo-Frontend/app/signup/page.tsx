@@ -10,6 +10,15 @@ import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { AuthModeToggle, type AuthMode } from "@/components/auth/AuthModeToggle";
 import { OtpBoxInput } from "@/components/auth/OtpBoxInput";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
+import {
+  EMAIL_MAX_LENGTH,
+  NAME_MAX_LENGTH,
+  PASSWORD_MAX_LENGTH,
+  PASSWORD_RULES_HINT,
+  validateEmailValue,
+  validateName,
+  validatePasswordValue,
+} from "@/lib/validation";
 
 type Step = "form" | "code";
 
@@ -34,16 +43,24 @@ export default function SignupPage() {
   async function handlePasswordFormSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
-    if (!firstName.trim() || !lastName.trim()) {
-      setError("First and last name are required");
+    const firstNameError = validateName(firstName, "First name");
+    if (firstNameError) {
+      setError(firstNameError);
       return;
     }
-    if (!email.trim()) {
-      setError("Email is required");
+    const lastNameError = validateName(lastName, "Last name");
+    if (lastNameError) {
+      setError(lastNameError);
       return;
     }
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+    const emailError = validateEmailValue(email);
+    if (emailError) {
+      setError(emailError);
+      return;
+    }
+    const passwordError = validatePasswordValue(password);
+    if (passwordError) {
+      setError(passwordError);
       return;
     }
     setSubmitting(true);
@@ -84,8 +101,9 @@ export default function SignupPage() {
     e.preventDefault();
     setError("");
     const emailToUse = email.trim().toLowerCase();
-    if (!emailToUse) {
-      setError("Email is required");
+    const emailError = validateEmailValue(emailToUse);
+    if (emailError) {
+      setError(emailError);
       return;
     }
     setSubmitting(true);
@@ -142,6 +160,7 @@ export default function SignupPage() {
                   onChange={(e) => setFirstName(e.target.value)}
                   placeholder="Jane"
                   disabled={submitting}
+                  maxLength={NAME_MAX_LENGTH}
                   autoFocus
                 />
               </Field>
@@ -154,6 +173,7 @@ export default function SignupPage() {
                   onChange={(e) => setLastName(e.target.value)}
                   placeholder="Smith"
                   disabled={submitting}
+                  maxLength={NAME_MAX_LENGTH}
                 />
               </Field>
             </div>
@@ -167,6 +187,7 @@ export default function SignupPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@company.com"
                 disabled={submitting}
+                maxLength={EMAIL_MAX_LENGTH}
               />
             </Field>
             <Field>
@@ -178,7 +199,9 @@ export default function SignupPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="At least 8 characters"
                 disabled={submitting}
+                maxLength={PASSWORD_MAX_LENGTH}
               />
+              <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
             </Field>
             {error && <FieldError>{error}</FieldError>}
             <Button type="submit" disabled={submitting} fullWidth style={gradientCta}>
@@ -219,6 +242,7 @@ export default function SignupPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="you@company.com"
                 disabled={submitting}
+                maxLength={EMAIL_MAX_LENGTH}
                 autoFocus
               />
               <FieldHint>We will send a one-time code to your email. No password needed.</FieldHint>

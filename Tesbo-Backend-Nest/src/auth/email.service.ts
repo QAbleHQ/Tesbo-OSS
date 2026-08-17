@@ -182,6 +182,39 @@ ${projectNames.length > 0 ? `<p>You have been assigned to: ${projectNames.map((n
     await this.send(to, `You have been invited to join ${workspaceName}`, textBody, htmlBody, `[INVITE] ${to} → ${acceptUrl}`);
   }
 
+  async sendPasswordReset(to: string, resetUrl: string): Promise<void> {
+    const textBody = `Hi,\n\nWe received a request to reset your Tesbo Test Manager password.\n\nReset your password here:\n${resetUrl}\n\nThis link expires in 60 minutes. If you did not request this, you can ignore this email — your password will not be changed.\n\nTesbo Test Manager`;
+    const htmlBody = `<p>Hi,</p>
+<p>We received a request to reset your Tesbo Test Manager password.</p>
+${this.button(resetUrl, "Reset password")}
+<p style="color:#6B7280;font-size:12px">This link expires in 60 minutes. If you did not request this, you can ignore this email — your password will not be changed.</p>`;
+    await this.send(
+      to,
+      "Reset your Tesbo Test Manager password",
+      textBody,
+      htmlBody,
+      // Format kept parseable like the OTP line: e2e tests scrape reset links out of container logs.
+      `PASSWORD RESET for ${to}: ${resetUrl}`
+    );
+  }
+
+  /**
+   * Fired after a password change, whether via account settings or a reset link. Best-effort:
+   * a Postmark hiccup must not undo an otherwise-successful password change.
+   */
+  async sendPasswordChanged(to: string): Promise<void> {
+    const resetUrl = `${this.config.frontendUrl}/forgot-password`;
+    const subject = "Your Tesbo Test Manager password was changed";
+    const textBody = `Hi,\n\nYour Tesbo Test Manager password was just changed. You've been signed out of all other active sessions.\n\nIf this was you, no action is needed.\n\nIf this wasn't you, reset your password immediately:\n${resetUrl}\n\nOr contact us at ${this.config.supportContactEmail}.\n\nTesbo Test Manager`;
+    const htmlBody = `<p>Hi,</p>
+<p>Your Tesbo Test Manager password was just changed. You've been signed out of all other active sessions.</p>
+<p>If this was you, no action is needed.</p>
+<p style="color:#6B7280;font-size:12px">If this wasn't you, <a href="${resetUrl}">reset your password now</a> or contact us at <a href="mailto:${this.config.supportContactEmail}">${this.config.supportContactEmail}</a>.</p>`;
+    await this.sendBestEffort("password-changed", () =>
+      this.send(to, subject, textBody, htmlBody, `[PASSWORD CHANGED] ${to}`)
+    );
+  }
+
   async sendOtp(to: string, code: string): Promise<void> {
     await this.send(
       to,

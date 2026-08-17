@@ -1,0 +1,291 @@
+// Auto-deploy on dev + SonarQube scan before deploy.
+// Sonar secrets: Jenkins Managed file id = tesbo-test-manager-env
+// Sonar failure does NOT block deploy (catchError).
+//
+// Blue/green stage deploy (zero-downtime cutover):
+//   - Live color keeps serving while the idle color is built + started
+//   - Health must pass on the NEW color before host nginx (systemctl) switches
+//   - Path: Cloudflare -> SafeLine(fixed :1080/:1081) -> host nginx -> app ports
+//   - On failure: leave host nginx on the old color (no public downtime)
+//   - Never: docker compose down -v
+//
+// Ports:
+//   blue  -> FE 1010 / BE 1011 / Redis host 6379
+//   green -> FE 1020 / BE 1021 / Redis host 6380
+//
+// Source branch: dev. Target environment: stage (app-stage.tesbo.io).
+// Prod uses Jenkinsfile -> app.tesbo.io.
+
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+  }
+
+  environment {
+    REPO_URL           = 'https://github.com/QAbleHQ/Tesbo-Test-Manager-Private.git'
+    APP_HEALTH         = 'https://app-stage.tesbo.io'
+    API_HEALTH         = 'https://api-app-stage.tesbo.io'
+    FRONTEND_DOMAIN    = 'app-stage.tesbo.io'
+    BACKEND_DOMAIN     = 'api-app-stage.tesbo.io'
+    DEPLOY_PATH        = '/root/devops/tesbo-test-manager-private-stage/Tesbo-Test-Manager-Private'
+    COMPOSE_BASE       = 'tesbo-private-stage'
+    LEGACY_COMPOSE     = 'tesbo-private-stage'
+    ACTIVE_COLOR_FILE  = '/root/devops/tesbo-test-manager-private-stage/Tesbo-Test-Manager-Private/.active-color'
+    BLUE_FE_PORT       = '1010'
+    BLUE_BE_PORT       = '1011'
+    BLUE_REDIS_PORT    = '6379'
+    GREEN_FE_PORT      = '1020'
+    GREEN_BE_PORT      = '1021'
+    GREEN_REDIS_PORT   = '6380'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        script {
+          env.GIT_SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          echo "Pipeline ${env.GIT_SHA} -> stage blue/green deploy from dev @ ${env.DEPLOY_PATH}"
+        }
+      }
+    }
+
+    stage('SonarQube') {
+      steps {
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+          configFileProvider([
+            configFile(fileId: 'tesbo-test-manager-env', variable: 'TESBO_ENV_FILE')
+          ]) {
+            sh '''
+              set -eu
+              set -a
+              # shellcheck disable=SC1090
+              . "$TESBO_ENV_FILE"
+              set +a
+
+              test -n "${SONAR_HOST_URL:-}" || { echo "SONAR_HOST_URL missing in tesbo-test-manager-env"; exit 1; }
+              test -n "${SONAR_TOKEN:-}" || { echo "SONAR_TOKEN missing in tesbo-test-manager-env"; exit 1; }
+
+              echo "==> SonarQube scan -> ${SONAR_HOST_URL}"
+              docker run --rm \
+                -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
+                -e SONAR_TOKEN="${SONAR_TOKEN}" \
+                -v "${WORKSPACE}:/usr/src" \
+                -w /usr/src \
+                sonarsource/sonar-scanner-cli:11 \
+                -Dsonar.projectBaseDir=/usr/src
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Deploy stage (blue/green)') {
+      steps {
+        withCredentials([usernamePassword(credentialsId: 'github-creds', usernameVariable: 'GIT_USERNAME', passwordVariable: 'GIT_PASSWORD')]) {
+          sh '''
+            set -eu
+
+            echo "==> Jenkins user: $(whoami)"
+            test -d "${DEPLOY_PATH}" || { echo "MISSING deploy path ${DEPLOY_PATH}"; exit 1; }
+            cd "${DEPLOY_PATH}"
+            test -f .env || { echo "MISSING .env - refusing to deploy"; exit 1; }
+
+            git remote set-url origin "${REPO_URL}"
+
+            ASKPASS=$(mktemp)
+            cat > "$ASKPASS" <<'EOS'
+#!/bin/sh
+case "$1" in
+  *Username*) printf '%s' "$GIT_USERNAME" ;;
+  *) printf '%s' "$GIT_PASSWORD" ;;
+esac
+EOS
+            chmod 700 "$ASKPASS"
+            GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 git fetch origin dev:refs/remotes/origin/dev
+            rm -f "$ASKPASS"
+
+            git checkout -B dev origin/dev
+            git reset --hard origin/dev
+            git log -1 --oneline
+
+            # --- Resolve active / target colors ---
+            if [ -f "${ACTIVE_COLOR_FILE}" ]; then
+              ACTIVE="$(tr -d '[:space:]' < "${ACTIVE_COLOR_FILE}" | tr '[:upper:]' '[:lower:]')"
+            else
+              ACTIVE="blue"
+              if docker-compose -p "${LEGACY_COMPOSE}" ps -q 2>/dev/null | grep -q .; then
+                echo "==> Legacy project ${LEGACY_COMPOSE} is running; treating as active=blue"
+              fi
+              echo "${ACTIVE}" > "${ACTIVE_COLOR_FILE}"
+            fi
+
+            case "${ACTIVE}" in
+              blue)  TARGET="green" ;;
+              green) TARGET="blue"  ;;
+              *) echo "Invalid ACTIVE_COLOR='${ACTIVE}' in ${ACTIVE_COLOR_FILE}"; exit 1 ;;
+            esac
+
+            if [ "${TARGET}" = "blue" ]; then
+              TARGET_FE="${BLUE_FE_PORT}"
+              TARGET_BE="${BLUE_BE_PORT}"
+              TARGET_REDIS="${BLUE_REDIS_PORT}"
+              PREV_FE="${GREEN_FE_PORT}"
+              PREV_BE="${GREEN_BE_PORT}"
+            else
+              TARGET_FE="${GREEN_FE_PORT}"
+              TARGET_BE="${GREEN_BE_PORT}"
+              TARGET_REDIS="${GREEN_REDIS_PORT}"
+              PREV_FE="${BLUE_FE_PORT}"
+              PREV_BE="${BLUE_BE_PORT}"
+            fi
+
+            TARGET_PROJECT="${COMPOSE_BASE}-${TARGET}"
+            ACTIVE_PROJECT="${COMPOSE_BASE}-${ACTIVE}"
+
+            echo "==> Active=${ACTIVE} (keep up)  Target=${TARGET} FE=${TARGET_FE} BE=${TARGET_BE}"
+
+            # Shell exports override .env port values for compose interpolation.
+            export FRONTEND_PORT="${TARGET_FE}"
+            export BACKEND_PORT="${TARGET_BE}"
+            export REDIS_PORT="${TARGET_REDIS}"
+
+            echo "==> Building ${TARGET_PROJECT} (live ${ACTIVE} stays UP)"
+            docker-compose -p "${TARGET_PROJECT}" build
+
+            echo "==> Starting ${TARGET_PROJECT}"
+            docker-compose -p "${TARGET_PROJECT}" up -d --remove-orphans
+
+            echo "==> Waiting for target health"
+            ok=0
+            i=1
+            while [ "$i" -le 30 ]; do
+              if curl -fsS "http://127.0.0.1:${TARGET_BE}/health" >/dev/null 2>&1 \
+                && curl -fsS -o /dev/null "http://127.0.0.1:${TARGET_FE}/" >/dev/null 2>&1; then
+                ok=1
+                break
+              fi
+              sleep 5
+              i=$((i + 1))
+            done
+
+            docker-compose -p "${TARGET_PROJECT}" ps || true
+
+            if [ "$ok" -ne 1 ]; then
+              echo "ERROR: target ${TARGET} failed health checks - leaving Nginx on ${ACTIVE}"
+              curl -fsS "http://127.0.0.1:${TARGET_BE}/health" || true
+              curl -fsS -o /dev/null -w "frontend_local:%{http_code}\\n" "http://127.0.0.1:${TARGET_FE}/" || true
+              docker-compose -p "${TARGET_PROJECT}" down --remove-orphans || true
+              exit 1
+            fi
+
+            echo "==> Target healthy; switching host nginx (systemctl) ${FRONTEND_DOMAIN}->${TARGET_FE}, ${BACKEND_DOMAIN}->${TARGET_BE}"
+            # Path: Cloudflare -> SafeLine (fixed 1080/1081) -> host nginx (systemctl) -> blue/green app ports.
+            # SafeLine upstreams stay on 1080/1081 forever; only host nginx proxy_pass flips colors.
+            switch_host_nginx_port() {
+              domain="$1"
+              port="$2"
+              conf=""
+              for candidate in \
+                "/etc/nginx/sites-available/${domain}" \
+                "/etc/nginx/sites-enabled/${domain}"; do
+                if [ -f "$candidate" ]; then
+                  conf="$(readlink -f "$candidate")"
+                  break
+                fi
+              done
+              if [ -z "$conf" ]; then
+                echo "MISSING host nginx site config for ${domain}"
+                exit 1
+              fi
+              echo "    ${domain}: ${conf} -> 127.0.0.1:${port}"
+              # Use [.] for dots — Groovy sh blocks reject backslash-dot escapes
+              if grep -qE 'proxy_pass[[:space:]]+http://127[.]0[.]0[.]1:[0-9]+' "$conf"; then
+                sed -i -E "s#(proxy_pass[[:space:]]+http://127[.]0[.]0[.]1:)[0-9]+#\\1${port}#g" "$conf"
+              else
+                echo "No proxy_pass http://127.0.0.1:PORT in ${conf}"
+                exit 1
+              fi
+            }
+
+            switch_host_nginx_port "${FRONTEND_DOMAIN}" "${TARGET_FE}"
+            switch_host_nginx_port "${BACKEND_DOMAIN}" "${TARGET_BE}"
+
+            nginx -t
+            systemctl reload nginx
+
+            echo "==> Verifying host nginx cutover before stopping old stack"
+            edge_ok=0
+            i=1
+            while [ "$i" -le 12 ]; do
+              fe_code="$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: ${FRONTEND_DOMAIN}" "http://127.0.0.1:1080/" || true)"
+              be_code="$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: ${BACKEND_DOMAIN}" "http://127.0.0.1:1081/health" || true)"
+              echo "    host-nginx check #${i}: fe=${fe_code} be=${be_code}"
+              if [ "$fe_code" = "200" ] && [ "$be_code" = "200" ]; then
+                edge_ok=1
+                break
+              fi
+              sleep 2
+              i=$((i + 1))
+            done
+            if [ "$edge_ok" -ne 1 ]; then
+              echo "ERROR: host nginx still unhealthy after switch - NOT stopping old stack"
+              exit 1
+            fi
+
+            echo "${TARGET}" > "${ACTIVE_COLOR_FILE}"
+            echo "==> ACTIVE_COLOR -> ${TARGET}"
+
+            echo "==> Stopping previous color / legacy stack (volumes kept)"
+            docker-compose -p "${ACTIVE_PROJECT}" down --remove-orphans || true
+            if docker-compose -p "${LEGACY_COMPOSE}" ps -q 2>/dev/null | grep -q .; then
+              echo "==> Stopping legacy ${LEGACY_COMPOSE}"
+              docker-compose -p "${LEGACY_COMPOSE}" down --remove-orphans || true
+            fi
+
+            curl -fsS "http://127.0.0.1:${TARGET_BE}/health" || true
+            curl -fsS -o /dev/null -w "frontend_local:%{http_code}\\n" "http://127.0.0.1:${TARGET_FE}/" || true
+            echo "Blue/green deploy finished: live=${TARGET} fe=${TARGET_FE} be=${TARGET_BE} (was ${ACTIVE} on ${PREV_FE}/${PREV_BE})"
+          '''
+        }
+      }
+    }
+
+    stage('Smoke check') {
+      steps {
+        sh '''
+          set -eu
+          fe="$(curl -sS -o /dev/null -w "%{http_code}" "${APP_HEALTH}/login" || true)"
+          if [ "$fe" != "200" ]; then
+            fe="$(curl -sS -o /dev/null -w "%{http_code}" "${APP_HEALTH}/" || true)"
+          fi
+          be="$(curl -sS -o /dev/null -w "%{http_code}" "${API_HEALTH}/health" || true)"
+          echo "frontend:${fe}"
+          echo "backend:${be}"
+          if [ -f "${ACTIVE_COLOR_FILE}" ]; then
+            echo "Active color: $(cat "${ACTIVE_COLOR_FILE}")"
+          fi
+          echo "Site: ${APP_HEALTH}"
+          test "$fe" = "200" || { echo "Smoke failed: frontend HTTP ${fe}"; exit 1; }
+          test "$be" = "200" || { echo "Smoke failed: backend HTTP ${be}"; exit 1; }
+        '''
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "OK: ${env.GIT_SHA} blue/green deploy -> https://app-stage.tesbo.io"
+    }
+    unstable {
+      echo "Deploy may have succeeded but Sonar was UNSTABLE."
+    }
+    failure {
+      echo "Failed. Stage only - prod was not touched. Nginx should still point at previous color."
+    }
+  }
+}
