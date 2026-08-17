@@ -221,6 +221,29 @@ function projectKey(value: string): string {
     .slice(0, 16) || "TESBO";
 }
 
+const PROJECT_NAME_MIN_LENGTH = 3;
+// Matches the projects.name VARCHAR(255) column — going over that isn't just a policy
+// choice, the insert/update would otherwise fail outright.
+const PROJECT_NAME_MAX_LENGTH = 255;
+const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
+
+/** Shared by createProject/updateProject. `name`/`description` undefined means "not being changed". */
+function validateProjectFields(name: string | undefined, description: string | undefined): void {
+  if (name !== undefined) {
+    const trimmed = name.trim();
+    if (!trimmed) throw new BadRequestException({ error: "Project name is required" });
+    if (trimmed.length < PROJECT_NAME_MIN_LENGTH) {
+      throw new BadRequestException({ error: `Project name must be at least ${PROJECT_NAME_MIN_LENGTH} characters` });
+    }
+    if (trimmed.length > PROJECT_NAME_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Project name must be at most ${PROJECT_NAME_MAX_LENGTH} characters` });
+    }
+  }
+  if (description !== undefined && description.trim().length > PROJECT_DESCRIPTION_MAX_LENGTH) {
+    throw new BadRequestException({ error: `Description must be at most ${PROJECT_DESCRIPTION_MAX_LENGTH} characters` });
+  }
+}
+
 function maskSecret(value: string): string {
   if (!value) return "********";
   const suffix = value.slice(-4);
@@ -1671,7 +1694,7 @@ export class LegacyService implements OnModuleInit {
   async createProject(userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const name = String(body.name || "").trim();
-    if (!name) throw new BadRequestException({ error: "name is required" });
+    validateProjectFields(name, body.description != null ? String(body.description) : undefined);
     const workspace = await this.workspace(uid);
     await this.planLimits.assertCanCreateProject(workspace.id);
     const key = projectKey(String(body.key || name));
@@ -1730,6 +1753,9 @@ export class LegacyService implements OnModuleInit {
   }
 
   async updateProject(id: string, body: Body) {
+    const name = body.name !== undefined ? String(body.name).trim() : undefined;
+    const description = body.description !== undefined ? String(body.description) : undefined;
+    validateProjectFields(name, description);
     await this.db.query(
       `UPDATE projects SET
        name = COALESCE($2, name),
@@ -1737,7 +1763,7 @@ export class LegacyService implements OnModuleInit {
        settings = COALESCE($4::jsonb, settings),
        updated_at = now()
        WHERE id = $1`,
-      [id, body.name ?? null, body.description ?? null, body.settings ? JSON.stringify(body.settings) : null]
+      [id, name ?? null, description ?? null, body.settings ? JSON.stringify(body.settings) : null]
     );
   }
 
@@ -1754,7 +1780,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
     const project = await this.requireProjectAccess(uid, id);
     await this.deleteProject(id);
-    await this.logProjectActivity(id, uid, "project_archived", "project", id, project.name, {});
+    await this.logProjectActivity(id, uid, "project_deleted", "project", id, project.name, {});
   }
 
   // Read-only: any project member (any role) may list the roster.
@@ -1839,7 +1865,7 @@ export class LegacyService implements OnModuleInit {
   async listSuites(projectId: string) {
     const res = await this.db.query(
       `SELECT s.id, s.parent_id, s.name, s.position, s.created_at, COUNT(t.id)::int AS test_case_count
-       FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id
+       FROM suites s LEFT JOIN testcases t ON t.suite_id = s.id AND t.deleted_at IS NULL
        WHERE s.project_id = $1
        GROUP BY s.id ORDER BY s.position, s.name`,
       [projectId]
@@ -2942,11 +2968,15 @@ export class LegacyService implements OnModuleInit {
 
   async analytics(projectId?: string, organizationId?: string) {
     const scopeValue = projectId ?? organizationId;
-    const projectsWhere = projectId ? " WHERE id = $1" : organizationId ? " WHERE organization_id = $1" : "";
+    const projectsWhere = projectId
+      ? " WHERE id = $1 AND archived_at IS NULL"
+      : organizationId
+        ? " WHERE organization_id = $1 AND archived_at IS NULL"
+        : " WHERE archived_at IS NULL";
     const childWhere = projectId
       ? " WHERE project_id = $1"
       : organizationId
-        ? " WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1)"
+        ? " WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
         : "";
     const values = scopeValue ? [scopeValue] : [];
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
@@ -2960,7 +2990,7 @@ export class LegacyService implements OnModuleInit {
           projectId
             ? " WHERE c.project_id = $1"
             : organizationId
-              ? " WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1)"
+              ? " WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
               : ""
         } GROUP BY e.status`,
         values

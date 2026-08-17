@@ -55,7 +55,7 @@ const ACTION_META: Record<string, [string, StatusChipProps["tone"]]> = {
   zyra_archived: ["Archived", "ai"],
   deleted: ["Deleted", "error"],
   testcase_deleted: ["Deleted", "error"],
-  project_archived: ["Archived", "error"],
+  project_deleted: ["Deleted", "error"],
   testcase_bulk_updated: ["Bulk updated", "info"],
   testcase_bulk_deleted: ["Bulk deleted", "error"],
   approved: ["Approved", "success"],
@@ -189,7 +189,7 @@ export function describeActivity(item: ActivityLogItem): string | null {
     return `Joined as ${diff.role}.`;
   }
   if (item.action === "project_created") return "Project created.";
-  if (item.action === "project_archived") return "Project archived.";
+  if (item.action === "project_deleted") return "Project deleted.";
   if (item.action === "testcase_custom_field_updated" && typeof diff?.fieldName === "string") {
     const after = diff.after;
     if (after == null || after === "" || (Array.isArray(after) && after.length === 0)) {

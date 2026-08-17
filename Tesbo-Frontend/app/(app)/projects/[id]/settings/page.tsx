@@ -31,8 +31,15 @@ import {
   Select,
   Textarea,
   Field,
+  FieldError,
   FieldLabel,
 } from "@/components/ui";
+import {
+  PROJECT_DESCRIPTION_MAX_LENGTH,
+  PROJECT_NAME_MAX_LENGTH,
+  validateProjectDescription,
+  validateProjectName,
+} from "@/lib/validation";
 
 type ProjectSettingsPayload = {
   ai?: {
@@ -78,6 +85,8 @@ export default function ProjectSettingsPage() {
   const [project, setProject] = useState<Record<string, unknown> | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [nameError, setNameError] = useState("");
+  const [descriptionError, setDescriptionError] = useState("");
   const [testcaseIdPrefix, setTestcaseIdPrefix] = useState("");
   const [testRunEnvironments, setTestRunEnvironments] = useState<TestEnvironmentSetting[]>([]);
   const [newEnvironmentName, setNewEnvironmentName] = useState("");
@@ -216,8 +225,18 @@ export default function ProjectSettingsPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setSaving(true);
     setMessage(null);
+    const nameValidationError = validateProjectName(name);
+    if (nameValidationError) {
+      setNameError(nameValidationError);
+      return;
+    }
+    const descriptionValidationError = validateProjectDescription(description);
+    if (descriptionValidationError) {
+      setDescriptionError(descriptionValidationError);
+      return;
+    }
+    setSaving(true);
     try {
       const draftName = newEnvironmentName.trim();
       const draftUrl = newEnvironmentUrl.trim();
@@ -473,16 +492,28 @@ export default function ProjectSettingsPage() {
                   <Input
                     type="text"
                     value={name}
-                    onChange={(e) => setName(e.target.value)}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setName(value);
+                      if (nameError && !validateProjectName(value)) setNameError("");
+                    }}
+                    maxLength={PROJECT_NAME_MAX_LENGTH}
                   />
+                  {nameError && <FieldError>{nameError}</FieldError>}
                 </Field>
                 <Field>
                   <FieldLabel>Description</FieldLabel>
                   <Textarea
                     value={description}
-                    onChange={(e) => setDescription(e.target.value)}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setDescription(value);
+                      if (descriptionError && !validateProjectDescription(value)) setDescriptionError("");
+                    }}
                     rows={3}
+                    maxLength={PROJECT_DESCRIPTION_MAX_LENGTH}
                   />
+                  {descriptionError && <FieldError>{descriptionError}</FieldError>}
                 </Field>
                 <Field>
                   <FieldLabel>Test case ID prefix</FieldLabel>
