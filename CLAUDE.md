@@ -93,20 +93,85 @@ Add specs to the existing suite; never start a parallel test project.
 - Comment any non-obvious locator or workaround with *why* — the existing specs do this (e.g.
   modals that render without `role="dialog"`).
 
-### Phase 3 — Run them
+### Phase 3 — Run the impacted tests, and say what you selected
 
-Run the suite for real and show the output. Never mark this phase done from reasoning alone.
+Run the tests for real and show the output. Never mark this phase done from reasoning alone.
+
+**Run the impacted areas only — the full suite is not the default.** Every statement costs a round
+trip to the hosted database, so a full run takes tens of minutes and buries the handful of results
+that actually speak to this change. Scope the run to the specs the change can reach, and be explicit
+about that scope so the user can see what was and wasn't exercised.
+
+#### 3a — Select the impacted specs
+
+Map every changed product file to the specs that exercise it:
+
+- `Tesbo-Backend-Nest/src/<module>/…` → [e2e/api/](e2e/api/)`<module>.spec.ts`. The names line up:
+  `testcases`, `suites`, `cycles`, `executions`, `execution-ops`, `bugs`, `projects`, `workspaces`,
+  `invitations`, `plans`, `reports`, `integrations`, `knowledge-base`, `custom-fields`,
+  `attachments`, `import-export`, `zyra`.
+- A `Tesbo-Frontend/` screen → the matching [e2e/ui/](e2e/ui/) spec **plus** the API spec for the
+  endpoints that screen calls. A UI change that alters a request is an API-area change too.
+- Guards, session, tokens, roles → add `api/auth.spec.ts`, `api/authorization.spec.ts`,
+  `api/rbac.spec.ts`.
+- Entitlements, plan limits, read-only locks → add `api/plans.spec.ts`, `api/billing.spec.ts`,
+  `ui/billing.spec.ts`.
+- A shared entity, DTO or migration → add the spec of **every** module that reads that table, not
+  only the one you edited.
+- Unsure which spec owns a behaviour? `grep` the endpoint path, the DB column or the on-screen
+  string across `e2e/` and let the hits choose the files. Selection is evidence, not a guess — and
+  if grep finds nothing, that area is uncovered and Phase 2 isn't finished.
+
+#### 3b — Count the selection and announce it *before* running
+
+`--list` resolves the same selection the run will use, without executing any test:
+
+```bash
+cd e2e
+npx playwright test api/testcases.spec.ts ui/testcases.spec.ts --list | tail -1   # selected
+npx playwright test --list | tail -1                                             # suite total
+```
+
+State it to the user in one line before the run starts, naming the areas and both numbers:
+
+```
+Impacted: testcases (api + ui), suites (api)
+Selected 63 of 512 tests across 3 files — running 63.
+```
+
+If the count contradicts what you expected — a `-g` that matched nothing, a mistyped path, a
+`--project` that excluded half the selection — fix the selection before running. **A run of 0 tests
+is a failed selection, not a pass.**
+
+#### 3c — Run exactly that selection
 
 ```bash
 cd e2e
 # point at THIS repo's stack — the defaults in .env.example are the OSS ports
-API_BASE_URL=http://localhost:1021 WEB_BASE_URL=http://localhost:1020 npx playwright test
+API_BASE_URL=http://localhost:1021 WEB_BASE_URL=http://localhost:1020 \
+  npx playwright test api/testcases.spec.ts ui/testcases.spec.ts
 ```
 
-- Run the **new specs plus the whole area they touch**, then the full suite before declaring done.
-- If the stack isn't up, use [scripts/deploy-and-test.sh](scripts/deploy-and-test.sh), which
-  rebuilds the images, waits for health, and runs the suite.
-- **If the suite cannot be run at all** (stack down, Docker unavailable, target unreachable):
+- While iterating on a single new test, narrow further with `-g "TC-042"` — but the impacted
+  **files** must go green in one run before this phase is done. A passing `-g` slice is not the
+  phase.
+- Close the loop on the number you announced: report `63 selected / 63 ran / 61 passed / 2 failed`
+  and name the failures. If fewer ran than were selected — a `beforeAll` blew up, the run aborted,
+  a worker died — say so explicitly. A short run is not a green run.
+- Never widen the selection to make a red run look proportionally smaller, and never trim it to drop
+  a failing file. Phase 4 applies to every test in the selection.
+
+#### 3d — When the whole suite does run
+
+Full-suite runs are opt-in. Run one when the user asks for it, or when the change is genuinely
+global — [e2e/global-setup.ts](e2e/global-setup.ts), [e2e/utils/](e2e/utils/),
+[playwright.config.ts](e2e/playwright.config.ts), auth/session middleware, or a migration that moves
+data other modules read. Say that you're doing it and why, and announce the count the same way.
+
+- If the stack isn't up, [scripts/deploy-and-test.sh](scripts/deploy-and-test.sh) rebuilds the
+  images, waits for health, and **forwards its arguments to Playwright** — so hand it the impacted
+  specs too: `scripts/deploy-and-test.sh api/testcases.spec.ts`.
+- **If the tests cannot be run at all** (stack down, Docker unavailable, target unreachable):
   **stop and report.** State which phase you reached and what is blocking it, and ask the user to
   bring the stack up. Do not rebuild or restart their stack unprompted, do not substitute unit
   tests or a type-check for this phase, and do not call the change done. Written-but-unrun specs
@@ -123,7 +188,8 @@ test is too strict.
   and say so explicitly to the user.
 - **Never** delete a test, weaken an assertion, add a `test.skip`, loosen a matcher, or widen a
   timeout to turn a red run green. That converts a real defect into silent debt.
-- Go-ahead requires a **fully green** run. If something is genuinely out of scope to fix, leave the
+- Go-ahead requires a **fully green run of the whole selected impact set** — not of a narrowed
+  re-run that leaves the red file out. If something is genuinely out of scope to fix, leave the
   test in place, report it as a known failure with the reason, and let the user decide — never
   quietly neutralise it.
 
