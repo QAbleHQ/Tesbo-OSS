@@ -114,7 +114,7 @@ export default function PrivacyPolicyPage() {
             <h2 className="text-lg font-semibold text-[var(--foreground)]">10. Contact</h2>
             <p className="mt-2">
               For privacy requests or questions, contact us at{" "}
-              <a href="mailto:support@tesbo.io" className="text-[var(--brand-primary)] hover:underline">
+              <a href="mailto:support@tesbo.io" className="text-[var(--accent-light)] hover:underline">
                 support@tesbo.io
               </a>
               .
@@ -123,7 +123,7 @@ export default function PrivacyPolicyPage() {
         </div>
 
         <div className="mt-10 text-sm">
-          <Link href="/terms-and-conditions" className="text-[var(--brand-primary)] hover:underline">
+          <Link href="/terms-and-conditions" className="text-[var(--accent-light)] hover:underline">
             View Terms and Conditions
           </Link>
         </div>

@@ -41,7 +41,7 @@ export default function CustomFieldsSection({
             <div className="flex items-center gap-2">
               <FieldLabel>
                 {definition.name}
-                {definition.required && isActive && <span className="text-[var(--error)]"> *</span>}
+                {definition.required && isActive && <span className="text-[var(--error-foreground)]"> *</span>}
               </FieldLabel>
               {!isActive && (
                 <StatusChip tone="neutral" className="text-[11px]">

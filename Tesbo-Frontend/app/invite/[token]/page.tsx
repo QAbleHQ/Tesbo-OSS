@@ -187,7 +187,7 @@ export default function InviteAcceptancePage() {
               </div>
 
               {errorMsg && (
-                <p className="text-sm text-[var(--error)]">{errorMsg}</p>
+                <p className="text-sm text-[var(--error-foreground)]">{errorMsg}</p>
               )}
 
               {/* ── Not logged in ── */}
@@ -224,7 +224,7 @@ export default function InviteAcceptancePage() {
               {/* ── Logged in, email mismatch ── */}
               {loggedInUserId && emailMismatch && (
                 <div className="space-y-3">
-                  <p className="text-sm text-[var(--error)]">
+                  <p className="text-sm text-[var(--error-foreground)]">
                     You are signed in as a different email. This invitation is for{" "}
                     <strong>{invite.email}</strong>. Sign out and sign in with the correct account.
                   </p>

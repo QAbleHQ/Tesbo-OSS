@@ -428,14 +428,14 @@ export default function ProjectSettingsPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="truncate font-medium text-[var(--brand-primary)]">Settings</span>
+              <span className="truncate font-medium text-[var(--accent-light)]">Settings</span>
             </nav>,
             topBarStartEl,
           )}
@@ -534,7 +534,7 @@ export default function ProjectSettingsPage() {
                 </Button>
               </Card>
               <div className="rounded-xl border border-[var(--error-border)] bg-[var(--error-soft)] p-4 space-y-2">
-                <h3 className="text-sm font-semibold text-[var(--error)]">Danger zone</h3>
+                <h3 className="text-sm font-semibold text-[var(--error-foreground)]">Danger zone</h3>
                 <p className="text-sm text-[var(--error-foreground)]">
                   Deleting a project permanently removes its test cases, runs, reports, and integrations.
                 </p>
@@ -586,7 +586,7 @@ export default function ProjectSettingsPage() {
                                 variant="secondary"
                                 size="sm"
                                 onClick={() => handleRemoveEnvironment(index)}
-                                className="text-[var(--error)] text-xs"
+                                className="text-[var(--error-foreground)] text-xs"
                               >
                                 Remove
                               </Button>
@@ -694,7 +694,7 @@ export default function ProjectSettingsPage() {
           )}
 
           {memberError && (
-            <p className="text-sm text-[var(--error)]">{memberError}</p>
+            <p className="text-sm text-[var(--error-foreground)]">{memberError}</p>
           )}
 
           <Card className="overflow-hidden">
@@ -744,7 +744,7 @@ export default function ProjectSettingsPage() {
                             type="button"
                             onClick={() => handleRemoveMember(member.userId)}
                             disabled={removingMemberId === member.userId}
-                            className="text-[var(--error)] hover:underline disabled:opacity-50"
+                            className="text-[var(--error-foreground)] hover:underline disabled:opacity-50"
                           >
                             {removingMemberId === member.userId ? "Removing…" : "Remove"}
                           </button>
@@ -866,7 +866,7 @@ export default function ProjectSettingsPage() {
                 <div className="mt-2 space-y-1">
                   <div className="flex items-center gap-2">
                     <span className="inline-block w-2 h-2 rounded-full bg-[var(--success)]" />
-                    <span className="text-xs text-[var(--success)] font-medium">Workspace connected</span>
+                    <span className="text-xs text-[var(--success-foreground)] font-medium">Workspace connected</span>
                   </div>
                   {jiraStatus.connectedProjects && jiraStatus.connectedProjects.length > 0 ? (
                     <p className="text-xs text-[var(--muted)]">
@@ -918,7 +918,7 @@ export default function ProjectSettingsPage() {
                 <div className="mt-2 space-y-1">
                   <div className="flex items-center gap-2">
                     <span className="inline-block w-2 h-2 rounded-full bg-[var(--success)]" />
-                    <span className="text-xs text-[var(--success)] font-medium">Workspace connected</span>
+                    <span className="text-xs text-[var(--success-foreground)] font-medium">Workspace connected</span>
                   </div>
                   {linearStatus.connectedProjects && linearStatus.connectedProjects.length > 0 ? (
                     <p className="text-xs text-[var(--muted)]">

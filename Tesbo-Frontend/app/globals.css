@@ -37,8 +37,11 @@
   --ink-900: #0D0E14;
   --ink-800: #1C1E2A;
   --ink-600: #3A3D4E;
-  --ink-400: #6B7280;
-  --ink-300: #A8ABBE;
+  /* ink-400/300 carry small labels and secondary text on the violet surfaces below, so both are
+     set to clear WCAG AA (4.5:1) against the *darkest* light surface (--surface-secondary), not
+     just against white. At their previous values ink-300 scored 1.90 and ink-400 4.04 there. */
+  --ink-400: #585D6B;
+  --ink-300: #63667A;
   --ink-200: #D4D8E4;
   --ink-100: #ECEEF4;
   --ink-50: #F8F9FC;
@@ -65,7 +68,7 @@
   /* ── Foreground / text ───────────────────────────────────────────── */
   --foreground: #0D0E14;
   --muted: #3A3D4E;
-  --muted-soft: #6B7280;
+  --muted-soft: #585D6B; /* tracks --ink-400 — see the note there */
   --border: #E4DFF5;
   --border-subtle: #EDE8FB;
   --border-strong: #C4B5FD;
@@ -184,7 +187,9 @@
   --ink-800: #F0EEFF;
   --ink-600: #C8C6E0;
   --ink-400: #9896B8;
-  --ink-300: #5C5A80;
+  /* Same rule as the light scale, mirrored: readable on the darkest thing it sits on, which in dark
+     is the *lightest* surface (--surface-secondary). #5C5A80 scored 2.13 there — unreadable. */
+  --ink-300: #9593B5;
   --ink-200: #2D2945;
   --ink-100: #272440;
   --ink-50: #12101E;
@@ -219,7 +224,9 @@
   --status-pass-text: #34D399;
   --status-pass-dot: #2D9A52;
   --status-pass-fill: #1A3020;
-  --status-fail-text: #D83A3A;
+  /* The -text tokens are read against dark surfaces, so this one follows --error-foreground rather
+     than the dot/fill red, which only reached 3.03:1 on --surface-secondary. */
+  --status-fail-text: #F87171;
   --status-fail-dot: #D83A3A;
   --status-fail-fill: #2A1010;
   --status-blocked-text: #D97C0A;
@@ -307,8 +314,17 @@ html {
   background: color-mix(in oklab, var(--brand-primary) 30%, transparent);
 }
 
+/*
+ * --accent-light, not --brand-primary: this is text. In light both resolve to the same #4A2FA0, but
+ * in dark --brand-primary is the button-fill violet and read 2.88:1 as link text on a raised
+ * surface.
+ *
+ * Worth knowing when changing a link's colour: this rule is unlayered, and unlayered CSS outranks
+ * every cascade layer — so it beats any `text-[…]` utility on an anchor regardless of specificity.
+ * A link that needs a different colour has to be handled here, not with a class at the call site.
+ */
 a {
-  color: var(--brand-primary);
+  color: var(--accent-light);
 }
 
 a[class~="text-white"],
@@ -625,13 +641,18 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   color: var(--foreground);
 }
 
+/*
+ * These map Tailwind palette classes onto the theme. Text maps to the -foreground/accent variants,
+ * never to the fill token: --brand-primary, --success, --warning and --error are tuned to *carry*
+ * white text as a background, and land between 3.1:1 and 4.0:1 when used as text themselves.
+ */
 .text-blue-600,
 .text-blue-700,
 .text-blue-800,
 .text-blue-500,
 .hover\:text-blue-700:hover,
 .hover\:text-blue-800:hover {
-  color: var(--brand-primary);
+  color: var(--accent-light);
 }
 
 .text-indigo-700,
@@ -728,7 +749,7 @@ button[class*="bg-[var(--surface-tertiary)]"] {
 .text-emerald-600,
 .text-emerald-700,
 .text-emerald-800 {
-  color: var(--success);
+  color: var(--success-foreground);
 }
 
 .border-green-200,
@@ -763,7 +784,7 @@ button[class*="bg-[var(--surface-tertiary)]"] {
 .text-amber-600,
 .text-amber-700,
 .text-orange-600 {
-  color: var(--warning);
+  color: var(--warning-foreground);
 }
 
 .border-yellow-200,
@@ -795,7 +816,7 @@ button[class*="bg-[var(--surface-tertiary)]"] {
 .text-red-700,
 .text-red-800,
 .text-rose-600 {
-  color: var(--error);
+  color: var(--error-foreground);
 }
 
 .border-red-200,

@@ -542,6 +542,126 @@ describe("reconcile a workspace whose plan drifted from Stripe", () => {
   });
 });
 
+/*
+ * Plans an operator set by hand from the admin panel (V76_admin_plan_override.sql).
+ *
+ * Stripe is not the authority for these workspaces, and the reason that matters is narrow: comping
+ * a churned customer leaves plan='pro' next to the id of the cancelled subscription that churned
+ * them. Every "over-provisioned" check in this service reads that shape as drift to be undone.
+ */
+describe("admin-granted plans", () => {
+  const grantedPro: Route[] = [
+    {
+      match: "SELECT plan, stripe_customer_id, stripe_subscription_id",
+      rows: [{ plan: "pro", stripe_customer_id: "cus_1", stripe_subscription_id: "sub_dead", plan_source: "admin" }]
+    },
+    { match: "SELECT plan, billing_interval", rows: [{ plan: "pro" }] }
+  ];
+
+  it("is never reconciled against Stripe", async () => {
+    const { service, query, stripe } = build({ routes: grantedPro });
+    // Without a retrieve() the reconcile path would throw and be swallowed, so the absence of a
+    // plan write would prove nothing. Supplying one that reports the subscription as cancelled
+    // makes this the exact shape reconcile downgrades — the guard is the only thing stopping it.
+    const retrieve = jest.fn().mockResolvedValue({
+      id: "sub_dead",
+      status: "canceled",
+      metadata: { organizationId: "org-1" },
+      items: { data: [{ price: { id: PRICES.usdMonthly, currency: "usd" }, current_period_end: 1800000000 }] },
+      cancel_at_period_end: false
+    });
+    (stripe.client.subscriptions as unknown as { retrieve: jest.Mock }).retrieve = retrieve;
+
+    await service.getBillingInfo("user-1");
+
+    expect(retrieve).not.toHaveBeenCalled();
+    expect(stripe.client.subscriptions.list).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("SET plan ="))).toBe(false);
+  });
+
+  it("survives a late webhook for the subscription that churned them", async () => {
+    const { service, query, email } = build({
+      routes: [
+        {
+          match: "SELECT plan, plan_grace_ends_at, payment_failed_at",
+          rows: [{ plan: "pro", plan_grace_ends_at: null, plan_source: "admin" }]
+        },
+        { match: "INSERT INTO stripe_webhook_events", rows: [{ id: "evt_1" }] }
+      ]
+    });
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    await service.handleWebhookEvent({
+      id: "evt_1",
+      type: "customer.subscription.deleted",
+      data: {
+        object: {
+          id: "sub_dead",
+          status: "canceled",
+          metadata: { organizationId: "org-1" },
+          items: { data: [{ price: { id: PRICES.usdMonthly, currency: "usd" }, current_period_end: 1800000000 }] },
+          cancel_at_period_end: false
+        }
+      }
+    } as unknown as Stripe.Event);
+
+    expect(query.mock.calls.some(([sql]) => String(sql).includes("SET plan ="))).toBe(false);
+    // The customer we are trying to win back must not be emailed about losing a plan we gave them.
+    expect((email as unknown as Record<string, jest.Mock>).sendPlanDowngraded).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("stands down the moment the customer actually subscribes", async () => {
+    const { service, query } = build({
+      routes: [
+        {
+          match: "SELECT plan, plan_grace_ends_at, payment_failed_at",
+          rows: [{ plan: "pro", plan_grace_ends_at: null, plan_source: "admin" }]
+        },
+        { match: "INSERT INTO stripe_webhook_events", rows: [{ id: "evt_2" }] }
+      ]
+    });
+
+    await service.handleWebhookEvent({
+      id: "evt_2",
+      type: "customer.subscription.updated",
+      data: {
+        object: {
+          id: "sub_live",
+          status: "active",
+          metadata: { organizationId: "org-1" },
+          items: { data: [{ price: { id: PRICES.usdMonthly, currency: "usd" }, current_period_end: 1800000000 }] },
+          cancel_at_period_end: false
+        }
+      }
+    } as unknown as Stripe.Event);
+
+    const applied = query.mock.calls.find(([sql]) => String(sql).includes("SET plan ="));
+    expect(applied?.[1]?.[0]).toBe("pro");
+    expect(String(applied?.[0])).toContain("plan_source = 'stripe'");
+    expect(String(applied?.[0])).toContain("plan_override_by = NULL");
+  });
+
+  it("hands the plan back to Stripe at checkout, without waiting for a second webhook", async () => {
+    const { service, query } = build({
+      routes: [
+        { match: "INSERT INTO stripe_webhook_events", rows: [{ id: "evt_3" }] },
+        { match: "SELECT plan FROM organizations", rows: [{ plan: "pro" }] }
+      ]
+    });
+
+    await service.handleWebhookEvent({
+      id: "evt_3",
+      type: "checkout.session.completed",
+      data: { object: { metadata: { organizationId: "org-1" }, subscription: "sub_new", amount_total: 4000, currency: "usd" } }
+    } as unknown as Stripe.Event);
+
+    const applied = query.mock.calls.find(([sql]) => String(sql).includes("SET plan = 'pro'"));
+    expect(applied).toBeDefined();
+    expect(String(applied?.[0])).toContain("plan_source = 'stripe'");
+  });
+});
+
 describe("billing history", () => {
   const onPro = (from: string): Route[] => [
     {

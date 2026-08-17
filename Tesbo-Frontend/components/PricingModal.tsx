@@ -202,7 +202,7 @@ export default function PricingModal({ open, onClose, billingInfo }: PricingModa
               Best value
             </span>
           )}
-          <div className="mb-1 text-[13px] font-semibold uppercase tracking-[0.06em] text-[var(--brand-primary)]">Pro</div>
+          <div className="mb-1 text-[13px] font-semibold uppercase tracking-[0.06em] text-[var(--accent-light)]">Pro</div>
           <div className="mb-1 flex items-baseline gap-1">
             <span className="text-[28px] font-semibold text-[var(--ink-800)]">
               {currencySymbol}
@@ -216,7 +216,7 @@ export default function PricingModal({ open, onClose, billingInfo }: PricingModa
           <ul className="mb-5 space-y-2">
             {PRO_FEATURES.map((feature) => (
               <li key={feature} className="flex items-start gap-2 text-[13px] text-[var(--ink-600)]">
-                <IconCheck size={16} className="mt-0.5 shrink-0 text-[var(--brand-primary)]" />
+                <IconCheck size={16} className="mt-0.5 shrink-0 text-[var(--accent-light)]" />
                 <span>{feature}</span>
               </li>
             ))}
@@ -242,7 +242,7 @@ export default function PricingModal({ open, onClose, billingInfo }: PricingModa
           href="https://github.com/QAbleHQ/Tesbo-Test-Manager"
           target="_blank"
           rel="noreferrer"
-          className="font-medium text-[var(--brand-primary)] hover:underline"
+          className="font-medium text-[var(--accent-light)] hover:underline"
         >
           Self-host Tesbo →
         </a>{" "}

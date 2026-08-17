@@ -164,7 +164,7 @@ export default function TaskQuickViewPanel({ task, projectId, onClose, onTaskUpd
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5">
           {error && (
-            <p className="mb-3 rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">{error}</p>
+            <p className="mb-3 rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">{error}</p>
           )}
 
           {activeTab === "testcases" && (

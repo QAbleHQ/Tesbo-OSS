@@ -28,6 +28,7 @@ import {
   Textarea,
 } from "@/components/ui";
 import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 import {
   PROJECT_DESCRIPTION_MAX_LENGTH,
   PROJECT_NAME_MAX_LENGTH,
@@ -50,7 +51,12 @@ type ProjectWithStats = ProjectSummary & {
 
 const VIEW_STORAGE_KEY = "tesbo_projects_view";
 
-const PROJECT_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+/*
+ * Avatar fills. Every one carries white initials, so each has to clear 4.5:1 against white — the
+ * green and the amber previously scored 3.59 and 3.07, and which project or member landed on them
+ * was down to a hash, so the defect surfaced on some accounts and not others.
+ */
+const PROJECT_COLORS = ["#7C5FCC", "#4C5FD5", "#1F7A3D", "#1D7FA8", "#A85F06", "#D83A3A"];
 
 type SortOption = "updated" | "name_asc" | "name_desc" | "created";
 
@@ -96,11 +102,15 @@ const STATUS_META: Record<ProjectStatus, { label: string; text: string; dot: str
   setup_required: { label: "Setup required", text: "var(--status-blocked-text)", dot: "var(--status-blocked-dot)", fill: "var(--status-blocked-fill)" },
 };
 
+/*
+ * The -foreground tokens, not the raw --success/--warning/--error fills: those are tuned to carry
+ * white text as a background, and read at 3.1–4.0:1 when used as text on a light surface.
+ */
 function passRateTextColor(rate: number | null): string {
   if (rate === null) return "var(--muted-soft)";
-  if (rate >= 90) return "var(--success)";
-  if (rate >= 70) return "var(--warning)";
-  return "var(--error)";
+  if (rate >= 90) return "var(--success-foreground)";
+  if (rate >= 70) return "var(--warning-foreground)";
+  return "var(--error-foreground)";
 }
 
 function formatRelativeTime(iso: string): string {
@@ -320,13 +330,13 @@ function ProjectsPageContent() {
   const canCreateProject = workspaceRole === "owner" || workspaceRole === "admin" || workspaceRole === "manager";
 
   useEffect(() => {
-    const saved = localStorage.getItem(VIEW_STORAGE_KEY);
+    const saved = readStoredValue(VIEW_STORAGE_KEY);
     if (saved === "grid" || saved === "list") setViewMode(saved);
   }, []);
 
   function handleViewModeChange(next: "grid" | "list") {
     setViewMode(next);
-    localStorage.setItem(VIEW_STORAGE_KEY, next);
+    writeStoredValue(VIEW_STORAGE_KEY, next);
   }
 
   useEffect(() => {
@@ -346,31 +356,49 @@ function ProjectsPageContent() {
           setWorkspaceRole((workspace.role || "").toLowerCase());
           const withStats = await Promise.all(
             list.map(async (p) => {
+              /*
+               * Each stat is caught on its own. A single rejection here used to take down the whole
+               * Promise.all, leaving `projects` empty with loading already false — so one failing
+               * suites/activity/members call showed the "No projects yet" onboarding state to a
+               * user who has projects. A partial outage should degrade one card, not the list.
+               */
               const [tcRes, suites, activity, members, runs] = await Promise.all([
-                listTestCases(p.id, { limit: 1 }),
-                listSuites(p.id),
-                listActivity(p.id, { limit: 1 }),
-                listProjectMembers(p.id),
+                listTestCases(p.id, { limit: 1 }).catch(() => ({ list: [], total: 0 })),
+                listSuites(p.id).catch(() => []),
+                listActivity(p.id, { limit: 1 }).catch(() => ({ list: [], total: 0 })),
+                listProjectMembers(p.id).catch(() => []),
                 listTestRuns(p.id).catch(() => []),
               ]);
               const lastActivityAt = activity.list[0]?.createdAt ?? null;
               const status: ProjectWithStats["status"] =
                 tcRes.total === 0 ? "setup_required" : (lastActivityAt ? "active" : "configured");
 
-              const completedRuns = [...runs]
-                .filter((r) => r.totalCases > 0)
+              /*
+               * The card reports the most recent run that has actually been executed, and reports it
+               * the same way the project dashboard does: passed over *executed*, never over total.
+               *
+               * Both halves of that mattered. Ranking by creation date alone meant scheduling an
+               * empty run replaced a finished 100% run with an unstarted one, and dividing by
+               * totalCases turned its nothing-executed-yet into "0%" — so the same project read 100%
+               * on its dashboard and 0% here.
+               */
+              const executedCases = (r: (typeof runs)[number]) => Math.max(0, r.totalCases - r.untested);
+              const executedRuns = [...runs]
+                .filter((r) => executedCases(r) > 0)
                 .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-              const latestRun = completedRuns[completedRuns.length - 1];
+              const latestRun = executedRuns[executedRuns.length - 1];
               const runCounts: RunCounts | null = latestRun
                 ? {
                     passed: latestRun.passed,
                     failed: latestRun.failed,
-                    blocked: Math.max(0, latestRun.totalCases - latestRun.passed - latestRun.failed),
+                    // The run's own blocked count. Deriving it as total - passed - failed swept
+                    // untested, skipped and retest into it, so an unexecuted case read as blocked.
+                    blocked: latestRun.blocked,
                     total: latestRun.totalCases,
                   }
                 : null;
               const currentPassRate = latestRun
-                ? Math.round((latestRun.passed / latestRun.totalCases) * 100)
+                ? Math.round((latestRun.passed / executedCases(latestRun)) * 100)
                 : null;
 
               return {
@@ -391,6 +419,24 @@ function ProjectsPageContent() {
         .finally(() => setLoading(false));
     });
   }, [router]);
+
+  /*
+   * Closing discards the draft. Leaving it behind meant reopening the modal showed the abandoned
+   * name — so a fresh key could be typed against a stale name and submitted without the user ever
+   * seeing what they were actually creating.
+   */
+  function closeCreate() {
+    if (createLoading) return;
+    setCreateOpen(false);
+    setCreateName("");
+    setCreateKey("");
+    setCreateDescription("");
+    setCreateError("");
+    // Field-level validation errors have to go too, or reopening the modal shows a complaint about
+    // input the user can no longer see.
+    setCreateNameError("");
+    setCreateDescriptionError("");
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -421,6 +467,7 @@ function ProjectsPageContent() {
       setCreateName("");
       setCreateKey("");
       setCreateDescription("");
+      setCreateError("");
       setCreateNameError("");
       setCreateDescriptionError("");
       router.push(`/projects/${created.id}/dashboard`);
@@ -503,16 +550,7 @@ function ProjectsPageContent() {
         />
       ) : null}
 
-      <Modal
-        open={createOpen}
-        onClose={() => {
-          if (createLoading) return;
-          setCreateOpen(false);
-          setCreateNameError("");
-          setCreateDescriptionError("");
-        }}
-        title="Create project"
-      >
+      <Modal open={createOpen} onClose={closeCreate} title="Create project">
         <form onSubmit={handleCreate} className="space-y-5">
           <Field>
             <FieldLabel htmlFor="create-name">Name *</FieldLabel>
@@ -563,16 +601,7 @@ function ProjectsPageContent() {
           </Field>
           {createError && <p className="text-sm text-red-600">{createError}</p>}
           <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => {
-                if (createLoading) return;
-                setCreateOpen(false);
-                setCreateNameError("");
-                setCreateDescriptionError("");
-              }}
-            >
+            <Button type="button" variant="secondary" onClick={closeCreate}>
               Cancel
             </Button>
             <Button type="submit" disabled={createLoading}>
@@ -606,7 +635,7 @@ function ProjectsPageContent() {
                             {p.name.trim().charAt(0).toUpperCase() || "P"}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <h2 className="truncate text-[15px] font-medium leading-5 text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">
+                            <h2 className="truncate text-[15px] font-medium leading-5 text-[var(--foreground)] group-hover:text-[var(--accent-light)]">
                               {p.name}
                             </h2>
                             <span className="mt-0.5 block font-mono text-[11px] uppercase tracking-wide text-[var(--muted-soft)]">
@@ -677,7 +706,7 @@ function ProjectsPageContent() {
                           {p.name.trim().charAt(0).toUpperCase() || "P"}
                         </div>
                         <div className="min-w-0">
-                          <div className="truncate text-[13px] font-medium text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">{p.name}</div>
+                          <div className="truncate text-[13px] font-medium text-[var(--foreground)] group-hover:text-[var(--accent-light)]">{p.name}</div>
                           <div className="font-mono text-[11px] uppercase text-[var(--muted-soft)]">{p.key}</div>
                         </div>
                       </div>

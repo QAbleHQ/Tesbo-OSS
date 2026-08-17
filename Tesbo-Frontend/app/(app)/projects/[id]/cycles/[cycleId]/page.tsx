@@ -68,6 +68,7 @@ import TrackingDestinationField, { type TrackingDestination } from "@/components
 import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
 import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 
@@ -76,7 +77,7 @@ const EXEC_STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Re
 const RUN_TABS = ["All", "Passed", "Failed", "Blocked", "Skipped", "Pending"] as const;
 type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
-const AVATAR_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+import { AVATAR_COLORS } from "@/lib/avatarColors";
 const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
 
 /* ───── Status tone helpers ───── */
@@ -444,7 +445,7 @@ export default function TestRunDetailPage() {
   function toggleRunPanel() {
     setRunPanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem(PANEL_STORAGE_KEY, next ? "open" : "closed");
+      writeStoredValue(PANEL_STORAGE_KEY, next ? "open" : "closed");
       return next;
     });
   }
@@ -456,7 +457,7 @@ export default function TestRunDetailPage() {
 
 
   useEffect(() => {
-    const saved = localStorage.getItem(PANEL_STORAGE_KEY);
+    const saved = readStoredValue(PANEL_STORAGE_KEY);
     if (saved === "closed") setRunPanelOpen(false);
     authMe().then((me) => {
       if (!me) {
@@ -835,7 +836,7 @@ export default function TestRunDetailPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
@@ -845,12 +846,12 @@ export default function TestRunDetailPage() {
               <button
                 type="button"
                 onClick={() => router.push(`/projects/${projectId}/cycles`)}
-                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
               >
                 Test Runs
               </button>
               <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
-              <span className="truncate font-medium text-[var(--brand-primary)]">{run.name}</span>
+              <span className="truncate font-medium text-[var(--accent-light)]">{run.name}</span>
             </nav>,
             topBarStartEl,
           )}
@@ -940,9 +941,9 @@ export default function TestRunDetailPage() {
             <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${runPanelOpen ? "justify-between" : "justify-center"}`}>
               {runPanelOpen && (
                 <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                   Runs
-                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                     {allRuns.length}
                   </span>
                 </p>
@@ -953,7 +954,7 @@ export default function TestRunDetailPage() {
                     type="button"
                     title="New test run"
                     onClick={() => router.push(`/projects/${projectId}/cycles?create=1`)}
-                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={14} stroke={2.5} />
                   </button>
@@ -995,7 +996,7 @@ export default function TestRunDetailPage() {
                       <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
                         {r.name}
                       </span>
-                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                         {r.totalCases}
                       </span>
                     </button>
@@ -1005,7 +1006,7 @@ export default function TestRunDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/cycles?create=1`)}
-                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                 >
                   <IconPlus size={13} stroke={1.75} />
                   New test run
@@ -1114,7 +1115,7 @@ export default function TestRunDetailPage() {
                           <button
                             type="button"
                             onClick={() => openExecutionPanel(e)}
-                            className="text-left text-[13px] text-[var(--brand-primary)] hover:underline"
+                            className="text-left text-[13px] text-[var(--accent-light)] hover:underline"
                           >
                             {e.title || e.snapshotTitle || "Untitled test case"}
                           </button>
@@ -1372,7 +1373,7 @@ export default function TestRunDetailPage() {
                         <td className="px-3 py-2">
                           <span className={`text-xs ${
                             isApproved
-                              ? "text-[var(--success)] font-medium"
+                              ? "text-[var(--success-foreground)] font-medium"
                               : "text-[var(--muted)]"
                           }`}>
                             {tc.status}
@@ -1491,7 +1492,7 @@ export default function TestRunDetailPage() {
               {selectedExistingBug ? (
                 <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-[13px]">
                   <span className="font-medium text-[var(--foreground)]">{selectedExistingBug.title}</span>
-                  <button type="button" onClick={() => setSelectedExistingBug(null)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                  <button type="button" onClick={() => setSelectedExistingBug(null)} className="text-[var(--muted)] hover:text-[var(--error-foreground)]">
                     ✕
                   </button>
                 </div>
@@ -1505,7 +1506,7 @@ export default function TestRunDetailPage() {
             <>
               <div>
                 <label className="block text-sm font-medium text-[var(--muted)] mb-1">
-                  Bug Title <span className="text-[var(--error)]">*</span>
+                  Bug Title <span className="text-[var(--error-foreground)]">*</span>
                 </label>
                 <Input
                   type="text"
@@ -1539,7 +1540,7 @@ export default function TestRunDetailPage() {
                   {bugIssue ? (
                     <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-[13px]">
                       <span className="font-medium text-[var(--foreground)]">{bugIssue.key} — {bugIssue.summary}</span>
-                      <button type="button" onClick={() => setBugIssue(null)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                      <button type="button" onClick={() => setBugIssue(null)} className="text-[var(--muted)] hover:text-[var(--error-foreground)]">
                         ✕
                       </button>
                     </div>
@@ -1639,7 +1640,7 @@ export default function TestRunDetailPage() {
             Create a public link to share this test run&apos;s results with anyone &mdash; no login required.
           </p>
           {shareError && (
-            <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">
+            <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
               {shareError}
             </p>
           )}

@@ -83,7 +83,7 @@ export default function TestCaseRunPicker({ projectId, value, onChange }: Props)
               <button
                 type="button"
                 onClick={() => removeLink(link.cycleId, link.testcaseId)}
-                className="text-[var(--muted)] hover:text-[var(--error)]"
+                className="text-[var(--muted)] hover:text-[var(--error-foreground)]"
                 aria-label="Remove link"
               >
                 ✕

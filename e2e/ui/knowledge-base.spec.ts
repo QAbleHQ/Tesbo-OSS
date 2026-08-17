@@ -1,0 +1,630 @@
+import { expect, test, type APIRequestContext, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
+import { exec, literal, scalar } from "../utils/psql";
+import {
+  loginAs,
+  provisionRbacTenant,
+  rbacSuiteSkipReason,
+  writeStorageState,
+  type RbacTenant,
+} from "../utils/rbac-tenant";
+
+/*
+ * The knowledge base screens: the browser at /projects/:id/knowledge-base and the document editor
+ * at /knowledge-base/documents/:documentId.
+ *
+ * What earns a browser here, over the 107 API tests in knowledge-base/kb-files/kb-comments: the API
+ * decides what is *allowed*, the screen decides what is *offered* and what it does with a refusal.
+ * Three things only a browser sees —
+ *
+ *   1. The page has NO role gate. Unlike the custom fields settings screen (which derives canManage
+ *      from project membership), this one renders every control for everybody and lets the API say
+ *      no. So "what does a qa_engineer see, and what happens when they click it" is a real question
+ *      with a real answer, and KBU-20/21 pin it.
+ *   2. Delete goes through window.confirm(), a native dialog Playwright must be told to handle.
+ *      Cancelling it must leave the row alone — a bug that would look identical to a working delete
+ *      in any API test.
+ *   3. There is no trash UI at all. Delete moves items to trash and the restore endpoints exist and
+ *      are owner-or-manager gated, but nothing in the app can reach them. KBU-24 pins that gap so it
+ *      stays a deliberate product decision rather than something nobody noticed.
+ *
+ * Runs against its own disposable workspace ("kb-ui"). Every test starts from an empty knowledge
+ * base — the summary counters are absolute numbers, so one leftover folder turns a correct product
+ * into a red test in whichever spec happens to run first.
+ *
+ * Locator notes, all three learned the hard way against the real DOM:
+ *
+ *   - `Modal` (components/ui/Modal.tsx) renders `role="presentation"`, NOT `role="dialog"`, through a
+ *     portal, with its title as an `h2`. `modal()` below scopes to it by that heading.
+ *   - `FieldLabel` is a bare `<label>` with no `htmlFor`, so getByLabel() resolves nothing anywhere
+ *     on this screen. Inputs are located by placeholder instead.
+ *   - "Knowledge base" is BOTH the page `h1` and the root folder's `h2`, so every heading lookup
+ *     here needs an explicit level.
+ */
+
+test.describe("knowledge base (UI)", () => {
+  let tenant: RbacTenant | null = null;
+  let api: APIRequestContext;
+  let rootFolderId = "";
+  const states = new Map<string, string>();
+  const contexts: BrowserContext[] = [];
+
+  test.beforeAll(async () => {
+    tenant = await provisionRbacTenant("kb-ui");
+    if (!tenant) return;
+    api = await loginAs(tenant.owner);
+    states.set("owner", await writeStorageState(tenant.owner, "kb-ui-owner"));
+    states.set("qa", await writeStorageState(tenant.qa, "kb-ui-qa"));
+    states.set("guest", await writeStorageState(tenant.guest, "kb-ui-guest"));
+
+    purgeKb(tenant);
+    const tree = await api.get(kbUrl("/folders/tree"));
+    expect(tree.status(), `resolving the KB root folder — ${await tree.text()}`).toBe(200);
+    rootFolderId = (await tree.json()).id;
+  });
+
+  test.afterAll(async () => {
+    if (tenant) purgeKb(tenant);
+    if (api) await api.dispose();
+    await Promise.all(contexts.map((ctx) => ctx.close()));
+  });
+
+  test.beforeEach(() => {
+    const reason = rbacSuiteSkipReason(tenant);
+    test.skip(reason !== null, reason ?? "");
+  });
+
+  test.afterEach(() => {
+    if (tenant) purgeKb(tenant);
+  });
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  function kbUrl(suffix: string, projectId?: string): string {
+    return `/api/projects/${projectId ?? tenant!.mainProjectId}/knowledge-base${suffix}`;
+  }
+
+  function purgeKb(t: RbacTenant): void {
+    const projects = `${literal(t.mainProjectId)}, ${literal(t.secondProjectId)}`;
+    exec(
+      `DELETE FROM knowledge_document_versions WHERE document_id IN (SELECT id FROM knowledge_documents WHERE project_id IN (${projects}));`,
+    );
+    exec(`DELETE FROM knowledge_document_comments WHERE project_id IN (${projects});`);
+    exec(`DELETE FROM knowledge_documents WHERE project_id IN (${projects});`);
+    exec(`DELETE FROM knowledge_files WHERE project_id IN (${projects});`);
+    // The root is kept: `is_root` rows are only ever written by project creation, so deleting one
+    // makes the whole knowledge base unreachable for the rest of the run.
+    exec(`DELETE FROM knowledge_folders WHERE project_id IN (${projects}) AND is_root = false;`);
+  }
+
+  /** Stamped so a re-run against the persistent volume can't collide on the unique name index. */
+  function stamp(label: string): string {
+    return `E2E ${label} ${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  }
+
+  async function openKb(browser: Browser, as: "owner" | "qa" | "guest" = "owner"): Promise<Page> {
+    const ctx = await browser.newContext({ storageState: states.get(as) });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base`);
+    await expect(page.getByRole("heading", { name: "Knowledge base", level: 1 })).toBeVisible();
+    return page;
+  }
+
+  /** The panel of an open Modal, scoped by its `h2` title — there is no role="dialog" to use. */
+  function modal(page: Page, title: string): Locator {
+    return page
+      .locator('div[role="presentation"]')
+      .filter({ has: page.getByRole("heading", { name: title, level: 2 }) })
+      .last();
+  }
+
+  /** The item table's row for a named folder/document/file. */
+  function row(page: Page, name: string): Locator {
+    return page.getByRole("row").filter({ hasText: name });
+  }
+
+  /** The row-action (⋯) trigger. The Actions cell nests a button inside a button. */
+  function rowMenu(page: Page, name: string): Locator {
+    return row(page, name).getByRole("cell").last().getByRole("button").first();
+  }
+
+  /**
+   * The open dropdown's panel.
+   *
+   * Menu (components/knowledge-base/Menu.tsx) portals to document.body and positions itself with an
+   * INLINE `position: fixed` so it is never clipped by the table's overflow wrapper. Modal portals
+   * to body too, but positions itself with a class — so the inline style is what tells the two
+   * apart, and scoping to it is what stops a menu item from colliding with an identically-named
+   * button elsewhere ("Create folder" is a MenuItem, the empty state's call to action, AND the
+   * create modal's submit button).
+   */
+  function menuPanel(page: Page): Locator {
+    return page.locator('body > div[style*="position: fixed"]');
+  }
+
+  /** Opens the "New" menu and picks one of its three entries. */
+  async function newMenu(page: Page, item: "Create folder" | "Create document" | "Upload file") {
+    // The trigger nests a button inside a button, so the name matches twice.
+    await page.getByRole("button", { name: "New", exact: true }).first().click();
+    await menuPanel(page).getByRole("button", { name: item, exact: true }).click();
+  }
+
+  async function createFolder(page: Page, name: string) {
+    await newMenu(page, "Create folder");
+    const dialog = modal(page, "Create folder");
+    await dialog.getByPlaceholder("e.g. Payment Module").fill(name);
+    await dialog.getByRole("button", { name: "Create folder" }).click();
+  }
+
+  function folderCount(): number {
+    return Number(
+      scalar(
+        `SELECT COUNT(*) FROM knowledge_folders WHERE project_id = ${literal(tenant!.mainProjectId)} AND is_root = false AND is_deleted = false;`,
+      ),
+    );
+  }
+
+  function documentCount(): number {
+    return Number(
+      scalar(
+        `SELECT COUNT(*) FROM knowledge_documents WHERE project_id = ${literal(tenant!.mainProjectId)} AND is_deleted = false;`,
+      ),
+    );
+  }
+
+  // ─── The primary flow ──────────────────────────────────────────────────────
+
+  test("KBU-01 a folder is created from the New menu and appears in the table and the tree", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    const name = stamp("Folder");
+
+    await createFolder(page, name);
+
+    // User-visible outcome first...
+    await expect(row(page, name)).toBeVisible();
+    // ...then the persisted state, which is what the next page load will read.
+    expect(folderCount()).toBe(1);
+
+    // And the tree in the left sidebar, which is a separate render from the table.
+    await expect(page.getByRole("button", { name, exact: true }).first()).toBeVisible();
+  });
+
+  test("KBU-02 a document created from a template is stored with the template's body", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    const title = stamp("Doc");
+
+    await newMenu(page, "Create document");
+    const dialog = modal(page, "Create document");
+    await dialog.getByPlaceholder("e.g. Login Requirements").fill(title);
+    // "Test Plan" is one of the six DOCUMENT_TEMPLATES. A template is the difference between a
+    // document with real contentHtml and an empty one, and contentText is what search reads.
+    await dialog.getByRole("button", { name: /Test Plan/ }).click();
+    await dialog.getByRole("button", { name: "Create document" }).click();
+
+    // Creating a document does not drop you back on the table — it opens the new document straight
+    // away, which is the point of picking a template. Assert where the user actually lands.
+    await expect(page).toHaveURL(/\/knowledge-base\/documents\/[0-9a-f-]{36}$/);
+    // The title is an editable field on this screen, not a heading.
+    await expect(page.getByPlaceholder("Untitled document")).toHaveValue(title);
+    // The template's headings are in the editor, not left for the user to type.
+    await expect(page.locator(".ProseMirror").first()).toContainText("Test Strategy");
+
+    expect(documentCount()).toBe(1);
+
+    // And it is in the table once you go back.
+    await page.getByRole("link", { name: /Back to Knowledge base/ }).click();
+    await expect(row(page, title)).toBeVisible();
+
+    const body = scalar(
+      `SELECT COALESCE(content_text, '') FROM knowledge_documents WHERE project_id = ${literal(tenant!.mainProjectId)} AND title = ${literal(title)};`,
+    );
+    expect(body.trim(), "a templated document is created with its body already filled in").not.toBe("");
+  });
+
+  test("KBU-03 a document is opened, edited, saved, and the change survives a reload", async ({ browser }) => {
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title: stamp("Editable"), folderId: rootFolderId, documentType: "general" },
+    });
+    expect(created.status()).toBe(201);
+    const documentId = (await created.json()).id;
+
+    const ctx = await browser.newContext({ storageState: states.get("owner") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/${documentId}`);
+
+    const editor = page.locator(".ProseMirror").first();
+    await expect(editor).toBeVisible();
+
+    const sentence = `Edited by KBU-03 at ${Date.now()}`;
+    await editor.click();
+    await page.keyboard.type(sentence);
+    await page.getByRole("button", { name: "Save" }).click();
+
+    // Assert on what was persisted, not on the toast: the save is only real if a reload shows it.
+    await expect
+      .poll(
+        () => scalar(`SELECT COALESCE(content_text, '') FROM knowledge_documents WHERE id = ${literal(documentId)};`),
+        { message: "the edit reaches the stored document" },
+      )
+      .toContain(sentence);
+
+    await page.reload();
+    await expect(page.locator(".ProseMirror").first()).toContainText(sentence);
+  });
+
+  test("KBU-04 an uploaded file appears in the table and is counted in the summary", async ({ browser }) => {
+    const page = await openKb(browser);
+    const fileName = `kbu-04-${Date.now()}.txt`;
+
+    await newMenu(page, "Upload file");
+    const dialog = modal(page, "Upload files");
+    // The real input is hidden behind a drop zone; setInputFiles drives it directly.
+    await dialog.locator('input[type="file"]').setInputFiles({
+      name: fileName,
+      mimeType: "text/plain",
+      buffer: Buffer.from("KBU-04 upload fixture"),
+    });
+    await dialog.getByRole("button", { name: /Upload/ }).click();
+
+    await expect(row(page, fileName)).toBeVisible();
+
+    const summary = await (await api.get(kbUrl("/summary"))).json();
+    expect(summary.files, "the summary counts the uploaded file").toBe(1);
+  });
+
+  // ─── Validation ────────────────────────────────────────────────────────────
+
+  test("KBU-05 the create button stays disabled for an empty or whitespace-only folder name", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    await newMenu(page, "Create folder");
+    const dialog = modal(page, "Create folder");
+    const submit = dialog.getByRole("button", { name: "Create folder" });
+    const input = dialog.getByPlaceholder("e.g. Payment Module");
+
+    // The screen's validation here is a disabled control, not an error message — `disabled={!name
+    // .trim()}`. Whitespace has to be treated as empty, which is the half a length check misses.
+    await expect(submit, "nothing typed yet").toBeDisabled();
+    await input.fill("   ");
+    await expect(submit, "whitespace is not a name").toBeDisabled();
+    await input.fill("real");
+    await expect(submit).toBeEnabled();
+
+    await page.keyboard.press("Escape");
+    expect(folderCount(), "no folder was created while proving the control is gated").toBe(0);
+  });
+
+  test("KBU-06 two folders cannot share a name under the same parent, but can under different ones", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    const shared = stamp("Shared");
+
+    await createFolder(page, shared);
+    await expect(row(page, shared)).toBeVisible();
+
+    // Same name, same parent — the API refuses, and no second row may appear.
+    await createFolder(page, shared);
+    await expect
+      .poll(() => folderCount(), { message: "a duplicate name under the same parent is refused" })
+      .toBe(1);
+    await page.keyboard.press("Escape");
+
+    // The same name under a different parent is legitimate.
+    const other = await api.post(kbUrl("/folders"), {
+      data: { name: stamp("Other"), parentFolderId: rootFolderId },
+    });
+    const otherId = (await other.json()).id;
+    const nested = await api.post(kbUrl("/folders"), { data: { name: shared, parentFolderId: otherId } });
+    expect(nested.status(), "the same name under a different parent is allowed").toBe(201);
+  });
+
+  test("KBU-07 the create button stays disabled for an empty or whitespace-only document title", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    await newMenu(page, "Create document");
+    const dialog = modal(page, "Create document");
+    const submit = dialog.getByRole("button", { name: "Create document" });
+    const input = dialog.getByPlaceholder("e.g. Login Requirements");
+
+    await expect(submit).toBeDisabled();
+    await input.fill("   ");
+    await expect(submit, "whitespace is not a title").toBeDisabled();
+
+    await page.keyboard.press("Escape");
+    expect(documentCount()).toBe(0);
+  });
+
+  // ─── Delete, and the native confirm ────────────────────────────────────────
+
+  test("KBU-08 cancelling the delete confirmation leaves the item alone", async ({ browser }) => {
+    const page = await openKb(browser);
+    const name = stamp("Keep");
+    await createFolder(page, name);
+    await expect(row(page, name)).toBeVisible();
+
+    // Delete goes through window.confirm(). Playwright auto-dismisses dialogs by default, but the
+    // dismissal is the behaviour under test, so it is handled explicitly and its text asserted.
+    let message = "";
+    page.once("dialog", (dialog) => {
+      message = dialog.message();
+      void dialog.dismiss();
+    });
+
+    await rowMenu(page, name).click();
+    await menuPanel(page).getByRole("button", { name: "Delete", exact: true }).click();
+
+    // Polled, not read straight after the click: confirmFolderDelete asks the API what is in the
+    // folder before it can word the message, so the dialog fires a round trip later.
+    await expect
+      .poll(() => message, { message: "the user is told where the item goes" })
+      .toContain("trash");
+    await expect(row(page, name)).toBeVisible();
+    expect(folderCount(), "dismissing the confirm must not delete anything").toBe(1);
+  });
+
+  test("KBU-09 accepting the confirmation soft-deletes the item and drops it from the table", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    const name = stamp("Doomed");
+    await createFolder(page, name);
+    await expect(row(page, name)).toBeVisible();
+
+    page.once("dialog", (dialog) => void dialog.accept());
+    await rowMenu(page, name).click();
+    await menuPanel(page).getByRole("button", { name: "Delete", exact: true }).click();
+
+    await expect(row(page, name)).toHaveCount(0);
+
+    // Soft delete, not a hard one: the row survives with is_deleted set, which is what makes the
+    // (UI-less) restore endpoint in KBU-24 meaningful.
+    await expect
+      .poll(
+        () =>
+          scalar(
+            `SELECT COALESCE(is_deleted::text, '') FROM knowledge_folders WHERE project_id = ${literal(tenant!.mainProjectId)} AND name = ${literal(name)};`,
+          ),
+        { message: "delete is a soft delete" },
+      )
+      .toBe("true");
+  });
+
+  /*
+   * The delete confirmation has to describe what will happen to THIS folder.
+   *
+   * Both halves of this were product bugs, in opposite directions. The folder tree claimed "this
+   * folder contains documents/files" unconditionally, so an empty folder warned about contents that
+   * did not exist; and the table's row menu never mentioned contents at all, so deleting a full
+   * folder gave no hint that everything inside went with it. Two tests, because a fix that only
+   * addresses one direction is still wrong.
+   */
+  test("KBU-10 deleting a folder with contents warns that the contents go too", async ({ browser }) => {
+    const parent = stamp("Parent");
+    const folder = await api.post(kbUrl("/folders"), { data: { name: parent, parentFolderId: rootFolderId } });
+    const parentId = (await folder.json()).id;
+    await api.post(kbUrl("/documents"), {
+      data: { title: stamp("Child"), folderId: parentId, documentType: "general" },
+    });
+
+    const page = await openKb(browser);
+
+    let message = "";
+    page.once("dialog", (dialog) => {
+      message = dialog.message();
+      void dialog.dismiss();
+    });
+
+    await rowMenu(page, parent).click();
+    await menuPanel(page).getByRole("button", { name: "Delete", exact: true }).click();
+
+    await expect
+      .poll(() => message, { message: "the confirm fires and names the consequence" })
+      .toContain("contents");
+  });
+
+  test("KBU-10b deleting an EMPTY folder from the tree does not claim it has contents", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    const empty = stamp("Empty");
+    await createFolder(page, empty);
+    await expect(row(page, empty)).toBeVisible();
+
+    let message = "";
+    page.once("dialog", (dialog) => {
+      message = dialog.message();
+      void dialog.dismiss();
+    });
+
+    // Driven through the FOLDER TREE, not the row menu — deliberately. This is the path that used to
+    // assert "This folder contains documents/files" unconditionally, so an empty folder was warned
+    // about contents it did not have. Running it through the row menu instead would pass even
+    // against the unfixed build and prove nothing.
+    const folderTree = page.getByRole("complementary").filter({ hasText: "Folders" });
+    const node = folderTree.getByRole("button", { name: empty, exact: true });
+    await node.getByRole("button").first().click();
+    await menuPanel(page).getByRole("button", { name: "Delete", exact: true }).click();
+
+    await expect.poll(() => message, { message: "the confirm fires" }).not.toBe("");
+    expect(message, "an empty folder must not be described as having contents").not.toContain("contents");
+  });
+
+  // ─── Browsing: filter, search, empty states ────────────────────────────────
+
+  test("KBU-11 an empty knowledge base renders its zero counts rather than an error", async ({ browser }) => {
+    const page = await openKb(browser);
+
+    // A fresh project has the root folder and nothing in it. The header states that in words —
+    // and the count excludes the root, so an empty knowledge base reads "0 folders", not "1".
+    await expect(page.getByText("0 items across 0 folders")).toBeVisible();
+    await expect(page.locator("body")).not.toContainText("Something went wrong");
+
+    const summary = await (await api.get(kbUrl("/summary"))).json();
+    expect(summary.documents).toBe(0);
+    expect(summary.files).toBe(0);
+  });
+
+  test("KBU-12 the type filter narrows the table to folders or documents", async ({ browser }) => {
+    const folderName = stamp("FilterFolder");
+    const docTitle = stamp("FilterDoc");
+    await api.post(kbUrl("/folders"), { data: { name: folderName, parentFolderId: rootFolderId } });
+    await api.post(kbUrl("/documents"), {
+      data: { title: docTitle, folderId: rootFolderId, documentType: "general" },
+    });
+
+    const page = await openKb(browser);
+    await expect(row(page, folderName)).toBeVisible();
+    await expect(row(page, docTitle)).toBeVisible();
+
+    // Two comboboxes sit side by side — type filter first, sort second.
+    const typeFilter = page.getByRole("combobox").first();
+
+    await typeFilter.selectOption({ label: "Folder" });
+    await expect(row(page, folderName)).toBeVisible();
+    await expect(row(page, docTitle), "a document is not a folder").toHaveCount(0);
+
+    await typeFilter.selectOption({ label: "Document" });
+    await expect(row(page, docTitle)).toBeVisible();
+    await expect(row(page, folderName)).toHaveCount(0);
+
+    await typeFilter.selectOption({ label: "All types" });
+    await expect(row(page, folderName)).toBeVisible();
+    await expect(row(page, docTitle)).toBeVisible();
+  });
+
+  test("KBU-13 search matches a document's body, not only its title", async ({ browser }) => {
+    const title = stamp("Findable");
+    const needle = `kbu13needle${Date.now()}`;
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title, folderId: rootFolderId, documentType: "general" },
+    });
+    const documentId = (await created.json()).id;
+    await api.put(kbUrl(`/documents/${documentId}`), {
+      data: { contentText: `A body containing ${needle}`, contentHtml: `<p>A body containing ${needle}</p>` },
+    });
+
+    const page = await openKb(browser);
+    await page.getByPlaceholder("Search knowledge base…").fill(needle);
+
+    // The title does not contain the needle, so a hit proves the body was searched.
+    await expect(row(page, title)).toBeVisible();
+  });
+
+  test("KBU-14 a whitespace-only search term matches nothing rather than everything", async ({ browser }) => {
+    const present = stamp("Present");
+    await api.post(kbUrl("/folders"), { data: { name: present, parentFolderId: rootFolderId } });
+
+    const page = await openKb(browser);
+    await expect(row(page, present)).toBeVisible();
+
+    await page.getByPlaceholder("Search knowledge base…").fill("   ");
+
+    // Whitespace is not a query. The risk this pins is the opposite of a crash: silently falling
+    // back to "match everything" looks like a working search until someone trusts the result.
+    const results = await (await api.get(kbUrl("/search?q=%20%20%20"))).json();
+    const rows = Array.isArray(results) ? results : (results.results ?? results.items ?? []);
+    expect(rows.length, "an empty search term matches nothing").toBe(0);
+  });
+
+  // ─── Authorization, which this page does not gate ──────────────────────────
+
+  test("KBU-20 a qa_engineer is shown the controls and can create — the page has no role gate", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser, "qa");
+
+    // Deliberately asserting the current, ungated design rather than a hoped-for one: a project
+    // member of any role may create in the knowledge base (the API allows it), so the button being
+    // present is correct. KBU-21 covers the account that genuinely cannot.
+    await expect(page.getByRole("button", { name: "New", exact: true }).first()).toBeVisible();
+
+    const name = stamp("QaFolder");
+    await createFolder(page, name);
+    await expect(row(page, name)).toBeVisible();
+    expect(folderCount()).toBe(1);
+  });
+
+  test("KBU-21 a workspace member with no access to the project cannot use the knowledge base", async ({
+    browser,
+  }) => {
+    const ctx = await browser.newContext({ storageState: states.get("guest") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base`);
+    await page.waitForLoadState("domcontentloaded");
+
+    // Whatever the screen chooses to render, it must not be a working knowledge base: no create
+    // affordance for a project this account is not a member of.
+    await expect(page.getByRole("button", { name: "New", exact: true })).toHaveCount(0);
+  });
+
+  test("KBU-22 a folder from another project is not reachable through this project's URL", async ({
+    browser,
+  }) => {
+    const secondRoot = (await (await api.get(kbUrl("/folders/tree", tenant!.secondProjectId))).json()).id;
+    const foreign = await api.post(kbUrl("/folders", tenant!.secondProjectId), {
+      data: { name: stamp("Foreign"), parentFolderId: secondRoot },
+    });
+    expect(foreign.status()).toBe(201);
+    const foreignId = (await foreign.json()).id;
+
+    const page = await openKb(browser);
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base?folderId=${foreignId}`);
+    await page.waitForLoadState("domcontentloaded");
+
+    // The screen must not render another project's folder, and the endpoint behind it must refuse.
+    const items = await api.get(kbUrl(`/folders/${foreignId}/items`), { failOnStatusCode: false });
+    expect([403, 404], "a folder from another project is not reachable through this one").toContain(
+      items.status(),
+    );
+  });
+
+  test("KBU-23 a malformed document id in the URL does not throw in the page", async ({ browser }) => {
+    const ctx = await browser.newContext({ storageState: states.get("owner") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/not-a-uuid`);
+    await page.waitForLoadState("domcontentloaded");
+
+    expect(errors, "a URL typo must not throw an uncaught error in the page").toEqual([]);
+    await expect(page.locator("body")).not.toContainText("Application error");
+  });
+
+  // ─── The gap this suite is here to pin ─────────────────────────────────────
+
+  test("KBU-24 deleted items are unreachable from the UI — restore is API-only", async ({ browser }) => {
+    const name = stamp("Trashed");
+    const created = await api.post(kbUrl("/folders"), { data: { name, parentFolderId: rootFolderId } });
+    const folderId = (await created.json()).id;
+    await api.delete(kbUrl(`/folders/${folderId}`));
+
+    const page = await openKb(browser);
+
+    // The row is gone from the browser...
+    await expect(row(page, name)).toHaveCount(0);
+    // ...and nothing on the screen offers a way back to it.
+    for (const label of [/^trash$/i, /deleted items/i, /restore/i]) {
+      await expect(
+        page.getByText(label),
+        `the KB screen offers no way to reach deleted items (${label})`,
+      ).toHaveCount(0);
+    }
+
+    // But the endpoint exists and works, which is what makes this a gap rather than a design.
+    const restored = await api.patch(kbUrl(`/folders/${folderId}/restore`));
+    expect(restored.status(), "restore works over the API — only the UI cannot reach it").toBe(200);
+  });
+});

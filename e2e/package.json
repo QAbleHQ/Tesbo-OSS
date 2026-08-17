@@ -8,11 +8,15 @@
     "test:api": "playwright test --project=api",
     "test:ui": "playwright test --project=ui",
     "report": "playwright show-report",
-    "install-browsers": "playwright install chromium"
+    "install-browsers": "playwright install chromium",
+    "coverage": "node --experimental-strip-types --no-warnings scripts/coverage-report.ts",
+    "coverage:gate": "node --experimental-strip-types --no-warnings scripts/coverage-report.ts --min-api 100 --min-ui 100",
+    "coverage:audit": "node --experimental-strip-types --no-warnings scripts/coverage-report.ts --audit"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/node": "^22.10.7",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "xlsx": "^0.18.5"
   }
 }

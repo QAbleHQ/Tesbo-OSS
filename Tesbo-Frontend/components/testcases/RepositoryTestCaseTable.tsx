@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { IconColumns } from "@tabler/icons-react";
 import { StatusChip } from "@/components/ui";
 import type { TestCaseListItem } from "@/lib/api";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 export type RepoTcColumnId =
   | "select"
@@ -174,7 +175,7 @@ function loadPrefs(projectId: string): Omit<TablePrefs, "widths"> & { widths: Re
   let dataOrder = DEFAULT_DATA_ORDER;
   let visible = DEFAULT_VISIBLE;
   try {
-    const raw = localStorage.getItem(storageKey(projectId));
+    const raw = readStoredValue(storageKey(projectId));
     if (!raw) return { dataOrder, visible, widths };
     const parsed = JSON.parse(raw) as Partial<TablePrefs>;
     dataOrder = normalizeDataOrder(parsed.dataOrder);
@@ -255,7 +256,7 @@ export function RepositoryTestCaseTable({
     if (!prefsReady) return;
     try {
       const payload: TablePrefs = { dataOrder, visible, widths };
-      localStorage.setItem(storageKey(projectId), JSON.stringify(payload));
+      writeStoredValue(storageKey(projectId), JSON.stringify(payload));
     } catch {
       /* ignore */
     }
@@ -506,7 +507,7 @@ export function RepositoryTestCaseTable({
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}
-                className={`${innerTruncate} inline-flex items-center gap-1 font-mono text-xs text-[var(--brand-primary)] hover:underline`}
+                className={`${innerTruncate} inline-flex items-center gap-1 font-mono text-xs text-[var(--accent-light)] hover:underline`}
               >
                 <svg viewBox="0 0 24 24" className="h-3 w-3 shrink-0" fill="currentColor" aria-hidden="true">
                   <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53ZM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77ZM2 11.6c0 2.4 1.95 4.34 4.35 4.35h1.78v1.71c0 2.4 1.95 4.35 4.35 4.35V12.44a.84.84 0 0 0-.84-.84H2Z" />
@@ -575,7 +576,7 @@ export function RepositoryTestCaseTable({
       <button
         type="button"
         onClick={() => setColumnsMenuOpen((o) => !o)}
-        className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+        className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
       >
         <IconColumns size={13} stroke={1.75} />
         Columns

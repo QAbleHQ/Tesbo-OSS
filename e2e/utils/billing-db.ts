@@ -1,8 +1,8 @@
-import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { APIRequestContext } from "@playwright/test";
 import { env } from "./env";
+import { column, dbControlAvailable, exec, literal, scalar } from "./psql";
 
 /*
  * Direct Postgres control over a workspace's billing state, for the payment suites.
@@ -17,9 +17,7 @@ import { env } from "./env";
  * That makes this module destructive by design. It must only ever be pointed at the disposable
  * billing tenants provisioned by global-setup.ts, never at the shared smoke workspace.
  *
- * Same transport as utils/otp.ts: piping SQL through `docker compose exec postgres psql`, which
- * needs the compose stack reachable from wherever the tests run. dbControlAvailable() probes for
- * that up front so the suites skip cleanly instead of failing on a remote target.
+ * The Postgres transport itself lives in utils/psql.ts, shared with the other suites that need it.
  */
 
 const AUTH_DIR = path.join(__dirname, "../.auth");
@@ -65,52 +63,6 @@ const BILLING_COLUMNS: (keyof BillingState)[] = [
   "grace_locked_notified_at",
   "storage_warned_pct",
 ];
-
-function escapeSql(value: string): string {
-  return value.replace(/'/g, "''");
-}
-
-function literal(value: string | number | boolean | null): string {
-  if (value === null) return "NULL";
-  if (typeof value === "number") return String(value);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  return `'${escapeSql(value)}'`;
-}
-
-function psql(sql: string, extraArgs = ""): string {
-  return execSync(
-    `docker compose -f "${env.dockerComposeFile}" exec -T ${env.dbService} ` +
-      `psql -U ${env.dbUser} -d ${env.dbName} -v ON_ERROR_STOP=1 ${extraArgs}`,
-    { input: sql, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-  );
-}
-
-/** Runs SQL for its effect. Throws (via ON_ERROR_STOP) if Postgres rejects it. */
-export function exec(sql: string): void {
-  psql(sql);
-}
-
-/** Runs a single-row, single-column SELECT and returns it as raw text ("" for NULL). */
-export function scalar(sql: string): string {
-  return psql(sql, "-At").trim();
-}
-
-let dbControlProbe: boolean | null = null;
-
-/**
- * Whether these helpers can actually reach Postgres.
- *
- * Cached, because it runs once per worker process and shelling out to docker isn't free.
- */
-export function dbControlAvailable(): boolean {
-  if (dbControlProbe !== null) return dbControlProbe;
-  try {
-    dbControlProbe = scalar("SELECT 1;") === "1";
-  } catch {
-    dbControlProbe = false;
-  }
-  return dbControlProbe;
-}
 
 const TENANT_CONTEXT_FILES: Record<BillingTenantKind, { context: string; state: string }> = {
   api: { context: "context-billing-api.json", state: "state-billing-api.json" },
@@ -282,11 +234,10 @@ export function insertBillingAuditEntry(
  * by, so a test can name which projects it expects to stay writable and which to be locked.
  */
 export function activeProjectIdsOldestFirst(organizationId: string): string[] {
-  const rows = scalar(
+  return column(
     `SELECT id FROM projects WHERE organization_id = ${literal(organizationId)} ` +
       `AND archived_at IS NULL ORDER BY created_at, id;`,
   );
-  return rows ? rows.split("\n").filter(Boolean) : [];
 }
 
 /** Whether an event id was recorded as processed — the webhook replay guard's own bookkeeping. */

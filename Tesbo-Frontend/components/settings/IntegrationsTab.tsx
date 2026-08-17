@@ -118,7 +118,7 @@ export default function IntegrationsTab() {
         </p>
       )}
       {error && (
-        <p className="rounded-lg border border-[var(--error)]/40 bg-[color-mix(in_oklab,var(--error)_8%,white)] px-3 py-2 text-sm text-[var(--error)]">
+        <p className="rounded-lg border border-[var(--error)]/40 bg-[color-mix(in_oklab,var(--error)_8%,white)] px-3 py-2 text-sm text-[var(--error-foreground)]">
           {error}
         </p>
       )}
@@ -153,7 +153,7 @@ export default function IntegrationsTab() {
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-semibold text-[var(--foreground)]">{provider.name}</h3>
                   {provider.proOnly && !isPro && (
-                    <span className="inline-flex items-center rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--brand-primary)]">
+                    <span className="inline-flex items-center rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.04em] text-[var(--accent-light)]">
                       Requires Pro
                     </span>
                   )}
@@ -163,7 +163,7 @@ export default function IntegrationsTab() {
                   <div className="mt-2 space-y-1">
                     <div className="flex items-center gap-2">
                       <span className="inline-block w-2 h-2 rounded-full bg-[var(--success)]" />
-                      <span className="text-xs text-[var(--success)] font-medium">Connected</span>
+                      <span className="text-xs text-[var(--success-foreground)] font-medium">Connected</span>
                       {status.siteUrl && (
                         <>
                           <span className="text-xs text-[var(--muted-soft)]">·</span>
@@ -171,7 +171,7 @@ export default function IntegrationsTab() {
                             href={status.siteUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="text-xs text-[var(--brand-primary)] hover:underline truncate"
+                            className="text-xs text-[var(--accent-light)] hover:underline truncate"
                           >
                             {status.siteUrl}
                           </a>
@@ -203,7 +203,7 @@ export default function IntegrationsTab() {
                         size="sm"
                         onClick={() => void handleDisconnect(provider.id)}
                         disabled={disconnectingProvider === provider.id}
-                        className="border-[var(--error)]/50 text-[var(--error)] hover:bg-[color-mix(in_oklab,var(--error)_8%,white)]"
+                        className="border-[var(--error)]/50 text-[var(--error-foreground)] hover:bg-[color-mix(in_oklab,var(--error)_8%,white)]"
                       >
                         Disconnect
                       </Button>
