@@ -114,7 +114,7 @@ test.describe("self-serve signup", () => {
 
   test("SGN-A-01 signup/start refuses a missing or malformed email and writes nothing", async () => {
     for (const email of [undefined, "", "   ", "not-an-email", "missing@tld", "@nodomain.com", "spaces in@x.com"]) {
-      const res = await start({ name: "E2E Signup", email, password: "E2E-Signup-Pass-9f3!" });
+      const res = await start({ name: "EndToEnd Signup", email, password: "E2E-Signup-Pass-9f3!" });
       expect(res.status(), `email ${JSON.stringify(email)} was accepted: ${await res.text()}`).toBe(400);
       expect(JSON.stringify(await res.json())).toContain("invalid email");
     }
@@ -140,7 +140,7 @@ test.describe("self-serve signup", () => {
     // 7 characters is refused, and the message says what the rule is — a password rule the user has to
     // guess at is a rule they will fight.
     for (const password of [undefined, "", "short", "1234567", "       "]) {
-      const res = await start({ name: "E2E Signup", email, password });
+      const res = await start({ name: "EndToEnd Signup", email, password });
       expect(res.status(), `password ${JSON.stringify(password)} was accepted`).toBe(400);
       expect(JSON.stringify(await res.json())).toContain("8 characters");
     }
@@ -153,7 +153,7 @@ test.describe("self-serve signup", () => {
     expect(existing, "no seeded account to test against").toBeTruthy();
 
     const pendingBefore = pendingCount(existing);
-    const res = await start({ name: "E2E Duplicate", email: existing, password: "E2E-Signup-Pass-9f3!" });
+    const res = await start({ name: "EndToEnd Duplicate", email: existing, password: "E2E-Signup-Pass-9f3!" });
     expect(res.status()).toBe(400);
     const message = JSON.stringify(await res.json());
     expect(message).toContain("already exists");
@@ -173,7 +173,7 @@ test.describe("self-serve signup", () => {
   test("SGN-A-05 the email is normalised, so case and padding cannot create a second account", async () => {
     const existing = scalar("SELECT email FROM users WHERE email LIKE 'e2e-%' ORDER BY created_at LIMIT 1;");
     for (const variant of [existing.toUpperCase(), `  ${existing}  `]) {
-      const res = await start({ name: "E2E Duplicate", email: variant, password: "E2E-Signup-Pass-9f3!" });
+      const res = await start({ name: "EndToEnd Duplicate", email: variant, password: "E2E-Signup-Pass-9f3!" });
       // validateEmail lowercases and trims before the existence check, so a shouted or padded address
       // is the same address — otherwise one person could hold two accounts differing only in case.
       expect(res.status(), `${JSON.stringify(variant)} was treated as a new address`).toBe(400);
@@ -233,7 +233,7 @@ test.describe("self-serve signup", () => {
     const email = signupEmail("happy");
     const password = "E2E-Signup-Pass-9f3!";
 
-    const started = await start({ name: "E2E Happy Signup", email, password });
+    const started = await start({ name: "EndToEnd Happy Signup", email, password });
     // 204: the response deliberately carries nothing, because saying whether the address was new
     // would make this endpoint an account-existence oracle for anyone who asks.
     expect(started.status(), `signup/start — ${await started.text()}`).toBe(204);
@@ -292,12 +292,12 @@ test.describe("self-serve signup", () => {
 
   test("SGN-A-11 starting twice for the same address leaves one usable pending signup", async () => {
     const email = signupEmail("restart");
-    const first = await start({ name: "E2E Restart", email, password: "E2E-Signup-Pass-9f3!" });
+    const first = await start({ name: "EndToEnd Restart", email, password: "E2E-Signup-Pass-9f3!" });
     expect(first.status()).toBe(204);
 
     // A user who misses the first email and asks again must not be locked out — whatever the row
     // count, the latest code has to work.
-    const second = await start({ name: "E2E Restart", email, password: "E2E-Signup-Pass-9f3!" });
+    const second = await start({ name: "EndToEnd Restart", email, password: "E2E-Signup-Pass-9f3!" });
     expect(second.status(), `a second signup/start answered ${second.status()}: ${await second.text()}`).toBe(204);
 
     // Two starts leave two pending rows; findPendingSignup takes the newest usable one, which is what

@@ -480,7 +480,7 @@ test.describe("invitations", () => {
 
     const password = "E2E-Register-Pass-1!";
     const res = await anon.post(`/api/invitations/${token}/register`, {
-      data: { name: "E2E Registered Invitee", password },
+      data: { name: "EndToEnd Registered Invitee", password },
       failOnStatusCode: false,
     });
     expect(res.ok(), `register failed: ${res.status()} ${await res.text()}`).toBeTruthy();
@@ -509,8 +509,8 @@ test.describe("invitations", () => {
 
     for (const data of [
       { name: "", password: "E2E-Register-Pass-1!" },
-      { name: "E2E No Password", password: "" },
-      { name: "E2E Short Password", password: "short" },
+      { name: "EndToEnd No Password", password: "" },
+      { name: "EndToEnd Short Password", password: "short" },
     ]) {
       const res = await anon.post(`/api/invitations/${token}/register`, {
         data,
@@ -552,7 +552,7 @@ test.describe("invitations", () => {
       const ctx = await anonymousContext();
       try {
         const start = await ctx.post(`/api/invitations/${token}/register/start`, {
-          data: { name: "E2E OTP Invitee", password },
+          data: { name: "EndToEnd OTP Invitee", password },
           failOnStatusCode: false,
         });
         expect(start.status(), `start failed: ${await start.text()}`).toBe(204);
@@ -596,7 +596,7 @@ test.describe("invitations", () => {
       const ctx = await anonymousContext();
       try {
         const start = await ctx.post(`/api/invitations/${token}/register/otp/start`, {
-          data: { name: "E2E Passwordless Invitee" },
+          data: { name: "EndToEnd Passwordless Invitee" },
           failOnStatusCode: false,
         });
         expect(start.status()).toBe(204);
@@ -654,7 +654,7 @@ test.describe("invitations", () => {
         expect(
           (
             await ctx.post(`/api/invitations/${token}/register/start`, {
-              data: { name: "E2E Bad Code", password: "E2E-Otp-Register-1!" },
+              data: { name: "EndToEnd Bad Code", password: "E2E-Otp-Register-1!" },
             })
           ).status(),
         ).toBe(204);
@@ -700,10 +700,10 @@ test.describe("invitations", () => {
       const ctx = await anonymousContext();
       try {
         await ctx.post(`/api/invitations/${mineInvite.token}/register/start`, {
-          data: { name: "E2E Mine", password: "E2E-Otp-Register-1!" },
+          data: { name: "EndToEnd Mine", password: "E2E-Otp-Register-1!" },
         });
         await ctx.post(`/api/invitations/${theirsInvite.token}/register/start`, {
-          data: { name: "E2E Theirs", password: "E2E-Otp-Register-1!" },
+          data: { name: "EndToEnd Theirs", password: "E2E-Otp-Register-1!" },
         });
         seedOtpCode(mine, "121212");
 
@@ -730,8 +730,8 @@ test.describe("invitations", () => {
         for (const data of [
           { name: "", password: "E2E-Otp-Register-1!" },
           { name: "   ", password: "E2E-Otp-Register-1!" },
-          { name: "E2E No Password", password: "" },
-          { name: "E2E Short Password", password: "short" },
+          { name: "EndToEnd No Password", password: "" },
+          { name: "EndToEnd Short Password", password: "short" },
         ]) {
           const res = await anon.post(`/api/invitations/${token}/register/start`, {
             data,
@@ -757,7 +757,7 @@ test.describe("invitations", () => {
 
       for (const path of ["register/start", "register/otp/start"]) {
         const res = await anon.post(`/api/invitations/${token}/${path}`, {
-          data: { name: "E2E Cancelled", password: "E2E-Otp-Register-1!" },
+          data: { name: "EndToEnd Cancelled", password: "E2E-Otp-Register-1!" },
           failOnStatusCode: false,
         });
         expect(res.status(), `${path} on a cancelled invite should be refused`).toBe(400);
@@ -770,7 +770,7 @@ test.describe("invitations", () => {
       const { token } = await invite(email);
       try {
         const res = await anon.post(`/api/invitations/${token}/register/start`, {
-          data: { name: "E2E Duplicate", password: "E2E-Otp-Register-1!" },
+          data: { name: "EndToEnd Duplicate", password: "E2E-Otp-Register-1!" },
           failOnStatusCode: false,
         });
         expect(res.status()).toBe(400);
@@ -787,7 +787,7 @@ test.describe("invitations", () => {
 
     try {
       const res = await anon.post(`/api/invitations/${token}/register`, {
-        data: { name: "E2E Duplicate", password: FIXTURE_PASSWORD },
+        data: { name: "EndToEnd Duplicate", password: FIXTURE_PASSWORD },
         failOnStatusCode: false,
       });
       expect(res.status()).toBe(400);

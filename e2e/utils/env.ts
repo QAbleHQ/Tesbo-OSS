@@ -91,9 +91,15 @@ export const env = {
 
   // Disposable smoke-test account. On a fresh stack this user doesn't exist yet —
   // global-setup creates it automatically when autoProvision is enabled (see below).
+  //
+  // Every *person* name below is deliberately "EndToEnd ...", not "E2E ...": validatePersonName()
+  // allows only letters, marks, space, hyphen, apostrophe and period, so the "2" in "E2E" is a 400
+  // on signup/start and on invite registration. Org and project names keep the "E2E " prefix — they
+  // are not name-validated, and global-setup finds existing fixtures by matching projectName, so
+  // renaming those would orphan every tenant already provisioned in the shared database.
   testEmail: process.env.E2E_TEST_EMAIL ?? `e2e-smoke@${emailDomain}`,
   testPassword: process.env.E2E_TEST_PASSWORD ?? "E2eSmokeTest!2026",
-  testName: process.env.E2E_TEST_NAME ?? "E2E Smoke User",
+  testName: process.env.E2E_TEST_NAME ?? "EndToEnd Smoke User",
 
   orgName: process.env.E2E_ORG_NAME ?? "E2E Smoke Org",
   projectName: process.env.E2E_PROJECT_NAME ?? "E2E Smoke Project",
@@ -102,7 +108,7 @@ export const env = {
   // (e2e/api/authorization.spec.ts) to prove account B can't reach account A's resources.
   testEmailB: process.env.E2E_TEST_EMAIL_B ?? `e2e-smoke-b@${emailDomain}`,
   testPasswordB: process.env.E2E_TEST_PASSWORD_B ?? "E2eSmokeTestB!2026",
-  testNameB: process.env.E2E_TEST_NAME_B ?? "E2E Smoke User B",
+  testNameB: process.env.E2E_TEST_NAME_B ?? "EndToEnd Smoke User B",
   orgNameB: process.env.E2E_ORG_NAME_B ?? "E2E Smoke Org B",
   projectNameB: process.env.E2E_PROJECT_NAME_B ?? "E2E Smoke Project B",
 
@@ -122,13 +128,13 @@ export const env = {
    */
   billingApiEmail: process.env.E2E_BILLING_API_EMAIL ?? `e2e-billing-api@${emailDomain}`,
   billingApiPassword: process.env.E2E_BILLING_API_PASSWORD ?? "E2eBillingApi!2026",
-  billingApiName: process.env.E2E_BILLING_API_NAME ?? "E2E Billing API User",
+  billingApiName: process.env.E2E_BILLING_API_NAME ?? "EndToEnd Billing API User",
   billingApiOrgName: process.env.E2E_BILLING_API_ORG_NAME ?? "E2E Billing API Org",
   billingApiProjectName: process.env.E2E_BILLING_API_PROJECT_NAME ?? "E2E Billing API Project",
 
   billingUiEmail: process.env.E2E_BILLING_UI_EMAIL ?? `e2e-billing-ui@${emailDomain}`,
   billingUiPassword: process.env.E2E_BILLING_UI_PASSWORD ?? "E2eBillingUi!2026",
-  billingUiName: process.env.E2E_BILLING_UI_NAME ?? "E2E Billing UI User",
+  billingUiName: process.env.E2E_BILLING_UI_NAME ?? "EndToEnd Billing UI User",
   billingUiOrgName: process.env.E2E_BILLING_UI_ORG_NAME ?? "E2E Billing UI Org",
   billingUiProjectName: process.env.E2E_BILLING_UI_PROJECT_NAME ?? "E2E Billing UI Project",
 
@@ -148,7 +154,7 @@ export const env = {
    */
   screensEmail: process.env.E2E_SCREENS_EMAIL ?? `e2e-screens@${emailDomain}`,
   screensPassword: process.env.E2E_SCREENS_PASSWORD ?? "E2eScreens!2026",
-  screensName: process.env.E2E_SCREENS_NAME ?? "E2E Screens User",
+  screensName: process.env.E2E_SCREENS_NAME ?? "EndToEnd Screens User",
   screensOrgName: process.env.E2E_SCREENS_ORG_NAME ?? "E2E Screens Org",
   screensProjectName: process.env.E2E_SCREENS_PROJECT_NAME ?? "E2E Screens Base Project",
 
@@ -166,7 +172,7 @@ export const env = {
    */
   workspacesEmail: process.env.E2E_WORKSPACES_EMAIL ?? `e2e-workspaces@${emailDomain}`,
   workspacesPassword: process.env.E2E_WORKSPACES_PASSWORD ?? "E2eWorkspaces!2026",
-  workspacesName: process.env.E2E_WORKSPACES_NAME ?? "E2E Workspaces User",
+  workspacesName: process.env.E2E_WORKSPACES_NAME ?? "EndToEnd Workspaces User",
   workspacesOrgName: process.env.E2E_WORKSPACES_ORG_NAME ?? "E2E Workspaces Org",
   workspacesProjectName: process.env.E2E_WORKSPACES_PROJECT_NAME ?? "E2E Workspaces Project",
 

@@ -125,24 +125,50 @@ test.describe("project CRUD", () => {
     expect(listAfterDelete.some((p: { id: string }) => p.id === created.id)).toBeFalsy();
   });
 
-  test("updating a project with an empty name blanks it out (no server-side validation on update)", async ({
-    request,
-  }) => {
-    // Unlike create, updateProject() has no "name required" check — COALESCE only skips
-    // null/undefined, and "" is neither, so PATCH {name: ""} really does blank the name.
-    // This documents that gap rather than papering over it.
+  test("update validates name and description instead of blanking the name", async ({ request }) => {
+    // This used to assert the opposite: updateProject() had no "name required" check, so
+    // PATCH {name: ""} blanked the name (COALESCE only skips null/undefined, and "" is neither),
+    // and the spec documented that gap. validateProjectFields() is now shared by
+    // createProject/updateProject, so the gap is closed and an empty name is a 400 that changes
+    // nothing. Boundaries are asserted here too, so a regression in either direction shows up.
     const suffix = Date.now().toString().slice(-8);
-    const name = `E2E Blankable Project ${suffix}`;
-    const createRes = await request.post("/api/projects", { data: { name, key: `E2EBLANK${suffix}` } });
+    const name = `E2E Validated Project ${suffix}`;
+    const createRes = await request.post("/api/projects", { data: { name, key: `E2EVAL${suffix}` } });
     const created = await createRes.json();
 
-    const patchRes = await request.patch(`/api/projects/${created.id}`, { data: { name: "" } });
-    expect(patchRes.ok()).toBeTruthy();
+    try {
+      // Each rejected payload must leave the stored name untouched, not partially applied.
+      for (const badName of ["", "   ", "ab"]) {
+        const res = await request.patch(`/api/projects/${created.id}`, {
+          data: { name: badName },
+          failOnStatusCode: false,
+        });
+        expect(res.status()).toBe(400);
+        const getRes = await request.get(`/api/projects/${created.id}`);
+        expect((await getRes.json()).name).toBe(name);
+      }
 
-    const getRes = await request.get(`/api/projects/${created.id}`);
-    expect((await getRes.json()).name).toBe("");
+      const tooLongName = await request.patch(`/api/projects/${created.id}`, {
+        data: { name: "x".repeat(256) },
+        failOnStatusCode: false,
+      });
+      expect(tooLongName.status()).toBe(400);
 
-    await request.delete(`/api/projects/${created.id}`);
+      const tooLongDescription = await request.patch(`/api/projects/${created.id}`, {
+        data: { description: "d".repeat(501) },
+        failOnStatusCode: false,
+      });
+      expect(tooLongDescription.status()).toBe(400);
+
+      // The max-length boundary itself is allowed — 255 passes, 256 (above) does not.
+      const atMaxName = `${"y".repeat(255)}`;
+      const okRes = await request.patch(`/api/projects/${created.id}`, { data: { name: atMaxName } });
+      expect(okRes.ok()).toBeTruthy();
+      const afterOk = await request.get(`/api/projects/${created.id}`);
+      expect((await afterOk.json()).name).toBe(atMaxName);
+    } finally {
+      await request.delete(`/api/projects/${created.id}`, { failOnStatusCode: false });
+    }
   });
 
   test("updating or deleting a project that doesn't exist returns 404", async ({ request }) => {
