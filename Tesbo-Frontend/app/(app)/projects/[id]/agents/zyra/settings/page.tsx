@@ -327,6 +327,10 @@ export default function ZyraSettingsPage() {
                   <button
                     key={option.value}
                     type="button"
+                    // Which of the four is chosen was conveyed by border and background colour
+                    // alone, so nothing but a sighted user could tell — and a colour-only state is
+                    // the same defect class the theme pass fixed elsewhere.
+                    aria-pressed={active}
                     onClick={() => selectTestcaseRange(option.value)}
                     className={`rounded-[8px] border p-3.5 text-left transition-colors ${
                       active

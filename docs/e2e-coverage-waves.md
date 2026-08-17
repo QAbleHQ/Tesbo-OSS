@@ -238,11 +238,11 @@ from the UI denominator by `OUT_OF_SCOPE_PAGES` in the coverage script rather th
 | 2 | Attachments & storage | **API done and green** — UI half still pending | 1 | 25 | 0 |
 | 3 | Custom fields | **done** — API + UI | 3 | 81 | 1 open (bug 11) |
 | 4 | Import / export | **done** — 4 spec-side reds, see §5 | 2 | 37 | 4 spec defects |
-| 5 | Knowledge Base v2 | **done 2026-08-14** — API complete, 9 product fixes | 3 | 107 | 0 |
+| 5 | Knowledge Base v2 | **done 2026-08-17** — API + UI, 10 product fixes | 4 | 127 | 0 |
 | 6 | Reports, analytics, dashboards | **API done** — `reports-ui` claimed, spec not written | 1 | 55 | 0 |
 | 7 | Execution bulk ops, schedules, share links | **done 2026-08-14** — bulk ops implemented; **scheduled runs are not implemented** | 1 | 17 | 3 (missing feature) |
 | 8 | Integrations (Jira, Linear) | **done 2026-08-14** — 15 product fixes; was wrongly marked "blocked" | 1 | 25 | 0 |
-| 9 | Zyra, AI, RAG, MCP | **done 2026-08-14** — 12 product fixes | 1 | 31 | 0 |
+| 9 | Zyra, AI, RAG, MCP | **done 2026-08-17** — API + UI, 13 product fixes | 2 | 52 | 0 |
 | 10 | The tail (notifications, activity, API keys, admin, ingest) | **done 2026-08-14** — 10 product fixes | 1 | 20 | 0 |
 | 11 | Cross-cutting depth (boundaries, pagination, cascades, concurrency) | **partial** — pagination closed across all 7 sites; the rest not started | — | — | — |
 | — | **Screens** (nav, projects list, project dashboard, theme) | **done** | 5 | 187 | 1 |
@@ -256,6 +256,49 @@ the outbound call is ours: authorization, the not-connected path, input validati
 ticket store (which can be seeded directly in Postgres). That turned out to be where all 15 defects
 were. **A dependency on a third party blocks less than it looks like it does; check what happens
 before the call before writing an area off.**
+
+### The Knowledge Base and Zyra UI halves (2026-08-17)
+
+`ui/knowledge-base.spec.ts` (20) and `ui/zyra.spec.ts` (21), on the `kb-ui` and `zyra-ui` tenants.
+These were the two largest screens with API coverage and no browser coverage at all — 138 API tests
+between them, and nothing driving the pages a user actually touches.
+
+**Two product fixes, both found by the tests:**
+
+1. **The KB delete confirmation was decoupled from reality in both directions.** The folder tree
+   claimed "This folder contains documents/files" unconditionally, so emptying a folder and deleting
+   it still warned about contents that were not there; the item table's row menu said only "it will
+   be moved to trash", so deleting a *full* folder never mentioned that everything inside went with
+   it. Both paths now call one `confirmFolderDelete()` that asks the API what is in the folder, and
+   falls back to the cautious wording if the lookup fails. Verified in both directions by reverting
+   the fix and watching KBU-10 and KBU-10b fail.
+2. **Zyra's "test cases per task" conveyed its selection with colour alone** — no `aria-pressed`,
+   no text — so nothing non-visual could tell which of the four was chosen. One attribute; the same
+   defect class the theme pass fixed for contrast.
+
+Findings worth keeping:
+
+- **The KB page has no role gate.** Unlike the custom fields settings screen (`canManage` from
+  project membership), it renders every control for everybody and lets the API refuse. That is
+  correct here — any project member may write to the knowledge base — but it means the refusal path
+  belongs to the account with *no project access*, not to a `qa_engineer`.
+- **There is no trash UI.** Delete soft-deletes, the restore endpoints exist and are owner-or-manager
+  gated, and nothing in the app can reach them. KBU-24 pins the gap: the row is gone from the
+  screen, no restore affordance exists anywhere, and `PATCH .../restore` still works.
+- **Creating a document navigates into it** rather than returning to the table — worth knowing
+  before asserting on a row that will never appear.
+- **Zyra's settings live on `projects.settings.zyraAgent`, not in a table of their own.** A
+  capability switched off by one test stays off for the next test *and the next run*. The teardown
+  drops the key (`settings - 'zyraAgent'`) to restore defaults; without that the three settings
+  tests fail on state left by their own previous run, which reads exactly like a product bug.
+- **`agent_name` must be `"Zyra the Test Generator"`** when seeding `ai_generation_requests`. The
+  board filters on it, so a row with any other value is invisible on the board while still reachable
+  by id — which looks like a UI bug and is not.
+- **A completed Zyra task is just a row**, and `drafts` is `generated_payload` verbatim. That is what
+  makes the whole review flow — select, save into a suite, delete, close — testable with no AI
+  provider at all. The generation call itself still needs `utils/fake-ai-server.ts`.
+- The Agents landing card **opens a modal**, it does not navigate; the modal carries the links to
+  the chat and the board.
 
 ### Wave 0 — what exists and what still doesn't
 
