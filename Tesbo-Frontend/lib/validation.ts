@@ -111,6 +111,19 @@ export function validateKnowledgeDocumentTitle(title: string): string | null {
   return null;
 }
 
+// Mirrors Tesbo-Backend-Nest/src/legacy/legacy.service.ts (LegacyService.KB_FOLDER_NAME_MAX_LENGTH,
+// enforced in createKnowledgeFolder / updateKnowledgeFolder). A product-level cap, tighter than the
+// knowledge_folders.name VARCHAR(255) column — folder names render in narrow tree/breadcrumb UI.
+export const KB_FOLDER_NAME_MAX_LENGTH = 50;
+
+/** Validates a knowledge base folder name. Returns an error message, or null if valid. */
+export function validateKnowledgeFolderName(name: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return "Folder name is required";
+  if (trimmed.length > KB_FOLDER_NAME_MAX_LENGTH) return `Folder name must be at most ${KB_FOLDER_NAME_MAX_LENGTH} characters`;
+  return null;
+}
+
 /**
  * localStorage key marking a document as created from the "Blank document" template, so the
  * editor can require both a title and content instead of the usual title-or-content rule.
