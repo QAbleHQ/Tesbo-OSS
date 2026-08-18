@@ -1010,6 +1010,10 @@ export function getMcpUrl(projectId: string): string {
 }
 
 // Suites
+
+/** Sentinel `suiteId` filter value meaning "test cases with no suite assigned". Matches the backend's UNASSIGNED_SUITE_ID. */
+export const UNASSIGNED_SUITE_ID = "none";
+
 export interface SuiteNode {
   id: string;
   parentId: string | null;
