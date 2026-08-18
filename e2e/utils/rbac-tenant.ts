@@ -74,7 +74,12 @@ export type RbacTenantKind =
   // The already-accepted invite → "Sign in" entry path into /login. Needs an invitation it can
   // actually redeem, and api/invitations.spec.ts clears its own tenant's pending invites in
   // beforeEach — sharing "invites" would delete this suite's token out from under it mid-test.
-  | "invite-signin";
+  | "invite-signin"
+  // The activity / audit feed. Its assertions are about WHICH events exist and in what order, so any
+  // other spec acting in the same project inserts events into the middle of them. The workspace-wide
+  // feed is also owner-only and rolls up every project in the workspace, which makes a shared
+  // workspace unusable here for the same reason.
+  | "activity";
 
 /** The three roles legacy.service.ts's normalizeRole() collapses every stored role into. */
 export type RbacRole = "owner" | "manager" | "qa_engineer";

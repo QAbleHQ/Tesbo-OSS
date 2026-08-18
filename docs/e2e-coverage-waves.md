@@ -935,7 +935,7 @@ BetterBugs session behind it, turned into specs. Source of the requirement is th
 description in every case — the Basecamp card title is often looser than the report (card 3 says
 "Internal Server Error while creating account"; the session says **workspace**, on `/onboarding`).
 
-**52 tests across 8 files.** Suite total 972 → **1024 tests in 54 files**. Landed on `BugFixes` after
+**69 tests across 9 files.** Suite total 972 → **1041 tests in 55 files**. Landed on `BugFixes` after
 merging `E2ETest` into it.
 
 > **Not yet executed.** These specs typecheck and enumerate (`--list`), and the counts above are
@@ -960,11 +960,12 @@ merging `E2ETest` into it.
 | Search clear button (6a7c1f86) | `TCR-05` | same | **RED** — no clear control on this screen (the KB screen has one) |
 | Unselect all Columns (6a7c217f) | `TCR-06..07` | same | **RED** — `toggleColumnVisible` has no locked-column concept |
 | Loading error after accepting invite (6a82d9a3) | 2 tests in "login reached from an already-accepted invite" | `ui/login-redirect.spec.ts` | green — root cause already fixed and covered; these add the entry path |
+| Activity data not displayed correctly (6a7c763c) | `ACT-A-01..17` | `api/activity.spec.ts` (new) | **ACT-A-02 and ACT-A-11 predicted RED** |
 
 ### New tenant kinds
 
-`account-ui`, `repo-ui`, `invite-signin` — added to `RbacTenantKind`. Each exists for a reason worth
-keeping:
+`account-ui`, `repo-ui`, `invite-signin`, `activity` — added to `RbacTenantKind`. Each exists for a
+reason worth keeping:
 
 - **`account-ui`** — every test in that file changes a real password. Sharing an account would leave
   the next spec (and `global-setup` on the following run) authenticating with a password that no
@@ -974,6 +975,9 @@ keeping:
   spec creating or deleting a case in the same project moves them mid-assertion.
 - **`invite-signin`** — needs a redeemable invitation, and `api/invitations.spec.ts` clears its
   tenant's pending invites in `beforeEach`, so borrowing `invites` would delete the token mid-test.
+- **`activity`** — the assertions are about which events exist and in what order, so any other spec
+  acting in the same project inserts events into the middle of them. The workspace rollup is
+  owner-only and spans every project in the workspace, which rules out sharing one too.
 
 ### Findings worth keeping
 
@@ -996,6 +1000,21 @@ keeping:
   guarded every sibling route. The merge put an unauthenticated destructive route next to nine guarded
   ones. Fixed in the merge commit with the standard two lines plus `isUuid` filtering, matching
   `addCycleTestCases`.
+- **The activity feed shows a person's action as "System".** `activityEventsSql` UNIONs `audit_logs`
+  (real actor) with rows SYNTHESIZED from the base tables, and every synthetic branch selects
+  `NULL::uuid AS actor_id, NULL AS actor_name` except plan/cycle/bug-*created*. So suite created and
+  suite updated have no actor ever, plan-updated and cycle-updated have none, and bug-updated is
+  attributed to `reported_by` — whoever FILED the bug, not whoever changed it. The UI prints
+  `actorName || actorEmail || "System"`, so all of those render as **System**. That is the whole of
+  "Activity data is not displayed correctly", and the suite half is **downstream of §3 bug 1**:
+  `createSuite(projectId, body)` takes no `userId` at all, so there is no actor to record even in
+  principle. Fixing bug 1 is a prerequisite for `ACT-A-02`, which makes bug 1 worth more than its own
+  entry suggests — it is two reported defects, not one.
+- **The "audit log" forgets.** `deleteSuite` and `deleteCycle` are HARD deletes and the synthetic rows
+  read from the live row, so deleting an entity retroactively erases every trace it ever existed —
+  while the page calls itself "a full audit log of all actions taken across this project". `ACT-A-11`
+  states the expectation; whether the fix is real audit rows on create/update/delete or a softer
+  delete is a product decision, but the present behaviour cannot be what was intended.
 - **Two counters disagreeing is the shape of 6a7c17a8.** The repository renders its numbers from
   `repoStats` (one fetch) and the suite tree from another, so `TCR-04` asserts the tree specifically
   rather than trusting that the stat cards standing in for it.
