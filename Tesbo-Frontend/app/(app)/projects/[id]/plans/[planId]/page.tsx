@@ -52,6 +52,7 @@ import { Button, StatusChip, StatusBadge, PriorityBadge, Input, Select, type Tes
 import Modal from "@/components/ui/Modal";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import { planStatus, formatLastRun, OwnerAvatar, PlanStatusBadge } from "@/components/testplans/PlanCard";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 const PANEL_STORAGE_KEY = "tesbo_plan_switcher_panel";
 
@@ -228,7 +229,7 @@ export default function PlanDetailPage() {
   }, [planId, projectId, router]);
 
   useEffect(() => {
-    const saved = localStorage.getItem(PANEL_STORAGE_KEY);
+    const saved = readStoredValue(PANEL_STORAGE_KEY);
     if (saved === "closed") setPlanPanelOpen(false);
     authMe().then((me) => {
       if (!me) {
@@ -242,7 +243,7 @@ export default function PlanDetailPage() {
   function togglePlanPanel() {
     setPlanPanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem(PANEL_STORAGE_KEY, next ? "open" : "closed");
+      writeStoredValue(PANEL_STORAGE_KEY, next ? "open" : "closed");
       return next;
     });
   }
@@ -354,7 +355,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
@@ -364,12 +365,12 @@ export default function PlanDetailPage() {
               <button
                 type="button"
                 onClick={() => router.push(`/projects/${projectId}/plans`)}
-                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
               >
                 Test plans
               </button>
               <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
-              <span className="truncate font-medium text-[var(--brand-primary)]">{planName}</span>
+              <span className="truncate font-medium text-[var(--accent-light)]">{planName}</span>
             </nav>,
             topBarStartEl,
           )}
@@ -389,7 +390,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={handleDelete}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error)]"
+                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
                   >
                     <IconTrash size={13} stroke={1.75} />
                     Delete
@@ -458,9 +459,9 @@ export default function PlanDetailPage() {
             <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${planPanelOpen ? "justify-between" : "justify-center"}`}>
               {planPanelOpen && (
                 <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                   Plans
-                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                     {allPlans.length}
                   </span>
                 </p>
@@ -471,7 +472,7 @@ export default function PlanDetailPage() {
                     type="button"
                     title="New test plan"
                     onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={14} stroke={2.5} />
                   </button>
@@ -514,7 +515,7 @@ export default function PlanDetailPage() {
                       <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
                         {p.name}
                       </span>
-                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                         {p.runCount}
                       </span>
                     </button>
@@ -524,7 +525,7 @@ export default function PlanDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                 >
                   <IconPlus size={13} stroke={1.75} />
                   New test plan
@@ -609,7 +610,7 @@ export default function PlanDetailPage() {
                       </div>
                       <div>
                         <label className="mb-1 block text-xs font-medium text-[var(--muted)]">
-                          Environment <span className="text-[var(--error)]">*</span>
+                          Environment <span className="text-[var(--error-foreground)]">*</span>
                         </label>
                         <Select value={selectedEnvironment} onChange={(e) => setSelectedEnvironment(e.target.value)} required>
                           <option value="">Select environment</option>
@@ -679,7 +680,7 @@ export default function PlanDetailPage() {
                             <div className="flex items-start justify-between gap-3">
                               <Link href={`/projects/${projectId}/cycles/${run.id}`} className="group min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <h4 className="truncate text-[14px] font-semibold text-[var(--foreground)] transition-colors group-hover:text-[var(--brand-primary)]">{run.name}</h4>
+                                  <h4 className="truncate text-[14px] font-semibold text-[var(--foreground)] transition-colors group-hover:text-[var(--accent-light)]">{run.name}</h4>
                                   <StatusChip tone={runStatusToTone(run.status)}>{run.status}</StatusChip>
                                 </div>
                                 <div className="mt-1 flex flex-wrap items-center gap-3 text-[12px] text-[var(--muted)]">
@@ -697,7 +698,7 @@ export default function PlanDetailPage() {
                                 <button
                                   onClick={() => handleDissociate(run.id)}
                                   title="Unlink from plan"
-                                  className="rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error)]"
+                                  className="rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error-foreground)]"
                                 >
                                   <IconX size={15} stroke={1.75} />
                                 </button>
@@ -764,7 +765,7 @@ export default function PlanDetailPage() {
                                     onClick={() => handleRemoveItem(item.id)}
                                     disabled={removingItemId === item.id}
                                     title="Remove from plan"
-                                    className="rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error)] disabled:opacity-50"
+                                    className="rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error-foreground)] disabled:opacity-50"
                                   >
                                     <IconX size={14} stroke={1.75} />
                                   </button>

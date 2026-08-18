@@ -148,7 +148,7 @@ export default function DashboardPage() {
                 <p className="text-sm text-[var(--muted)]">
                   Total executions across all projects: <strong>{totalExec}</strong>
                 </p>
-                <Link href="/projects" className="mt-1 inline-block text-sm text-[var(--brand-primary)] hover:underline">
+                <Link href="/projects" className="mt-1 inline-block text-sm text-[var(--accent-light)] hover:underline">
                   View projects →
                 </Link>
               </div>

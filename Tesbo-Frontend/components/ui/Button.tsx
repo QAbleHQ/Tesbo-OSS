@@ -15,10 +15,12 @@ const variantClasses: Record<ButtonVariant, string> = {
   ghost:
     "border-0 bg-transparent text-[var(--ink-400)] hover:bg-[var(--ink-100)] hover:text-[var(--ink-600)]",
   // Destructive (danger and destructive are identical — destructive kept for backward compat)
+  // Themed, not the literal #FDEAEA these carried: that pale red stayed put in dark mode while the
+  // label followed the theme, leaving the two a shade apart from each other.
   danger:
-    "border border-[#F09595] bg-[#FDEAEA] text-[var(--status-fail-text)] hover:bg-[#FCCFCF] active:opacity-90",
+    "border border-[var(--error-border)] bg-[var(--error-soft)] text-[var(--status-fail-text)] hover:bg-[color-mix(in_oklab,var(--error-soft)_82%,var(--error))] active:opacity-90",
   destructive:
-    "border border-[#F09595] bg-[#FDEAEA] text-[var(--status-fail-text)] hover:bg-[#FCCFCF] active:opacity-90",
+    "border border-[var(--error-border)] bg-[var(--error-soft)] text-[var(--status-fail-text)] hover:bg-[color-mix(in_oklab,var(--error-soft)_82%,var(--error))] active:opacity-90",
   // AI actions
   ai: "border border-[var(--ai-border)] bg-[var(--ai-soft)] text-[var(--ai-primary)] hover:bg-[var(--ai-surface)]",
   // Confidence

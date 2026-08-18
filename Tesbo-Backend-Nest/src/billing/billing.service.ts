@@ -184,12 +184,24 @@ export class BillingService {
    * down. Worst case the caller sees the un-healed state and the next load tries again.
    */
   private async reconcileDriftedPlan(organizationId: string, userId: string): Promise<void> {
-    const res = await this.db.query<{ plan: string; stripe_customer_id: string | null; stripe_subscription_id: string | null }>(
-      "SELECT plan, stripe_customer_id, stripe_subscription_id FROM organizations WHERE id = $1",
+    const res = await this.db.query<{
+      plan: string;
+      stripe_customer_id: string | null;
+      stripe_subscription_id: string | null;
+      plan_source: string | null;
+    }>(
+      "SELECT plan, stripe_customer_id, stripe_subscription_id, plan_source FROM organizations WHERE id = $1",
       [organizationId]
     );
     const row = res.rows[0];
     if (!row) return;
+
+    // Nothing to reconcile against: this workspace's plan was set by an operator, so a disagreement
+    // with Stripe is the intended state rather than drift. Reconciling would be actively wrong here
+    // — a comped ex-customer still carries the id of the cancelled subscription that churned them,
+    // and "over-provisioned" below would read that as Pro to be taken away. The override is cleared
+    // from the admin panel, or by the customer subscribing for real (see applySubscriptionState).
+    if (row.plan_source === "admin") return;
 
     const mayBeUnderProvisioned = row.plan === "launch" && !!row.stripe_customer_id && !row.stripe_subscription_id;
     const mayBeOverProvisioned = row.plan === "pro" && !!row.stripe_subscription_id;
@@ -412,7 +424,22 @@ export class BillingService {
         if (organizationId && subscriptionId) {
           const before = await this.db.query<{ plan: string }>("SELECT plan FROM organizations WHERE id = $1", [organizationId]);
           await this.db.query(
-            `UPDATE organizations SET plan = 'pro', stripe_subscription_id = $1, updated_at = now() WHERE id = $2`,
+            `UPDATE organizations
+                SET plan = 'pro',
+                    stripe_subscription_id = $1,
+                    -- The customer has paid, so Stripe owns this plan from now on and any
+                    -- hand-set grant is retired. Done here as well as in applySubscriptionState
+                    -- because that runs off customer.subscription.created, and a workspace left
+                    -- marked 'admin' by a webhook that never arrives is one this service would
+                    -- then permanently decline to reconcile — the exact failure the reconcile
+                    -- path exists to catch.
+                    plan_source = 'stripe',
+                    plan_override_by = NULL,
+                    plan_override_at = NULL,
+                    plan_override_reason = NULL,
+                    plan_override_expires_at = NULL,
+                    updated_at = now()
+              WHERE id = $2`,
             [subscriptionId, organizationId]
           );
           /*
@@ -886,12 +913,33 @@ export class BillingService {
       payment_failed_at: string | null;
       grace_locked_notified_at: string | null;
       cancel_at_period_end: boolean | null;
+      plan_source: string | null;
     }>(
-      `SELECT plan, plan_grace_ends_at, payment_failed_at, grace_locked_notified_at, cancel_at_period_end
+      `SELECT plan, plan_grace_ends_at, payment_failed_at, grace_locked_notified_at, cancel_at_period_end,
+              plan_source
          FROM organizations WHERE id = $1`,
       [organizationId]
     );
     const current = before.rows[0];
+
+    /*
+     * A plan an operator set by hand (V76_admin_plan_override.sql) outranks a *dead* subscription,
+     * and loses to a live one.
+     *
+     * The dead case is the one that bites: comping a churned workspace leaves plan = 'pro' next to
+     * the id of their old, cancelled subscription. Any late-delivered customer.subscription.* event
+     * for that corpse would otherwise land here, compute 'launch', and undo the grant — with a
+     * "your plan was downgraded" email to the customer we were trying to win back.
+     *
+     * The live case is not a conflict at all: the customer is paying now, so Stripe becomes the
+     * authority again and the override is cleared below rather than defended.
+     */
+    if (current?.plan_source === "admin" && ENDED_SUBSCRIPTION_STATUSES.has(subscription.status)) {
+      console.warn(
+        `[billing] ignoring ${subscription.status} subscription ${subscription.id} for organization ${organizationId}: its plan was set by an admin and is not Stripe's to change`
+      );
+      return;
+    }
     const wasPro = current?.plan === "pro";
     const droppingToLaunch = wasPro && plan === "launch";
     const wasCancelling = current?.cancel_at_period_end === true;
@@ -934,6 +982,13 @@ export class BillingService {
            plan_grace_ends_at = $8,
            payment_failed_at = $9,
            grace_locked_notified_at = $10,
+           -- Stripe is speaking for a live subscription, so it is the authority again: any
+           -- hand-set plan is stood down rather than left to fight the next webhook.
+           plan_source = 'stripe',
+           plan_override_by = NULL,
+           plan_override_at = NULL,
+           plan_override_reason = NULL,
+           plan_override_expires_at = NULL,
            updated_at = now()
        WHERE id = $11`,
       [

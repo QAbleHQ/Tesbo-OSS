@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022"],
+    // DOM is needed for the code that runs INSIDE page.evaluate() — the theme sweep audits
+    // computed styles in the browser, where document/window/getComputedStyle are real.
+    "lib": ["ES2022", "DOM"],
     "module": "commonjs",
     "moduleResolution": "node",
     "esModuleInterop": true,

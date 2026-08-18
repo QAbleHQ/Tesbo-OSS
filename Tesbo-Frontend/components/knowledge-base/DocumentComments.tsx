@@ -33,7 +33,7 @@ function timeAgo(iso: string): string {
 
 function Avatar({ name }: { name: string }) {
   return (
-    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-[10px] font-semibold text-[var(--brand-primary)]">
+    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-[10px] font-semibold text-[var(--accent-light)]">
       {initials(name)}
     </span>
   );
@@ -163,7 +163,7 @@ export function DocumentComments({
           <IconMessage size={17} stroke={1.75} />
           Comments
           {openCount > 0 && (
-            <span className="rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[11px] font-semibold text-[var(--brand-primary)]">
+            <span className="rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[11px] font-semibold text-[var(--accent-light)]">
               {openCount} open
             </span>
           )}
@@ -180,7 +180,7 @@ export function DocumentComments({
       </div>
 
       {error && (
-        <div className="mb-3 rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-[13px] text-[var(--error)]">{error}</div>
+        <div className="mb-3 rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-[13px] text-[var(--error-foreground)]">{error}</div>
       )}
 
       <div className="mb-5 rounded-[10px] border border-[var(--border)] bg-[var(--surface-secondary)] p-3">
@@ -240,7 +240,7 @@ export function DocumentComments({
                     <span className="text-[13px] font-semibold text-[var(--foreground)]">{thread.authorName}</span>
                     <span className="text-[11px] text-[var(--muted-soft)]">{timeAgo(thread.createdAt)}</span>
                     {thread.isResolved && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--success)]">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--success-foreground)]">
                         <IconCheck size={10} /> Resolved{thread.resolvedByName ? ` by ${thread.resolvedByName}` : ""}
                       </span>
                     )}
@@ -270,7 +270,7 @@ export function DocumentComments({
                         <button
                           type="button"
                           onClick={() => remove(thread, true)}
-                          className="inline-flex items-center gap-1 text-[12px] text-[var(--muted)] hover:text-[var(--error)]"
+                          className="inline-flex items-center gap-1 text-[12px] text-[var(--muted)] hover:text-[var(--error-foreground)]"
                         >
                           <IconTrash size={12} /> Delete
                         </button>
@@ -295,7 +295,7 @@ export function DocumentComments({
                           <button
                             type="button"
                             onClick={() => remove(reply, false)}
-                            className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-[var(--error)]"
+                            className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-[var(--error-foreground)]"
                           >
                             <IconTrash size={11} /> Delete
                           </button>

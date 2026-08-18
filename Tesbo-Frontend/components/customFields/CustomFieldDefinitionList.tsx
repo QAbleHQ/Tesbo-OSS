@@ -99,7 +99,7 @@ export default function CustomFieldDefinitionList({
 
   return (
     <>
-      {error && <p className="mb-2 text-sm text-[var(--error)]">{error}</p>}
+      {error && <p className="mb-2 text-sm text-[var(--error-foreground)]">{error}</p>}
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
           <table className="tesbo-table min-w-full text-sm">
@@ -161,7 +161,7 @@ export default function CustomFieldDefinitionList({
                       <div className="flex justify-end gap-2">
                         {!isArchived && (
                           <>
-                            <button type="button" onClick={() => onEdit(definition)} disabled={busy} className="text-[var(--brand-primary)] hover:underline disabled:opacity-50">
+                            <button type="button" onClick={() => onEdit(definition)} disabled={busy} className="text-[var(--accent-light)] hover:underline disabled:opacity-50">
                               Edit
                             </button>
                             <button type="button" onClick={() => toggleActive(definition)} disabled={busy} className="text-[var(--foreground)] hover:underline disabled:opacity-50">
@@ -180,7 +180,7 @@ export default function CustomFieldDefinitionList({
                               setDeleteTarget(definition);
                             }}
                             disabled={busy}
-                            className="text-[var(--error)] hover:underline disabled:opacity-50"
+                            className="text-[var(--error-foreground)] hover:underline disabled:opacity-50"
                           >
                             Delete
                           </button>
@@ -207,7 +207,7 @@ export default function CustomFieldDefinitionList({
           <p className="text-sm text-[var(--muted)]">
             Permanently delete &quot;{deleteTarget?.name}&quot;? This can&apos;t be undone. Fields with recorded values can&apos;t be deleted — archive them instead.
           </p>
-          {deleteError && <p className="text-sm text-[var(--error)]">{deleteError}</p>}
+          {deleteError && <p className="text-sm text-[var(--error-foreground)]">{deleteError}</p>}
           <div className="flex justify-end gap-2">
             <Button type="button" variant="secondary" onClick={() => setDeleteTarget(null)}>
               Cancel

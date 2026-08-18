@@ -104,7 +104,7 @@ export default function CustomFieldOptionsEditor({
               type="button"
               onClick={() => removeNew(index)}
               disabled={disabled}
-              className="shrink-0 text-[var(--error)] hover:opacity-80 disabled:opacity-30"
+              className="shrink-0 text-[var(--error-foreground)] hover:opacity-80 disabled:opacity-30"
               aria-label="Remove option"
             >
               <IconTrash size={16} />

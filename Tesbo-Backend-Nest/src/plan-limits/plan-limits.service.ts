@@ -69,17 +69,81 @@ export class PlanLimitsService {
    * a deadline comparison is exact at the moment it matters. Nothing is ever deleted or archived
    * when the window closes — access is derived from these columns, so resubscribing restores
    * everything with no data to migrate back.
+   *
+   * A plan an operator set by hand (plan_source = 'admin', V76_admin_plan_override.sql) is read the
+   * same way — it is an ordinary value in `plan` — except that a grant carrying an expiry is retired
+   * here the moment it lapses, on the same lazy principle.
    */
   private async getEntitlement(organizationId: string): Promise<Entitlement> {
-    const res = await this.db.query<{ plan: string; plan_grace_ends_at: string | null }>(
-      "SELECT plan, plan_grace_ends_at FROM organizations WHERE id = $1",
+    const res = await this.db.query<{
+      plan: string;
+      plan_grace_ends_at: string | null;
+      plan_source: string | null;
+      plan_override_expires_at: string | null;
+    }>(
+      `SELECT plan, plan_grace_ends_at, plan_source, plan_override_expires_at
+         FROM organizations WHERE id = $1`,
       [organizationId]
     );
     const row = res.rows[0];
-    const plan: Plan = row?.plan === "pro" ? "pro" : "launch";
-    const graceEndsAt = row?.plan_grace_ends_at ?? null;
+    let plan: Plan = row?.plan === "pro" ? "pro" : "launch";
+    let graceEndsAt = row?.plan_grace_ends_at ?? null;
+
+    const overrideLapsed =
+      row?.plan_source === "admin" &&
+      !!row.plan_override_expires_at &&
+      new Date(row.plan_override_expires_at).getTime() <= Date.now();
+
+    if (overrideLapsed) {
+      await this.expireAdminOverride(organizationId, plan);
+      plan = "launch";
+      graceEndsAt = null;
+    }
+
     const inGracePeriod = plan === "launch" && !!graceEndsAt && new Date(graceEndsAt).getTime() > Date.now();
     return { plan, effectivePlan: inGracePeriod ? "pro" : plan, inGracePeriod, graceEndsAt };
+  }
+
+  /**
+   * Retires a hand-granted plan whose end date has passed, handing the workspace back to Stripe.
+   *
+   * No grace window is opened. plan_grace_ends_at exists to soften a *loss* the customer did not
+   * choose — a failed card, a cancellation processed mid-cycle — by keeping Pro-sized limits for
+   * PLAN_GRACE_DAYS. A comp reaching the end date it was given is not that: the date was the deal,
+   * and extending it by another 30 days silently would make every expiry a two-month one.
+   *
+   * The write is guarded on plan_source still being 'admin' so that a workspace which subscribed
+   * for real in the meantime — checkout resets plan_source to 'stripe' — cannot be knocked off Pro
+   * by a stale grant expiring underneath it.
+   */
+  private async expireAdminOverride(organizationId: string, planAtExpiry: Plan): Promise<void> {
+    const res = await this.db.query(
+      `UPDATE organizations
+          SET plan = 'launch',
+              plan_source = 'stripe',
+              plan_override_by = NULL,
+              plan_override_at = NULL,
+              plan_override_reason = NULL,
+              plan_override_expires_at = NULL,
+              updated_at = now()
+        WHERE id = $1 AND plan_source = 'admin'
+          AND plan_override_expires_at IS NOT NULL
+          AND plan_override_expires_at <= now()`,
+      [organizationId]
+    );
+    if (!res.rowCount) return;
+
+    await this.db
+      .query(
+        `INSERT INTO audit_logs (organization_id, actor_id, action, entity_type, entity_id, entity_name, diff)
+         VALUES ($1, NULL, 'billing_downgraded', 'billing', NULL, $2, $3::jsonb)`,
+        [
+          organizationId,
+          "Moved to Launch — granted plan reached its end date",
+          JSON.stringify({ from: planAtExpiry, to: "launch", source: "admin_override_expired" })
+        ]
+      )
+      .catch(() => undefined);
   }
 
   private async getProjectCount(organizationId: string): Promise<number> {

@@ -134,10 +134,10 @@ export default function AdminsTab() {
             </button>
           </div>
           {addError && (
-            <p className="mt-2 text-[13px] text-[var(--error)]">{addError}</p>
+            <p className="mt-2 text-[13px] text-[var(--error-foreground)]">{addError}</p>
           )}
           {addSuccess && (
-            <p className="mt-2 text-[13px] text-[var(--success)]">
+            <p className="mt-2 text-[13px] text-[var(--success-foreground)]">
               {addSuccess}
             </p>
           )}
@@ -176,7 +176,7 @@ export default function AdminsTab() {
                     className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${
                       admin.role === "owner"
                         ? "bg-[var(--ai-soft)] text-[var(--ai-primary)]"
-                        : "bg-[var(--brand-soft)] text-[var(--brand-primary)]"
+                        : "bg-[var(--brand-soft)] text-[var(--accent-light)]"
                     }`}
                   >
                     {admin.role}
@@ -209,7 +209,7 @@ export default function AdminsTab() {
                   type="button"
                   onClick={() => handleRemove(admin.id)}
                   disabled={removingId === admin.id}
-                  className="rounded-xl border border-[var(--error)]/30 px-3 py-1.5 text-[13px] font-semibold text-[var(--error)] hover:bg-[var(--error-soft)] transition-colors disabled:opacity-60"
+                  className="rounded-xl border border-[var(--error)]/30 px-3 py-1.5 text-[13px] font-semibold text-[var(--error-foreground)] hover:bg-[var(--error-soft)] transition-colors disabled:opacity-60"
                 >
                   {removingId === admin.id ? "Removing..." : "Remove"}
                 </button>

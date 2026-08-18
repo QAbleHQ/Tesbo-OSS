@@ -1,0 +1,417 @@
+import { expect, test, type APIRequestContext, type BrowserContext, type Locator, type Page } from "@playwright/test";
+import { resetToLaunch, setProPlan } from "../utils/billing-db";
+import { env } from "../utils/env";
+import { exec, literal, scalar } from "../utils/psql";
+import {
+  loginAs,
+  provisionRbacTenant,
+  rbacSuiteSkipReason,
+  writeStorageState,
+  type RbacTenant,
+} from "../utils/rbac-tenant";
+
+/*
+ * The custom fields screens: the per-project settings editor, and the two places a field shows up
+ * once it exists — the test case panel and the list's filter popover.
+ *
+ * What makes these worth a browser rather than more API tests: the API decides what is *allowed*,
+ * the screen decides what is *offered*. A QA engineer shown an "Add custom field" button that 403s,
+ * a Delete button on a field that holds values, or an archived field still offering "Deactivate"
+ * are all bugs api/custom-fields.spec.ts cannot see.
+ *
+ * Runs against its own disposable workspace ("custom-fields-ui"), which provisionRbacTenant puts on
+ * Pro. One test downgrades it to Launch to check the upsell and puts it straight back.
+ */
+
+const CREATE_MODAL_TITLE = "Add custom field";
+
+test.describe("custom fields (UI)", () => {
+  let tenant: RbacTenant | null = null;
+  let api: APIRequestContext;
+  const states = new Map<string, string>();
+  const contexts: BrowserContext[] = [];
+
+  test.beforeAll(async () => {
+    tenant = await provisionRbacTenant("custom-fields-ui");
+    if (!tenant) return;
+    api = await loginAs(tenant.owner);
+    states.set("owner", await writeStorageState(tenant.owner, "custom-fields-ui-owner"));
+    states.set("qa", await writeStorageState(tenant.qa, "custom-fields-ui-qa"));
+    purgeFixtures(tenant);
+  });
+
+  test.afterAll(async () => {
+    if (tenant) {
+      purgeFixtures(tenant);
+      setProPlan(tenant.organizationId);
+    }
+    if (api) await api.dispose();
+    await Promise.all(contexts.map((ctx) => ctx.close()));
+  });
+
+  test.beforeEach(() => {
+    const reason = rbacSuiteSkipReason(tenant);
+    test.skip(reason !== null, reason ?? "");
+  });
+
+  test.afterEach(() => {
+    if (tenant) purgeFixtures(tenant);
+  });
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  function purgeFixtures(t: RbacTenant): void {
+    const projects = `${literal(t.mainProjectId)}, ${literal(t.secondProjectId)}`;
+    exec(`DELETE FROM custom_field_definitions WHERE project_id IN (${projects});`);
+    exec(`DELETE FROM testcases WHERE project_id IN (${projects});`);
+  }
+
+  /** A page signed in as one of the fixture roles. baseURL isn't inherited by newContext(). */
+  async function pageAs(browser: import("@playwright/test").Browser, label: string): Promise<Page> {
+    const context = await browser.newContext({ baseURL: env.webBaseUrl, storageState: states.get(label)! });
+    contexts.push(context);
+    return context.newPage();
+  }
+
+  function settingsUrl(): string {
+    return `/projects/${tenant!.mainProjectId}/settings/custom-fields`;
+  }
+
+  function testcasesUrl(): string {
+    return `/projects/${tenant!.mainProjectId}/testcases`;
+  }
+
+  function definitionsUrl(): string {
+    return `/api/projects/${tenant!.mainProjectId}/custom-fields/definitions`;
+  }
+
+  function fieldName(label: string): string {
+    return `E2E ${label} ${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  }
+
+  async function defineField(body: Record<string, unknown>): Promise<any> {
+    const res = await api.post(definitionsUrl(), {
+      data: { name: fieldName(String(body.fieldType ?? "field")), ...body },
+      failOnStatusCode: false,
+    });
+    expect(res.status(), await res.text()).toBe(201);
+    return res.json();
+  }
+
+  async function listFields(): Promise<any[]> {
+    const res = await api.get(definitionsUrl());
+    expect(res.ok(), await res.text()).toBeTruthy();
+    return res.json();
+  }
+
+  async function seedTestCase(data: Record<string, unknown>): Promise<any> {
+    const res = await api.post(`/api/projects/${tenant!.mainProjectId}/testcases`, {
+      data: { title: `E2E CF UI Case ${Date.now()}${Math.floor(Math.random() * 1000)}`, ...data },
+      failOnStatusCode: false,
+    });
+    expect(res.status(), await res.text()).toBe(201);
+    return res.json();
+  }
+
+  function storedValue(definitionId: string, testcaseId: string): string {
+    return scalar(
+      `SELECT value::text FROM custom_field_values WHERE definition_id = ${literal(definitionId)} ` +
+        `AND testcase_id = ${literal(testcaseId)};`,
+    );
+  }
+
+  /*
+   * The definition editor renders through components/ui/Modal, which portals to <body> and marks
+   * both its backdrop and its panel role="presentation" — there is no role="dialog" to target. The
+   * panel is the innermost of the two, hence .last().
+   */
+  function modal(page: Page, title: string): Locator {
+    return page
+      .locator("div[role='presentation']", { has: page.getByRole("heading", { name: title, exact: true }) })
+      .last();
+  }
+
+  /*
+   * Field labels in this form are plain <label> elements with no htmlFor, so getByLabel can't reach
+   * the control. Every Field renders <label> immediately followed by its input, so the adjacent
+   * sibling selector is the stable way in.
+   */
+  function control(scope: Locator, label: string, tag: "input" | "select" | "textarea" = "input"): Locator {
+    return scope.locator(`label:text-is("${label}") + ${tag}`);
+  }
+
+  function checkbox(scope: Locator, label: string): Locator {
+    return scope.locator("label").filter({ hasText: label }).locator("input[type='checkbox']");
+  }
+
+  function definitionRow(page: Page, name: string): Locator {
+    return page.locator("tbody tr").filter({ hasText: name });
+  }
+
+  // ─── The settings screen ───────────────────────────────────────────────────
+
+  test("an owner can add a custom field and see it listed", async ({ browser }) => {
+    const page = await pageAs(browser, "owner");
+    await page.goto(settingsUrl());
+    await expect(page.getByRole("heading", { name: "Custom Fields" })).toBeVisible();
+
+    await page.getByRole("button", { name: "Add custom field" }).click();
+    const form = modal(page, CREATE_MODAL_TITLE);
+    const name = fieldName("UI Text");
+    await control(form, "Field name").fill(name);
+    await control(form, "Description / helper text", "textarea").fill("Where the risk sits");
+    await control(form, "Field type", "select").selectOption("number");
+    await control(form, "Unit").fill("hours");
+    await checkbox(form, "Required").check();
+    await form.getByRole("button", { name: "Create field" }).click();
+
+    await expect(form).toBeHidden();
+    const row = definitionRow(page, name);
+    await expect(row).toContainText("Number");
+    await expect(row).toContainText("Required");
+    await expect(row).toContainText("Active");
+    await expect(row).toContainText("Where the risk sits");
+
+    // The screen's own summary is not the proof — the persisted definition is.
+    const [persisted] = await listFields();
+    expect(persisted).toMatchObject({ name, fieldType: "number", required: true, status: "active" });
+    expect(persisted.config.unit).toBe("hours");
+  });
+
+  test("a select field can be built with options from the modal", async ({ browser }) => {
+    const page = await pageAs(browser, "owner");
+    await page.goto(settingsUrl());
+
+    await page.getByRole("button", { name: "Add custom field" }).click();
+    const form = modal(page, CREATE_MODAL_TITLE);
+    const name = fieldName("UI Select");
+    await control(form, "Field name").fill(name);
+    await control(form, "Field type", "select").selectOption("single_select");
+
+    for (const label of ["Low", "High"]) {
+      await form.getByPlaceholder("Add an option").fill(label);
+      await form.getByRole("button", { name: "Add", exact: true }).click();
+    }
+    await form.getByRole("button", { name: "Create field" }).click();
+    await expect(form).toBeHidden();
+
+    const [persisted] = await listFields();
+    expect(persisted.config.options.map((o: any) => o.label)).toEqual(["Low", "High"]);
+    await expect(definitionRow(page, name)).toContainText("Single-Select Dropdown");
+  });
+
+  test("a name the server refuses is reported in the form, and nothing is created", async ({ browser }) => {
+    const existing = await defineField({ fieldType: "text" });
+
+    const page = await pageAs(browser, "owner");
+    await page.goto(settingsUrl());
+    await page.getByRole("button", { name: "Add custom field" }).click();
+
+    const form = modal(page, CREATE_MODAL_TITLE);
+    await control(form, "Field name").fill(existing.name.toUpperCase());
+    await form.getByRole("button", { name: "Create field" }).click();
+
+    await expect(form.getByRole("alert")).toContainText("already exists");
+    await expect(form).toBeVisible();
+    expect(await listFields()).toHaveLength(1);
+  });
+
+  test("the order arrows move a field, and the new order is what the project keeps", async ({ browser }) => {
+    const first = await defineField({ fieldType: "text" });
+    const second = await defineField({ fieldType: "text" });
+
+    const page = await pageAs(browser, "owner");
+    await page.goto(settingsUrl());
+    await expect(definitionRow(page, first.name)).toBeVisible();
+
+    await definitionRow(page, second.name).getByRole("button", { name: "Move up" }).click();
+
+    await expect(page.locator("tbody tr").first()).toContainText(second.name);
+    await expect
+      .poll(async () => (await listFields()).map((d) => d.id))
+      .toEqual([second.id, first.id]);
+  });
+
+  test("a field can be deactivated and reactivated from the list", async ({ browser }) => {
+    const field = await defineField({ fieldType: "text" });
+
+    const page = await pageAs(browser, "owner");
+    await page.goto(settingsUrl());
+    const row = definitionRow(page, field.name);
+
+    await row.getByRole("button", { name: "Deactivate" }).click();
+    await expect(row).toContainText("Inactive");
+    await expect.poll(async () => (await listFields())[0].status).toBe("inactive");
+
+    await row.getByRole("button", { name: "Activate" }).click();
+    await expect(row).toContainText("Active");
+    await expect.poll(async () => (await listFields())[0].status).toBe("active");
+  });
+
+  test("archiving asks first and leaves the field read-only", async ({ browser }) => {
+    const field = await defineField({ fieldType: "text" });
+
+    const page = await pageAs(browser, "owner");
+    // Archiving goes through window.confirm, which Playwright dismisses by default — an unhandled
+    // dialog would silently make this a no-op test.
+    page.on("dialog", (dialog) => {
+      expect(dialog.message()).toContain("Archived fields become read-only");
+      return dialog.accept();
+    });
+    await page.goto(settingsUrl());
+
+    const row = definitionRow(page, field.name);
+    await row.getByRole("button", { name: "Archive" }).click();
+
+    await expect(row).toContainText("Archived");
+    // An archived field offers none of the edit affordances, because the API refuses all of them.
+    await expect(row.getByRole("button", { name: "Edit" })).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Deactivate" })).toHaveCount(0);
+    await expect(row.getByRole("button", { name: "Archive" })).toHaveCount(0);
+    await expect.poll(async () => (await listFields())[0].status).toBe("archived");
+  });
+
+  test("an unused field can be deleted, and a field in use is not offered for deletion", async ({ browser }) => {
+    const unused = await defineField({ fieldType: "text" });
+    const used = await defineField({ fieldType: "text" });
+    await seedTestCase({ customFieldValues: { [used.id]: "recorded" } });
+
+    const page = await pageAs(browser, "owner");
+    await page.goto(settingsUrl());
+
+    const usedRow = definitionRow(page, used.name);
+    await expect(usedRow).toContainText("Yes");
+    await expect(usedRow.getByRole("button", { name: "Delete" })).toHaveCount(0);
+
+    await definitionRow(page, unused.name).getByRole("button", { name: "Delete" }).click();
+    const confirm = modal(page, "Delete custom field");
+    await expect(confirm).toContainText(unused.name);
+    await confirm.getByRole("button", { name: "Delete permanently" }).click();
+
+    await expect(definitionRow(page, unused.name)).toHaveCount(0);
+    await expect.poll(async () => (await listFields()).map((d) => d.id)).toEqual([used.id]);
+  });
+
+  test("a QA engineer is told the screen isn't theirs to use", async ({ browser }) => {
+    await defineField({ fieldType: "text" });
+
+    const page = await pageAs(browser, "qa");
+    await page.goto(settingsUrl());
+
+    await expect(page.getByText("Only project owners and managers can manage custom fields.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Add custom field" })).toHaveCount(0);
+  });
+
+  test("on the Launch plan the screen sells the upgrade instead of offering the editor", async ({ browser }) => {
+    resetToLaunch(tenant!.organizationId);
+    try {
+      const page = await pageAs(browser, "owner");
+      await page.goto(settingsUrl());
+
+      await expect(page.getByText("Custom fields are a Pro plan feature")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Add custom field" })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "Upgrade to Pro" })).toBeVisible();
+    } finally {
+      setProPlan(tenant!.organizationId);
+    }
+  });
+
+  test("a workspace that downgrades keeps seeing the fields it already has, with a warning", async ({ browser }) => {
+    const field = await defineField({ fieldType: "text" });
+    resetToLaunch(tenant!.organizationId);
+    try {
+      const page = await pageAs(browser, "owner");
+      await page.goto(settingsUrl());
+
+      await expect(definitionRow(page, field.name)).toBeVisible();
+      await expect(page.getByText("This workspace is on the Launch plan")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Add custom field" })).toBeDisabled();
+    } finally {
+      setProPlan(tenant!.organizationId);
+    }
+  });
+
+  // ─── On the test case panel ────────────────────────────────────────────────
+
+  test("a required custom field is enforced on the create panel and its value is saved", async ({ browser }) => {
+    const placeholder = "e.g. payments";
+    const field = await defineField({ fieldType: "text", required: true, config: { placeholder } });
+
+    const page = await pageAs(browser, "owner");
+    await page.goto(testcasesUrl());
+    await page.getByRole("button", { name: "Add test case" }).first().click();
+
+    const panel = page.locator("aside");
+    const title = `E2E CF UI Case ${Date.now()}`;
+    await panel.getByPlaceholder("Describe what this test case validates").fill(title);
+    await expect(panel.getByText("Custom Fields", { exact: true })).toBeVisible();
+
+    // Saving without the required field must be refused by the screen, not by a 400 the user only
+    // sees as a generic failure.
+    await panel.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(panel.getByText(`${field.name} is required`)).toBeVisible();
+
+    await panel.getByPlaceholder(placeholder).fill("Payments");
+    await panel.getByRole("button", { name: "Create", exact: true }).click();
+    await expect(panel.getByText("Test case created successfully.")).toBeVisible();
+
+    const created = await api
+      .get(`/api/projects/${tenant!.mainProjectId}/testcases`, { params: { search: title } })
+      .then((r) => r.json());
+    expect(created).toHaveLength(1);
+    expect(storedValue(field.id, created[0].id)).toBe('"Payments"');
+  });
+
+  test("an existing test case shows its custom fields on their own tab", async ({ browser }) => {
+    const single = await defineField({
+      fieldType: "single_select",
+      config: { options: [{ label: "Low" }, { label: "High" }] },
+    });
+    const [lowId, highId] = single.config.options.map((o: any) => o.id);
+    const testcase = await seedTestCase({ customFieldValues: { [single.id]: lowId } });
+
+    const page = await pageAs(browser, "owner");
+    await page.goto(testcasesUrl());
+    await page.getByRole("button", { name: testcase.title }).click();
+
+    const panel = page.locator("aside");
+    await panel.getByRole("button", { name: /^Custom Fields/ }).click();
+    // Told apart from the panel's other dropdowns by an option only this field has.
+    const select = panel.locator("select").filter({ has: page.locator("option", { hasText: "High" }) });
+    await expect(select).toHaveValue(lowId);
+
+    await select.selectOption(highId);
+    await panel.getByRole("button", { name: "Save changes" }).click();
+
+    await expect.poll(() => storedValue(single.id, testcase.id)).toBe(`"${highId}"`);
+  });
+
+  // ─── Filtering the list ────────────────────────────────────────────────────
+
+  test("the custom field filter narrows the test case list", async ({ browser }) => {
+    const single = await defineField({
+      fieldType: "single_select",
+      config: { options: [{ label: "Alpha" }, { label: "Beta" }] },
+    });
+    const [alphaId, betaId] = single.config.options.map((o: any) => o.id);
+    const alphaCase = await seedTestCase({ customFieldValues: { [single.id]: alphaId } });
+    const betaCase = await seedTestCase({ customFieldValues: { [single.id]: betaId } });
+
+    const page = await pageAs(browser, "owner");
+    await page.goto(testcasesUrl());
+    await expect(page.getByRole("button", { name: alphaCase.title })).toBeVisible();
+    await expect(page.getByRole("button", { name: betaCase.title })).toBeVisible();
+
+    await page.getByRole("button", { name: "Custom fields" }).click();
+    const popover = page.locator("div").filter({ has: page.getByRole("button", { name: "Add filter" }) }).last();
+    await popover.locator("select").nth(0).selectOption(single.id);
+    await popover.locator("select").nth(1).selectOption("is");
+    await popover.locator("select").nth(2).selectOption(alphaId);
+    await popover.getByRole("button", { name: "Add filter" }).click();
+
+    await expect(page.getByRole("button", { name: betaCase.title })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: alphaCase.title })).toBeVisible();
+    // The trigger carries the count, so an active filter can't be invisible.
+    await expect(page.getByRole("button", { name: "Custom fields" })).toContainText("1");
+  });
+});

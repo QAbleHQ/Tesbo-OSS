@@ -149,7 +149,7 @@ export default function AgentsPage() {
       }
     >
       {error && (
-        <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">{error}</p>
+        <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">{error}</p>
       )}
 
       <div className="mb-4 flex items-center gap-2">
@@ -199,7 +199,7 @@ export default function AgentsPage() {
                 <IconClock size={13} stroke={1.75} />
                 {stats.lastActivityAt ? `Used ${formatRelativeTime(stats.lastActivityAt)}` : "Not used yet"}
               </span>
-              <span className="inline-flex items-center gap-1 text-[12px] font-medium text-[var(--brand-primary)] group-hover:text-[var(--accent-light)]">
+              <span className="inline-flex items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] group-hover:text-[var(--accent-light)]">
                 Open agent
                 <IconArrowRight size={13} stroke={1.75} />
               </span>
@@ -290,26 +290,26 @@ export default function AgentsPage() {
               className="group flex items-center justify-between rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-secondary)] px-4 py-3 transition hover:border-[var(--brand-primary)]"
             >
               <div className="flex items-center gap-3">
-                <IconMessage2Bolt size={20} stroke={1.75} className="text-[var(--brand-primary)]" />
+                <IconMessage2Bolt size={20} stroke={1.75} className="text-[var(--accent-light)]" />
                 <div>
                   <div className="text-[13px] font-medium text-[var(--foreground)]">Agent workspace</div>
                   <div className="text-[12px] text-[var(--muted)]">Chat with {state.agent.name} and manage pending tasks</div>
                 </div>
               </div>
-              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--brand-primary)]" />
+              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--accent-light)]" />
             </Link>
             <Link
               href={`/projects/${projectId}/agents/tasks`}
               className="group flex items-center justify-between rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-secondary)] px-4 py-3 transition hover:border-[var(--brand-primary)]"
             >
               <div className="flex items-center gap-3">
-                <IconClipboardCheck size={20} stroke={1.75} className="text-[var(--brand-primary)]" />
+                <IconClipboardCheck size={20} stroke={1.75} className="text-[var(--accent-light)]" />
                 <div>
                   <div className="text-[13px] font-medium text-[var(--foreground)]">Task board</div>
                   <div className="text-[12px] text-[var(--muted)]">Review and approve generated test cases</div>
                 </div>
               </div>
-              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--brand-primary)]" />
+              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--accent-light)]" />
             </Link>
             <Link
               href={`/projects/${projectId}/agents/zyra/settings`}
@@ -322,7 +322,7 @@ export default function AgentsPage() {
                   <div className="text-[12px] text-[var(--muted)]">Configure sources, memory, and behaviour</div>
                 </div>
               </div>
-              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--brand-primary)]" />
+              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--accent-light)]" />
             </Link>
           </div>
         </div>

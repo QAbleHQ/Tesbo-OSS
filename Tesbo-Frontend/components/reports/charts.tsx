@@ -20,7 +20,7 @@ export const PRIORITY_COLORS: Record<string, string> = {
   P3: "var(--muted-soft)",
 };
 
-export const SUITE_PALETTE = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+export { AVATAR_COLORS as SUITE_PALETTE } from "@/lib/avatarColors";
 
 export function DonutChart({
   data,

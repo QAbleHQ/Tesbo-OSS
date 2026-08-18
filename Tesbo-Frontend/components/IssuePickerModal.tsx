@@ -90,7 +90,7 @@ export default function IssuePickerModal({ projectId, open, onClose, onSelect }:
             <Input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search by key or summary…" />
           </Field>
 
-          {error ? <p className="text-[13px] text-[var(--error)]">{error}</p> : null}
+          {error ? <p className="text-[13px] text-[var(--error-foreground)]">{error}</p> : null}
 
           <div className="max-h-[320px] overflow-y-auto rounded-[var(--radius-control)] border border-[var(--border)]">
             {loading ? (

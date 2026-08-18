@@ -69,7 +69,7 @@ function VerifyOtpForm() {
     <AuthSplitShell>
       <div className="auth-fade-slide text-center">
         <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full border border-[rgba(123,110,224,.3)] bg-[rgba(123,110,224,.15)]">
-          <IconMailOpened size={26} stroke={1.5} className="text-[var(--brand-primary)]" />
+          <IconMailOpened size={26} stroke={1.5} className="text-[var(--accent-light)]" />
         </div>
         <div className="mb-2 text-[20px] font-bold tracking-tight text-[var(--foreground)]">Check your email</div>
         <p className="mb-7 text-[13px] leading-relaxed text-[var(--muted)]">
@@ -97,7 +97,7 @@ function VerifyOtpForm() {
             type="button"
             onClick={handleResend}
             disabled={resendState === "sending"}
-            className="font-medium text-[var(--brand-primary)] hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+            className="font-medium text-[var(--accent-light)] hover:underline disabled:cursor-not-allowed disabled:opacity-60"
           >
             {resendState === "sent" ? "Code sent" : resendState === "sending" ? "Sending..." : "Resend code"}
           </button>
@@ -105,7 +105,7 @@ function VerifyOtpForm() {
 
         {!isInviteEmailLocked && (
           <p className="mt-4 text-sm">
-            <Link href="/login" className="text-[var(--brand-primary)] hover:underline">
+            <Link href="/login" className="text-[var(--accent-light)] hover:underline">
               Use a different email
             </Link>
           </p>

@@ -119,7 +119,7 @@ export default function TermsAndConditionsPage() {
             <h2 className="text-lg font-semibold text-[var(--foreground)]">12. Contact</h2>
             <p className="mt-2">
               For legal or terms-related questions, contact{" "}
-              <a href="mailto:support@tesbo.io" className="text-[var(--brand-primary)] hover:underline">
+              <a href="mailto:support@tesbo.io" className="text-[var(--accent-light)] hover:underline">
                 support@tesbo.io
               </a>
               .
@@ -128,7 +128,7 @@ export default function TermsAndConditionsPage() {
         </div>
 
         <div className="mt-10 text-sm">
-          <Link href="/privacy-policy" className="text-[var(--brand-primary)] hover:underline">
+          <Link href="/privacy-policy" className="text-[var(--accent-light)] hover:underline">
             View Privacy Policy
           </Link>
         </div>
