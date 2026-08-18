@@ -802,6 +802,13 @@ export interface ZyraAgentState {
     maskedKey: string;
   } | null;
   tokenUsage: { total: number };
+  /**
+   * Test cases Zyra has created in this project, counted across chat mode AND task mode.
+   *
+   * Authoritative, and not derivable from `tasks`: chat mode writes no generation row, so summing
+   * task.generatedCount reports 0 for a project whose cases were all made by talking to Zyra.
+   */
+  testcasesCreated: number;
   tasks: ZyraTask[];
 }
 

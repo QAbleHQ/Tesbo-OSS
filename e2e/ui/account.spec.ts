@@ -324,4 +324,37 @@ test.describe("account screen and password reset (UI)", () => {
     // None of the refusals changed the stored password.
     expect(await passwordWorks(FIXTURE_PASSWORD)).toBe(true);
   });
+  // ─── The profile card ──────────────────────────────────────────────────────
+
+  test("ACU-11 the profile shows the name captured at signup, not just the email", async ({ browser }) => {
+    /*
+     * Basecamp 10212498688 — "Profile page should have user name and surname and mobile number fields
+     * fetched during sign up". The Profile card rendered nothing but the email.
+     *
+     * The name half was a pure display gap: /signup collects First name and Last name, sends them as
+     * one `name`, and GET /me has always returned it — the screen just never read it. Asserted against
+     * the value the API reports rather than a hard-coded string, so this stays true for any tenant.
+     *
+     * The mobile number is deliberately NOT asserted: signup never collects one, there is no column
+     * and no value to fetch, so there is nothing to display. That half is a separate feature and is
+     * recorded on the card for Specification — not silently rendered as an empty row.
+     */
+    const page = await openAccount(browser);
+
+    const reported = await page.evaluate(async () => {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      return res.ok ? ((await res.json()) as { name?: string | null; email?: string | null }) : null;
+    });
+    expect(reported, "GET /me did not answer").not.toBeNull();
+    const expectedName = (reported!.name ?? "").trim();
+    expect(expectedName, "this tenant's user has no name stored, so the test proves nothing").not.toBe("");
+
+    // The name is on the screen, and labelled — not just present somewhere in the markup.
+    const nameValue = page.locator("#account-name");
+    await expect(nameValue, "the profile card shows no name field").toBeVisible();
+    await expect(nameValue).toHaveText(expectedName);
+
+    // The email it used to show alone is still there.
+    await expect(page.locator("#account-email")).toHaveText((reported!.email ?? "").trim());
+  });
 });

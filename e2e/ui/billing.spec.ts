@@ -388,4 +388,58 @@ test.describe("billing settings", () => {
       }
     });
   });
+  test.describe("Pro-only integrations read the same on every screen", () => {
+    test("the project settings Linear card shows the Pro lock a Launch workspace is under", async () => {
+      /*
+       * Basecamp 10191178824 — "Linear is restricted behind a Pro upgrade in Workspace Settings, but the
+       * same integration is available in Project Settings → Integrations".
+       *
+       * Workspace Settings → Integrations locks its Linear card with `proOnly && !isPro && !connected`.
+       * Project Settings → Integrations had no plan awareness at all, so the same Launch workspace was
+       * told "Connect in Workspace Settings" on one screen and "Requires Pro" on the other.
+       *
+       * NOT an entitlement bypass, and this test says so explicitly: integrationCallback calls
+       * assertIntegrationAllowed, so the connection itself was always refused server-side. What was
+       * wrong is that the user only found out after following the button.
+       */
+      resetToLaunch(orgId);
+
+      const suffix = `${Date.now().toString(36)}`.slice(-8).toUpperCase();
+      const created = await api.post("/api/projects", {
+        data: { name: `E2E Linear Gate ${suffix}`, key: `LGT${suffix}` },
+        failOnStatusCode: false,
+      });
+      expect(created.ok(), `seeding a project — ${await created.text()}`).toBeTruthy();
+      const projectId = (await created.json()).id;
+
+      try {
+        await page.goto(`/projects/${projectId}/settings?tab=integrations`);
+        await expect(page.getByRole("heading", { name: "Linear" })).toBeVisible();
+
+        // The card states the restriction rather than implying the integration is available.
+        await expect(
+          page.getByText(/Linear is a Pro plan integration/i),
+          "the project screen does not mention the Pro restriction the workspace is under",
+        ).toBeVisible();
+
+        // And its call to action leads to the upgrade, not to a connect flow that must fail.
+        const cta = page.getByTestId("linear-project-cta");
+        await expect(cta).toHaveText(/Upgrade to Pro/i);
+        await expect(cta).toHaveAttribute("href", /tab=billing/);
+
+        // Jira is on Launch, so it must NOT have acquired a lock from this change.
+        await expect(page.getByRole("heading", { name: "Jira" })).toBeVisible();
+        await expect(page.getByText(/Jira is a Pro plan integration/i)).toHaveCount(0);
+
+        // On Pro the same card offers the connect flow again.
+        setProPlan(orgId);
+        await page.goto(`/projects/${projectId}/settings?tab=integrations`);
+        await expect(page.getByText(/Linear is a Pro plan integration/i)).toHaveCount(0);
+        await expect(page.getByTestId("linear-project-cta")).toHaveText(/Connect in Workspace Settings/i);
+      } finally {
+        await api.delete(`/api/projects/${projectId}`, { failOnStatusCode: false });
+        resetToLaunch(orgId);
+      }
+    });
+  });
 });

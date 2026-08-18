@@ -52,7 +52,11 @@ export default function GeneralTab() {
       showToast("Workspace details updated");
       // Sidebar, workspace switcher, and this page's header all read the name
       // from separate client-side fetches — reload so they all pick it up.
-      window.location.reload();
+      //
+      // Delayed, because reloading on the same tick tore the toast down before it could be read: the
+      // save appeared to produce no confirmation at all, which is the other half of Basecamp
+      // 10212550781. Short enough that the header still updates promptly.
+      setTimeout(() => window.location.reload(), 1200);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to update workspace");
       setSaving(false);
@@ -77,7 +81,7 @@ export default function GeneralTab() {
       </div>
 
       {toast && (
-        <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--ink-800)] px-4 py-2.5 text-sm text-white shadow-lg">
+        <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--toast-surface)] px-4 py-2.5 text-sm text-[var(--toast-foreground)] shadow-lg">
           {toast}
         </div>
       )}

@@ -145,12 +145,31 @@ is a failed selection, not a pass.**
 
 #### 3c — Run exactly that selection
 
+**Three conditions gate every run. All three, every time — no exceptions for a quick re-check.**
+
+1. **Ask first, and wait.** State the selection and the exact command, then stop and wait for the
+   user's go-ahead. A run saturates the machine for minutes and writes to shared infrastructure;
+   the user decides when that starts, not you. Never launch one as a side effect of another task.
+2. **`--workers=10`.** Playwright's default here is 5 (half of this box's 10 logical cores), so the
+   flag is not optional and is not the config default — pass it explicitly. **If the run cannot be
+   given 10 workers, do not run it**; report the blocker instead.
+3. **Its own Terminal window.** Runs go through [scripts/e2e-run.sh](scripts/e2e-run.sh), which
+   opens a Terminal.app window streaming live logs and tees to `e2e/.run-logs/<stamp>.log`. Output
+   buried in an agent's tool call is not a visible run.
+
 ```bash
-cd e2e
-# point at THIS repo's stack — the defaults in .env.example are the OSS ports
-API_BASE_URL=http://localhost:1021 WEB_BASE_URL=http://localhost:1020 \
-  npx playwright test api/testcases.spec.ts ui/testcases.spec.ts
+# from the repo root — announces the selection, refuses a 0-test selection, refuses to start while
+# another run holds e2e/.auth/state.json, then opens the window at --workers=10
+scripts/e2e-run.sh api/testcases.spec.ts ui/testcases.spec.ts
 ```
+
+The machine is an Apple M1 Max — 10 logical cores, 32 GB. API specs are network-bound on Neon and
+leave the CPU idle, so 10 workers costs nothing there. UI specs each carry a Chromium, and the
+backend `:1021` and frontend `:1020` share this box, so a UI-heavy selection at 10 will oversubscribe
+the CPU and make the contention flakes catalogued in
+[docs/e2e-coverage-waves.md](docs/e2e-coverage-waves.md) §"Contention flakes" more likely. That is an
+accepted cost of the mandate: re-confirm a suspected contention flake at `--workers=1` before
+reporting it as a failure — never by lowering the workers on the whole run.
 
 - While iterating on a single new test, narrow further with `-g "TC-042"` — but the impacted
   **files** must go green in one run before this phase is done. A passing `-g` slice is not the

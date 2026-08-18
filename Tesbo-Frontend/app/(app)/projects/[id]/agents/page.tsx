@@ -78,8 +78,16 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(diffMs / day)}d ago`;
 }
 
-function deriveZyraStats(tasks: ZyraTask[]) {
-  const testsGenerated = tasks.reduce((sum, t) => sum + t.generatedCount, 0);
+/*
+ * `testcasesCreated` comes from the API rather than being summed here.
+ *
+ * Basecamp 10212918496: this summed task.generatedCount, a number only the task-board draft flow
+ * produces. Chat mode creates test cases directly and records no generation row, so a project whose
+ * 33 cases were all made through the chat reported "0 tests generated". The backend now counts the
+ * `zyra_created` audit action, which both modes write.
+ */
+function deriveZyraStats(tasks: ZyraTask[], testcasesCreated: number) {
+  const testsGenerated = testcasesCreated;
   const activeTasks = tasks.filter((t) => ACTIVE_TASK_STATUSES.has(t.taskStatus)).length;
   const decided = tasks.filter((t) => t.taskStatus === "accepted" || t.taskStatus === "rejected");
   const approvalRate =
@@ -121,7 +129,7 @@ export default function AgentsPage() {
     });
   }, [loadData, router]);
 
-  const stats = useMemo(() => (state ? deriveZyraStats(state.tasks) : null), [state]);
+  const stats = useMemo(() => (state ? deriveZyraStats(state.tasks, state.testcasesCreated ?? 0) : null), [state]);
   const capabilityChips = useMemo(() => {
     if (!state) return [];
     return (Object.keys(CAPABILITY_META) as Array<keyof ZyraCapabilities>)

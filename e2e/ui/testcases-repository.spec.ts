@@ -331,4 +331,243 @@ test.describe("test case repository (UI)", () => {
     const headers = page.getByRole("columnheader");
     expect(await headers.count(), "at least one data column must survive").toBeGreaterThan(1);
   });
+  // ─── Cases that belong to no suite ─────────────────────────────────────────
+
+  /*
+   * Basecamp 10194323432 / BetterBugs 6a7c1e9d — "DRAFT count not updated after APPROVED", reported
+   * against a project whose screen showed "All test cases 1" in the suite panel while the stat cards
+   * read TOTAL 50 / DRAFT 24 / APPROVED 26. The Draft number looked invented because the sidebar
+   * said the repository held a single case.
+   *
+   * Neither number was stale. The sidebar badge was `suites.reduce((sum, s) => sum + s.testCaseCount,
+   * 0)`, and listSuites counts cases through `t.suite_id = s.id` — so every case with no suite was
+   * counted by no suite row, and the badge reported only the cases that happened to be filed. The
+   * create form leaves suiteId null by default and import leaves it null when no suite column is
+   * mapped, so "most of the repository is unfiled" is the normal case, not a corner one.
+   *
+   * TCR-08 fails against that code: the badge and the subtitle read 1 instead of 4.
+   */
+  test("TCR-08 the repository counters include cases that belong to no suite", async ({ browser }) => {
+    const suiteName = stamp("FiledSuite");
+    const suiteId = await seedSuite(suiteName);
+    const filed = stamp("Filed");
+    await seedCase(filed, { suiteId });
+    // Exactly how the create form and a suite-less import leave them.
+    const unfiled = [stamp("Unfiled A"), stamp("Unfiled B"), stamp("Unfiled C")];
+    for (const title of unfiled) await seedCase(title);
+
+    const stored = storedCaseCount();
+    expect(stored, "fixture should hold 1 filed + 3 unfiled cases").toBe(4);
+
+    const page = await openRepository(browser);
+
+    // The suite's own badge is right to say 1 — it holds one case. What must not say 1 is anything
+    // claiming to describe the whole repository.
+    await expect(
+      page.getByText(`${stored} test cases across`),
+      "the subtitle must count unfiled cases",
+    ).toBeVisible();
+    expect(await statCard(page, "Total"), "the Total stat card").toBe(stored);
+    await expect(pagination(page).getByText(`${stored} results`)).toBeVisible();
+
+    // The "All test cases" badge: the sidebar button's own trailing count, not the suite's.
+    const allCasesBadge = await page.evaluate(() => {
+      const button = Array.from(document.querySelectorAll("button")).find((b) =>
+        b.textContent?.trim().startsWith("All test cases"),
+      );
+      return button?.lastElementChild?.textContent?.trim() ?? "";
+    });
+    expect(
+      Number(allCasesBadge),
+      `"All test cases" reported ${allCasesBadge} for a repository holding ${stored}`,
+    ).toBe(stored);
+
+    // And every unfiled case is genuinely reachable from that view, so the number is not merely
+    // patched to agree while the rows stay hidden.
+    for (const title of unfiled) await expect(row(page, title)).toBeVisible();
+    await expect(row(page, filed)).toBeVisible();
+  });
+  /*
+   * Basecamp 10212879823 / 10212867874 — the same project that reported "All test cases 26" against a
+   * TOTAL of 33. TCR-08 covers the count; this covers reaching the 7 that were missing.
+   *
+   * Fails against the old screen: there is no "No suites" node at all.
+   */
+  test("TCR-09 a No suites node lists the cases that belong to no suite", async ({ browser }) => {
+    const suiteName = stamp("FiledSuite");
+    const suiteId = await seedSuite(suiteName);
+    const filed = stamp("Filed");
+    await seedCase(filed, { suiteId });
+    const unfiled = [stamp("Unfiled A"), stamp("Unfiled B")];
+    for (const title of unfiled) await seedCase(title);
+
+    const page = await openRepository(browser);
+
+    const noSuites = page.getByRole("button", { name: /No suites/ });
+    await expect(noSuites, "the suite tree offers no way to reach unfiled cases").toBeVisible();
+    await expect(noSuites, "the node should count the 2 unfiled cases").toContainText("2");
+
+    await noSuites.click();
+
+    // Only the unfiled cases, and the filed one is gone — the node filters rather than just counting.
+    for (const title of unfiled) await expect(row(page, title)).toBeVisible();
+    await expect(row(page, filed), "a filed case appeared under No suites").toHaveCount(0);
+    await expect(pagination(page).getByText("2 results")).toBeVisible();
+
+    // The view names itself rather than showing a bare "Suite" chip.
+    await expect(page.getByText("No suites").last()).toBeVisible();
+
+    // The stat cards stay project-wide — they describe the repository, not the current node.
+    expect(await statCard(page, "Total"), "the Total card must not follow the node filter").toBe(
+      storedCaseCount(),
+    );
+  });
+
+  test("TCR-10 the No suites node disappears once every case is filed", async ({ browser }) => {
+    // The node is only meaningful when something is unfiled; a tidy project should not gain an
+    // empty row in its tree.
+    const suiteId = await seedSuite(stamp("AllFiledSuite"));
+    const title = stamp("AllFiled");
+    await seedCase(title, { suiteId });
+
+    const page = await openRepository(browser);
+    await expect(row(page, title)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /No suites/ }),
+      "a project with nothing unfiled should show no No suites node",
+    ).toHaveCount(0);
+  });
+  /*
+   * Basecamp 10212766570 — the screen half. Archived cases are out of the default list now, so the
+   * screen must say so (the DEPRECATED tile still counts them, and an unexplained "33 test cases"
+   * above "30 results" is the same count confusion this screen was already reported for), and an
+   * archived row must not look like a live one when it IS shown.
+   */
+  test("TCR-11 archived cases are hidden by default, disclosed, and marked when shown", async ({
+    browser,
+  }) => {
+    const liveTitle = stamp("Live case");
+    const archivedTitle = stamp("Archived case");
+    await seedCase(liveTitle);
+    await seedCase(archivedTitle, { status: "Archived" });
+
+    const page = await openRepository(browser);
+
+    // Hidden by default, and the footer agrees with the rows on screen.
+    await expect(row(page, liveTitle)).toBeVisible();
+    await expect(row(page, archivedTitle), "an archived case is in the default list").toHaveCount(0);
+    await expect(pagination(page).getByText("1 result")).toBeVisible();
+
+    // Disclosed rather than silently dropped, and the chip says how many.
+    const chip = page.getByTestId("archived-hidden-chip");
+    await expect(chip, "nothing tells the user archived cases are being hidden").toBeVisible();
+    await expect(chip).toContainText("1");
+
+    // The DEPRECATED tile still counts it, so the repository's own accounting is unchanged.
+    expect(await statCard(page, "Deprecated"), "the Deprecated tile lost the archived case").toBe(1);
+
+    // The chip reveals them, and the archived row is visibly distinct from a live one.
+    await chip.click();
+    await expect(row(page, archivedTitle)).toBeVisible();
+    await expect(row(page, liveTitle), "the Archived filter should show only archived").toHaveCount(0);
+    const archivedRow = page.locator('tr[data-archived="true"]');
+    await expect(archivedRow, "an archived row is not marked as archived").toHaveCount(1);
+    await expect(archivedRow).toContainText(archivedTitle);
+  });
+  /*
+   * Basecamp 10194318194 — filed as the question "Can we move Priority and Automation Type
+   * separately", against Test case > Select all > Bulk action.
+   *
+   * Underneath the ask was silent data loss. The three selects opened pre-set to Draft / P2 / Not
+   * Automated and ALL THREE were always sent, so changing only Priority also reset every selected
+   * case's Status to Draft and its Automation to Not Automated. On a 25-case selection that is 50
+   * fields overwritten to answer one question — and it manufactures Drafts nobody asked for, which is
+   * its own reporting confusion.
+   *
+   * Each field now defaults to "Leave unchanged" and only chosen fields are sent (the API already
+   * COALESCEs an omitted one). TCR-12 fails against the old modal: the untouched fields come back
+   * rewritten.
+   */
+  test("TCR-12 a bulk edit changes only the field that was set, leaving the others alone", async ({
+    browser,
+  }) => {
+    const title = stamp("BulkScoped");
+    // Deliberately none of the old defaults, so any overwrite is unmistakable.
+    await seedCase(title, { status: "Approved", priority: "P0", automationStatus: "Automated" });
+
+    const page = await openRepository(browser);
+    await expect(row(page, title)).toBeVisible();
+
+    await page.getByRole("row").filter({ hasText: title }).getByRole("checkbox").first().check();
+    await expect(page.getByText("1 selected")).toBeVisible();
+    await page.getByRole("button", { name: "Bulk actions" }).click();
+    await page.getByRole("combobox").filter({ hasText: /Select an action/ }).selectOption("update");
+
+    // Every field starts on "Leave unchanged" — the old modal pre-selected real values here, which is
+    // what made an accidental overwrite the default behaviour rather than an opt-in.
+    const selects = page.getByRole("combobox");
+    const statusSelect = selects.nth(1);
+    const prioritySelect = selects.nth(2);
+    const automationSelect = selects.nth(3);
+    for (const [field, select] of [
+      ["Status", statusSelect],
+      ["Priority", prioritySelect],
+      ["Automation Type", automationSelect],
+    ] as const) {
+      expect(
+        await select.inputValue(),
+        `${field} does not default to "Leave unchanged" — an untouched field will be written`,
+      ).toBe("");
+    }
+
+    // Change Priority only, which is exactly what the reporter wanted to do.
+    await prioritySelect.selectOption("P1");
+    await page.getByRole("button", { name: "Confirm" }).click();
+
+    // Priority moved...
+    await expect(page.getByRole("row").filter({ hasText: title })).toContainText("P1");
+
+    // ...and nothing else did. Asserted against the API, not the row, so a stale render cannot pass it.
+    const listed = await api.get(`/api/projects/${tenant!.mainProjectId}/testcases`, {
+      params: { search: title, limit: 10 },
+      failOnStatusCode: false,
+    });
+    expect(listed.ok()).toBeTruthy();
+    const updated = (await listed.json())[0];
+    expect(updated, "the case vanished from the list").toBeTruthy();
+    expect(updated.priority, "the field that was chosen should have changed").toBe("P1");
+    expect(updated.status, "Status was overwritten by a bulk edit that never touched it").toBe("Approved");
+    expect(
+      updated.automationStatus,
+      "Automation Type was overwritten by a bulk edit that never touched it",
+    ).toBe("Automated");
+  });
+
+  test("TCR-13 a bulk edit can still set several fields at once when they are chosen", async ({
+    browser,
+  }) => {
+    // The opt-in default must not have cost the ability to change more than one field deliberately.
+    const title = stamp("BulkMulti");
+    await seedCase(title, { status: "Approved", priority: "P0", automationStatus: "Automated" });
+
+    const page = await openRepository(browser);
+    await page.getByRole("row").filter({ hasText: title }).getByRole("checkbox").first().check();
+    await page.getByRole("button", { name: "Bulk actions" }).click();
+    await page.getByRole("combobox").filter({ hasText: /Select an action/ }).selectOption("update");
+
+    const selects = page.getByRole("combobox");
+    await selects.nth(1).selectOption("Deprecated");
+    await selects.nth(2).selectOption("P2");
+    await page.getByRole("button", { name: "Confirm" }).click();
+
+    const listed = await api.get(`/api/projects/${tenant!.mainProjectId}/testcases`, {
+      params: { search: title, limit: 10, includeArchived: "true" },
+      failOnStatusCode: false,
+    });
+    const updated = (await listed.json())[0];
+    expect(updated.status).toBe("Deprecated");
+    expect(updated.priority).toBe("P2");
+    // The one left alone is still untouched.
+    expect(updated.automationStatus).toBe("Automated");
+  });
 });

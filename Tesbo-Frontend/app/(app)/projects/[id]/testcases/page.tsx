@@ -8,6 +8,8 @@ import {
   IconChevronRight,
   IconDownload,
   IconFileText,
+  IconArchive,
+  IconFolderOff,
   IconFolders,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
@@ -69,6 +71,10 @@ import { readStoredValue, writeStoredValue } from "@/lib/storage";
 // be bulk-edited in five separate passes.
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 250, 500] as const;
 const MAX_PAGE_SIZE = 500;
+/* Matches the `suiteId=none` the list endpoint reads as "suite_id IS NULL" — see listTestCases. */
+const UNFILED_SUITE_ID = "none";
+/* The bulk-edit selects' "don't touch this field" value. Empty so the API reads it as omitted. */
+const BULK_NO_CHANGE = "";
 const DEFAULT_PAGE_SIZE = 25;
 const TESTCASE_STATUSES = ["Draft", "In Review", "Approved", "Deprecated", "Archived"];
 const TESTCASE_PRIORITIES = ["P0", "P1", "P2", "P3"];
@@ -124,6 +130,16 @@ export default function TestCasesPage() {
   const searchParams = useSearchParams();
   const projectId = params.id as string;
   const activeSuiteId = searchParams.get("suiteId");
+  /*
+   * "?suiteId=none" is the "No suites" node — the cases that belong to no suite.
+   *
+   * It rides the same query parameter as a real suite id so the list request, the filter chips and the
+   * pagination reset all keep working unchanged. `formSuiteId` is the value the create/edit form may
+   * pre-select from it: the sentinel is not a suite, so it must resolve to "no suite chosen" there
+   * rather than being written to a testcase's suite_id.
+   */
+  const isUnfiledView = activeSuiteId === UNFILED_SUITE_ID;
+  const formSuiteId = isUnfiledView ? null : activeSuiteId;
   const activeJiraIssueKey = searchParams.get("jiraIssueKey") || "";
   const activeLinearIssueKey = searchParams.get("linearIssueKey") || "";
 
@@ -299,7 +315,14 @@ export default function TestCasesPage() {
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const areAllCasesSelected =
     selectedSuiteCases.length > 0 && selectedSuiteCases.every((tc) => selectedCaseIdSet.has(tc.id));
-  const repositoryCaseCount = useMemo(
+  /*
+   * The sum of the suite counts, which is NOT the size of the repository.
+   *
+   * listSuites counts cases through `t.suite_id = s.id`, so a case with no suite (the create form's
+   * default, and what import produces when no suite column is mapped) is counted by no suite row at
+   * all. Only ever a fallback for before the summary lands — see repositoryTotalCount.
+   */
+  const suiteCaseCountSum = useMemo(
     () => suites.reduce((sum, suite) => sum + suite.testCaseCount, 0),
     [suites]
   );
@@ -327,6 +350,36 @@ export default function TestCasesPage() {
         deprecated: statusCount("Deprecated") + statusCount("Archived"),
       }
     : null;
+
+  /*
+   * The repository's true size, for every counter that claims to describe the whole repository.
+   *
+   * repositorySummary counts `testcases_active` for the project, so it includes cases that belong to
+   * no suite; suiteCaseCountSum cannot see those at all. Basecamp 10194323432 was reported against a
+   * project where the two disagreed on screen — the sidebar said 1 while the tiles said 50 with 24
+   * Draft — so the Draft tile read as invented.
+   */
+  const repositoryTotalCount = repoStats?.total ?? suiteCaseCountSum;
+  /*
+   * How many cases belong to no suite, from repositorySummary's bySuite bucket — it groups on
+   * COALESCE(s.name, 'Unassigned'), so the unfiled cases are already counted there and this needs no
+   * extra request. Falls back to the arithmetic when the summary has not landed yet.
+   */
+  /*
+   * Archived cases are excluded from the list by default (see listTestCases), so the screen has to say
+   * so — the DEPRECATED tile still counts them, and "33 test cases" above "30 results" with no
+   * explanation is exactly the count-mismatch confusion this screen has already been reported for.
+   */
+  const archivedCaseCount = useMemo(
+    () => repoSummary?.byStatus.find((s) => s.name === "Archived")?.count ?? 0,
+    [repoSummary]
+  );
+  const archivedHidden = archivedCaseCount > 0 && suiteStatusFilter !== "Archived";
+  const unfiledCaseCount = useMemo(() => {
+    const bucket = repoSummary?.bySuite.find((s) => s.name === "Unassigned");
+    if (bucket) return bucket.count;
+    return Math.max(0, repositoryTotalCount - suiteCaseCountSum);
+  }, [repoSummary, repositoryTotalCount, suiteCaseCountSum]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -434,7 +487,7 @@ export default function TestCasesPage() {
     setPriority((data.priority as string) ?? "P2");
     setStatus((data.status as string) ?? "Draft");
     setAutomationStatus((data.automationStatus as string) ?? "Not Automated");
-    setSuiteId((data.suiteId as string) ?? activeSuiteId ?? "");
+    setSuiteId((data.suiteId as string) ?? formSuiteId ?? "");
     setPanelJiraIssueKey((data.jiraIssueKey as string) ?? "");
     setPanelJiraUrl((data.jiraUrl as string) ?? "");
   }
@@ -451,7 +504,7 @@ export default function TestCasesPage() {
     setPriority("P2");
     setStatus("Draft");
     setAutomationStatus("Not Automated");
-    setSuiteId(defaultSuiteId ?? activeSuiteId ?? "");
+    setSuiteId(defaultSuiteId ?? formSuiteId ?? "");
     setTestcaseIdPrefix(defaultTestcaseIdPrefix);
     setPanelJiraIssueKey("");
     setPanelJiraUrl("");
@@ -470,7 +523,7 @@ export default function TestCasesPage() {
     setPanelTestcaseId(null);
     setPanelMode("create");
     setPanelTab("overview");
-    resetForm(activeSuiteId);
+    resetForm(formSuiteId);
   }
 
   async function openCreatePanelForSuite(targetSuiteId: string) {
@@ -592,9 +645,21 @@ export default function TestCasesPage() {
     setBulkAction("");
     setBulkError(null);
     setBulkTargetSuiteId("");
-    setBulkStatus("Draft");
-    setBulkPriority("P2");
-    setBulkAutomationStatus("Not Automated");
+    /*
+     * "Leave unchanged", not concrete defaults.
+     *
+     * Basecamp 10194318194 asked "can we move Priority and Automation Type separately". Underneath the
+     * ask was data loss: these three opened pre-set to Draft / P2 / Not Automated and ALL THREE were
+     * always sent, so a user who only wanted to change Priority also silently reset every selected
+     * case's Status to Draft and its Automation to Not Automated. On a 25-case selection that is 50
+     * fields overwritten to answer one question.
+     *
+     * The backend already tolerates this: bulkUpdateTestCases uses COALESCE($n, column) with
+     * `body.status || null`, so an empty value leaves that column alone.
+     */
+    setBulkStatus(BULK_NO_CHANGE);
+    setBulkPriority(BULK_NO_CHANGE);
+    setBulkAutomationStatus(BULK_NO_CHANGE);
     setIsBulkActionModalOpen(true);
   }
 
@@ -616,16 +681,21 @@ export default function TestCasesPage() {
       } else if (bulkAction === "archive") {
         await bulkUpdateTestCases(projectId, { testcaseIds: selectedCaseIds, status: "Archived" });
       } else if (bulkAction === "update") {
+        // Only the fields actually chosen. Omitted keys hit COALESCE server-side and leave the column
+        // as it was — see openBulkActionModal for why this matters.
         await bulkUpdateTestCases(projectId, {
           testcaseIds: selectedCaseIds,
-          status: bulkStatus,
-          priority: bulkPriority,
-          automationStatus: bulkAutomationStatus,
+          ...(bulkStatus !== BULK_NO_CHANGE ? { status: bulkStatus } : {}),
+          ...(bulkPriority !== BULK_NO_CHANGE ? { priority: bulkPriority } : {}),
+          ...(bulkAutomationStatus !== BULK_NO_CHANGE ? { automationStatus: bulkAutomationStatus } : {}),
         });
       } else if (bulkAction === "move") {
+        // An empty target used to become `undefined`, which the API COALESCE'd back to each case's
+        // existing suite — so "Unassigned (no suite)" reported success and moved nothing (Basecamp
+        // 10194174342). UNFILED_SUITE_ID is the explicit "clear it" value the API now understands.
         await bulkUpdateTestCases(projectId, {
           testcaseIds: selectedCaseIds,
-          suiteId: bulkTargetSuiteId || undefined,
+          suiteId: bulkTargetSuiteId || UNFILED_SUITE_ID,
         });
       }
       const refreshPanelTestcaseId = panelTestcaseId && selectedCaseIdSet.has(panelTestcaseId) ? panelTestcaseId : null;
@@ -960,7 +1030,7 @@ export default function TestCasesPage() {
               Test case repository
             </h1>
             <p className="mt-[3px] text-[13px] text-[var(--muted-soft)]">
-              {repoStats?.total ?? repositoryCaseCount} test case{(repoStats?.total ?? repositoryCaseCount) === 1 ? "" : "s"} across {rootSuites.length} suite{rootSuites.length === 1 ? "" : "s"}
+              {repositoryTotalCount} test case{repositoryTotalCount === 1 ? "" : "s"} across {rootSuites.length} suite{rootSuites.length === 1 ? "" : "s"}
             </p>
           </div>
           {!loading && repoStats && (
@@ -1049,7 +1119,7 @@ export default function TestCasesPage() {
                   >
                     <span>All test cases</span>
                     <span className={`font-mono text-[11px] ${!activeSuiteId ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
-                      {repositoryCaseCount}
+                      {repositoryTotalCount}
                     </span>
                   </button>
 
@@ -1231,6 +1301,37 @@ export default function TestCasesPage() {
                     })
                   )}
 
+                  {/*
+                    * The cases that belong to no suite.
+                    *
+                    * Basecamp 10212879823 / 10212867874: cases with a null suite_id were counted by no
+                    * suite row and reachable from no node, so the suite tree said 26 for a repository
+                    * holding 33 and the 7 unfiled ones — Zyra had created them without naming a suite —
+                    * were invisible here. Cases land unfiled routinely: the create form defaults to no
+                    * suite and an import with no suite column mapped leaves it null.
+                    *
+                    * Rendered only when there are some, so a tidy project gains no empty node.
+                    */}
+                  {unfiledCaseCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => router.push(`/projects/${projectId}/testcases?suiteId=${UNFILED_SUITE_ID}`)}
+                      className={`mt-0.5 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] transition-colors ${
+                        isUnfiledView
+                          ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
+                          : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)]"
+                      }`}
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <IconFolderOff size={13} stroke={1.75} className="shrink-0 opacity-70" />
+                        <span className="truncate">No suites</span>
+                      </span>
+                      <span className={`font-mono text-[11px] ${isUnfiledView ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
+                        {unfiledCaseCount}
+                      </span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => openAddSuiteModal()}
@@ -1261,10 +1362,23 @@ export default function TestCasesPage() {
                   </label>
                   {activeSuiteId && (
                     <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--accent-light)]">
-                      {selectedSuite?.name ?? "Suite"}
+                      {/* The unfiled view has no suite row to take a name from, so it names itself. */}
+                      {isUnfiledView ? "No suites" : selectedSuite?.name ?? "Suite"}
                     </span>
                   )}
                   <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                    {archivedHidden && (
+                      <button
+                        type="button"
+                        data-testid="archived-hidden-chip"
+                        title="Archived test cases are not shown in this list"
+                        onClick={() => setSuiteStatusFilter("Archived")}
+                        className="flex items-center gap-1 rounded-full border border-[var(--border)] px-2.5 py-0.5 text-[11.5px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
+                      >
+                        <IconArchive size={11} stroke={1.75} />
+                        {archivedCaseCount} archived hidden
+                      </button>
+                    )}
                     {suiteStatusFilter !== "all" && (
                       <button
                         type="button"
@@ -2044,26 +2158,35 @@ export default function TestCasesPage() {
         )}
 
         {bulkAction === "update" && (
+          <>
           <div className="mt-4 grid grid-cols-2 gap-3">
             <Field>
               <FieldLabel>Status</FieldLabel>
               <Select value={bulkStatus} onChange={(e) => setBulkStatus(e.target.value)}>
+                <option value={BULK_NO_CHANGE}>Leave unchanged</option>
                 {TESTCASE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
               </Select>
             </Field>
             <Field>
               <FieldLabel>Priority</FieldLabel>
               <Select value={bulkPriority} onChange={(e) => setBulkPriority(e.target.value)}>
+                <option value={BULK_NO_CHANGE}>Leave unchanged</option>
                 {TESTCASE_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
               </Select>
             </Field>
             <Field>
               <FieldLabel>Automation Type</FieldLabel>
               <Select value={bulkAutomationStatus} onChange={(e) => setBulkAutomationStatus(e.target.value)}>
+                <option value={BULK_NO_CHANGE}>Leave unchanged</option>
                 {TESTCASE_AUTOMATION_TYPES.map((a) => <option key={a} value={a}>{a}</option>)}
               </Select>
             </Field>
           </div>
+          <p className="mt-2 text-[12px] text-[var(--muted)]">
+            Only the fields you change are applied — anything left on &ldquo;Leave unchanged&rdquo; keeps its
+            current value on every selected test case.
+          </p>
+          </>
         )}
 
         {bulkAction === "archive" && (
@@ -2166,7 +2289,7 @@ export default function TestCasesPage() {
       />
 
       {importToast && (
-        <div className="fixed bottom-5 right-5 z-[60] rounded-[var(--radius-control)] bg-[var(--ink-800)] px-4 py-2.5 text-sm text-white shadow-lg">
+        <div className="fixed bottom-5 right-5 z-[60] rounded-[var(--radius-control)] bg-[var(--toast-surface)] px-4 py-2.5 text-sm text-[var(--toast-foreground)] shadow-lg">
           {importToast}
         </div>
       )}

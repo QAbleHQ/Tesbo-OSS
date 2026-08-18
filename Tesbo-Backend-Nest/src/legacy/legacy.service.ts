@@ -2209,11 +2209,56 @@ export class LegacyService implements OnModuleInit {
    * Kept unguarded for the MCP tool, whose API token is already bound to a single project. Every row
    * carries the project's custom field values, so route traffic goes through listTestCasesForUser.
    */
+  /*
+   * Ordered by creation, newest first, with id as the final tiebreaker.
+   *
+   * Basecamp 10212941059 ("Test Case ID Sequence Is Incorrect After Performing Bulk Actions"): this
+   * was `ORDER BY updated_at DESC` alone. A bulk update writes `updated_at = now()` to every selected
+   * row in ONE statement, so all of them share a single timestamp — and an ORDER BY whose key is not
+   * unique leaves the tied rows in whatever order the plan happens to emit. Under LIMIT/OFFSET that
+   * is not merely untidy: the two pages of a 33-case project are two separate queries, so a tied row
+   * could be returned on both pages while another was never returned at all.
+   *
+   * external_id is assigned sequentially at creation, so created_at DESC IS the ID sequence the
+   * screen displays, and no edit reshuffles it. exportTestCases is ordered the same way so a
+   * downloaded file matches the list it was exported from.
+   */
   async listTestCases(projectId: string, query: Body) {
     const limit = pageNumber(query.limit, 100, 0, 500);
     const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const filters: string[] = ["project_id = $1", "deleted_at IS NULL"];
     const values: any[] = [projectId];
+    /*
+     * `suiteId=none` asks for the cases that belong to no suite.
+     *
+     * There was no way to express that: the filter loop below only builds `suite_id = $n`, and a case
+     * with a NULL suite_id therefore matched no suite filter at all — so the "No suites" node in the
+     * repository's suite tree had nothing to select with. Cases land unfiled routinely (the create
+     * form defaults to no suite, an import with no suite column mapped leaves it null, and Zyra's chat
+     * only files a case when the model names a suite), which is Basecamp 10212879823 / 10212867874.
+     *
+     * Handled before the loop because "none" is a truthy value the loop would otherwise push into a
+     * `suite_id = 'none'` comparison against a uuid column.
+     */
+    const suiteFilter = String(query.suiteId ?? "");
+    const wantsUnfiled = suiteFilter.toLowerCase() === "none";
+    if (wantsUnfiled) filters.push("suite_id IS NULL");
+    /*
+     * Archived cases are out of the working list unless they are asked for.
+     *
+     * "Archived" is the status Zyra's archive operation sets when a user asks it to remove test cases,
+     * and it is what the UI's archive action sets. They were still listed by default, so a user who
+     * had just archived three cases saw them sitting in the repository and concluded nothing had
+     * happened — then asked again and got duplicates (Basecamp 10212766570).
+     *
+     * Two ways to see them, so nothing is unreachable: `status=Archived` explicitly, or
+     * `includeArchived=true` to get the whole repository. repositorySummary is untouched and still
+     * counts them into its Deprecated bucket, which is what the screen's DEPRECATED tile reads.
+     */
+    const statusFilter = String(query.status ?? "").trim();
+    const includeArchived =
+      statusFilter.toLowerCase() === "archived" || String(query.includeArchived ?? "").toLowerCase() === "true";
+    if (!includeArchived) filters.push("status IS DISTINCT FROM 'Archived'");
     for (const [param, column] of [
       ["suiteId", "suite_id"],
       ["status", "status"],
@@ -2223,6 +2268,7 @@ export class LegacyService implements OnModuleInit {
       ["jiraIssueKey", "jira_issue_key"],
       ["linearIssueKey", "linear_issue_key"]
     ] as const) {
+      if (param === "suiteId" && wantsUnfiled) continue;
       if (query[param]) {
         values.push(query[param]);
         // "type" can enter the system with inconsistent casing (e.g. an imported testcase
@@ -2268,7 +2314,7 @@ export class LegacyService implements OnModuleInit {
               ) AS custom_field_values,
               COUNT(*) OVER () AS total_count
        FROM testcases ${customFieldJoinSql} WHERE ${where}
-       ORDER BY testcases.updated_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
+       ORDER BY testcases.created_at DESC, testcases.id DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values
     );
     const total = Number(res.rows[0]?.total_count || 0);
@@ -2287,7 +2333,7 @@ export class LegacyService implements OnModuleInit {
        FROM testcases t
        LEFT JOIN suites s ON s.id = t.suite_id
        WHERE t.project_id = $1 AND t.deleted_at IS NULL
-       ORDER BY t.updated_at DESC`,
+       ORDER BY t.created_at DESC, t.id DESC`,
       [projectId]
     );
 
@@ -3218,12 +3264,35 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const ids = Array.isArray(body.testcaseIds) ? body.testcaseIds : [];
     if (!ids.length) return;
+    /*
+     * `suiteId: "none"` clears the suite; an absent suiteId leaves it alone.
+     *
+     * COALESCE alone cannot express the difference, and the repository's bulk-move modal offers
+     * "Unassigned (no suite)" as its first option — which sent an empty string, became `undefined`, and
+     * then COALESCE'd back to the case's existing suite. So choosing it moved nothing at all while the
+     * modal reported success, and the suite counts did not budge: Basecamp 10194174342, "test cases
+     * count and test cases discrepancy after suite move".
+     *
+     * "none" is the same sentinel listTestCases reads as `suite_id IS NULL`, so the value that filters
+     * to unfiled cases is also the value that makes a case unfiled.
+     */
+    const clearSuite = String(body.suiteId ?? "").toLowerCase() === "none";
     await this.db.query(
-      `UPDATE testcases SET priority=COALESCE($2,priority), suite_id=COALESCE($3,suite_id),
+      `UPDATE testcases SET priority=COALESCE($2,priority),
+       suite_id = CASE WHEN $8::boolean THEN NULL ELSE COALESCE($3::uuid, suite_id) END,
        status=COALESCE($4,status), owner_id=COALESCE($5,owner_id), automation_status=COALESCE($6,automation_status),
        updated_by=$7, updated_at=now()
        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
-      [ids, body.priority || null, body.suiteId || null, body.status || null, body.ownerId || null, body.automationStatus || null, uid]
+      [
+        ids,
+        body.priority || null,
+        clearSuite ? null : body.suiteId || null,
+        body.status || null,
+        body.ownerId || null,
+        body.automationStatus || null,
+        uid,
+        clearSuite
+      ]
     );
     await this.logProjectActivity(projectId, uid, "testcase_bulk_updated", "testcase", null, null, {
       testcaseIds: ids,
@@ -3292,6 +3361,33 @@ export class LegacyService implements OnModuleInit {
     if (!res.rows[0]) throw new NotFoundException({ error: "Plan item not found" });
   }
 
+  /**
+   * The status buckets every "how far along is this run" counter in the product is built from.
+   *
+   * Shared rather than repeated because the plan screens and the runs screen were computing the same
+   * numbers three different ways, and a user comparing two screens saw two answers for one run:
+   *
+   * - Counted off `e.id`, not `ci.id`. A cycle_item with no live execution row renders nowhere (the
+   *   run's own table INNER JOINs executions), so counting items let it inflate the total on the
+   *   plan screen alone. It also keeps a cycle with no items at all out of every bucket: under
+   *   `COUNT(*)` the LEFT JOIN's placeholder row scored as one untested case, which is how a plan
+   *   holding an empty run reported more untested cases than it had cases.
+   * - Joined with `deleted_at IS NULL`. Executions soft-delete, and a deleted result is not a
+   *   result; leaving it in double-counted the case it belonged to.
+   * - Every status lands in exactly one bucket, so the buckets always sum to total_cases. Retest
+   *   belongs with untested: a case sent back for retest has no settled result for this run, and
+   *   giving it no bucket at all is what made these counters sum to less than the total.
+   *
+   * Callers supply the joins: LEFT JOIN cycle_items ci, then LEFT JOIN executions e ON
+   * e.cycle_item_id = ci.id AND e.deleted_at IS NULL.
+   */
+  private static readonly EXECUTION_BUCKET_COUNTS = `COUNT(e.id)::int AS total_cases,
+              COUNT(e.id) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(e.id) FILTER (WHERE e.status = 'Failed')::int AS failed,
+              COUNT(e.id) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+              COUNT(e.id) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+              COUNT(e.id) FILTER (WHERE e.status IN ('Untested', 'Retest'))::int AS untested`;
+
   async listPlansForUser(userId: string | null | undefined, projectId: string) {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
     return this.listPlans(projectId);
@@ -3316,14 +3412,14 @@ export class LegacyService implements OnModuleInit {
        LEFT JOIN (
          SELECT c.plan_id,
                 COUNT(DISTINCT c.id)::int AS run_count,
-                COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
-                COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
-                COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
-                COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+                COUNT(e.id) FILTER (WHERE e.status = 'Passed')::int AS passed,
+                COUNT(e.id) FILTER (WHERE e.status = 'Failed')::int AS failed,
+                COUNT(e.id) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+                COUNT(e.id) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
                 MAX(COALESCE(c.started_at, c.created_at)) AS last_run_at
          FROM cycles c
          LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
-         LEFT JOIN executions e ON e.cycle_item_id = ci.id
+         LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
          WHERE c.plan_id IS NOT NULL
          GROUP BY c.plan_id
        ) runs ON runs.plan_id = p.id
@@ -3381,7 +3477,7 @@ export class LegacyService implements OnModuleInit {
          SELECT e.status
          FROM cycles c
          JOIN cycle_items ci ON ci.cycle_id = c.id AND ci.testcase_id = pi.testcase_id
-         JOIN executions e ON e.cycle_item_id = ci.id
+         JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
          WHERE c.plan_id = pi.plan_id
          ORDER BY e.executed_at DESC NULLS LAST, e.created_at DESC
          LIMIT 1
@@ -3414,19 +3510,13 @@ export class LegacyService implements OnModuleInit {
 
   private async planRunRows(planId: string) {
     const res = await this.db.query(
+      // Counted exactly like listCycles, so one run cannot report a different case count on the plan
+      // screen than on the runs screen it links to.
       `SELECT c.*,
-              COUNT(ci.id)::int AS total_cases,
-              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
-              COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
-              COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
-              COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
-              -- settled result for this run. Leaving it out of every bucket made these counters sum
-              -- to less than total_cases.
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
+              ${LegacyService.EXECUTION_BUCKET_COUNTS}
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
-       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
        WHERE c.plan_id = $1
        GROUP BY c.id
        ORDER BY c.created_at DESC`,
@@ -3450,19 +3540,13 @@ export class LegacyService implements OnModuleInit {
       skipped: number;
       untested: number;
     }>(
+      // The plan header is the sum of the rows planRunRows returns, counted the same way, so the
+      // tiles always add up to total_cases and always agree with the runs listed beneath them.
       `SELECT COUNT(DISTINCT c.id)::int AS run_count,
-              COUNT(ci.id)::int AS total_cases,
-              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
-              COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
-              COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
-              COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
-              -- settled result for this run. Leaving it out of every bucket made these counters sum
-              -- to less than total_cases.
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
+              ${LegacyService.EXECUTION_BUCKET_COUNTS}
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
-       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
        WHERE c.plan_id = $1`,
       [planId]
     );
@@ -3506,16 +3590,7 @@ export class LegacyService implements OnModuleInit {
       // on the run card can never disagree with the number of rows the run's own table renders.
       // Counting cycle_items instead let anything without a live execution inflate the card.
       `SELECT c.*,
-              COUNT(e.id)::int AS total_cases,
-              COUNT(e.id) FILTER (WHERE e.status = 'Passed')::int AS passed,
-              COUNT(e.id) FILTER (WHERE e.status = 'Failed')::int AS failed,
-              COUNT(e.id) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
-              COUNT(e.id) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
-              -- settled result for this run. Leaving it out of every bucket made these counters sum
-              -- to less than total_cases. Filtered off e.id like the buckets above, so a cycle_item
-              -- with no live execution stays out of both the numerator and total_cases.
-              COUNT(e.id) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
+              ${LegacyService.EXECUTION_BUCKET_COUNTS}
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
        LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
@@ -4445,19 +4520,41 @@ export class LegacyService implements OnModuleInit {
     return { rows: res.rows.map(toCamel) };
   }
 
-  async analytics(projectId?: string, organizationId?: string) {
+  /*
+   * `callerId` narrows the workspace-wide scope to the projects that caller is a member of.
+   *
+   * Basecamp 10199551447 — "[Dashboard / Project Access] QA Engineer can view project details of all
+   * owner projects". /api/workspace/analytics scoped by organization_id alone, with no membership
+   * filter, so a QA Engineer belonging to ONE project still saw counts and an execution-status
+   * breakdown aggregated across every project in the workspace — including the owner's, which they
+   * cannot open. listProjects and requireProjectAccess both scope by project_members; this endpoint
+   * was the one that did not, and the dashboard is the first screen a member lands on.
+   *
+   * Only applied to the non-privileged roles. Owner, admin and manager administer the whole workspace
+   * and their totals are meant to span it, so narrowing theirs would be a different change with a
+   * different blast radius — and it is not what was reported.
+   */
+  async analytics(projectId?: string, organizationId?: string, callerId?: string | null, callerRole?: string | null) {
     const scopeValue = projectId ?? organizationId;
+    const scopeToMemberships =
+      !projectId && !!organizationId && !!callerId && !["owner", "admin", "manager"].includes(this.normalizeRole(String(callerRole ?? "")));
+    // $1 stays the organization id; the caller becomes $2 only where the narrowing applies.
+    const memberProjects = " AND id IN (SELECT project_id FROM project_members WHERE user_id = $2)";
+    const memberChildProjects = " AND project_id IN (SELECT project_id FROM project_members WHERE user_id = $2)";
     const projectsWhere = projectId
       ? " WHERE id = $1 AND archived_at IS NULL"
       : organizationId
-        ? " WHERE organization_id = $1 AND archived_at IS NULL"
+        ? ` WHERE organization_id = $1 AND archived_at IS NULL${scopeToMemberships ? memberProjects : ""}`
         : " WHERE archived_at IS NULL";
     const childWhere = projectId
       ? " WHERE project_id = $1"
       : organizationId
-        ? " WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
+        ? ` WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)${
+            scopeToMemberships ? memberChildProjects : ""
+          }`
         : "";
-    const values = scopeValue ? [scopeValue] : [];
+    const values: any[] = scopeValue ? [scopeValue] : [];
+    if (scopeToMemberships) values.push(callerId);
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM projects${projectsWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases_active${childWhere}`, values),
@@ -4469,7 +4566,11 @@ export class LegacyService implements OnModuleInit {
           projectId
             ? " WHERE c.project_id = $1"
             : organizationId
-              ? " WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
+              ? ` WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)${
+                  scopeToMemberships
+                    ? " AND c.project_id IN (SELECT project_id FROM project_members WHERE user_id = $2)"
+                    : ""
+                }`
               : ""
         } GROUP BY e.status`,
         values
@@ -5347,11 +5448,34 @@ export class LegacyService implements OnModuleInit {
     return res.rows;
   }
 
+  /**
+   * A folder name that the column can actually hold.
+   *
+   * `knowledge_folders.name` is VARCHAR(255). Neither create nor rename bounded the input, so a longer
+   * name reached Postgres and raised 22001 (string_data_right_truncation) — an error code no handler
+   * caught, so the request answered 500 Internal Server Error. Basecamp 10199204536 reported that
+   * against rename; create had the identical gap.
+   *
+   * Validated at the edge so the caller gets a field-level 400 naming the limit. The 22001 catch in
+   * both callers stays as a backstop for any path that reaches the column another way.
+   */
+  private static readonly KB_FOLDER_NAME_MAX = 255;
+
+  private kbFolderName(raw: unknown): string {
+    const name = String(raw ?? "").trim();
+    if (!name) throw new BadRequestException({ error: "Folder name is required" });
+    if (name.length > LegacyService.KB_FOLDER_NAME_MAX) {
+      throw new BadRequestException({
+        error: `Folder name is too long (${LegacyService.KB_FOLDER_NAME_MAX} character limit).`
+      });
+    }
+    return name;
+  }
+
   async createKnowledgeFolder(projectId: string, userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const project = await this.requireProjectAccess(uid, projectId);
-    const name = String(body.name || "").trim();
-    if (!name) throw new BadRequestException({ error: "Folder name is required" });
+    const name = this.kbFolderName(body.name);
 
     let parentFolderId = body.parentFolderId ? String(body.parentFolderId) : null;
     if (parentFolderId) {
@@ -5437,17 +5561,26 @@ export class LegacyService implements OnModuleInit {
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, folder.created_by, uid);
 
+    // Bounded before the statement runs: an over-long name used to reach the VARCHAR(255) column and
+    // come back as 22001, which nothing caught — so a rename answered 500. Basecamp 10199204536.
+    const nextName = body.name === undefined || body.name === null ? null : this.kbFolderName(body.name);
+
     try {
       const res = await this.db.query(
         `UPDATE knowledge_folders SET name = COALESCE($3, name), description = COALESCE($4, description),
          updated_by = $2, updated_at = now() WHERE id = $1 RETURNING *`,
-        [folderId, uid, body.name ? String(body.name).trim() : null, body.description ?? null]
+        [folderId, uid, nextName, body.description ?? null]
       );
       await this.logProjectActivity(projectId, uid, "updated", "knowledge_folder", folderId, res.rows[0].name, {});
       return toCamel(res.rows[0]);
     } catch (error) {
       if ((error as { code?: string }).code === "23505")
         throw new BadRequestException({ error: "A folder with this name already exists here" });
+      // Backstop: any other route to an over-long value must still be a 400, never a 500.
+      if ((error as { code?: string }).code === "22001")
+        throw new BadRequestException({
+          error: `Folder name is too long (${LegacyService.KB_FOLDER_NAME_MAX} character limit).`
+        });
       throw error;
     }
   }
@@ -5516,14 +5649,25 @@ export class LegacyService implements OnModuleInit {
         [folderId, uid]
       );
       await client.query(
+        // The Zyra memory document survives its folder being deleted — otherwise deleting the AI
+        // memory folder is a way around the guard in deleteKnowledgeDocument.
         `${descendantsCte} UPDATE knowledge_documents SET is_deleted = true, deleted_at = now(), updated_at = now(), updated_by = $2
-         WHERE folder_id IN (SELECT id FROM descendants) AND is_deleted = false`,
+         WHERE folder_id IN (SELECT id FROM descendants) AND is_deleted = false AND title <> '${LegacyService.ZYRA_MEMORY_DOC_TITLE}'`,
         [folderId, uid]
       );
       await client.query(
         `${descendantsCte} UPDATE knowledge_files SET is_deleted = true, deleted_at = now()
          WHERE folder_id IN (SELECT id FROM descendants) AND is_deleted = false`,
         [folderId]
+      );
+      // The memory document was spared above, so it would now point at a deleted folder and appear in
+      // no listing at all — kept but invisible is worse than a clear refusal. Re-home it to the root.
+      await client.query(
+        `${descendantsCte} UPDATE knowledge_documents
+            SET folder_id = (SELECT id FROM knowledge_folders WHERE project_id = $2 AND is_root = true LIMIT 1),
+                updated_at = now()
+          WHERE folder_id IN (SELECT id FROM descendants) AND title = '${LegacyService.ZYRA_MEMORY_DOC_TITLE}'`,
+        [folderId, projectId]
       );
     });
 
@@ -5640,8 +5784,57 @@ export class LegacyService implements OnModuleInit {
 
     const [folders, documents, files] = await Promise.all([
       this.db.query(
-        `SELECT kf.*, u.name AS updated_by_name, u.email AS updated_by_email
-         FROM knowledge_folders kf LEFT JOIN users u ON u.id = kf.updated_by
+        /*
+         * Folder rows carry the size and the counts of everything BENEATH them, at every depth.
+         *
+         * Basecamp 10199231000 — "Folder size is not displayed in Knowledge Base even when documents
+         * are present". This was a bare `SELECT kf.*`, so a folder row had no size at all and the
+         * table's Size column rendered "—" for every folder.
+         *
+         * Recursive, because a size that stopped at direct children would under-report any folder whose
+         * content sits in subfolders — the normal shape once a KB is organised. `file_bytes` is real
+         * stored bytes from knowledge_files; documents are DB text with no file behind them, so they
+         * are reported as a COUNT rather than folded into the byte figure, and the screen shows both.
+         */
+        `WITH RECURSIVE subtree AS (
+           SELECT id FROM knowledge_folders WHERE parent_folder_id = $1 AND is_deleted = false
+           UNION ALL
+           SELECT kf.id FROM knowledge_folders kf JOIN subtree st ON kf.parent_folder_id = st.id
+           WHERE kf.is_deleted = false
+         ),
+         roots AS (
+           SELECT id FROM knowledge_folders WHERE parent_folder_id = $1 AND is_deleted = false
+         ),
+         descendants AS (
+           -- Every (root, descendant-including-itself) pair, so each listed folder can be aggregated.
+           SELECT r.id AS root_id, r.id AS node_id FROM roots r
+           UNION ALL
+           SELECT d.root_id, kf.id
+           FROM knowledge_folders kf JOIN descendants d ON kf.parent_folder_id = d.node_id
+           WHERE kf.is_deleted = false
+         ),
+         sizes AS (
+           SELECT d.root_id,
+                  COALESCE(SUM(f.file_size), 0)::bigint AS file_bytes,
+                  COUNT(f.id)::int AS file_count
+           FROM descendants d
+           LEFT JOIN knowledge_files f ON f.folder_id = d.node_id AND f.is_deleted = false
+           GROUP BY d.root_id
+         ),
+         docs AS (
+           SELECT d.root_id, COUNT(kd.id)::int AS document_count
+           FROM descendants d
+           LEFT JOIN knowledge_documents kd ON kd.folder_id = d.node_id AND kd.is_deleted = false
+           GROUP BY d.root_id
+         )
+         SELECT kf.*, u.name AS updated_by_name, u.email AS updated_by_email,
+                COALESCE(sz.file_bytes, 0)::bigint AS file_bytes,
+                COALESCE(sz.file_count, 0)::int AS file_count,
+                COALESCE(dc.document_count, 0)::int AS document_count
+         FROM knowledge_folders kf
+         LEFT JOIN users u ON u.id = kf.updated_by
+         LEFT JOIN sizes sz ON sz.root_id = kf.id
+         LEFT JOIN docs dc ON dc.root_id = kf.id
          WHERE kf.parent_folder_id = $1 AND kf.is_deleted = false ORDER BY kf.name`,
         [folderId]
       ),
@@ -5663,11 +5856,26 @@ export class LegacyService implements OnModuleInit {
     ]);
 
     const items: Body[] = [
-      ...folders.rows.map((row) => Object.assign(toCamel(row), { type: "folder" })),
+      ...folders.rows.map((row) => {
+        const camelled = toCamel(row);
+        // node-postgres returns bigint as a string to avoid precision loss; the byte total is far
+        // below 2^53 so a Number is safe, and the client should not have to parse it.
+        return Object.assign(camelled, {
+          type: "folder",
+          fileBytes: Number(camelled.fileBytes ?? 0),
+          fileCount: Number(camelled.fileCount ?? 0),
+          documentCount: Number(camelled.documentCount ?? 0)
+        });
+      }),
       ...documents.rows.map((row) => {
         const camelled = toCamel(row);
         delete camelled.searchVector;
-        return Object.assign(camelled, { type: "document" });
+        // A document has no file behind it, so its "size" is the byte length of the text it holds.
+        // Reported as fileSize so the table's existing formatter renders it without a special case.
+        return Object.assign(camelled, {
+          type: "document",
+          fileSize: Buffer.byteLength(String(row.content_text ?? ""), "utf8")
+        });
       }),
       ...files.rows.map((row) => Object.assign(this.kbFileView(row), { type: "file" }))
     ];
@@ -5773,6 +5981,13 @@ export class LegacyService implements OnModuleInit {
     }
 
     const nextTitle = body.title !== undefined ? String(body.title).trim() : doc.title;
+    // Renaming detaches the document from the agent: rememberZyraMemory and zyraMemoryText both look
+    // it up BY TITLE, so the old memory becomes unreachable and a second, empty one starts.
+    if (this.isZyraMemoryDocument(doc) && nextTitle !== doc.title) {
+      throw new BadRequestException({
+        error: `"${LegacyService.ZYRA_MEMORY_DOC_TITLE}" is managed by Zyra and can't be renamed — Zyra finds its memory by this title.`
+      });
+    }
     const nextJson = body.contentJson !== undefined ? JSON.stringify(body.contentJson) : doc.content_json ? JSON.stringify(doc.content_json) : null;
     const nextHtml = body.contentHtml !== undefined ? body.contentHtml : doc.content_html;
     const nextText = body.contentText !== undefined ? body.contentText : doc.content_text;
@@ -5871,12 +6086,22 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
+  /** True for the agent-managed memory document, which users may read but not delete or rename. */
+  private isZyraMemoryDocument(doc: { title?: unknown }): boolean {
+    return String(doc?.title ?? "").trim() === LegacyService.ZYRA_MEMORY_DOC_TITLE;
+  }
+
   async deleteKnowledgeDocument(projectId: string, userId: string | null | undefined, documentId: string) {
     const uid = this.requireUser(userId);
     await this.requireProjectAccess(uid, projectId);
     const doc = await this.kbDocument(projectId, documentId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, doc.created_by, uid);
+    if (this.isZyraMemoryDocument(doc)) {
+      throw new BadRequestException({
+        error: `"${LegacyService.ZYRA_MEMORY_DOC_TITLE}" is managed by Zyra and can't be deleted — it holds everything Zyra has learned about this project. To clear it, reset Zyra's memory from the agent's settings.`
+      });
+    }
     await this.db.query(
       "UPDATE knowledge_documents SET is_deleted = true, deleted_at = now(), updated_by = $2, updated_at = now() WHERE id = $1",
       [documentId, uid]
@@ -7543,6 +7768,7 @@ export class LegacyService implements OnModuleInit {
       tokenUsage: {
         total: Number(usage.rows[0]?.total || 0)
       },
+      testcasesCreated: await this.zyraCreatedTestcaseCount(projectId),
       tasks: tasks.rows.map((row) => this.formatAiTask(row))
     };
   }
@@ -7609,6 +7835,30 @@ export class LegacyService implements OnModuleInit {
     } catch (err) {
       return { ok: false, provider, model, error: err instanceof Error ? err.message : String(err), latencyMs: Math.round(performance.now() - start) };
     }
+  }
+
+  /**
+   * How many test cases Zyra has put into this project, across BOTH of its modes.
+   *
+   * Basecamp 10212918496 ("Zyra Test Generator Displays 0 Tests Generated After Creating 33 Test
+   * Cases"): the tile summed `generated_count` over ai_generation_requests, a column only the
+   * task-board draft flow ever writes. Chat mode creates test cases directly through
+   * applyZyraChatOperations and touches no generation row at all, so every case made by talking to
+   * Zyra — which is how the reporter made all 33 — counted as zero.
+   *
+   * Counted from the `zyra_created` audit action, which both modes now write, and restricted to cases
+   * that still exist so deleting a Zyra case takes it back out of the number. DISTINCT because a
+   * re-save of the same draft must not count the case twice.
+   */
+  private async zyraCreatedTestcaseCount(projectId: string): Promise<number> {
+    const res = await this.db.query<{ count: string }>(
+      `SELECT COUNT(DISTINCT a.entity_id) AS count
+         FROM audit_logs a
+         JOIN testcases_active t ON t.id = a.entity_id
+        WHERE a.project_id = $1 AND a.action = 'zyra_created' AND a.entity_type = 'testcase'`,
+      [projectId]
+    );
+    return Number(res.rows[0]?.count || 0);
   }
 
   async zyraTask(projectId: string, userId: string | null | undefined, taskId: string) {
@@ -8362,6 +8612,16 @@ export class LegacyService implements OnModuleInit {
   // Matches the largest batch chatTestcasePlan will ask for, so a legitimate generation is never
   // partially applied (see applyZyraChatOperations / normalizeZyraChatDecision).
   private static readonly ZYRA_CHAT_MAX_OPERATIONS = 25;
+  /*
+   * The knowledge document Zyra keeps its project memory in.
+   *
+   * It is a real knowledge_documents row on purpose — it is pinned into RAG context and readable, so
+   * a team can see what Zyra has learned. What it is NOT is a user document: deleting or renaming it
+   * throws away everything Zyra remembers about the project, and a rename also detaches it, since
+   * rememberZyraMemory and zyraMemoryText both find it BY TITLE and would silently start a second,
+   * empty memory. Basecamp 10212786541.
+   */
+  private static readonly ZYRA_MEMORY_DOC_TITLE = "Zyra AI Memory";
 
   private zyraBatchMessage(originalMessage: string, batch: string[]): string {
     return [
@@ -9120,6 +9380,10 @@ export class LegacyService implements OnModuleInit {
         touched.push({ id: existingLinked.rows[index].id, title: draft.title, updated: true });
       } else {
         const testcase = await this.createTestCase(projectId, userId, payload);
+        // The same audit action chat mode writes in applyZyraChatOperations. Both modes have to be
+        // recorded identically or the agent's "tests generated" tile can only ever see one of them
+        // — Basecamp 10212918496, where 33 chat-created cases were reported as 0.
+        await this.logProjectActivity(projectId, userId ?? null, "zyra_created", "testcase", testcase.id, `${testcase.externalId} - ${testcase.title}`, { source: "zyra_task", taskId });
         created.push(testcase);
         touched.push(testcase);
       }
@@ -10489,19 +10753,57 @@ export class LegacyService implements OnModuleInit {
   // nothing used to compare the two — so a decision that promised a mutation and then persisted
   // nothing was still reported as a success ("All 15 test cases have been saved into the Login
   // suite" over zero written rows). Prefix an honest correction rather than let the claim stand.
+  /*
+   * Keeps the visible reply honest about what was actually written.
+   *
+   * `decision.reply` is model-authored prose. It states what the model INTENDED, and the model does
+   * not write — applyZyraChatOperations does, and it drops operations for several reasons: the
+   * ZYRA_CHAT_MAX_OPERATIONS per-message cap, an external-id conflict that survives one retry, a
+   * referenced test case or suite that does not exist, and capability gating.
+   *
+   * This used to correct only the all-or-nothing case (`if (applied.testcases.length) return
+   * decision.reply`), so a turn that asked for 20 and applied 7 returned "Created 20 edge case test
+   * scenarios..." verbatim while 7 existed — Basecamp 10212827246 ("shows success but test cases are
+   * not reflected") and the "Created 20..." / "7 test cases generated" mismatch on 10212918496.
+   * A partial application is now reported as a partial application, with applied.activity carrying
+   * the per-operation reason.
+   */
   private reconcileZyraReply(decision: ZyraChatDecision, applied: { testcases: Body[]; activity: Body[] }): string {
     if (decision.actionType === "answer") return decision.reply;
-    if (applied.testcases.length) return decision.reply;
     // Creating an empty suite touches no testcases and is still a complete success.
     if (decision.operations.length && decision.operations.every((op) => op.type === "create_suite")) return decision.reply;
-    const detail = decision.operations.length
-      ? "The test cases it referred to do not exist in this project, so there was nothing to change."
-      : "I did not produce any test case operations for this request.";
-    return [
-      `⚠️ Nothing was saved. ${detail} Ask me to generate the test cases and I'll write them straight to the repository in the same step.`,
-      "",
-      decision.reply
-    ].join("\n");
+
+    // create_suite is the one operation that is not expected to produce a testcase row.
+    const requested = decision.operations.filter((op) => op.type !== "create_suite").length;
+    const appliedCount = applied.testcases.length;
+
+    if (!appliedCount) {
+      const detail = decision.operations.length
+        ? "The test cases it referred to do not exist in this project, so there was nothing to change."
+        : "I did not produce any test case operations for this request.";
+      return [
+        `⚠️ Nothing was saved. ${detail} Ask me to generate the test cases and I'll write them straight to the repository in the same step.`,
+        "",
+        decision.reply
+      ].join("\n");
+    }
+
+    if (appliedCount < requested) {
+      // The reasons are already in the activity log this turn; naming them here keeps the chat itself
+      // truthful instead of making the user open the activity panel to find out.
+      const reasons = applied.activity
+        .filter((entry) => /could not|skipped/i.test(String(entry.title || "")))
+        .map((entry) => String(entry.detail || entry.title))
+        .filter(Boolean);
+      return [
+        `⚠️ ${appliedCount} of ${requested} test case operation(s) were applied.` +
+          (reasons.length ? ` ${reasons.join(" ")}` : " The rest were not written to the repository."),
+        "",
+        decision.reply
+      ].join("\n");
+    }
+
+    return decision.reply;
   }
 
   private aiUnavailableForZyraChat(existingCount: number, reason = "AI generation was not available for this chat request."): ZyraChatDecision {

@@ -1479,4 +1479,190 @@ test.describe("knowledge base v2 — folders and documents", () => {
       exec(`DELETE FROM knowledge_base_items WHERE id = ${literal(note.id)};`);
     }
   });
+  // ─── The agent-managed memory document ────────────────────────────────────
+
+  /*
+   * Basecamp 10212786541 — "Zyra ai Memory > Able to delete AI memory doc from knowledge base".
+   *
+   * Zyra keeps its project memory in a knowledge document titled exactly "Zyra AI Memory". It is a
+   * real document on purpose (pinned into RAG context, and readable so a team can see what Zyra has
+   * learned) but it is not a user document: deleting it discards everything Zyra remembers, and a
+   * RENAME is worse than a delete — rememberZyraMemory and zyraMemoryText both find it BY TITLE, so a
+   * renamed document is silently abandoned and a second, empty memory starts beside it.
+   *
+   * All three tests fail against the unfixed code, where the document had no protection at all.
+   */
+  const ZYRA_MEMORY_TITLE = "Zyra AI Memory";
+
+  test("KB-A-55 the Zyra memory document cannot be deleted or renamed", async () => {
+    // Created with the real title, which is the only thing the guard keys on.
+    const memory = await createDocument({ title: ZYRA_MEMORY_TITLE });
+    try {
+      const deleted = await asOwner.delete(kbUrl(`/documents/${memory.id}`), { failOnStatusCode: false });
+      expect(
+        deleted.status(),
+        `deleting Zyra's memory answered ${deleted.status()}: ${await deleted.text()}`,
+      ).toBeGreaterThanOrEqual(400);
+      expect(isDeleted("knowledge_documents", memory.id), "Zyra's memory was deleted").toBe(false);
+
+      const renamed = await asOwner.patch(kbUrl(`/documents/${memory.id}`), {
+        data: { title: "Team notes" },
+        failOnStatusCode: false,
+      });
+      expect(
+        renamed.status(),
+        `renaming Zyra's memory answered ${renamed.status()}: ${await renamed.text()}`,
+      ).toBeGreaterThanOrEqual(400);
+      expect(
+        scalar(`SELECT title FROM knowledge_documents WHERE id = ${literal(memory.id)};`),
+        "Zyra's memory was renamed, which detaches it from the agent",
+      ).toBe(ZYRA_MEMORY_TITLE);
+    } finally {
+      // The guard is the point of the test, so the row is removed directly rather than through the API.
+      exec(`DELETE FROM knowledge_documents WHERE id = ${literal(memory.id)};`);
+    }
+  });
+
+  test("KB-A-56 its body is still editable, and ordinary documents are still deletable", async () => {
+    // The protection is deliberately narrow: the document is readable and writable content-wise
+    // (rememberZyraMemory prepends to whatever is there), and nothing else changed about the KB.
+    const memory = await createDocument({ title: ZYRA_MEMORY_TITLE });
+    const ordinary = await createDocument({ title: stamp("Ordinary doc") });
+    try {
+      const edited = await asOwner.patch(kbUrl(`/documents/${memory.id}`), {
+        data: { contentText: "Zyra learned something." },
+        failOnStatusCode: false,
+      });
+      expect(edited.status(), `editing the memory body — ${await edited.text()}`).toBeLessThan(400);
+
+      const deleted = await asOwner.delete(kbUrl(`/documents/${ordinary.id}`), { failOnStatusCode: false });
+      expect(deleted.status(), `deleting an ordinary doc — ${await deleted.text()}`).toBeLessThan(400);
+      expect(isDeleted("knowledge_documents", ordinary.id)).toBe(true);
+    } finally {
+      exec(`DELETE FROM knowledge_documents WHERE id IN (${literal(memory.id)}, ${literal(ordinary.id)});`);
+    }
+  });
+
+  test("KB-A-57 deleting the folder it sits in does not take the memory document with it", async () => {
+    /*
+     * The folder cascade soft-deletes every document under the folder in one statement, which was a
+     * way around the per-document guard: delete the AI memory folder, lose the memory. It is now
+     * excluded from the cascade AND re-homed to the root, because a surviving document pointing at a
+     * deleted folder would appear in no listing — kept but invisible is worse than a clear refusal.
+     */
+    const folder = await createFolder({ name: stamp("AI memory folder") });
+    const memory = await createDocument({ title: ZYRA_MEMORY_TITLE, folderId: folder.id });
+    const sibling = await createDocument({ title: stamp("Sibling doc"), folderId: folder.id });
+    try {
+      const res = await asOwner.delete(kbUrl(`/folders/${folder.id}`), { failOnStatusCode: false });
+      expect(res.status(), `deleting the folder — ${await res.text()}`).toBeLessThan(400);
+
+      // The sibling goes, as it always did — the cascade still works.
+      expect(isDeleted("knowledge_documents", sibling.id), "the cascade stopped working").toBe(true);
+      // The memory survives, and is reachable rather than orphaned under a deleted folder.
+      expect(isDeleted("knowledge_documents", memory.id), "Zyra's memory died with its folder").toBe(false);
+      const parent = scalar(
+        `SELECT coalesce(f.is_root::text, 'no-folder') FROM knowledge_documents d ` +
+          `LEFT JOIN knowledge_folders f ON f.id = d.folder_id WHERE d.id = ${literal(memory.id)};`,
+      );
+      expect(parent, "Zyra's memory was left pointing at a deleted folder").toBe("t");
+
+      // And Zyra can still find it, which is the whole point: it is looked up by title.
+      const listed = await asOwner.get(kbUrl("/documents"), { failOnStatusCode: false });
+      expect(listed.status()).toBe(200);
+      expect(
+        (await listed.json()).some((d: { id: string }) => d.id === memory.id),
+        "Zyra's memory survived but is no longer listed anywhere",
+      ).toBe(true);
+    } finally {
+      exec(`DELETE FROM knowledge_documents WHERE id IN (${literal(memory.id)}, ${literal(sibling.id)});`);
+      exec(`DELETE FROM knowledge_folders WHERE id = ${literal(folder.id)};`);
+    }
+  });
+  // ─── Folder name length, and what a folder reports as its size ────────────
+
+  test("KB-A-58 an over-long folder name is refused with a 400, never a 500", async () => {
+    /*
+     * Basecamp 10199204536 — "[Knowledge Base → Folders] Internal Server Error occurs when renaming a
+     * folder with a long name". `knowledge_folders.name` is VARCHAR(255) and neither create nor rename
+     * bounded the input, so a longer name reached Postgres, raised 22001
+     * (string_data_right_truncation), and — no handler catching that code — answered 500.
+     *
+     * Both paths are asserted: rename is what was reported, create had the identical gap.
+     */
+    const folder = await createFolder({ name: stamp("Rename target") });
+    const tooLong = "L".repeat(256);
+    try {
+      const renamed = await asOwner.patch(kbUrl(`/folders/${folder.id}`), {
+        data: { name: tooLong },
+        failOnStatusCode: false,
+      });
+      expect(
+        renamed.status(),
+        `renaming to a 256-character name answered ${renamed.status()}: ${await renamed.text()}`,
+      ).toBe(400);
+      // The message has to name the limit, or the user cannot tell what to shorten it to.
+      expect(await renamed.text()).toMatch(/too long/i);
+      // And nothing was written.
+      expect(scalar(`SELECT name FROM knowledge_folders WHERE id = ${literal(folder.id)};`)).not.toBe(tooLong);
+
+      const created = await asOwner.post(kbUrl("/folders"), {
+        data: { name: tooLong, parentFolderId: rootFolderId },
+        failOnStatusCode: false,
+      });
+      expect(created.status(), `creating a 256-character name answered ${created.status()}`).toBe(400);
+
+      // The boundary itself is accepted — 255 is a legal name, so the guard must be off-by-none.
+      const atLimit = "A".repeat(255);
+      const ok = await asOwner.patch(kbUrl(`/folders/${folder.id}`), {
+        data: { name: atLimit },
+        failOnStatusCode: false,
+      });
+      expect(ok.status(), `a 255-character name was refused — ${await ok.text()}`).toBeLessThan(400);
+      expect(scalar(`SELECT name FROM knowledge_folders WHERE id = ${literal(folder.id)};`)).toBe(atLimit);
+    } finally {
+      exec(`DELETE FROM knowledge_folders WHERE id = ${literal(folder.id)};`);
+    }
+  });
+
+  test("KB-A-59 a folder reports the size and document count of everything beneath it", async () => {
+    /*
+     * Basecamp 10199231000 — "Folder size is not displayed in Knowledge Base even when documents are
+     * present". The folders branch of listKnowledgeFolderItems was a bare `SELECT kf.*`, so a folder row
+     * carried no size at all and the table rendered "—" for every one.
+     *
+     * Recursive on purpose: a total that stopped at direct children would under-report any folder whose
+     * content sits in a subfolder, which is the normal shape once a KB is organised. Documents are text
+     * rows with no file behind them, so they are counted rather than folded into the byte figure.
+     */
+    const parent = await createFolder({ name: stamp("Sized parent") });
+    const child = await createFolder({ name: stamp("Sized child"), parentFolderId: parent.id });
+    const docs = [
+      await createDocument({ title: stamp("Direct doc"), folderId: parent.id, contentText: "x".repeat(120) }),
+      await createDocument({ title: stamp("Nested doc"), folderId: child.id, contentText: "y".repeat(80) }),
+    ];
+    try {
+      const listed = await asOwner.get(kbUrl(`/folders/${rootFolderId}/items`), { failOnStatusCode: false });
+      expect(listed.status(), `listing the root — ${await listed.text()}`).toBe(200);
+      const row = (await listed.json()).items.find((i: { id: string }) => i.id === parent.id);
+      expect(row, "the parent folder is not in the root listing").toBeTruthy();
+
+      // Both documents counted, including the one nested a level down.
+      expect(
+        row.documentCount,
+        "the folder does not report the documents beneath it — the Size column stays blank",
+      ).toBe(2);
+      // No files were uploaded, so the byte total is 0 rather than absent.
+      expect(row.fileBytes, "fileBytes is missing from the folder row").toBe(0);
+      expect(row.fileCount).toBe(0);
+
+      // A document reports its own text length, so a docs-only folder is not blank either.
+      const inParent = await asOwner.get(kbUrl(`/folders/${parent.id}/items`), { failOnStatusCode: false });
+      const docRow = (await inParent.json()).items.find((i: { id: string }) => i.id === docs[0].id);
+      expect(docRow.fileSize, "a document reports no size").toBe(120);
+    } finally {
+      exec(`DELETE FROM knowledge_documents WHERE id IN (${docs.map((d) => literal(d.id)).join(", ")});`);
+      exec(`DELETE FROM knowledge_folders WHERE id IN (${literal(child.id)}, ${literal(parent.id)});`);
+    }
+  });
 });

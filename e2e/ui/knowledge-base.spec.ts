@@ -865,4 +865,74 @@ test.describe("knowledge base (UI)", () => {
       "no element exposes the full folder name, so a truncated name cannot be read at all",
     ).toBeAttached();
   });
+  /*
+   * Basecamp 10199290648 — "Resolving a comment deletes the comment and its replies".
+   *
+   * It does not: resolve sets is_resolved (delete is a separate endpoint), the list endpoint still
+   * returns the thread, and it can be reopened — all pinned API-side by KBC-A-10..13. What the
+   * reporter actually hit was a disappearance: a resolved thread is hidden from the default view, and
+   * the only thing saying so was a 12px grey underlined link in the header's far corner. When the
+   * resolved thread is the LAST open one the entire list empties at once, which reads as destruction.
+   *
+   * Asserts the behaviour is non-destructive AND that the screen says so. Fails against the old UI on
+   * the chip locator and on the empty-state wording.
+   */
+  test("KBU-31 resolving a comment hides it without ever looking like a deletion", async ({ browser }) => {
+    const docName = stamp("Comment doc");
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title: docName, folderId: rootFolderId, contentText: "Body under discussion." },
+      failOnStatusCode: false,
+    });
+    expect(created.status(), `seeding the document — ${await created.text()}`).toBe(201);
+    const documentId = (await created.json()).id;
+
+    const threadBody = stamp("Please review this passage");
+    const thread = await api.post(kbUrl(`/documents/${documentId}/comments`), {
+      data: { body: threadBody },
+      failOnStatusCode: false,
+    });
+    expect(thread.status(), `seeding the thread — ${await thread.text()}`).toBe(201);
+    const threadId = (await thread.json()).id;
+    const replyBody = stamp("Agreed");
+    await api.post(kbUrl(`/documents/${documentId}/comments`), {
+      data: { body: replyBody, parentCommentId: threadId },
+      failOnStatusCode: false,
+    });
+
+    const page = await openKb(browser);
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/${documentId}`);
+
+    // The thread and its reply are both on screen, and there is nothing resolved yet.
+    await expect(page.getByText(threadBody)).toBeVisible();
+    await expect(page.getByText(replyBody)).toBeVisible();
+    await expect(page.getByTestId("toggle-resolved-comments")).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Resolve/ }).first().click();
+
+    // It leaves the default view — that part is intended.
+    await expect(page.getByText(threadBody)).toHaveCount(0);
+    await expect(page.getByText(replyBody)).toHaveCount(0);
+
+    // But the screen must make it obvious the thread was kept, not destroyed.
+    const chip = page.getByTestId("toggle-resolved-comments");
+    await expect(chip, "nothing prominent says where the resolved thread went").toBeVisible();
+    await expect(chip).toContainText("1 resolved");
+    // This was the only open thread, so the list is now empty — the moment the reporter read as a
+    // deletion. The empty state has to say otherwise.
+    await expect(page.getByText(/Nothing was deleted/i)).toBeVisible();
+
+    // And it is genuinely recoverable from the UI.
+    await chip.click();
+    await expect(page.getByText(threadBody)).toBeVisible();
+    await expect(page.getByText(replyBody), "the reply was not restored with its thread").toBeVisible();
+    await page.getByRole("button", { name: /Reopen/ }).first().click();
+    await expect(page.getByTestId("toggle-resolved-comments")).toHaveCount(0);
+    await expect(page.getByText(threadBody)).toBeVisible();
+
+    // Proof it was never deleted: the API still serves both rows, undeleted.
+    const listed = await (await api.get(kbUrl(`/documents/${documentId}/comments`))).json();
+    const bodies = listed.map((c: { body: string }) => c.body);
+    expect(bodies, "the thread or its reply was actually deleted").toContain(threadBody);
+    expect(bodies).toContain(replyBody);
+  });
 });

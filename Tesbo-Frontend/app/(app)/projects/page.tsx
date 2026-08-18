@@ -35,6 +35,7 @@ import {
   validateProjectDescription,
   validateProjectName,
 } from "@/lib/validation";
+import { avatarColor } from "@/lib/avatarColors";
 
 type RunCounts = { passed: number; failed: number; blocked: number; total: number };
 type ProjectStatus = "active" | "configured" | "setup_required";
@@ -52,11 +53,13 @@ type ProjectWithStats = ProjectSummary & {
 const VIEW_STORAGE_KEY = "tesbo_projects_view";
 
 /*
- * Avatar fills. Every one carries white initials, so each has to clear 4.5:1 against white — the
- * green and the amber previously scored 3.59 and 3.07, and which project or member landed on them
- * was down to a hash, so the defect surfaced on some accounts and not others.
+ * Avatar fills come from lib/avatarColors.ts.
+ *
+ * This module used to hold its own copy of the palette and its own hashSeed — byte-identical to the
+ * shared ones, which is exactly how they drift apart. Basecamp 10198836413 ("Display picture initials
+ * show different colours across the website") was that drift: one person's initials were painted five
+ * different ways across the app.
  */
-const PROJECT_COLORS = ["#7C5FCC", "#4C5FD5", "#1F7A3D", "#1D7FA8", "#A85F06", "#D83A3A"];
 
 type SortOption = "updated" | "name_asc" | "name_desc" | "created";
 
@@ -86,14 +89,8 @@ function sortProjects(projects: ProjectWithStats[], sortBy: SortOption): Project
   }
 }
 
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
 function projectColor(seed: string): string {
-  return PROJECT_COLORS[hashSeed(seed) % PROJECT_COLORS.length];
+  return avatarColor(seed);
 }
 
 const STATUS_META: Record<ProjectStatus, { label: string; text: string; dot: string; fill: string }> = {

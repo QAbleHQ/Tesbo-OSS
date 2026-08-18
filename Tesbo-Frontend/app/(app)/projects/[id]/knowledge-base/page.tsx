@@ -193,6 +193,25 @@ const DOCUMENT_TEMPLATES: DocumentTemplate[] = [
   },
 ];
 
+/**
+ * What the Size column shows for one row.
+ *
+ * A folder has no size of its own, so it describes its contents: the stored bytes of the files beneath
+ * it, and the number of documents (which are text rows, not files, and so carry no bytes to add). An
+ * empty folder says "Empty" rather than "0 B", which would imply it holds a zero-byte thing.
+ */
+function sizeLabel(item: KnowledgeItem): string {
+  if (item.type === "folder") {
+    const bytes = Number((item as { fileBytes?: number }).fileBytes || 0);
+    const docs = Number((item as { documentCount?: number }).documentCount || 0);
+    const parts: string[] = [];
+    if (bytes > 0) parts.push(formatFileSize(bytes));
+    if (docs > 0) parts.push(`${docs} doc${docs === 1 ? "" : "s"}`);
+    return parts.length ? parts.join(" · ") : "Empty";
+  }
+  return formatFileSize((item as { fileSize?: number }).fileSize);
+}
+
 function formatFileSize(bytes: number | null | undefined): string {
   if (bytes == null) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -853,7 +872,12 @@ function KnowledgeBasePageInner() {
   const sortedItems = [...typeFilteredItems].sort((a, b) => {
     if (sortBy === "name") return itemLabel(a).localeCompare(itemLabel(b));
     if (sortBy === "size") {
-      const sizeOf = (item: KnowledgeItem) => (item.type === "file" ? Number((item as { fileSize?: number }).fileSize || 0) : -1);
+      // Folders sort by the bytes they contain now that they report them, instead of being pinned
+      // below every file by a -1 sentinel.
+      const sizeOf = (item: KnowledgeItem) =>
+        item.type === "folder"
+          ? Number((item as { fileBytes?: number }).fileBytes || 0)
+          : Number((item as { fileSize?: number }).fileSize || 0);
       return sizeOf(b) - sizeOf(a);
     }
     return new Date((b as { updatedAt: string }).updatedAt).getTime() - new Date((a as { updatedAt: string }).updatedAt).getTime();
@@ -1217,7 +1241,14 @@ function KnowledgeBasePageInner() {
                               : (item as { updatedByName?: string }).updatedByName || "—"}
                           </td>
                           <td className="px-4 py-2.5 text-[var(--muted)]">{formatDate((item as { updatedAt: string }).updatedAt)}</td>
-                          <td className="px-4 py-2.5 text-[var(--muted)]">{item.type === "file" ? formatFileSize((item as { fileSize?: number }).fileSize) : "—"}</td>
+                          {/*
+                            * Basecamp 10199231000 — folders (and documents) rendered a bare "—" here.
+                            * A folder now reports the total bytes of every file beneath it at any depth,
+                            * plus a document count, since documents are DB text with no file behind them
+                            * and cannot be folded into a byte total honestly. A document reports the
+                            * byte length of its own text.
+                            */}
+                          <td className="px-4 py-2.5 text-[var(--muted)]">{sizeLabel(item)}</td>
                           <td className="px-4 py-2.5 text-right">
                             <Menu
                               align="right"

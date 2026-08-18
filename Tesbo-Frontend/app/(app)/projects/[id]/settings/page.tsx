@@ -11,6 +11,7 @@ import {
   updateProject,
   deleteProject as deleteProjectRequest,
   getJiraStatus,
+  getBillingInfo,
   getLinearStatus,
   listProjectMembers,
   listWorkspaceMembers,
@@ -95,6 +96,21 @@ export default function ProjectSettingsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
   const [linearStatus, setLinearStatus] = useState<LinearConnection | null>(null);
+  /*
+   * Basecamp 10191178824 — "Linear is restricted behind a Pro upgrade in Workspace Settings, but the
+   * same integration is available in Project Settings → Integrations".
+   *
+   * The workspace tab locks its Linear card with `proOnly && !isPro && !connected`; this screen had no
+   * plan awareness at all, so a Launch workspace saw a plain "Connect in Workspace Settings" button
+   * here and a Pro lock there. The server does enforce the gate — integrationCallback calls
+   * assertIntegrationAllowed — so this was never a bypass; the user just did not learn about the
+   * restriction until after following the button, which is why the two screens read as contradicting.
+   *
+   * Mirrors the workspace tab's condition rather than inventing a second rule. `null` means "not known
+   * yet", so the card never flashes a lock it may not need.
+   */
+  const [linearIsPro, setLinearIsPro] = useState<boolean | null>(null);
+  const linearLocked = linearIsPro === false && !linearStatus?.connected;
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [projectMembers, setProjectMembers] = useState<ProjectMember[]>([]);
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
@@ -217,6 +233,9 @@ export default function ProjectSettingsPage() {
       }).catch(() => router.replace("/projects"));
       getJiraStatus(projectId).then(setJiraStatus).catch(() => {});
       getLinearStatus(projectId).then(setLinearStatus).catch(() => {});
+      getBillingInfo()
+        .then((billing) => setLinearIsPro(billing.plan === "pro"))
+        .catch(() => setLinearIsPro(null));
       listApiKeys(projectId).then((l) => setApiTokenCount(l.length)).catch(() => {});
       listCustomFieldDefinitions(projectId).then((l) => setCustomFieldCount(l.length)).catch(() => {});
       loadMembers().catch(() => {});
@@ -930,7 +949,11 @@ export default function ProjectSettingsPage() {
                   )}
                 </div>
               ) : (
-                <p className="mt-2 text-xs text-[var(--muted-soft)]">Not connected for this workspace yet.</p>
+                <p className="mt-2 text-xs text-[var(--muted-soft)]">
+                  {linearLocked
+                    ? "Linear is a Pro plan integration — the Launch plan includes Jira only."
+                    : "Not connected for this workspace yet."}
+                </p>
               )}
             </div>
             <div className="shrink-0">
@@ -945,10 +968,15 @@ export default function ProjectSettingsPage() {
                 </Link>
               ) : (
                 <Link
-                  href="/settings/integrations/linear"
-                  className="inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+                  href={linearLocked ? "/settings?tab=billing" : "/settings/integrations/linear"}
+                  data-testid="linear-project-cta"
+                  className={
+                    linearLocked
+                      ? "inline-flex h-9 items-center justify-center rounded-[10px] border border-[var(--border)] px-3.5 text-[13px] font-semibold text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
+                      : "inline-flex h-9 items-center justify-center rounded-[10px] border border-transparent bg-[var(--brand-primary)] px-3.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[var(--brand-hover)]"
+                  }
                 >
-                  Connect in Workspace Settings
+                  {linearLocked ? "Upgrade to Pro" : "Connect in Workspace Settings"}
                 </Link>
               )}
             </div>

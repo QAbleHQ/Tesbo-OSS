@@ -524,9 +524,14 @@ test.describe("project dashboard summary", () => {
       // The dashboard reads executions_active (the deleted_at IS NULL view from V64), so the row
       // is gone and the rate climbs to 1 of 1 passed.
       expect(summary.passRate.value).toBe(100);
-      // listCycles reads the raw executions table, so the very same row is still counted here.
-      // The two screens now disagree about this run permanently, in the same session.
-      expect(listed.failed).toBe(1);
+      // The run list agrees now. This used to assert the opposite — listCycles read the raw
+      // executions table, so the deleted row stayed in its counters and the two screens disagreed
+      // about the same run permanently. listCycles joins `AND e.deleted_at IS NULL` and counts off
+      // e.id, and every plan roll-up was moved onto that same rule (EXECUTION_BUCKET_COUNTS) when
+      // "Overall progress percentage not matching" was fixed, so a deleted result is now nowhere.
+      expect(listed.failed).toBe(0);
+      expect(listed.totalCases).toBe(1);
+      expect(listed.passed).toBe(1);
     } finally {
       await deleteProjects(api, [project.id]);
     }
@@ -539,11 +544,14 @@ test.describe("project dashboard summary", () => {
 
       const listed = (await listRuns(api, project.id)).find((r) => r.id === run.cycleId)!;
       expect(listed.totalCases).toBe(0);
-      // COUNT(ci.id) ignores the NULLs, but COUNT(*) FILTER (...) does not: the LEFT JOIN emits one
-      // all-NULL row for a cycle with no items, and the untested filter counts it. So an empty run
-      // reports a case that doesn't exist. Pinned rather than asserted-as-0 so that fixing it is a
-      // deliberate change — the dashboard already clamps around this (executed = max(0, ...)).
-      expect(listed.untested).toBe(1);
+      // This used to be pinned at 1, recording the defect: the LEFT JOIN emits one all-NULL row for
+      // a cycle with no items, and an untested bucket counted with COUNT(*) FILTER (...) scored that
+      // row as a case that does not exist. The pin said fixing it had to be a deliberate change —
+      // this is that change, made everywhere at once. Counting the buckets off e.id (see
+      // EXECUTION_BUCKET_COUNTS) keeps the placeholder row out, so an empty run claims nothing on
+      // the run list, and a plan holding one no longer reports more untested cases than it has
+      // cases. That was the "Overall progress percentage not matching" report.
+      expect(listed.untested).toBe(0);
     } finally {
       await deleteProjects(api, [project.id]);
     }

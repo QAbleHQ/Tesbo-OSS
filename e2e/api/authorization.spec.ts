@@ -147,6 +147,31 @@ test.describe("test plans", () => {
       await request.delete(`/api/plans/${created.id}`, { failOnStatusCode: false });
     }
   });
+
+  test("the plan progress roll-up is refused to another tenant and to no session at all", async ({
+    request,
+  }) => {
+    // Not a known gap: planProgress/planRuns both go through requirePlanAccess, unlike the
+    // getPlan/updatePlan/deletePlan trio above. These assert the guard stays wired up — the
+    // roll-up carries a workspace's case counts and run names.
+    const created = await (
+      await request.post(`/api/projects/${ctxA.projectId}/plans`, {
+        data: { name: `E2E Plan Progress IDOR ${Date.now()}` },
+      })
+    ).json();
+
+    try {
+      for (const path of [`/api/plans/${created.id}/progress`, `/api/plans/${created.id}/runs`]) {
+        const asBRes = await asB.get(path, { failOnStatusCode: false });
+        expect(REFUSED, `must refuse another tenant: ${path}`).toContain(asBRes.status());
+
+        const anonRes = await anon.get(path, { failOnStatusCode: false });
+        expect(REFUSED, `must refuse an anonymous caller: ${path}`).toContain(anonRes.status());
+      }
+    } finally {
+      await request.delete(`/api/plans/${created.id}`, { failOnStatusCode: false });
+    }
+  });
 });
 
 test.describe("test cycles / runs", () => {

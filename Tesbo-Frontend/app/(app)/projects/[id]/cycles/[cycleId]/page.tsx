@@ -449,6 +449,27 @@ export default function TestRunDetailPage() {
       .finally(() => setLoading(false));
   }, [cycleId, projectId, router]);
 
+  /*
+   * Re-reads the run list the left panel's per-run counts come from.
+   *
+   * Basecamp 10199377404 — "[Test Run] Count does not match when deleted test cases from run". The
+   * removal handlers filtered `executions` locally, which is what the detail's Total and table render,
+   * but `allRuns` was only ever fetched by load() on mount. Its `totalCases` therefore kept the
+   * pre-delete number, so the panel showed 11 beside a run whose own Total said 10.
+   *
+   * Refetched rather than decremented locally: removing cases also moves the run's status buckets, and
+   * the server already computes all of them off live execution rows (listCycles). handleAddCases calls
+   * the full load() for the same reason.
+   */
+  const refreshRunList = useCallback(async () => {
+    try {
+      setAllRuns(await listTestRuns(projectId));
+    } catch {
+      // The panel's counts are secondary to the removal that just succeeded — a failed refresh must
+      // not present itself as a failed delete.
+    }
+  }, [projectId]);
+
   function toggleRunPanel() {
     setRunPanelOpen((prev) => {
       const next = !prev;
@@ -714,8 +735,12 @@ export default function TestRunDetailPage() {
         next.delete(testcaseId);
         return next;
       });
-    } catch {
-      // ignore
+      // The left panel's count for this run is now one behind.
+      await refreshRunList();
+    } catch (err) {
+      // Was a bare `// ignore`: a removal that failed left the row on screen with no explanation, so
+      // it read as an unresponsive button.
+      setBulkRemoveError(err instanceof Error ? err.message : "Failed to remove the test case.");
     }
   }
 
@@ -732,6 +757,7 @@ export default function TestRunDetailPage() {
       setSelectedRunCaseIds(new Set());
       setBulkRemoveError(null);
       setBulkRemoveOpen(false);
+      await refreshRunList();
     } catch (err) {
       setBulkRemoveError(err instanceof Error ? err.message : "Failed to remove the selected test cases.");
     } finally {
@@ -1045,7 +1071,11 @@ export default function TestRunDetailPage() {
                       <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
                         {r.name}
                       </span>
-                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
+                      <span
+                        data-testid="run-list-count"
+                        data-run-id={r.id}
+                        className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}
+                      >
                         {r.totalCases}
                       </span>
                     </button>
