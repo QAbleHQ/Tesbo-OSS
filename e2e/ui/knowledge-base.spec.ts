@@ -511,11 +511,26 @@ test.describe("knowledge base (UI)", () => {
       data: { contentText: `A body containing ${needle}`, contentHtml: `<p>A body containing ${needle}</p>` },
     });
 
+    // A second document that cannot match, so the assertion proves FILTERING and not merely that a
+    // freshly created document is somewhere in the list.
+    const decoyTitle = stamp("Unfindable");
+    await api.post(kbUrl("/documents"), {
+      data: { title: decoyTitle, folderId: rootFolderId, documentType: "general" },
+    });
+
     const page = await openKb(browser);
+    await expect(row(page, title)).toBeVisible();
+    await expect(row(page, decoyTitle)).toBeVisible();
+
+    // Enter, not fill() alone: this screen's search is a FORM, and searchQuery — the only state the
+    // results read — is set in onSubmit. Typing without submitting leaves the unfiltered list on
+    // screen, so an assertion that the document is visible would pass without searching at all.
     await page.getByPlaceholder("Search knowledge base…").fill(needle);
+    await page.getByPlaceholder("Search knowledge base…").press("Enter");
 
     // The title does not contain the needle, so a hit proves the body was searched.
     await expect(row(page, title)).toBeVisible();
+    await expect(row(page, decoyTitle), "a non-matching document must drop out").toHaveCount(0);
   });
 
   test("KBU-14 a whitespace-only search term matches nothing rather than everything", async ({ browser }) => {
@@ -626,5 +641,106 @@ test.describe("knowledge base (UI)", () => {
     // But the endpoint exists and works, which is what makes this a gap rather than a design.
     const restored = await api.patch(kbUrl(`/folders/${folderId}/restore`));
     expect(restored.status(), "restore works over the API — only the UI cannot reach it").toBe(200);
+  });
+  // ─── Blank documents (BetterBugs 6a7da01c) ─────────────────────────────────
+  //
+  // "user should not be able to save blank documents add some validation".
+  //
+  // KBU-07 already covers the CREATE modal refusing an empty title. These two are about the editor,
+  // which is a different code path and currently unguarded: handleTitleChange feeds scheduleSave
+  // directly, and scheduleSave's only precondition is a payload size ceiling. So a title can be
+  // cleared to nothing and autosaved, and the document then shows as "Untitled" everywhere it is
+  // listed. Both tests are expected RED until the editor validates before saving.
+
+  test("KBU-25 a document's title cannot be emptied and saved", async ({ browser }) => {
+    const title = stamp("KeepsTitle");
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title, folderId: rootFolderId, documentType: "general" },
+    });
+    const documentId = (await created.json()).id;
+
+    const ctx = await browser.newContext({ storageState: states.get("owner") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/${documentId}`);
+
+    const titleBox = page.getByPlaceholder("Untitled document");
+    await expect(titleBox).toHaveValue(title);
+    await titleBox.fill("");
+    await titleBox.blur();
+
+    // The editor autosaves on a debounce, so give it longer than the debounce to do the wrong thing
+    // before concluding it did not.
+    await expect(page.getByText(/Unsaved changes|Saving…|Saved/)).toBeVisible();
+    await page.waitForTimeout(2_000);
+
+    expect(
+      scalar(`SELECT title FROM knowledge_documents WHERE id = ${literal(documentId)};`),
+      "an emptied title must not be persisted",
+    ).toBe(title);
+  });
+
+  test("KBU-26 a whitespace-only title is refused the same way an empty one is", async ({ browser }) => {
+    const title = stamp("WhitespaceTitle");
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title, folderId: rootFolderId, documentType: "general" },
+    });
+    const documentId = (await created.json()).id;
+
+    const ctx = await browser.newContext({ storageState: states.get("owner") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/${documentId}`);
+
+    const titleBox = page.getByPlaceholder("Untitled document");
+    await expect(titleBox).toHaveValue(title);
+    // Spaces are the loophole an empty-string check alone leaves open — the stored title then looks
+    // present to the database and blank to every human reading the list.
+    await titleBox.fill("      ");
+    await titleBox.blur();
+    await page.waitForTimeout(2_000);
+
+    const stored = scalar(`SELECT title FROM knowledge_documents WHERE id = ${literal(documentId)};`);
+    expect(stored.trim(), "a whitespace-only title must not be persisted").not.toBe("");
+  });
+
+  // ─── Search feedback while typing (BetterBugs 6a7dae14) ────────────────────
+
+  test("KBU-27 search either filters as you type or offers a visible Search control", async ({ browser }) => {
+    const present = stamp("TypeAheadHit");
+    const absent = stamp("TypeAheadMiss");
+    for (const name of [present, absent]) {
+      await api.post(kbUrl("/folders"), { data: { name, parentFolderId: rootFolderId } });
+    }
+
+    const page = await openKb(browser);
+    await expect(row(page, present)).toBeVisible();
+    await expect(row(page, absent)).toBeVisible();
+
+    // Typed character by character and deliberately NOT submitted.
+    await page.getByPlaceholder("Search knowledge base…").pressSequentially(present, { delay: 20 });
+
+    /*
+     * The ticket accepts either resolution, so this test does too — it fails only if NEITHER is
+     * offered, which is the state the reporter hit: results arrive only on Enter and there is no
+     * button saying so, leaving the screen looking broken mid-type.
+     *
+     * The "Clear" button next to the box does not count: it appears only once a search has already
+     * been submitted, so it cannot tell a user how to submit one.
+     */
+    const filteredAsTyped = await row(page, absent)
+      .waitFor({ state: "detached", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+
+    const searchControl = page
+      .getByRole("button", { name: /^Search$/i })
+      .or(page.locator('button[type="submit"]').filter({ hasText: /search/i }));
+    const hasSearchButton = await searchControl.first().isVisible().catch(() => false);
+
+    expect(
+      filteredAsTyped || hasSearchButton,
+      "typing filtered nothing and no Search button was offered — the user cannot tell how to search",
+    ).toBe(true);
   });
 });

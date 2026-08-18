@@ -10,6 +10,7 @@ import {
   inviteStatus,
   loginAs,
   mintInviteToken,
+  orgMemberCount,
   orgRoleForEmail,
   provisionRbacTenant,
   rbacSuiteSkipReason,
@@ -793,6 +794,161 @@ test.describe("invitations", () => {
       expect(res.status()).toBe(400);
       expect((await res.json()).error).toContain("already exists");
     } finally {
+      detachUserByEmail(email);
+    }
+  });
+  // ─── A pending invitation must grant nothing (BetterBugs 6a7d8189) ─────────
+  //
+  // "User is onboarded without receiving or accepting invitation email" — reported as HIGH: the
+  // invited person appeared in the workspace's members without ever having opened the link.
+  //
+  // The email half of that report is covered elsewhere and is not a defect: the invite IS sent, and
+  // api/email-delivery.spec.ts pins that its accept link is emitted and works. Outside production the
+  // backend runs EMAIL_DELIVERY_MODE=log, so nothing reaches a real inbox on purpose — which is what
+  // the reporter observed on stage.
+  //
+  // The half worth pinning is the authorization one, and these tests state it from both sides: while
+  // an invitation is pending it must confer NO access at all, and acceptance must be the only thing
+  // that turns it into membership.
+
+  test("INV-P-01 a pending invitation confers no membership and no access", async () => {
+    const email = uniqueEmail("pending-noaccess");
+    const invitee = seedFixtureUser(email, "EndToEnd Pending Invitee");
+    await invite(email, { role: "manager" });
+
+    const asInvitee = await loginAs(invitee);
+    try {
+      // Nothing in the database says they belong here.
+      expect(storedOrgRole(tenant!, invitee.userId), "a pending invite is not a membership").toBe("");
+      expect(orgRoleForEmail(tenant!, email)).toBe("");
+      expect(storedProjectRole(tenant!.mainProjectId, invitee.userId)).toBe("");
+
+      // And nothing in the API lets them act as though they do. The invite named a project, so the
+      // project read is the one that would leak first.
+      const workspace = await asInvitee.get("/api/workspace", { failOnStatusCode: false });
+      if (workspace.ok()) {
+        expect(
+          (await workspace.json())?.id,
+          "an unaccepted invite must not make this workspace the invitee's",
+        ).not.toBe(tenant!.organizationId);
+      }
+
+      const project = await asInvitee.get(`/api/projects/${tenant!.mainProjectId}`, { failOnStatusCode: false });
+      expect(
+        [401, 403, 404],
+        `a pending invitee read the project: ${project.status()} ${await project.text()}`,
+      ).toContain(project.status());
+
+      const cases = await asInvitee.get(`/api/projects/${tenant!.mainProjectId}/testcases`, {
+        failOnStatusCode: false,
+      });
+      expect([401, 403, 404]).toContain(cases.status());
+    } finally {
+      await asInvitee.dispose();
+      detachUserByEmail(email);
+    }
+  });
+
+  test("INV-P-02 a pending invitee is not in the workspace's member roster", async () => {
+    const email = uniqueEmail("pending-roster");
+    const invitee = seedFixtureUser(email, "EndToEnd Roster Invitee");
+    const before = orgMemberCount(tenant!);
+    await invite(email);
+
+    try {
+      // The reporter's actual symptom: the invited address showing up in Team Members. The invite
+      // belongs in the *invitations* list, and nowhere else, until it is accepted.
+      const members = await (await asOwner.get("/api/workspace/members")).json();
+      const emails = (Array.isArray(members) ? members : members.members ?? []).map(
+        (m: { email?: string }) => m.email,
+      );
+      expect(emails, "a pending invitee must not be listed as a member").not.toContain(email);
+      expect(orgMemberCount(tenant!), "the member count must not move on invite").toBe(before);
+
+      const invitations = await (await asOwner.get("/api/workspace/invitations")).json();
+      expect(invitations.some((i: { email: string }) => i.email === email)).toBeTruthy();
+    } finally {
+      detachUserByEmail(email);
+    }
+  });
+
+  test("INV-P-03 acceptance is what creates the membership, and only then", async () => {
+    const email = uniqueEmail("accept-boundary");
+    const invitee = seedFixtureUser(email, "EndToEnd Boundary Invitee");
+    const before = orgMemberCount(tenant!);
+    const { token } = await invite(email, { role: "qa_engineer" });
+
+    const asInvitee = await loginAs(invitee);
+    try {
+      expect(storedOrgRole(tenant!, invitee.userId)).toBe("");
+      expect(orgMemberCount(tenant!)).toBe(before);
+
+      const accepted = await asInvitee.post(`/api/invitations/${token}/accept`, {
+        data: {},
+        failOnStatusCode: false,
+      });
+      expect(accepted.ok(), `accept failed: ${accepted.status()} ${await accepted.text()}`).toBeTruthy();
+
+      // Only now.
+      expect(storedOrgRole(tenant!, invitee.userId)).toBe("qa_engineer");
+      expect(orgMemberCount(tenant!)).toBe(before + 1);
+
+      const members = await (await asOwner.get("/api/workspace/members")).json();
+      const emails = (Array.isArray(members) ? members : members.members ?? []).map(
+        (m: { email?: string }) => m.email,
+      );
+      expect(emails).toContain(email);
+    } finally {
+      await asInvitee.dispose();
+      detachUserByEmail(email);
+    }
+  });
+
+  test("INV-P-04 a cancelled invitation leaves the invitee with nothing", async () => {
+    const email = uniqueEmail("cancelled-noaccess");
+    const invitee = seedFixtureUser(email, "EndToEnd Cancelled Invitee");
+    const before = orgMemberCount(tenant!);
+    const { id, token } = await invite(email);
+
+    const asInvitee = await loginAs(invitee);
+    try {
+      const cancelled = await asOwner.delete(`/api/workspace/invitations/${id}`, { failOnStatusCode: false });
+      expect(cancelled.ok(), `cancel failed: ${await cancelled.text()}`).toBeTruthy();
+      expect(inviteStatus(id)).toBe("cancelled");
+
+      const accepted = await asInvitee.post(`/api/invitations/${token}/accept`, {
+        data: {},
+        failOnStatusCode: false,
+      });
+      expect(accepted.ok(), "a cancelled invitation must not be redeemable").toBeFalsy();
+
+      expect(storedOrgRole(tenant!, invitee.userId)).toBe("");
+      expect(orgMemberCount(tenant!)).toBe(before);
+    } finally {
+      await asInvitee.dispose();
+      detachUserByEmail(email);
+    }
+  });
+
+  test("INV-P-05 an expired invitation cannot quietly become a membership", async () => {
+    const email = uniqueEmail("expired-noaccess");
+    const invitee = seedFixtureUser(email, "EndToEnd Expired Invitee");
+    const before = orgMemberCount(tenant!);
+    const { id, token } = await invite(email);
+    expireInvite(id);
+
+    const asInvitee = await loginAs(invitee);
+    try {
+      const accepted = await asInvitee.post(`/api/invitations/${token}/accept`, {
+        data: {},
+        failOnStatusCode: false,
+      });
+      expect(accepted.ok(), "an expired invitation must not be redeemable").toBeFalsy();
+
+      expect(storedOrgRole(tenant!, invitee.userId)).toBe("");
+      expect(orgMemberCount(tenant!)).toBe(before);
+    } finally {
+      await asInvitee.dispose();
       detachUserByEmail(email);
     }
   });

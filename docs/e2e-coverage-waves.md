@@ -928,6 +928,80 @@ those suites skip themselves with a reason rather than failing — see `rbacSuit
 
 ---
 
+## 6b. Wave 12 — the reported-bug wave (2026-08-18)
+
+Not a coverage wave. The 14 cards in the Basecamp board's **Writing Tests** column, each with a
+BetterBugs session behind it, turned into specs. Source of the requirement is the BetterBugs
+description in every case — the Basecamp card title is often looser than the report (card 3 says
+"Internal Server Error while creating account"; the session says **workspace**, on `/onboarding`).
+
+**52 tests across 8 files.** Suite total 972 → **1024 tests in 54 files**. Landed on `BugFixes` after
+merging `E2ETest` into it.
+
+> **Not yet executed.** These specs typecheck and enumerate (`--list`), and the counts above are
+> measured from `--list`. **No test in this wave has been run**, at explicit request. Every "RED" and
+> "green" in the table below is therefore a **prediction from reading the product code**, not a
+> measurement — §5's rule applies: re-measure, don't re-quote. The first job for whoever runs them is
+> to replace this table's states with observed ones, and to move the confirmed product bugs into §3.
+
+| Ticket (BetterBugs) | Tests | File | State |
+|---|---|---|---|
+| Projects search not working (6a7c203d) | `PRJ-S-01..07` | `ui/projects-list.spec.ts` | green — implemented since the report |
+| Projects sort/filter not working (6a7c1f28) | `PRJ-S-08..11` | same | green — sort implemented; there is no separate filter control, the search box *is* the filter |
+| 500 creating a workspace (6a7afa2d) | `ONB-A-01..08` | `api/onboarding.spec.ts` (new) | **ONB-A-04 predicted RED** |
+| Sign Up validation missing (6a7c621b) | `SGN-A-12..17` | `api/signup.spec.ts` | green — enforced both sides |
+| Account label should be "My Account" (6a840253) | `ACU-01` | `ui/account.spec.ts` (new) | **RED** — still `<h1>Account</h1>` + sidebar "Account" |
+| Password change needs a success message (6a8400e2) | `ACU-02..04` | same | green — `showToast` already there |
+| Forgot/Reset password missing (6a7b24ef) | `ACU-05..10` | same | green — built end to end since the report |
+| Onboarded without accepting invite (6a7d8189) | `INV-P-01..05` | `api/invitations.spec.ts` | green — pending invites confer nothing |
+| KB blank documents need validation (6a7da01c) | `KBU-25..26` | `ui/knowledge-base.spec.ts` | **RED** — editor autosaves an emptied title |
+| Search only works on Enter (6a7dae14) | `KBU-27` | same | **RED** for the KB screen; the repository screen debounces correctly |
+| Repository count stale after delete (6a7c17a8) | `TCR-01..04` | `ui/testcases-repository.spec.ts` (new) | to be measured |
+| Search clear button (6a7c1f86) | `TCR-05` | same | **RED** — no clear control on this screen (the KB screen has one) |
+| Unselect all Columns (6a7c217f) | `TCR-06..07` | same | **RED** — `toggleColumnVisible` has no locked-column concept |
+| Loading error after accepting invite (6a82d9a3) | 2 tests in "login reached from an already-accepted invite" | `ui/login-redirect.spec.ts` | green — root cause already fixed and covered; these add the entry path |
+
+### New tenant kinds
+
+`account-ui`, `repo-ui`, `invite-signin` — added to `RbacTenantKind`. Each exists for a reason worth
+keeping:
+
+- **`account-ui`** — every test in that file changes a real password. Sharing an account would leave
+  the next spec (and `global-setup` on the following run) authenticating with a password that no
+  longer exists. The file restores `FIXTURE_PASSWORD` in `afterEach`, through the product's own
+  change endpoint rather than a hand-written hash.
+- **`repo-ui`** — the repository header counters are absolute project-wide numbers. Any concurrent
+  spec creating or deleting a case in the same project moves them mid-assertion.
+- **`invite-signin`** — needs a redeemable invitation, and `api/invitations.spec.ts` clears its
+  tenant's pending invites in `beforeEach`, so borrowing `invites` would delete the token mid-test.
+
+### Findings worth keeping
+
+- **`KBU-13` was a false positive.** It filled the knowledge-base search box and asserted the
+  matching document was visible — but that screen's search is a `<form>` and `searchQuery` is only set
+  in `onSubmit`, so `fill()` never searched. The document it asserted on was visible in the
+  *unfiltered* list, so the test passed while testing nothing. Now presses Enter and asserts a decoy
+  document drops out. This is the narrow spec-side fix §3 allows: the method was wrong, not the
+  expectation.
+- **`signup/start`'s rate-limit budget is nearly spent.** `OTP_MAX_ATTEMPTS` is 5 and the file now
+  makes 3 attempts. A rate-limited `start` still answers **204** while writing no `pending_signups`
+  row, so overspending does not fail loudly — it makes assertions flaky by file order. Any new test
+  there expecting a 204 has to justify the attempt.
+- **The invite-email half of 6a7d8189 is not a defect.** The invite *is* sent and
+  `api/email-delivery.spec.ts` already pins that its accept link is emitted and works. Outside
+  production `EMAIL_DELIVERY_MODE=log` means nothing reaches an inbox on purpose, which is what the
+  reporter saw on stage. Only the authorization half was worth new tests.
+- **`removeCycleTestCases` had no caller check** — found while merging `E2ETest` into `BugFixes`, not
+  by a test. `BugFixes` added the bulk-delete on a base where `/api/cycles/*` was unguarded; `E2ETest`
+  guarded every sibling route. The merge put an unauthenticated destructive route next to nine guarded
+  ones. Fixed in the merge commit with the standard two lines plus `isUuid` filtering, matching
+  `addCycleTestCases`.
+- **Two counters disagreeing is the shape of 6a7c17a8.** The repository renders its numbers from
+  `repoStats` (one fetch) and the suite tree from another, so `TCR-04` asserts the tree specifically
+  rather than trusting that the stat cards standing in for it.
+
+---
+
 ## 7. Working across threads
 
 1. **Claim a wave here before starting it** — add your session and the date to the status table.

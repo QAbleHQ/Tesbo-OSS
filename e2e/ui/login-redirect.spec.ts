@@ -1,5 +1,16 @@
-import { expect, test, type Page } from "@playwright/test";
-import { env } from "../utils/env";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { env, testAddress } from "../utils/env";
+import {
+  clearInvitations,
+  detachUserByEmail,
+  FIXTURE_PASSWORD,
+  loginAs,
+  mintInviteToken,
+  provisionRbacTenant,
+  rbacSuiteSkipReason,
+  seedFixtureUser,
+  type RbacTenant,
+} from "../utils/rbac-tenant";
 
 /**
  * /login's handling of `?redirect=`, covering the two defects that parameter carried.
@@ -165,5 +176,112 @@ test.describe("login redirect after signing in through the form", () => {
 
     await page.waitForURL(/\/projects/);
     expect(offSite).toEqual([]);
+  });
+});
+
+/*
+ * The entry path the BetterBugs session actually took into /login.
+ *
+ * The describes above cover what /login does once it is there. This one covers how the user got
+ * there: they opened an invite link that had already been redeemed, and the invite page offered them
+ * a "Sign in" button. That button is the seam — it is the only route into /login that arrives with no
+ * session, from a page that is itself a dead end, and the recording ends on "Loading...".
+ *
+ * Its own disposable tenant ("invite-signin") because it needs a real redeemable invitation:
+ * api/invitations.spec.ts clears its tenant's pending invites in beforeEach, so borrowing "invites"
+ * would have that file delete this one's token mid-test.
+ */
+test.describe("login reached from an already-accepted invite", () => {
+  let tenant: RbacTenant | null = null;
+  let asOwner: APIRequestContext | undefined;
+  const inviteeEmails: string[] = [];
+
+  test.beforeAll(async () => {
+    tenant = await provisionRbacTenant("invite-signin");
+    if (!tenant) return;
+    asOwner = await loginAs(tenant.owner);
+  });
+
+  test.afterAll(async () => {
+    if (tenant) clearInvitations(tenant);
+    for (const email of inviteeEmails) detachUserByEmail(email);
+    await asOwner?.dispose();
+  });
+
+  test.beforeEach(() => {
+    const reason = rbacSuiteSkipReason(tenant);
+    test.skip(reason !== null, reason ?? "");
+  });
+
+  /** An invitation that has already been redeemed, and the raw token that redeemed it. */
+  async function spentInvite(label: string): Promise<string> {
+    const email = testAddress(`invite-signin-${label}`);
+    inviteeEmails.push(email);
+    const invitee = seedFixtureUser(email, "EndToEnd Invite Signin");
+
+    const created = await asOwner!.post("/api/workspace/invitations", {
+      data: { email, role: "qa_engineer" },
+      failOnStatusCode: false,
+    });
+    expect(created.ok(), `inviting ${email} — ${await created.text()}`).toBeTruthy();
+    const token = mintInviteToken((await created.json()).id);
+
+    const asInvitee = await loginAs(invitee);
+    try {
+      const accepted = await asInvitee.post(`/api/invitations/${token}/accept`, {
+        data: {},
+        failOnStatusCode: false,
+      });
+      expect(accepted.ok(), `accepting as ${email} — ${await accepted.text()}`).toBeTruthy();
+    } finally {
+      await asInvitee.dispose();
+    }
+    return token;
+  }
+
+  test("a spent invite link says so and its Sign in button reaches a usable form", async ({ browser }) => {
+    const token = await spentInvite("usable");
+    // No session: this is somebody following a link out of their mail client.
+    const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+    try {
+      const page = await ctx.newPage();
+      await page.goto(`/invite/${token}`);
+
+      await expect(page.getByText("Invitation already accepted")).toBeVisible();
+      await expect(page.getByText(/already been accepted/)).toBeVisible();
+
+      await page.getByRole("button", { name: "Sign in" }).click();
+      await page.waitForURL(/\/login/);
+
+      // The whole point of the ticket: a form, not a permanent loading screen.
+      await expect(page.getByLabel("Email", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole("button", { name: "Sign in" })).toBeEnabled();
+      await expect(page.getByText("Loading...")).toHaveCount(0);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test("and the form it reaches actually signs the invitee in", async ({ browser }) => {
+    const token = await spentInvite("signsin");
+    const email = inviteeEmails[inviteeEmails.length - 1];
+    const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+    try {
+      const page = await ctx.newPage();
+      await page.goto(`/invite/${token}`);
+      await page.getByRole("button", { name: "Sign in" }).click();
+      await page.waitForURL(/\/login/);
+
+      await page.getByLabel("Email", { exact: true }).fill(email);
+      await page.getByLabel("Password", { exact: true }).fill(FIXTURE_PASSWORD);
+      await page.getByRole("button", { name: "Sign in" }).click();
+
+      // They are already a member, so signing in must land them inside the app rather than back on
+      // the invite or the loading screen.
+      await page.waitForURL(/\/(projects|dashboard)/, { timeout: 20_000 });
+      await expect(page.getByText("Loading...")).toHaveCount(0);
+    } finally {
+      await ctx.close();
+    }
   });
 });
