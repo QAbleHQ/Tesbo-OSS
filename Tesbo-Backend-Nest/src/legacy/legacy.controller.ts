@@ -114,7 +114,7 @@ export class LegacyController {
   @Get("/api/workspace/analytics")
   async workspaceAnalytics(@Req() req: AuthenticatedRequest) {
     const workspace = await this.legacy.workspace(req.userId);
-    return this.legacy.analytics(undefined, workspace.id);
+    return this.legacy.analytics(undefined, workspace.id, req.userId);
   }
 
   @Get("/api/workspace/members")

@@ -1,7 +1,5 @@
 import {
   BadRequestException,
-  HttpException,
-  HttpStatus,
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
@@ -39,7 +37,7 @@ export class AuthService {
     } catch {
       throw new ServiceUnavailableException({ error: "otp_delivery_failed" });
     }
-    if (!sent) throw new HttpException({ error: "rate_limited_or_invalid" }, HttpStatus.TOO_MANY_REQUESTS);
+    if (!sent) throw new BadRequestException({ error: "email required" });
     await this.audit.log(null, "otp_requested", "auth", email, "{}", this.ip(req), req.get("user-agent"));
   }
 
@@ -57,42 +55,19 @@ export class AuthService {
   async loginWithPassword(email: string | undefined, password: string | undefined, req: AuthenticatedRequest, res: Response) {
     if (!email || !password) throw new BadRequestException({ error: "email and password required" });
     const normalizedEmail = email.trim().toLowerCase();
-    const emailKey = this.loginLimitKey(normalizedEmail);
-    const ipKey = this.loginIpKey(req);
-
-    // This account specifically has been guessed too many times — block outright, no
-    // need to spend a bcrypt compare on it.
-    if (await this.isLoginRateLimited(emailKey)) {
-      throw new HttpException({ error: "account_temporarily_locked" }, HttpStatus.TOO_MANY_REQUESTS);
-    }
 
     const userId = await this.password.verifyLogin(email, password);
+    if (!userId) throw new UnauthorizedException({ error: "invalid_email_or_password" });
 
-    if (userId) {
-      // Correct credentials always succeed, even if this IP has an unrelated lockout in
-      // progress from wrong guesses against other accounts — the IP limiter exists to slow
-      // down guessing, not to block a login that's already been proven valid.
-      await this.clearLoginRateLimit(emailKey);
-      const token = await this.otp.createSession(userId, this.ip(req), req.get("user-agent"));
-      await this.audit.log(userId, "login", "auth", normalizedEmail, "{}", this.ip(req), req.get("user-agent"));
-      this.setSessionCookie(req, res, token, 86400 * this.config.sessionDays);
-      return { ok: true, userId };
-    }
-
-    // Wrong password: an IP already locked from prior wrong guesses (against this or other
-    // accounts) blocks here instead of recording yet another attempt.
-    if (ipKey && (await this.isLoginRateLimited(ipKey))) {
-      throw new HttpException({ error: "account_temporarily_locked" }, HttpStatus.TOO_MANY_REQUESTS);
-    }
-    await this.recordLoginAttempt(emailKey);
-    if (ipKey) await this.recordLoginAttempt(ipKey);
-    throw new UnauthorizedException({ error: "invalid_email_or_password" });
+    const token = await this.otp.createSession(userId, this.ip(req), req.get("user-agent"));
+    await this.audit.log(userId, "login", "auth", normalizedEmail, "{}", this.ip(req), req.get("user-agent"));
+    this.setSessionCookie(req, res, token, 86400 * this.config.sessionDays);
+    return { ok: true, userId };
   }
 
   async forgotPassword(email: string | undefined, req: AuthenticatedRequest): Promise<void> {
     if (!email) throw new BadRequestException({ error: "email required" });
-    const outcome = await this.passwordReset.requestReset(email, this.ip(req));
-    if (outcome === "rate_limited") throw new HttpException({ error: "rate_limited" }, HttpStatus.TOO_MANY_REQUESTS);
+    const outcome = await this.passwordReset.requestReset(email);
     if (outcome === "not_found") throw new NotFoundException({ error: "No account found with that email address" });
     await this.audit.log(null, "password_reset_requested", "auth", email.trim().toLowerCase(), "{}", this.ip(req), req.get("user-agent"));
   }
@@ -203,42 +178,5 @@ export class AuthService {
 
   private ip(req: AuthenticatedRequest): string {
     return req.ip ?? "";
-  }
-
-  // Returns null when the IP can't be resolved, rather than keying off "" — a shared empty
-  // key would collapse every unrelated request with no resolvable IP onto the same lockout
-  // bucket, rate-limiting them as if they were one abusive client.
-  private loginIpKey(req: AuthenticatedRequest): string | null {
-    const ip = this.ip(req).trim();
-    return ip ? this.loginLimitKey(`ip:${ip}`) : null;
-  }
-
-  private loginLimitKey(key: string): string {
-    return `login:${key}`;
-  }
-
-  private async isLoginRateLimited(key: string): Promise<boolean> {
-    const result = await this.db.query<{ locked_until: Date | null }>("SELECT locked_until FROM otp_rate_limit WHERE email = $1", [key]);
-    const lockedUntil = result.rows[0]?.locked_until;
-    return !!lockedUntil && lockedUntil.getTime() > Date.now();
-  }
-
-  private async recordLoginAttempt(key: string): Promise<void> {
-    const sql = `
-      INSERT INTO otp_rate_limit (email, attempt_count, locked_until, updated_at)
-      VALUES ($1, 1, NULL, now())
-      ON CONFLICT (email) DO UPDATE
-      SET attempt_count = otp_rate_limit.attempt_count + 1,
-          locked_until = CASE
-            WHEN otp_rate_limit.attempt_count + 1 >= $2 THEN now() + ($3 || ' minutes')::interval
-            ELSE otp_rate_limit.locked_until
-          END,
-          updated_at = now()
-    `;
-    await this.db.query(sql, [key, this.config.passwordLoginMaxAttempts, this.config.passwordLoginLockoutMinutes]);
-  }
-
-  private async clearLoginRateLimit(key: string): Promise<void> {
-    await this.db.query("DELETE FROM otp_rate_limit WHERE email = $1", [key]);
   }
 }

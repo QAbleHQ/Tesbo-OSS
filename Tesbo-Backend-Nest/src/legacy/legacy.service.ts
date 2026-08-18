@@ -4320,19 +4320,23 @@ export class LegacyService implements OnModuleInit {
     return { rows: res.rows.map(toCamel) };
   }
 
-  async analytics(projectId?: string, organizationId?: string) {
-    const scopeValue = projectId ?? organizationId;
+  // `organizationId` is the org-wide dashboard view — it must be scoped to the calling user's
+  // own project_members rows, or a QA Engineer would see counts (and, via the other endpoints,
+  // data) for every project in the org, not just the ones they were invited to.
+  async analytics(projectId?: string, organizationId?: string, userId?: string | null) {
+    const orgProjectsSubquery =
+      "SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL AND id IN (SELECT project_id FROM project_members WHERE user_id = $2)";
     const projectsWhere = projectId
       ? " WHERE id = $1 AND archived_at IS NULL"
       : organizationId
-        ? " WHERE organization_id = $1 AND archived_at IS NULL"
+        ? ` WHERE organization_id = $1 AND archived_at IS NULL AND id IN (SELECT project_id FROM project_members WHERE user_id = $2)`
         : " WHERE archived_at IS NULL";
     const childWhere = projectId
       ? " WHERE project_id = $1"
       : organizationId
-        ? " WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
+        ? ` WHERE project_id IN (${orgProjectsSubquery})`
         : "";
-    const values = scopeValue ? [scopeValue] : [];
+    const values = projectId ? [projectId] : organizationId ? [organizationId, userId] : [];
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM projects${projectsWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases_active${childWhere}`, values),
@@ -4344,7 +4348,7 @@ export class LegacyService implements OnModuleInit {
           projectId
             ? " WHERE c.project_id = $1"
             : organizationId
-              ? " WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)"
+              ? ` WHERE c.project_id IN (${orgProjectsSubquery})`
               : ""
         } GROUP BY e.status`,
         values
