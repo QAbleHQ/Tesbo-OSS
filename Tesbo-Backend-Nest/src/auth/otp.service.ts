@@ -16,7 +16,8 @@ export class OtpService {
     const email = rawEmail.trim().toLowerCase();
     if (!email) return false;
     const ipKey = this.rateLimitKeyForIp(ipAddress);
-    if ((await this.isRateLimited(this.sendLimitKey(email))) || (await this.isRateLimited(this.sendLimitKey(ipKey)))) return false;
+    if (await this.isRateLimited(this.sendLimitKey(email))) return false;
+    if (ipKey && (await this.isRateLimited(this.sendLimitKey(ipKey)))) return false;
 
     const plainCode = this.generateOtp();
     const codeHash = this.hash(plainCode);
@@ -28,7 +29,7 @@ export class OtpService {
       expiresAt
     ]);
     await this.recordOtpAttempt(this.sendLimitKey(email));
-    await this.recordOtpAttempt(this.sendLimitKey(ipKey));
+    if (ipKey) await this.recordOtpAttempt(this.sendLimitKey(ipKey));
     await this.email.sendOtp(email, plainCode);
     return true;
   }
@@ -60,15 +61,15 @@ export class OtpService {
       // down guessing, not to block a code that's already been proven valid.
       await this.markOtpUsed(otpId);
       await this.clearRateLimit(this.verifyLimitKey(email));
-      await this.clearRateLimit(this.verifyLimitKey(ipKey));
+      if (ipKey) await this.clearRateLimit(this.verifyLimitKey(ipKey));
       return true;
     }
 
     // Wrong code: an IP already locked from prior wrong guesses (against this or other
     // accounts) blocks here instead of recording yet another attempt.
-    if (await this.isRateLimited(this.verifyLimitKey(ipKey))) return false;
+    if (ipKey && (await this.isRateLimited(this.verifyLimitKey(ipKey)))) return false;
     await this.recordOtpAttempt(this.verifyLimitKey(email));
-    await this.recordOtpAttempt(this.verifyLimitKey(ipKey));
+    if (ipKey) await this.recordOtpAttempt(this.verifyLimitKey(ipKey));
     return false;
   }
 
@@ -141,8 +142,12 @@ export class OtpService {
     return inserted.rows[0]?.id ?? (await this.findOrCreateUser(email));
   }
 
-  private rateLimitKeyForIp(ipAddress?: string | null): string {
-    return `ip:${ipAddress?.trim() ?? ""}`;
+  // Returns null when the IP can't be resolved, rather than a "" sentinel — a shared empty
+  // key would collapse every unrelated request with no resolvable IP onto the same bucket,
+  // rate-limiting them as if they were one abusive client.
+  private rateLimitKeyForIp(ipAddress?: string | null): string | null {
+    const trimmed = ipAddress?.trim();
+    return trimmed ? `ip:${trimmed}` : null;
   }
 
   // Requesting a new code and guessing a code are distinct actions; keeping them on
