@@ -644,6 +644,42 @@ fix belongs on the test side and is the narrow case §3's rule allows, because t
 is wrong — it should scope the query to the two accounts this spec created. Left in place for whoever
 owns that file; do not "fix" it by relaxing the number.
 
+### Fixed on 2026-08-18 — the plan roll-up ("Overall progress percentage not matching")
+
+Basecamp 10213208002. The plan detail header read **30% over 7 untested** above a single run reading
+**40% over 6**. Three separate defects, all closed by one invariant: *the header is the sum of the
+runs the plan lists, and each run's buckets sum to its own total.*
+
+| # | Defect | Where | Regression test |
+|---|---|---|---|
+| A | A run with no cases contributed a phantom untested case — the untested bucket was `COUNT(*) FILTER (...)`, which counts the LEFT JOIN's all-NULL placeholder row for a cycle with no items | `planProgressRollup`, `planRunRows`, `listPlans` | `PLN-A-02`, `PLN-A-03`, `PLN-U-09` |
+| B | The plan screens counted `ci.id` against the raw `executions` table while the run screen and the run list count live execution rows, so one run carried two different case counts | same three, plus `planItemRows`' last-status lateral | `PLN-A-04` |
+| C | The runs list dropped every run that was not `In Progress`/`Completed` while the header kept aggregating them. `Planning` is the status every run is created with — including from this page's own Create test run button — so a run vanished the moment it was made and its cases were counted anyway | `plans/[planId]/page.tsx` | `PLN-U-08` |
+
+The fix is one shared SQL fragment, `LegacyService.EXECUTION_BUCKET_COUNTS`, now used by `listCycles`,
+`planRunRows`, `planProgressRollup` and `listPlans`: counted off `e.id`, joined with
+`AND e.deleted_at IS NULL`, every status in exactly one bucket. The four queries can no longer drift.
+The per-run percentage on the plan screen was also changed to `passed+failed+blocked+skipped`, the
+same arithmetic the header's `completionPercent` uses, rather than `total - untested`.
+
+Verified failing-first against a rebuilt image with the product change stashed out
+(`PLN-A-02/03/04`, `PLN-U-08/09` red, 27 passed), then green after: **126 of 129 passed** across
+`api/plans`, `api/cycles`, `api/projects`, `api/authorization`, `api/reports`, `ui/plans`.
+
+`DSH-A-21` and `DSH-A-22` were **stale pins**, red at HEAD before this change: both read `listCycles`,
+which an earlier session had already moved onto `COUNT(e.id)` + `deleted_at IS NULL` without updating
+the tests that pinned the old behaviour (`DSH-A-22`'s own comment asked for the fix to be "a
+deliberate change" — this was it). Their expectations were corrected, not weakened, and the SQL was
+checked against all 101 cycles in the database to confirm this change leaves `listCycles` results
+identical. `RPT-A-48` (`/api/cycles/<unknown-id>/report/summary` answers 404 where the spec expects
+200 with zeros) is **unrelated and still red** — it is on a different query, and it regressed
+somewhere between the 2026-08-17 image and HEAD.
+
+**Watch out: the local images go stale silently.** A run against the 2026-08-17 image reported 34
+failures across authorization, cycles, dashboard and reports; every one of them vanished on a rebuild
+from HEAD. Rebuild before believing a red, and check
+`docker compose exec backend grep -c Retest dist/legacy/legacy.service.js` against the source count.
+
 ### Fixed and verified green on 2026-08-14
 
 Fourteen numbered defects, plus the pattern instances behind them. Every one was found by a test that
@@ -1018,6 +1054,77 @@ reason worth keeping:
 - **Two counters disagreeing is the shape of 6a7c17a8.** The repository renders its numbers from
   `repoStats` (one fetch) and the suite tree from another, so `TCR-04` asserts the tree specifically
   rather than trusting that the stat cards standing in for it.
+
+---
+
+## 6c. Wave 13 — the second reported-bug bucket (2026-08-18)
+
+The 16 cards that refilled the board's **Writing Tests** column. **Ten were already covered by a
+concurrent session** working the same bucket — check before writing: `grep -rn <card-id> e2e/` finds
+most of it, but not all, because not every spec cites the card id (`10213212329` is covered by
+`PLN-U-01/02/04/06` and names none). The six below are this session's.
+
+**12 tests across 4 files.** Suite 1041 → **1087 tests in 58 files** (the rest of that delta is the
+concurrent session's plans/shared-report work).
+
+| Ticket (BetterBugs) | Tests | File | State |
+|---|---|---|---|
+| Dashboard project count wrong (6a7dbf42) | `WSA-A-01` | `api/workspace-setup.spec.ts` | **predicted RED** |
+| Project dashboard suite count wrong (6a7c1abd) | `WSA-A-02` | same | **predicted RED** |
+| KB upload popup hides types/size (6a7da3ff) | `KBU-28` | `ui/knowledge-base.spec.ts` | **predicted RED** |
+| KB shows API/CORS diagnostic (6a7da27f) | `KBU-29` | same | **predicted RED** |
+| KB folder name truncated with no tooltip (6a7da94c) | `KBU-30` | same | **predicted RED** |
+| Zyra success but cases missing (6a841e18) | `ZCC-A-01..05` | `api/zyra-chat-consistency.spec.ts` (new) | partial — see below |
+
+Same honesty rule as Wave 12: **none of these has been run.** They typecheck and enumerate; every
+state above is a prediction from reading product code.
+
+### The dashboard counts are one defect, and it is not the archived-projects one
+
+`analytics()` was already fixed to filter `archived_at`, so §3 bug 3 is closed. What remains is that
+the two surfaces count **different populations**:
+
+```
+listProjects   JOIN project_members pm ... WHERE pm.user_id = $1 AND organization_id = $2
+analytics()    FROM projects WHERE organization_id = $1 AND archived_at IS NULL
+```
+
+The tile is workspace-wide; the list is membership-scoped. An owner who is not a `project_members` row
+on every project in their own workspace — the normal state as soon as a manager creates one — reads a
+Projects tile the Projects page cannot reproduce, which is exactly the reporter's repro ("note the
+count, go to Projects, compare"). `analytics()`'s `childWhere` resolves projects by organization too,
+so `suiteCount` and `testCaseCount` count the contents of projects the caller cannot open — a small
+disclosure as well as a wrong number.
+
+### `lib/api.ts` leaks a developer diagnostic to every user
+
+`api()` turns any network failure into
+
+> `Failed to fetch — browser blocked or could not reach the API. Confirm NEXT_PUBLIC_API_URL, HTTPS,
+> and that the backend allows this page's origin in CORS_ALLOWED_ORIGINS.`
+
+and throws it as the user-facing message. It names three environment variables and asks the user to
+check a CORS allowlist. Because it lives in the shared wrapper, **every** screen shows it, not just the
+KB upload the ticket was filed against — so `KBU-29` provokes it by aborting the upload request rather
+than by dropping a folder (Playwright cannot synthesise a directory drop, and the folder handling is
+not where the defect is).
+
+### The Zyra ticket is only half reachable
+
+`ZCC-A-01..05` pin the half that needs no model: an assistant turn's `testcases` array is the only
+honest record of what was written (`zyraTranscript` derives its annotation from it), and it must never
+advertise a case the repository does not have — deleted, or belonging to another project.
+
+The other half cannot be tested yet. Every decision about whether to create runs **behind** the
+provider call: `zyraCapabilityDisabled` is invoked only after `zyraChatWithAnthropic` /
+`zyraChatWithOpenAi` return, as does the per-turn operation ceiling. So "the reply claimed 15 and saved
+10" needs `utils/fake-ai-server.ts` — Wave 0 item 3, still the gap that blocks real Zyra behaviour
+testing. The product's own prompt is the clearest statement of the problem: it tells the model to
+"trust the annotation over the wording of the reply, which may describe testcases that were never
+saved". The annotation exists for the model; the human reading the chat gets the wording.
+
+`ZCC-A-03` therefore asserts something slightly unusual: that a turn which saved nothing exposes
+*some* field the UI could use to contradict its own prose. Which field is the product's call.
 
 ---
 

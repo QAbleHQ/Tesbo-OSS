@@ -743,4 +743,126 @@ test.describe("knowledge base (UI)", () => {
       "typing filtered nothing and no Search button was offered — the user cannot tell how to search",
     ).toBe(true);
   });
+  // ─── Upload affordances and error copy ─────────────────────────────────────
+
+  /*
+   * Basecamp 10199159265 / BetterBugs 6a7da3ff — "Supported file types and maximum file size are not
+   * displayed in Knowledge Base upload popup".
+   *
+   * The modal says only "Drag and drop files here, or click to browse". The rules it does not mention
+   * are real and enforced server-side:
+   *
+   *   - `KB_ALLOWED_EXTENSIONS` — 33 extensions; anything else is refused with
+   *     "This file type is not supported: <name>"
+   *   - `KB_MAX_UPLOAD_SIZE` — MAX_UPLOAD_SIZE or 100 MB, enforced by FilesInterceptor
+   *   - `FilesInterceptor("files", 10)` — at most 10 files per request
+   *
+   * and the refusal is ATOMIC: one unsupported file in a batch rejects the whole batch. So a user who
+   * is not told the rules loses the entire upload to a single wrong file. The `<input type="file">`
+   * also carries no `accept`, so the OS picker offers files the product will reject.
+   *
+   * Expected RED. The assertion is deliberately about the limits being DISCLOSED, not about exact
+   * wording — any copy naming the formats and the size satisfies it.
+   */
+  test("KBU-28 the upload modal states which files are allowed and how large they may be", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    await newMenu(page, "Upload file");
+    const dialog = modal(page, "Upload file");
+    await expect(dialog).toBeVisible();
+
+    const copy = ((await dialog.textContent()) ?? "").toLowerCase();
+
+    // The size ceiling, however it is phrased ("100 MB", "100MB", "max 100 mb").
+    expect(copy, "the modal never mentions a maximum file size").toMatch(/\d+\s*(mb|gb)/);
+
+    // A representative sample of the allowed list, so the copy has to actually enumerate formats
+    // rather than say "supported files only".
+    const named = ["pdf", "docx", "xlsx", "png", "csv"].filter((ext) => copy.includes(ext));
+    expect(
+      named.length,
+      `the modal names none of the supported formats — copy was: ${copy.trim().slice(0, 200)}`,
+    ).toBeGreaterThan(0);
+
+    // And the picker itself should not offer what the server will refuse.
+    const accept = await dialog.locator('input[type="file"]').getAttribute("accept");
+    expect(accept, "the file input has no accept attribute, so the OS picker offers rejected types").toBeTruthy();
+  });
+
+  /*
+   * Basecamp 10199144861 / BetterBugs 6a7da27f — "Technical API error displayed to user during folder
+   * drag-and-drop upload".
+   *
+   * Dropping a FOLDER yields DataTransfer entries with no readable file, the upload request fails, and
+   * the page renders what `lib/api.ts` threw:
+   *
+   *   "Failed to fetch — browser blocked or could not reach the API. Confirm NEXT_PUBLIC_API_URL,
+   *    HTTPS, and that the backend allows this page's origin in CORS_ALLOWED_ORIGINS."
+   *
+   * That string is a developer diagnostic. It names three environment variables and tells the user to
+   * check a CORS allowlist, which is not theirs to check — and because the throw lives in the shared
+   * `api()` wrapper, EVERY network failure anywhere in the app shows it, not just this upload.
+   *
+   * The failure is provoked here by aborting the upload request rather than by dropping a real folder:
+   * Playwright cannot synthesise a directory drop, and the defect is not in the folder handling — it
+   * is in what the page does with any failed request. Aborting reproduces the exact `Failed to fetch`
+   * branch the reporter hit.
+   *
+   * Expected RED until the diagnostic moves to the console and the user gets plain copy.
+   */
+  test("KBU-29 a failed upload shows plain copy, not the API/CORS diagnostic", async ({ browser }) => {
+    const page = await openKb(browser);
+
+    await page.route(/\/knowledge-base\/files/, (route) =>
+      route.request().method() === "POST" ? route.abort("failed") : route.continue(),
+    );
+
+    await newMenu(page, "Upload file");
+    const dialog = modal(page, "Upload file");
+    await dialog
+      .locator('input[type="file"]')
+      .setInputFiles({ name: "kbu29.txt", mimeType: "text/plain", buffer: Buffer.from("KBU-29") });
+    await dialog.getByRole("button", { name: /^Upload/ }).click();
+
+    // Something must be said — silence would be its own bug.
+    const alert = page.getByText(/fail|error|unable|could not/i).first();
+    await expect(alert).toBeVisible();
+    const shown = (await page.locator("body").textContent()) ?? "";
+
+    for (const leak of ["NEXT_PUBLIC_API_URL", "CORS_ALLOWED_ORIGINS", "HTTPS", "Failed to fetch"]) {
+      expect(shown, `the page showed the internal diagnostic "${leak}" to the user`).not.toContain(leak);
+    }
+  });
+
+  /*
+   * Basecamp 10199215592 / BetterBugs 6a7da94c — "Full folder name is not visible when truncated".
+   *
+   * Both places a folder name appears clip it with `className="truncate"` and neither carries a
+   * `title`: `FolderTree.tsx`'s tree node and the item table's name cell. The reporter asked for a
+   * tooltip on hover, which `title` is the accessible, zero-JS way to provide.
+   *
+   * Expected RED.
+   */
+  test("KBU-30 a long folder name is readable in full from a tooltip", async ({ browser }) => {
+    // Comfortably past the tree's width, so it genuinely truncates.
+    const longName = `${stamp("VeryLongFolderName")} ${"Segment".repeat(12)}`;
+    const created = await api.post(kbUrl("/folders"), {
+      data: { name: longName, parentFolderId: rootFolderId },
+    });
+    expect(created.ok(), `creating the long-named folder — ${await created.text()}`).toBeTruthy();
+
+    const page = await openKb(browser);
+
+    // The tree node and the table cell are two separate renders of the same name; the reporter saw
+    // the tree, but a user reads whichever is in front of them.
+    const treeNode = page.locator("span.truncate", { hasText: longName.slice(0, 40) }).first();
+    await expect(treeNode).toBeVisible();
+
+    const withTitle = page.locator(`[title=${JSON.stringify(longName)}]`);
+    await expect(
+      withTitle.first(),
+      "no element exposes the full folder name, so a truncated name cannot be read at all",
+    ).toBeAttached();
+  });
 });

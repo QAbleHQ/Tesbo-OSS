@@ -79,7 +79,11 @@ export type RbacTenantKind =
   // other spec acting in the same project inserts events into the middle of them. The workspace-wide
   // feed is also owner-only and rolls up every project in the workspace, which makes a shared
   // workspace unusable here for the same reason.
-  | "activity";
+  | "activity"
+  // Zyra chat ↔ repository consistency. Separate from "zyra" because api/zyra.spec.ts owns that
+  // tenant and these tests delete test cases out from under a stored transcript, which would change
+  // what that file's assertions see.
+  | "zyra-chat";
 
 /** The three roles legacy.service.ts's normalizeRole() collapses every stored role into. */
 export type RbacRole = "owner" | "manager" | "qa_engineer";
