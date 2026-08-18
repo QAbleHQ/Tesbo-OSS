@@ -1,0 +1,482 @@
+import { expect, test, type APIRequestContext, type Browser, type BrowserContext, type Locator, type Page } from "@playwright/test";
+import { exec, literal, scalar } from "../utils/psql";
+import {
+  loginAs,
+  provisionRbacTenant,
+  rbacSuiteSkipReason,
+  writeStorageState,
+  type RbacTenant,
+} from "../utils/rbac-tenant";
+
+/*
+ * The Agents screens: the agent picker, Zyra's chat, Zyra's settings, the task board, and the task
+ * detail review table.
+ *
+ * NO AI PROVIDER IS CALLED, and that is the same deliberate boundary api/zyra.spec.ts draws. The
+ * fixture workspace has no AI key allocated, so every route that would reach a model stops at the
+ * allocation check. That is not a reduced version of the feature — it is the state a new workspace
+ * is actually in, and the state these screens spend most of their life rendering: "AI provider not
+ * connected", a disabled "Create task", a settings page that says "Needs key".
+ *
+ * What that leaves untested is generation itself, which needs utils/fake-ai-server.ts (Wave 0 item 3,
+ * still missing). Everything downstream of generation is reachable anyway, because a completed task
+ * is just a row: seedTask() writes one into ai_generation_requests with its drafts, activity and
+ * sources, and the whole review flow — select, save into a suite, delete, close — runs against it.
+ * That is where the real risk lives: those actions write test cases into the project and delete
+ * generated work, and none of it is covered anywhere else.
+ *
+ * Two things about the seed that cost time to discover:
+ *
+ *   - `agent_name` must be exactly "Zyra the Test Generator" (ZYRA_AGENT_NAME in legacy.service.ts).
+ *     The tasks list filters `agent_name = ANY(...)`, so a row with any other value is invisible on
+ *     the board while still being reachable by id — which looks like a UI bug and isn't.
+ *   - a task's `drafts` are `generated_payload` verbatim (formatAiTask), so the seed controls the
+ *     review table exactly.
+ *
+ * Runs against its own disposable workspace ("zyra-ui"). Locator conventions match
+ * ui/knowledge-base.spec.ts: Modal is role="presentation" with an h2 title, and FieldLabel has no
+ * htmlFor, so fields are reached through the modal by role and placeholder rather than getByLabel.
+ */
+
+/** legacy.service.ts ZYRA_AGENT_NAME. The tasks list is filtered on it. */
+const ZYRA_AGENT_NAME = "Zyra the Test Generator";
+
+test.describe("zyra / agents (UI)", () => {
+  let tenant: RbacTenant | null = null;
+  let api: APIRequestContext;
+  const states = new Map<string, string>();
+  const contexts: BrowserContext[] = [];
+
+  test.beforeAll(async () => {
+    tenant = await provisionRbacTenant("zyra-ui");
+    if (!tenant) return;
+    api = await loginAs(tenant.owner);
+    states.set("owner", await writeStorageState(tenant.owner, "zyra-ui-owner"));
+    states.set("qa", await writeStorageState(tenant.qa, "zyra-ui-qa"));
+    states.set("guest", await writeStorageState(tenant.guest, "zyra-ui-guest"));
+    purgeZyra(tenant);
+  });
+
+  test.afterAll(async () => {
+    if (tenant) purgeZyra(tenant);
+    if (api) await api.dispose();
+    await Promise.all(contexts.map((ctx) => ctx.close()));
+  });
+
+  test.beforeEach(() => {
+    const reason = rbacSuiteSkipReason(tenant);
+    test.skip(reason !== null, reason ?? "");
+  });
+
+  test.afterEach(() => {
+    if (tenant) purgeZyra(tenant);
+  });
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  function purgeZyra(t: RbacTenant): void {
+    const projects = `${literal(t.mainProjectId)}, ${literal(t.secondProjectId)}`;
+    exec(`DELETE FROM ai_generation_requests WHERE project_id IN (${projects});`);
+    exec(
+      `DELETE FROM zyra_chat_messages WHERE session_id IN (SELECT id FROM zyra_chat_sessions WHERE project_id IN (${projects}));`,
+    );
+    exec(`DELETE FROM zyra_chat_sessions WHERE project_id IN (${projects});`);
+    // Saved drafts land in real test cases and suites, so the review tests have to clear those too
+    // or the next run's counts drift.
+    exec(`DELETE FROM testcases WHERE project_id IN (${projects});`);
+    exec(`DELETE FROM suites WHERE project_id IN (${projects});`);
+    // Zyra's settings live on the PROJECT, not in a table of their own, so a capability switched
+    // off by one test stays off for the next one and for the next run against the same volume.
+    // Dropping the key restores the built-in defaults (every capability on, the default range).
+    exec(`UPDATE projects SET settings = COALESCE(settings, '{}'::jsonb) - 'zyraAgent' WHERE id IN (${projects});`);
+  }
+
+  function stamp(label: string): string {
+    return `E2E ${label} ${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  }
+
+  interface SeedOptions {
+    userStory?: string;
+    status?: string;
+    drafts?: Array<Record<string, unknown>>;
+    projectId?: string;
+  }
+
+  /** Writes a completed Zyra task straight into the table, drafts and all. Returns its id. */
+  function seedTask(options: SeedOptions = {}): string {
+    const t = tenant!;
+    const projectId = options.projectId ?? t.mainProjectId;
+    const userStory = options.userStory ?? stamp("Story");
+    const drafts = options.drafts ?? [
+      {
+        title: "Sign in with a valid password",
+        priority: "P1",
+        preconditions: "The account exists",
+        steps: [{ action: "Submit the form", expectedResult: "The dashboard opens" }],
+      },
+      { title: "Sign in with a wrong password", priority: "P2", preconditions: "", steps: [] },
+    ];
+    const activity = JSON.stringify([{ type: "picked_up", title: "Picked up task", detail: userStory }]);
+    const sources = JSON.stringify([{ type: "knowledge_document", title: "Auth notes", detail: "Seeded source" }]);
+
+    exec(
+      `INSERT INTO ai_generation_requests
+        (project_id, requested_by, provider, model, user_story, requested_count,
+         include_happy_flow, include_negative_flow, include_multi_tab, include_cross_browser, include_boundary,
+         generated_count, generated_payload, saved_count, save_events, agent_name, task_status,
+         feedback, context, jira_issue_keys, token_input, token_output, token_total, source_summary, activity_log)
+       VALUES (${literal(projectId)}, ${literal(t.owner.userId)}, 'openai', 'gpt-4o-mini',
+         ${literal(userStory)}, ${drafts.length},
+         true, true, false, false, false,
+         ${drafts.length}, ${literal(JSON.stringify(drafts))}::jsonb, 0, '[]'::jsonb,
+         ${literal(ZYRA_AGENT_NAME)}, ${literal(options.status ?? "in_review")},
+         '', '', '[]'::jsonb, 10, 20, 30, ${literal(sources)}::jsonb, ${literal(activity)}::jsonb);`,
+    );
+    return scalar(
+      `SELECT id FROM ai_generation_requests WHERE project_id = ${literal(projectId)} AND user_story = ${literal(userStory)};`,
+    );
+  }
+
+  function draftTitles(taskId: string): string[] {
+    const raw = scalar(
+      `SELECT COALESCE(jsonb_agg(d->>'title'), '[]'::jsonb)::text FROM ai_generation_requests r, jsonb_array_elements(r.generated_payload) d WHERE r.id = ${literal(taskId)};`,
+    );
+    return JSON.parse(raw || "[]");
+  }
+
+  async function open(browser: Browser, path: string, as: "owner" | "qa" | "guest" = "owner"): Promise<Page> {
+    const ctx = await browser.newContext({ storageState: states.get(as) });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+    await page.goto(`/projects/${tenant!.mainProjectId}${path}`);
+    return page;
+  }
+
+  function modal(page: Page, title: string): Locator {
+    return page
+      .locator('div[role="presentation"]')
+      .filter({ has: page.getByRole("heading", { name: title, level: 2 }) })
+      .last();
+  }
+
+  // ─── The agent picker ──────────────────────────────────────────────────────
+
+  test("ZYU-01 the agent picker offers Zyra and marks the two planned agents unavailable", async ({
+    browser,
+  }) => {
+    const page = await open(browser, "/agents");
+
+    await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Zyra the Test Generator" })).toBeVisible();
+
+    // The two placeholders are deliberately not links — a card that looks clickable and does
+    // nothing is worse than one that says it isn't ready.
+    for (const planned of ["Run Analyst", "Bug Triage"]) {
+      await expect(page.getByRole("heading", { name: planned })).toBeVisible();
+    }
+    await expect(page.getByText("Not yet available")).toHaveCount(2);
+  });
+
+  test("ZYU-02 the Zyra card opens a detail modal that routes to the workspace and the board", async ({
+    browser,
+  }) => {
+    const page = await open(browser, "/agents");
+
+    // The card does not navigate — it opens a modal offering the two places Zyra lives. Clicking
+    // it and expecting a route change was this spec's first wrong guess.
+    await page.getByRole("button", { name: /Zyra the Test Generator/ }).click();
+
+    const board = page.getByRole("link", { name: /Task board/ });
+    await expect(board).toHaveAttribute("href", new RegExp(`/projects/${tenant!.mainProjectId}/agents/tasks$`));
+
+    await page.getByRole("link", { name: /Agent workspace/ }).click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${tenant!.mainProjectId}/agents/zyra$`));
+    await expect(page.getByRole("heading", { name: "Zyra", level: 1 })).toBeVisible();
+  });
+
+  // ─── The unconfigured-provider state, which is most workspaces ─────────────
+
+  test("ZYU-03 the chat says the provider is not connected and points at where to fix it", async ({
+    browser,
+  }) => {
+    const page = await open(browser, "/agents/zyra");
+
+    // Not an error, not a crash, not a silent empty box: a named state with a way out.
+    await expect(page.getByRole("heading", { name: "AI provider not connected" })).toBeVisible();
+    await expect(page.getByText("No AI key connected")).toBeVisible();
+    await expect(page.getByRole("link", { name: "Set up AI key" })).toHaveAttribute(
+      "href",
+      /\/settings\?tab=ai/,
+    );
+  });
+
+  test("ZYU-04 settings reports the missing key and links to the workspace providers page", async ({
+    browser,
+  }) => {
+    const page = await open(browser, "/agents/zyra/settings");
+
+    await expect(page.getByRole("heading", { name: "Zyra settings", level: 1 })).toBeVisible();
+    await expect(page.getByText("No AI key connected")).toBeVisible();
+    await expect(page.getByText("Needs key")).toBeVisible();
+    await expect(page.getByRole("link", { name: /workspace AI providers/ })).toHaveAttribute(
+      "href",
+      /\/settings\?tab=ai/,
+    );
+  });
+
+  test("ZYU-05 the board's Create task is disabled without a provider", async ({ browser }) => {
+    const page = await open(browser, "/agents/tasks");
+
+    // The gate is on the control, not only in the API: a workspace with no key cannot start a task
+    // it has no way to finish.
+    await expect(page.getByRole("button", { name: "Create task" })).toBeDisabled();
+  });
+
+  // ─── Settings that are ours, not the model's ───────────────────────────────
+
+  test("ZYU-06 a capability toggle persists across a reload", async ({ browser }) => {
+    const page = await open(browser, "/agents/zyra/settings");
+
+    const knowledgeBase = page.getByRole("switch").nth(1);
+    await expect(knowledgeBase).toBeChecked();
+    await knowledgeBase.click();
+    await expect(knowledgeBase).not.toBeChecked();
+
+    await page.getByRole("button", { name: "Save settings" }).click();
+    await page.reload();
+
+    await expect(
+      page.getByRole("switch").nth(1),
+      "a capability the user turned off stays off",
+    ).not.toBeChecked();
+  });
+
+  test("ZYU-07 the test-cases-per-task choice persists across a reload", async ({ browser }) => {
+    const page = await open(browser, "/agents/zyra/settings");
+
+    await page.getByRole("button", { name: /10–30 Broad/ }).click();
+    await page.getByRole("button", { name: "Save settings" }).click();
+    await page.reload();
+
+    // Two assertions because a wrong highlight and a wrong setting look identical on screen.
+    //
+    // The state: these four options used to convey the choice with border and background colour
+    // only, so nothing non-visual could tell which was picked. aria-pressed now carries it, and
+    // that is what makes the selection perceivable as well as assertable.
+    await expect(page.getByRole("button", { name: /10–30 Broad/ })).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByRole("button", { name: /1–10 Focused/ })).toHaveAttribute("aria-pressed", "false");
+
+    // And the stored value the next generation would actually use. The agent-state endpoint nests
+    // it under `settings`; there is no bare GET .../settings that returns it flat.
+    const state = await (await api.get(`/api/projects/${tenant!.mainProjectId}/agents/zyra`)).json();
+    expect(state.settings.testcaseRange, "the choice is persisted, not just rendered").toBe("10-30");
+  });
+
+  test("ZYU-08 reset to defaults puts every capability back on", async ({ browser }) => {
+    const page = await open(browser, "/agents/zyra/settings");
+
+    const first = page.getByRole("switch").first();
+    await first.click();
+    await expect(first).not.toBeChecked();
+    await page.getByRole("button", { name: "Save settings" }).click();
+
+    await page.getByRole("button", { name: "Reset to defaults" }).click();
+
+    for (const index of [0, 1, 2, 3]) {
+      await expect(page.getByRole("switch").nth(index), `capability ${index} is back on`).toBeChecked();
+    }
+  });
+
+  // ─── The task board ────────────────────────────────────────────────────────
+
+  test("ZYU-09 a project with no tasks says so rather than rendering an empty table", async ({
+    browser,
+  }) => {
+    const page = await open(browser, "/agents/tasks");
+    await expect(page.getByText("No tasks in queue")).toBeVisible();
+  });
+
+  test("ZYU-10 a task appears on the board with its status, draft count and token total", async ({
+    browser,
+  }) => {
+    const userStory = stamp("Board story");
+    seedTask({ userStory });
+
+    const page = await open(browser, "/agents/tasks");
+
+    const card = page.getByRole("button", { name: new RegExp(userStory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("in review");
+    await expect(card, "the board summarises how much was generated").toContainText("2 testcases");
+  });
+
+  test("ZYU-11 the board switches to the Kanban view and keeps the task", async ({ browser }) => {
+    const userStory = stamp("Kanban story");
+    seedTask({ userStory });
+
+    const page = await open(browser, "/agents/tasks");
+    await page.getByRole("tab", { name: "Kanban board" }).click();
+
+    await expect(page.getByRole("tab", { name: "Kanban board" })).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByText(userStory)).toBeVisible();
+  });
+
+  // ─── The review table, which is where the writes happen ────────────────────
+
+  test("ZYU-12 the task detail lists every generated draft with its priority", async ({ browser }) => {
+    const taskId = seedTask();
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+
+    await expect(page.getByRole("heading", { name: "Zyra task", level: 1 })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Generated Testcases (2)" })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "Sign in with a valid password" })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "P1" })).toBeVisible();
+
+    // The other two tabs carry the counts the seed put there.
+    await expect(page.getByRole("button", { name: "Activities (1)" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Sources (1)" })).toBeVisible();
+  });
+
+  test("ZYU-13 selection drives the bulk actions", async ({ browser }) => {
+    const taskId = seedTask();
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+
+    // Nothing selected: every bulk action is refused up front rather than erroring on click.
+    await expect(page.getByRole("button", { name: "Delete selected" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Clear selection" })).toBeDisabled();
+
+    await page.getByRole("button", { name: "Select all" }).click();
+    await expect(page.getByText("2 of 2 testcases selected")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Delete selected" })).toBeEnabled();
+
+    await page.getByRole("button", { name: "Clear selection" }).click();
+    await expect(page.getByText("0 of 2 testcases selected")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Delete selected" })).toBeDisabled();
+  });
+
+  test("ZYU-14 saving a draft into a new suite creates a real test case", async ({ browser }) => {
+    const taskId = seedTask();
+    const suiteName = stamp("Suite");
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+
+    await page.getByRole("row", { name: /Sign in with a valid password/ }).getByRole("button", { name: "Save" }).click();
+
+    const dialog = modal(page, "Save generated testcases");
+    await dialog.getByRole("combobox").first().selectOption("new");
+    await dialog.getByRole("textbox").last().fill(suiteName);
+    await dialog.getByRole("button", { name: "Save" }).click();
+
+    // The point of the whole screen: a generated draft becomes a real, queryable test case in a
+    // real suite. A toast would not prove that.
+    await expect
+      .poll(
+        () =>
+          Number(
+            scalar(
+              `SELECT COUNT(*) FROM testcases t JOIN suites s ON s.id = t.suite_id WHERE t.project_id = ${literal(tenant!.mainProjectId)} AND s.name = ${literal(suiteName)} AND t.title = 'Sign in with a valid password';`,
+            ),
+          ),
+        { message: "the saved draft lands in the named suite as a test case" },
+      )
+      .toBe(1);
+  });
+
+  test("ZYU-15 deleting a draft removes it from the task and leaves the rest", async ({ browser }) => {
+    const taskId = seedTask();
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+
+    page.on("dialog", (dialog) => void dialog.accept());
+    await page
+      .getByRole("row", { name: /Sign in with a valid password/ })
+      .getByRole("button", { name: "Delete" })
+      .click();
+
+    await expect
+      .poll(() => draftTitles(taskId), { message: "only the deleted draft goes" })
+      .toEqual(["Sign in with a wrong password"]);
+  });
+
+  test("ZYU-16 a task whose drafts are all gone says so", async ({ browser }) => {
+    const taskId = seedTask({ drafts: [] });
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+
+    await expect(page.getByText("No generated testcases remain for this task.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Generated Testcases (0)" })).toBeVisible();
+
+    // The bulk toolbar stays on screen with nothing to act on. Asserting it is *inert* rather than
+    // absent: "Select all" renders either way, but selecting nothing must not arm the destructive
+    // buttons. (That the toolbar shows at all on an empty task is cosmetic, and left alone.)
+    await expect(page.getByRole("button", { name: "Delete selected" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Save selected" }).last()).toBeDisabled();
+  });
+
+  test("ZYU-17 closing a task records the new status", async ({ browser }) => {
+    const taskId = seedTask();
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+
+    page.on("dialog", (dialog) => void dialog.accept());
+    await page.getByRole("button", { name: "Close task" }).click();
+
+    await expect
+      .poll(() => scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`), {
+        message: "closing the task is persisted, not just visual",
+      })
+      .not.toBe("in_review");
+  });
+
+  // ─── Authorization ─────────────────────────────────────────────────────────
+
+  test("ZYU-20 a workspace member with no project access cannot use the task board", async ({
+    browser,
+  }) => {
+    seedTask();
+    const page = await open(browser, "/agents/tasks", "guest");
+    await page.waitForLoadState("domcontentloaded");
+
+    // No board, and above all no task rows — a Zyra task carries whatever the team told the agent
+    // about their product.
+    await expect(page.getByRole("tab", { name: "Kanban board" })).toHaveCount(0);
+  });
+
+  test("ZYU-21 another project's task is not reachable through this project's URL", async ({
+    browser,
+  }) => {
+    const foreignTask = seedTask({ projectId: tenant!.secondProjectId });
+
+    const page = await open(browser, `/agents/tasks/${foreignTask}`);
+    await page.waitForLoadState("domcontentloaded");
+
+    // The id is real, the project in the URL is not the one that owns it.
+    const res = await api.get(
+      `/api/projects/${tenant!.mainProjectId}/agents/zyra/tasks/${foreignTask}`,
+      { failOnStatusCode: false },
+    );
+    expect([403, 404], "a task is scoped to its project").toContain(res.status());
+    await expect(page.getByRole("button", { name: "Close task" })).toHaveCount(0);
+  });
+
+  test("ZYU-22 a malformed task id does not throw in the page", async ({ browser }) => {
+    const ctx = await browser.newContext({ storageState: states.get("owner") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+
+    await page.goto(`/projects/${tenant!.mainProjectId}/agents/tasks/not-a-uuid`);
+    await page.waitForLoadState("domcontentloaded");
+
+    expect(errors, "a URL typo must not throw an uncaught error in the page").toEqual([]);
+    await expect(page.locator("body")).not.toContainText("Application error");
+  });
+
+  test("ZYU-23 a qa_engineer can open Zyra and review a task", async ({ browser }) => {
+    const taskId = seedTask();
+    const page = await open(browser, `/agents/tasks/${taskId}`, "qa");
+
+    // A project member of any role reviews generated work — the API allows it, so the screen must
+    // not hide it. The role that cannot is the one with no project access (ZYU-20).
+    await expect(page.getByRole("heading", { name: "Zyra task", level: 1 })).toBeVisible();
+    await expect(page.getByRole("cell", { name: "Sign in with a valid password" })).toBeVisible();
+  });
+});

@@ -21,6 +21,7 @@ import {
 } from "@/components/ui";
 import { PageHeader, ListWorkspaceLayout } from "@/components/workflows";
 import { PlanCard, planStatus, type PlanStatus } from "@/components/testplans/PlanCard";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 import {
   IconArrowsSort,
   IconClipboardList,
@@ -67,13 +68,13 @@ export default function PlansPage() {
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
 
   useEffect(() => {
-    const saved = localStorage.getItem(VIEW_STORAGE_KEY);
+    const saved = readStoredValue(VIEW_STORAGE_KEY);
     if (saved === "grid" || saved === "list") setViewMode(saved);
   }, []);
 
   function handleViewModeChange(next: "grid" | "list") {
     setViewMode(next);
-    localStorage.setItem(VIEW_STORAGE_KEY, next);
+    writeStoredValue(VIEW_STORAGE_KEY, next);
   }
 
   useEffect(() => {
@@ -219,7 +220,7 @@ export default function PlansPage() {
               </Field>
             </div>
             {createError && (
-              <p className="mt-3 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/10 px-3 py-2 text-sm text-[var(--error)]">
+              <p className="mt-3 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/10 px-3 py-2 text-sm text-[var(--error-foreground)]">
                 {createError}
               </p>
             )}
@@ -373,7 +374,7 @@ export default function PlansPage() {
               <button
                 type="button"
                 onClick={() => { setSearchQuery(""); setStatusFilter("all"); }}
-                className="flex items-center gap-1 text-[12px] font-medium text-[var(--brand-primary)] hover:underline"
+                className="flex items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] hover:underline"
               >
                 <IconX size={12} stroke={2} />
                 Clear filters

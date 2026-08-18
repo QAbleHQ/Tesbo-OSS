@@ -106,7 +106,7 @@ export function MenuItem({ onClick, danger, children }: { onClick: () => void; d
       type="button"
       onClick={onClick}
       className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] transition-colors ${
-        danger ? "text-[var(--error)] hover:bg-[var(--error-soft)]" : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
+        danger ? "text-[var(--error-foreground)] hover:bg-[var(--error-soft)]" : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
       }`}
     >
       {children}

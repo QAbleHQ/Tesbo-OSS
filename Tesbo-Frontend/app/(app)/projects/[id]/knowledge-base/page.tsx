@@ -62,6 +62,7 @@ import {
   validateKnowledgeDocumentTitle,
   blankDocumentFlagKey,
 } from "@/lib/validation";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
@@ -216,7 +217,7 @@ function formatDate(value: string): string {
 }
 
 function itemIcon(item: KnowledgeItem) {
-  if (item.type === "folder") return <IconFolder size={17} stroke={1.75} className="text-[var(--brand-primary)]" />;
+  if (item.type === "folder") return <IconFolder size={17} stroke={1.75} className="text-[var(--accent-light)]" />;
   if (item.type === "document") return <IconFileText size={17} stroke={1.75} className="text-[var(--info)]" />;
   return <IconFile size={17} stroke={1.75} className="text-[var(--muted)]" />;
 }
@@ -657,7 +658,7 @@ function KnowledgeBasePageInner() {
   );
 
   useEffect(() => {
-    const savedPanel = localStorage.getItem("tesbo_kb_tree_panel");
+    const savedPanel = readStoredValue("tesbo_kb_tree_panel");
     if (savedPanel === "closed") setTreePanelOpen(false);
     (async () => {
       const me = await authMe();
@@ -733,7 +734,7 @@ function KnowledgeBasePageInner() {
   function toggleTreePanel() {
     setTreePanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem("tesbo_kb_tree_panel", next ? "open" : "closed");
+      writeStoredValue("tesbo_kb_tree_panel", next ? "open" : "closed");
       return next;
     });
   }
@@ -780,6 +781,34 @@ function KnowledgeBasePageInner() {
     }
   }
 
+  /*
+   * Deleting a folder is destructive and cascades, so the confirmation has to describe what will
+   * actually happen to THIS folder.
+   *
+   * Both delete paths used to be wrong, in opposite directions: the folder tree claimed "this folder
+   * contains documents/files" unconditionally, so emptying a folder and deleting it still warned
+   * about contents that weren't there; and the item table's row menu said only "it will be moved to
+   * trash", so deleting a full folder never mentioned that everything inside went with it. Asking
+   * the API what is in the folder makes one truthful message serve both.
+   *
+   * A failed lookup falls back to the cautious wording rather than the reassuring one — if we can't
+   * tell, the user should be warned, not soothed.
+   */
+  async function confirmFolderDelete(folderId: string, label: string): Promise<boolean> {
+    let hasContents = true;
+    try {
+      const contents = await listKnowledgeFolderItems(projectId, folderId);
+      hasContents = (contents.total ?? contents.items?.length ?? 0) > 0;
+    } catch {
+      hasContents = true;
+    }
+    return window.confirm(
+      hasContents
+        ? `Deleting "${label}" will also move all its contents to trash. Continue?`
+        : `Delete "${label}"? It will be moved to trash.`,
+    );
+  }
+
   async function handleFolderAction(action: FolderAction, folder: KnowledgeFolderTreeNode) {
     if (action === "create-subfolder") {
       setCreateFolderParent(folder.id);
@@ -789,7 +818,7 @@ function KnowledgeBasePageInner() {
     } else if (action === "move") {
       setMoveTarget({ kind: "folder", id: folder.id, excludeId: folder.id });
     } else if (action === "delete") {
-      if (!window.confirm(`This folder contains documents/files. Deleting "${folder.name}" will also move all contents to trash. Continue?`)) return;
+      if (!(await confirmFolderDelete(folder.id, folder.name))) return;
       setError(null);
       try {
         await deleteKnowledgeFolder(projectId, folder.id);
@@ -888,7 +917,11 @@ function KnowledgeBasePageInner() {
 
   async function handleDeleteItem(item: KnowledgeItem) {
     const label = itemLabel(item);
-    if (!window.confirm(`Delete "${label}"? It will be moved to trash.`)) return;
+    const confirmed =
+      item.type === "folder"
+        ? await confirmFolderDelete(item.id, label)
+        : window.confirm(`Delete "${label}"? It will be moved to trash.`);
+    if (!confirmed) return;
     setError(null);
     try {
       if (item.type === "document") await deleteKnowledgeDocument(projectId, item.id);
@@ -943,14 +976,14 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="font-medium text-[var(--brand-primary)]">Knowledge base</span>
+              <span className="font-medium text-[var(--accent-light)]">Knowledge base</span>
             </nav>,
             topBarStartEl
           )}
@@ -1038,7 +1071,7 @@ function KnowledgeBasePageInner() {
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
-                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--brand-primary)]">{summary.folders}</div>
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--accent-light)]">{summary.folders}</div>
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Folders</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
@@ -1054,7 +1087,7 @@ function KnowledgeBasePageInner() {
         </div>
 
         {error && (
-          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
+          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)]">
             <span>{error}</span>
             <button onClick={() => setError(null)}><IconX size={16} /></button>
           </div>
@@ -1067,10 +1100,10 @@ function KnowledgeBasePageInner() {
               <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${treePanelOpen ? "justify-between" : "justify-center"}`}>
                 {treePanelOpen && (
                   <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                    <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                    <IconFolders size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                     Folders
                     {summary && (
-                      <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                      <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                         {summary.folders}
                       </span>
                     )}
@@ -1082,7 +1115,7 @@ function KnowledgeBasePageInner() {
                       type="button"
                       title="New folder"
                       onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
-                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                     >
                       <IconPlus size={14} stroke={2.5} />
                     </button>
@@ -1117,7 +1150,7 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
-                    className="mt-2 flex w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    className="mt-2 flex w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={13} stroke={2} /> New folder
                   </button>
@@ -1164,7 +1197,7 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => { setSearchQuery(""); setSearchInput(""); }}
-                    className="shrink-0 text-[12px] text-[var(--brand-primary)] hover:underline"
+                    className="shrink-0 text-[12px] text-[var(--accent-light)] hover:underline"
                   >
                     Clear
                   </button>
@@ -1352,7 +1385,7 @@ function KnowledgeBasePageInner() {
                     type="button"
                     onClick={() => setPage((prev) => Math.max(1, prev - 1))}
                     disabled={safePage === 1}
-                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                   >
                     Previous
                   </button>
@@ -1360,7 +1393,7 @@ function KnowledgeBasePageInner() {
                     type="button"
                     onClick={() => setPage((prev) => (prev >= totalPages ? prev : prev + 1))}
                     disabled={safePage >= totalPages}
-                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                   >
                     Next
                   </button>

@@ -230,7 +230,7 @@ export default function AiProvidersTab() {
         </p>
       )}
       {error && (
-        <p className="rounded-lg border border-[var(--error)]/40 bg-[color-mix(in_oklab,var(--error)_8%,white)] px-3 py-2 text-sm text-[var(--error)]">
+        <p className="rounded-lg border border-[var(--error)]/40 bg-[color-mix(in_oklab,var(--error)_8%,white)] px-3 py-2 text-sm text-[var(--error-foreground)]">
           {error}
         </p>
       )}

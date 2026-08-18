@@ -139,7 +139,7 @@ export default function CustomFieldsSettingsPage() {
         </Button>
       </div>
 
-      {loadError && <p className="text-sm text-[var(--error)]">{loadError}</p>}
+      {loadError && <p className="text-sm text-[var(--error-foreground)]">{loadError}</p>}
 
       {!loading && (
         <CustomFieldDefinitionList

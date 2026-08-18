@@ -30,7 +30,10 @@ function makeDb(routes: Route[] = []) {
     }
     return Promise.resolve({ rows: [] });
   });
-  return { db: { query } as unknown as DatabaseService, query, calls };
+  // Routes are matched the same way inside a transaction, so the double hands the callback a
+  // client backed by the very same `query` fn — SAVEPOINT/RELEASE statements included.
+  const transaction = jest.fn((fn: (client: { query: typeof query }) => Promise<unknown>) => fn({ query }));
+  return { db: { query, transaction } as unknown as DatabaseService, query, calls };
 }
 
 /** Route for LegacyService#workspace()'s primary "active organization" lookup. */
@@ -356,6 +359,81 @@ describe("LegacyService — multi-workspace / organization switching", () => {
       expect(err).toBeInstanceOf(ForbiddenException);
       expect(err.getResponse()).toEqual({ error: "Cannot promote to owner" });
       expect(query.mock.calls.some((c) => String(c[0]).includes("UPDATE organization_members SET role"))).toBe(false);
+    });
+  });
+
+  describe("createWorkspace() — workspace names are not globally unique", () => {
+    /** Routes the org INSERT through a real-ish unique index on `slug`, seeded with `taken`. */
+    function orgInsertRoute(taken: string[]) {
+      const slugs = new Set(taken);
+      let created = 0;
+      return {
+        route: {
+          match: "INSERT INTO organizations",
+          handler: (params: unknown[]) => {
+            const slug = String(params[1]);
+            if (slugs.has(slug)) throw Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
+            slugs.add(slug);
+            created += 1;
+            return { rows: [{ id: "org-new" }] };
+          }
+        } as Route,
+        createdCount: () => created
+      };
+    }
+
+    it("creates the workspace on the bare slug when the name is unclaimed", async () => {
+      const insert = orgInsertRoute([]);
+      const { db, calls } = makeDb([insert.route]);
+      const svc = makeLegacy(db);
+
+      await expect(svc.createWorkspace("user-1", { orgName: "Acme Corp" })).resolves.toEqual({ organizationId: "org-new" });
+      const slug = calls.find((c) => c.sql.includes("INSERT INTO organizations"))!.params[1];
+      expect(slug).toBe("acme-corp");
+    });
+
+    it("still creates the workspace when another account already owns that name", async () => {
+      const insert = orgInsertRoute(["acme-corp"]);
+      const { db, calls } = makeDb([insert.route]);
+      const svc = makeLegacy(db);
+
+      await expect(svc.createWorkspace("user-2", { orgName: "Acme Corp" })).resolves.toEqual({ organizationId: "org-new" });
+
+      const slugs = calls.filter((c) => c.sql.includes("INSERT INTO organizations")).map((c) => String(c.params[1]));
+      expect(slugs[0]).toBe("acme-corp");
+      expect(slugs[slugs.length - 1]).toMatch(/^acme-corp-[0-9a-f]{6}$/);
+      expect(insert.createdCount()).toBe(1);
+      // The owner row and the active-workspace pointer must still target the newly created org.
+      const member = calls.find((c) => c.sql.includes("INSERT INTO organization_members"))!;
+      expect(member.params).toEqual(["org-new", "user-2"]);
+    });
+
+    it("rolls back to a savepoint after a collision so the transaction stays usable", async () => {
+      const insert = orgInsertRoute(["acme-corp"]);
+      const { db, calls } = makeDb([insert.route]);
+      const svc = makeLegacy(db);
+
+      await svc.createWorkspace("user-2", { orgName: "Acme Corp" });
+
+      const sql = calls.map((c) => c.sql);
+      expect(sql).toContain("SAVEPOINT org_slug");
+      expect(sql).toContain("ROLLBACK TO SAVEPOINT org_slug");
+      expect(sql).toContain("RELEASE SAVEPOINT org_slug");
+    });
+
+    it("propagates non-unique-violation insert failures instead of retrying them", async () => {
+      const { db, calls } = makeDb([
+        {
+          match: "INSERT INTO organizations",
+          handler: () => {
+            throw Object.assign(new Error("null value in column violates not-null constraint"), { code: "23502" });
+          }
+        }
+      ]);
+      const svc = makeLegacy(db);
+
+      await expect(svc.createWorkspace("user-1", { orgName: "Acme Corp" })).rejects.toThrow("not-null constraint");
+      expect(calls.filter((c) => c.sql.includes("INSERT INTO organizations"))).toHaveLength(1);
     });
   });
 });

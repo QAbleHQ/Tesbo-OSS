@@ -105,21 +105,59 @@ async function bootstrapFromLegacyChangelog(client: PoolClient, migrations: Migr
   console.log(`Bootstrapped ${appliedMigrations.length} migration record(s) from the legacy changelog.`);
 }
 
+function indexMigrations(migrations: MigrationFile[]) {
+  return {
+    byVersion: new Map(migrations.map((migration) => [migration.version, migration])),
+    byFilename: new Map(migrations.map((migration) => [migration.filename, migration])),
+    byChecksum: new Map(migrations.map((migration) => [migration.checksum, migration]))
+  };
+}
+
 async function validateAppliedChecksums(client: PoolClient, migrations: MigrationFile[]) {
   const applied = await client.query<{ version: number; filename: string; checksum: string }>(
     "SELECT version, filename, checksum FROM schema_migrations"
   );
-  const byVersion = new Map(migrations.map((migration) => [migration.version, migration]));
+  const { byVersion, byFilename, byChecksum } = indexMigrations(migrations);
 
   for (const row of applied.rows) {
-    const migration = byVersion.get(row.version);
-    if (!migration) {
-      throw new Error(`Database has unknown migration version ${row.version} (${row.filename}).`);
+    const sameVersion = byVersion.get(row.version);
+    if (!sameVersion) {
+      // Stage applied V78 from a branch that never merged the SQL file.
+      console.warn(
+        `Skipping unknown applied migration version ${row.version} (${row.filename}).`
+      );
+      continue;
     }
-    if (migration.checksum !== row.checksum) {
-      throw new Error(`Checksum mismatch for migration ${migration.filename}. Create a new migration instead of editing an applied one.`);
+    if (sameVersion.checksum === row.checksum) continue;
+
+    // Stage and prod reused V76 for different files (password_reset vs admin_plan_override).
+    // If this DB row is a known file under another version, do not block deploy.
+    if (byChecksum.has(row.checksum) || byFilename.has(row.filename)) {
+      console.warn(
+        `Skipping version fork at ${row.version}: DB has ${row.filename}, this image has ${sameVersion.filename}.`
+      );
+      continue;
     }
+
+    throw new Error(
+      `Checksum mismatch for migration ${sameVersion.filename}. Create a new migration instead of editing an applied one.`
+    );
   }
+}
+
+function pendingMigrations(
+  migrations: MigrationFile[],
+  applied: { version: number; filename: string; checksum: string }[]
+) {
+  const appliedVersions = new Set(applied.map((row) => row.version));
+  const appliedFilenames = new Set(applied.map((row) => row.filename));
+  const appliedChecksums = new Set(applied.map((row) => row.checksum));
+  return migrations.filter(
+    (migration) =>
+      !appliedVersions.has(migration.version) &&
+      !appliedFilenames.has(migration.filename) &&
+      !appliedChecksums.has(migration.checksum)
+  );
 }
 
 async function applyMigration(client: PoolClient, migration: MigrationFile) {
@@ -161,9 +199,10 @@ async function main() {
     await bootstrapFromLegacyChangelog(client, migrations);
     await validateAppliedChecksums(client, migrations);
 
-    const applied = await client.query<{ version: number }>("SELECT version FROM schema_migrations");
-    const appliedVersions = new Set(applied.rows.map((row) => row.version));
-    const pending = migrations.filter((migration) => !appliedVersions.has(migration.version));
+    const applied = await client.query<{ version: number; filename: string; checksum: string }>(
+      "SELECT version, filename, checksum FROM schema_migrations"
+    );
+    const pending = pendingMigrations(migrations, applied.rows);
 
     if (pending.length === 0) {
       console.log("Database schema is up to date.");

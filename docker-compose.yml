@@ -59,6 +59,10 @@ services:
       LINEAR_REDIRECT_URI: ${LINEAR_REDIRECT_URI:-}
       POSTMARK_API_TOKEN: ${POSTMARK_API_TOKEN:-}
       POSTMARK_FROM_EMAIL: ${POSTMARK_FROM_EMAIL:-noreply@example.com}
+      # "live" = real delivery, and only production should say it. Left at "log" here, which never
+      # emails an OTP and only replays other emails through a Postmark SANDBOX server (verified with
+      # Postmark, not assumed), so a local or CI stack cannot bounce mail off invented addresses.
+      EMAIL_DELIVERY_MODE: ${EMAIL_DELIVERY_MODE:-log}
       # Platform OAuth apps. Set these and workspace owners connect with one click — no
       # per-workspace client id/secret entry.
       JIRA_CLIENT_ID: ${JIRA_CLIENT_ID:-}

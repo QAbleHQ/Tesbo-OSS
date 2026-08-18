@@ -327,6 +327,10 @@ export default function ZyraSettingsPage() {
                   <button
                     key={option.value}
                     type="button"
+                    // Which of the four is chosen was conveyed by border and background colour
+                    // alone, so nothing but a sighted user could tell — and a colour-only state is
+                    // the same defect class the theme pass fixed elsewhere.
+                    aria-pressed={active}
                     onClick={() => selectTestcaseRange(option.value)}
                     className={`rounded-[8px] border p-3.5 text-left transition-colors ${
                       active
@@ -370,7 +374,7 @@ export default function ZyraSettingsPage() {
         {/* ── Save / actions bar ── */}
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[var(--border)] bg-[var(--surface)] p-4">
           <span className="text-xs text-[var(--muted)]">
-            {saveError ? <span className="text-[var(--error)]">{saveError}</span> : dirty ? "You have unsaved changes." : "All changes saved."}
+            {saveError ? <span className="text-[var(--error-foreground)]">{saveError}</span> : dirty ? "You have unsaved changes." : "All changes saved."}
           </span>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={handleResetDefaults} disabled={saving}>Reset to defaults</Button>

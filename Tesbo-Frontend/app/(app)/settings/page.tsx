@@ -105,7 +105,7 @@ function WorkspaceSettingsContent() {
         {topBarStartEl &&
           createPortal(
             <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[12px]">
-              <span className="truncate font-medium text-[var(--brand-primary)]">Workspace settings</span>
+              <span className="truncate font-medium text-[var(--accent-light)]">Workspace settings</span>
             </nav>,
             topBarStartEl,
           )}
