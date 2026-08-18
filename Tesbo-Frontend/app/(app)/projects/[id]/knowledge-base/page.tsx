@@ -48,11 +48,20 @@ import {
   type KnowledgeFile,
   type KnowledgeBaseSummary,
 } from "@/lib/api";
-import { Button, Input, Modal, Field, FieldLabel, StatusChip, EmptyStateBlock } from "@/components/ui";
+import { Button, Input, Textarea, Modal, Field, FieldLabel, FieldError, StatusChip, EmptyStateBlock } from "@/components/ui";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import FileViewerModal from "@/components/knowledge-base/FileViewerModal";
 import { Menu, MenuItem } from "@/components/knowledge-base/Menu";
 import { FolderTreeNodeRow, flattenFolders, findAncestorIds, type FolderAction } from "@/components/knowledge-base/FolderTree";
+import {
+  KB_ACCEPT_ATTR,
+  KB_MAX_FILES_PER_UPLOAD,
+  KB_UPLOAD_HINT,
+  validateKnowledgeBaseFile,
+  KB_DOCUMENT_TITLE_MAX_LENGTH,
+  validateKnowledgeDocumentTitle,
+  blankDocumentFlagKey,
+} from "@/lib/validation";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
@@ -351,24 +360,53 @@ function CreateDocumentModal({
 }: {
   open: boolean;
   onClose: () => void;
-  onCreate: (title: string, template: DocumentTemplate) => void;
+  onCreate: (title: string, template: DocumentTemplate, blankContent?: string) => void;
   saving: boolean;
 }) {
   const [title, setTitle] = useState("");
+  const [titleError, setTitleError] = useState("");
   const [templateKey, setTemplateKey] = useState(DOCUMENT_TEMPLATES[0].key);
+  // Only the "Blank document" template starts with no content, so it's the only one that
+  // needs this field — the other templates already come with pre-filled starter content.
+  const [blankContent, setBlankContent] = useState("");
   useEffect(() => {
     if (open) {
       setTitle("");
+      setTitleError("");
       setTemplateKey(DOCUMENT_TEMPLATES[0].key);
+      setBlankContent("");
     }
   }, [open]);
   const template = DOCUMENT_TEMPLATES.find((t) => t.key === templateKey) || DOCUMENT_TEMPLATES[0];
+  const isBlankTemplate = template.key === "blank";
+  const canCreate = Boolean(title.trim()) && (!isBlankTemplate || Boolean(blankContent.trim()));
+  function handleCreateClick() {
+    const trimmed = title.trim();
+    if (!trimmed || (isBlankTemplate && !blankContent.trim())) return;
+    const error = validateKnowledgeDocumentTitle(trimmed);
+    if (error) {
+      setTitleError(error);
+      return;
+    }
+    onCreate(trimmed, template, isBlankTemplate ? blankContent.trim() : undefined);
+  }
   return (
     <Modal open={open} onClose={onClose} title="Create document" className="max-w-2xl">
       <div className="space-y-4">
         <Field>
           <FieldLabel>Document title</FieldLabel>
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder="e.g. Login Requirements" />
+          <Input
+            value={title}
+            onChange={(e) => {
+              const value = e.target.value;
+              setTitle(value);
+              if (titleError && !validateKnowledgeDocumentTitle(value)) setTitleError("");
+            }}
+            autoFocus
+            placeholder="e.g. Login Requirements"
+            maxLength={KB_DOCUMENT_TITLE_MAX_LENGTH}
+          />
+          {titleError && <FieldError>{titleError}</FieldError>}
         </Field>
         <Field>
           <FieldLabel>Template</FieldLabel>
@@ -390,9 +428,20 @@ function CreateDocumentModal({
             ))}
           </div>
         </Field>
+        {isBlankTemplate && (
+          <Field>
+            <FieldLabel>Content</FieldLabel>
+            <Textarea
+              value={blankContent}
+              onChange={(e) => setBlankContent(e.target.value)}
+              placeholder="Write something before creating this document…"
+              rows={5}
+            />
+          </Field>
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button disabled={!title.trim() || saving} onClick={() => onCreate(title.trim(), template)}>
+          <Button disabled={!canCreate || saving} onClick={handleCreateClick}>
             {saving ? "Creating…" : "Create document"}
           </Button>
         </div>
@@ -416,10 +465,14 @@ function UploadModal({
 }) {
   const [files, setFiles] = useState<File[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [rejectionMessage, setRejectionMessage] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const pickerOpenRef = useRef(false);
   useEffect(() => {
-    if (open) setFiles([]);
+    if (open) {
+      setFiles([]);
+      setRejectionMessage(null);
+    }
   }, [open]);
   useEffect(() => {
     if (!open) return;
@@ -434,6 +487,24 @@ function UploadModal({
     inputRef.current?.click();
   }
 
+  function addFiles(incoming: File[]) {
+    const reasons: string[] = [];
+    const valid: File[] = [];
+    for (const file of incoming) {
+      const reason = validateKnowledgeBaseFile(file);
+      if (reason) reasons.push(reason);
+      else valid.push(file);
+    }
+    setFiles((prev) => {
+      const room = KB_MAX_FILES_PER_UPLOAD - prev.length;
+      if (valid.length > room) {
+        reasons.push(`Only ${room} more file${room === 1 ? "" : "s"} can be added (max ${KB_MAX_FILES_PER_UPLOAD} per upload).`);
+      }
+      return [...prev, ...valid.slice(0, Math.max(0, room))];
+    });
+    setRejectionMessage(reasons.length > 0 ? reasons.join(" · ") : null);
+  }
+
   return (
     <Modal open={open} onClose={onClose} title="Upload files">
       <div className="space-y-4">
@@ -444,7 +515,7 @@ function UploadModal({
           onDrop={(e) => {
             e.preventDefault();
             setDragOver(false);
-            setFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
+            addFiles(Array.from(e.dataTransfer.files));
           }}
           onClick={openFilePicker}
           role="button"
@@ -465,10 +536,18 @@ function UploadModal({
             ref={inputRef}
             type="file"
             multiple
+            accept={KB_ACCEPT_ATTR}
             className="hidden"
-            onChange={(e) => setFiles((prev) => [...prev, ...Array.from(e.target.files || [])])}
+            onChange={(e) => {
+              addFiles(Array.from(e.target.files || []));
+              e.target.value = "";
+            }}
           />
         </div>
+        <p className="text-[11px] text-[var(--muted-soft)]">{KB_UPLOAD_HINT}</p>
+        {rejectionMessage && (
+          <p className="rounded-md bg-[var(--error-soft)] px-2.5 py-1.5 text-[12.5px] text-[var(--error)]">{rejectionMessage}</p>
+        )}
         {files.length > 0 && (
           <ul className="max-h-40 space-y-1 overflow-y-auto text-[13px]">
             {files.map((f, i) => (
@@ -621,6 +700,15 @@ function KnowledgeBasePageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [folderParam, loading, tree]);
 
+  // Debounce typing into the search box instead of waiting for Enter/submit, so results
+  // update live as the user types (matches the search UX elsewhere in the app).
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setSearchQuery(searchInput.trim());
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [searchInput]);
+
   useEffect(() => {
     if (!searchQuery) {
       setSearchResults(null);
@@ -734,19 +822,30 @@ function KnowledgeBasePageInner() {
     }
   }
 
-  async function handleCreateDocument(title: string, template: DocumentTemplate) {
+  async function handleCreateDocument(title: string, template: DocumentTemplate, blankContent?: string) {
     if (!selectedFolderId) return;
     setSaving(true);
     setError(null);
     try {
+      const content =
+        template.key === "blank" && blankContent
+          ? doc(...blankContent.split(/\n+/).map((line) => paragraph(line)).filter((p) => p.content))
+          : template.content;
       const created = await createKnowledgeDocument(projectId, {
         folderId: selectedFolderId,
         title,
         documentType: template.documentType,
-        contentJson: template.content || undefined,
-        contentHtml: template.content ? docNodeToHtml(template.content) : undefined,
-        contentText: template.content ? docNodeToText(template.content) : undefined,
+        contentJson: content || undefined,
+        contentHtml: content ? docNodeToHtml(content) : undefined,
+        contentText: content ? docNodeToText(content) : undefined,
       });
+      if (template.key === "blank") {
+        try {
+          window.localStorage.setItem(blankDocumentFlagKey(created.id), "1");
+        } catch {
+          // Private browsing / storage disabled — the stricter blank-doc validation just won't apply.
+        }
+      }
       setCreateDocOpen(false);
       router.push(`/projects/${projectId}/knowledge-base/documents/${created.id}`);
     } catch (err) {

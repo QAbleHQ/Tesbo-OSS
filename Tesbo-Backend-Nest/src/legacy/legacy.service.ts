@@ -1014,7 +1014,16 @@ export class LegacyService implements OnModuleInit {
     // Only owner can remove members; manager cannot remove members (per spec)
     const callerRole = this.normalizeRole(workspace.role);
     if (callerRole !== "owner") throw new ForbiddenException({ error: "Only the owner can remove team members" });
-    await this.db.query("DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2", [workspace.id, targetUserId]);
+    await this.db.transaction(async (client) => {
+      await client.query("DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2", [workspace.id, targetUserId]);
+      // A workspace-level removal must also drop the user from every project in this
+      // workspace — otherwise they keep showing up as a project member (and keep project
+      // access) despite no longer being part of the workspace at all.
+      await client.query(
+        "DELETE FROM project_members WHERE user_id = $2 AND project_id IN (SELECT id FROM projects WHERE organization_id = $1)",
+        [workspace.id, targetUserId]
+      );
+    });
     await this.logWorkspaceActivity(workspace.id, uid, "workspace_member_removed", "workspace_member", targetUserId, targetMember.rows[0].email, { role: targetMember.rows[0].role });
   }
 
@@ -3735,6 +3744,12 @@ export class LegacyService implements OnModuleInit {
   // ─── Knowledge Base v2 (folders / documents / files) ──────────────────────────
 
   private static readonly KB_VERSION_SNAPSHOT_MINUTES = 15;
+  // Mirrors knowledge_documents.title VARCHAR(512) — checked here so an over-limit title comes
+  // back as a clear 400 instead of a raw Postgres "value too long" error.
+  private static readonly KB_DOCUMENT_TITLE_MAX_LENGTH = 512;
+  // Mirrors the frontend's own payload-size guard (MAX_DOCUMENT_PAYLOAD_BYTES in the document
+  // editor page). The API is reachable directly, so the limit needs to be enforced here too.
+  private static readonly KB_DOCUMENT_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024;
   private static readonly KB_DOCUMENT_COLUMNS = `id, organization_id, project_id, folder_id, title, content_json, content_html, content_text,
     document_type, status, is_ai_generated, source_provider, source_external_id, source_url,
     source_role, source_synced_by, source_synced_at, is_read_only,
@@ -4129,11 +4144,30 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel), total: res.rowCount };
   }
 
+  // Same limit the document editor enforces client-side before ever calling this endpoint —
+  // repeated here because the API is reachable directly, bypassing that check entirely.
+  private assertKnowledgeDocumentPayloadSize(body: Body) {
+    const jsonSize = body.contentJson ? Buffer.byteLength(JSON.stringify(body.contentJson), "utf8") : 0;
+    const htmlSize = body.contentHtml ? Buffer.byteLength(String(body.contentHtml), "utf8") : 0;
+    const textSize = body.contentText ? Buffer.byteLength(String(body.contentText), "utf8") : 0;
+    const size = jsonSize + htmlSize + textSize;
+    if (size > LegacyService.KB_DOCUMENT_MAX_PAYLOAD_BYTES) {
+      const limitMb = LegacyService.KB_DOCUMENT_MAX_PAYLOAD_BYTES / (1024 * 1024);
+      throw new BadRequestException({
+        error: `This document is over the ${limitMb}MB limit we currently support. Split it into smaller documents to save.`
+      });
+    }
+  }
+
   async createKnowledgeDocument(projectId: string, userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const project = await this.requireProjectAccess(uid, projectId);
     const title = String(body.title || "").trim();
     if (!title) throw new BadRequestException({ error: "Document title is required" });
+    if (title.length > LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Title must be at most ${LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH} characters` });
+    }
+    this.assertKnowledgeDocumentPayloadSize(body);
     const folderId = String(body.folderId || "");
     if (!folderId) throw new BadRequestException({ error: "folderId is required" });
     await this.kbFolder(projectId, folderId);
@@ -4207,6 +4241,14 @@ export class LegacyService implements OnModuleInit {
     const nextJson = body.contentJson !== undefined ? JSON.stringify(body.contentJson) : doc.content_json ? JSON.stringify(doc.content_json) : null;
     const nextHtml = body.contentHtml !== undefined ? body.contentHtml : doc.content_html;
     const nextText = body.contentText !== undefined ? body.contentText : doc.content_text;
+
+    if (!nextTitle && !String(nextText || "").trim()) {
+      throw new BadRequestException({ error: "A document needs a title or some content — it can't be saved blank." });
+    }
+    if (nextTitle.length > LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Title must be at most ${LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH} characters` });
+    }
+    this.assertKnowledgeDocumentPayloadSize(body);
 
     const contentChanged =
       nextTitle !== doc.title || nextHtml !== doc.content_html || nextText !== doc.content_text;
@@ -4515,6 +4557,8 @@ export class LegacyService implements OnModuleInit {
   // ─── Knowledge Base v2: files ──────────────────────────────────────────────
 
   static readonly KB_MAX_UPLOAD_SIZE = Number(process.env.MAX_UPLOAD_SIZE) || 100 * 1024 * 1024;
+  // Archives (zip) and executables (exe) are deliberately excluded — a zip can hide anything,
+  // including an executable, past this extension check.
   static readonly KB_ALLOWED_EXTENSIONS = new Set([
     "png", "jpg", "jpeg", "webp", "svg",
     "pdf", "doc", "docx", "txt", "md",
@@ -4522,8 +4566,7 @@ export class LegacyService implements OnModuleInit {
     "ppt", "pptx",
     "js", "ts", "java", "py", "json", "xml", "yaml", "yml", "sql", "html", "css",
     "mp3", "wav", "m4a",
-    "mp4", "mov", "webm",
-    "zip"
+    "mp4", "mov", "webm"
   ]);
   // Extensions we can read as plain UTF-8 text without any parsing library.
   static readonly KB_PLAINTEXT_EXTENSIONS = new Set([

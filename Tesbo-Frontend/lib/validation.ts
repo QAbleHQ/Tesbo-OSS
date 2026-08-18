@@ -60,3 +60,62 @@ export function validateProjectDescription(value: string): string {
   }
   return "";
 }
+
+// Mirrors Tesbo-Backend-Nest/src/legacy/legacy.service.ts — LegacyService.KB_ALLOWED_EXTENSIONS,
+// the FilesInterceptor("files", 10, ...) file-count limit, and KB_MAX_UPLOAD_SIZE (itself driven
+// by the MAX_UPLOAD_SIZE env var, currently 50MB). Keep all three in sync with the backend.
+// Archives (zip) and executables (exe) are deliberately excluded — a zip can hide anything,
+// including an executable, past this extension check.
+export const KB_ALLOWED_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "webp", "svg",
+  "pdf", "doc", "docx", "txt", "md",
+  "xls", "xlsx", "csv",
+  "ppt", "pptx",
+  "js", "ts", "java", "py", "json", "xml", "yaml", "yml", "sql", "html", "css",
+  "mp3", "wav", "m4a",
+  "mp4", "mov", "webm"
+]);
+export const KB_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+export const KB_MAX_FILES_PER_UPLOAD = 10;
+export const KB_ACCEPT_ATTR = [...KB_ALLOWED_EXTENSIONS].map((ext) => `.${ext}`).join(",");
+export const KB_UPLOAD_HINT =
+  `Images, PDF, Word/Excel/PowerPoint, code/text files, or audio/video (no zip or executable files) · Max ${KB_MAX_FILE_SIZE_BYTES / (1024 * 1024)}MB per file · Up to ${KB_MAX_FILES_PER_UPLOAD} files at a time`;
+
+function fileExtension(fileName: string): string {
+  const dot = fileName.lastIndexOf(".");
+  return dot === -1 ? "" : fileName.slice(dot + 1).toLowerCase();
+}
+
+/** Validates one file to upload to the knowledge base. Returns an error message, or null if valid. */
+export function validateKnowledgeBaseFile(file: File): string | null {
+  const ext = fileExtension(file.name);
+  if (!ext || !KB_ALLOWED_EXTENSIONS.has(ext)) {
+    return `${file.name}: this file type is not supported`;
+  }
+  if (file.size > KB_MAX_FILE_SIZE_BYTES) {
+    return `${file.name}: file is too large (max ${KB_MAX_FILE_SIZE_BYTES / (1024 * 1024)}MB)`;
+  }
+  return null;
+}
+
+// Mirrors Tesbo-Backend-Nest/migrations/V45_knowledge_base_v2.sql — knowledge_documents.title is
+// VARCHAR(512), and legacy.service.ts (createKnowledgeDocument / updateKnowledgeDocument) enforces
+// the same limit server-side.
+export const KB_DOCUMENT_TITLE_MAX_LENGTH = 512;
+
+/** Validates a knowledge base document title. Returns an error message, or null if valid. */
+export function validateKnowledgeDocumentTitle(title: string): string | null {
+  if (title.trim().length > KB_DOCUMENT_TITLE_MAX_LENGTH) {
+    return `Title must be at most ${KB_DOCUMENT_TITLE_MAX_LENGTH} characters`;
+  }
+  return null;
+}
+
+/**
+ * localStorage key marking a document as created from the "Blank document" template, so the
+ * editor can require both a title and content instead of the usual title-or-content rule.
+ * Set at creation time (knowledge-base/page.tsx) and read in the document editor.
+ */
+export function blankDocumentFlagKey(documentId: string): string {
+  return `kb-blank-doc:${documentId}`;
+}
