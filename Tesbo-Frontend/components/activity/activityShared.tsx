@@ -56,6 +56,7 @@ const ACTION_META: Record<string, [string, StatusChipProps["tone"]]> = {
   deleted: ["Deleted", "error"],
   testcase_deleted: ["Deleted", "error"],
   project_deleted: ["Deleted", "error"],
+  testcase_bulk_created: ["Imported", "success"],
   testcase_bulk_updated: ["Bulk updated", "info"],
   testcase_bulk_deleted: ["Bulk deleted", "error"],
   approved: ["Approved", "success"],
@@ -159,6 +160,9 @@ export function describeActivity(item: ActivityLogItem): string | null {
   if (diff?.reason && typeof diff.reason === "string") return diff.reason;
   if (item.action === "zyra_moved_to_suite" && typeof diff?.movedCount === "number") {
     return `Moved ${diff.movedCount} test case${diff.movedCount === 1 ? "" : "s"} to this suite.`;
+  }
+  if (item.action === "testcase_bulk_created" && Array.isArray(diff?.testcaseIds)) {
+    return `Imported ${(diff.testcaseIds as unknown[]).length} test case(s).`;
   }
   if (item.action === "testcase_bulk_updated" && Array.isArray(diff?.testcaseIds)) {
     return `Bulk-updated ${(diff.testcaseIds as unknown[]).length} test case(s).`;

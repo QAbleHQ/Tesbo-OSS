@@ -326,6 +326,11 @@ export class LegacyController {
     return this.legacy.duplicateTestCase(testcaseId, req.userId);
   }
 
+  @Post("/api/projects/:projectId/testcases/bulk-create")
+  bulkCreate(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
+    return this.legacy.bulkCreateTestCases(projectId, req.userId, body);
+  }
+
   @Post("/api/projects/:projectId/testcases/bulk-update")
   bulkUpdate(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string, @Body() body: Record<string, any>) {
     return this.legacy.bulkUpdateTestCases(projectId, req.userId, body);
@@ -424,6 +429,13 @@ export class LegacyController {
   @Post("/api/cycles/:cycleId/testcases")
   addCycleCases(@Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
     return this.legacy.addCycleTestCases(cycleId, body);
+  }
+
+  // Mirrors /api/projects/:projectId/testcases/bulk-delete: POST (not DELETE) so the id list
+  // travels in a body, which no proxy strips the way it can from a DELETE.
+  @Post("/api/cycles/:cycleId/testcases/bulk-delete")
+  removeCycleCases(@Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
+    return this.legacy.removeCycleTestCases(cycleId, body);
   }
 
   @Delete("/api/cycles/:cycleId/testcases/:testcaseId")

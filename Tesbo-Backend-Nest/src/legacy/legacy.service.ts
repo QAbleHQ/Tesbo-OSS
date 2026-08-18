@@ -22,7 +22,7 @@ import { RagRetrievalService } from "../rag/rag-retrieval.service";
 import { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import { PlanLimitsService } from "../plan-limits/plan-limits.service";
 import { CustomFieldsService } from "../custom-fields/custom-fields.service";
-import { CustomFieldDefinitionDto } from "../custom-fields/custom-fields.types";
+import { CustomFieldDefinitionDto, QueryRunner } from "../custom-fields/custom-fields.types";
 
 type Body = Record<string, any>;
 
@@ -1938,11 +1938,12 @@ export class LegacyService implements OnModuleInit {
     }
 
     const where = filters.join(" AND ");
-    const total = await this.db.query<{ count: string }>(
-      `SELECT COUNT(*) AS count FROM testcases ${customFieldJoinSql} WHERE ${where}`,
-      values
-    );
     values.push(limit, offset);
+    // Total comes back as a window function on the same statement rather than a second
+    // COUNT(*) query. This endpoint backs the repository table, the suite tree and the run
+    // picker, and against a managed Postgres the round trip costs far more than the scan does,
+    // so folding two trips into one roughly halves its latency. COUNT(*) OVER () is evaluated
+    // after WHERE and before LIMIT, so it still reports every matching row.
     const res = await this.db.query(
       `SELECT testcases.id, testcases.external_id, testcases.title, testcases.priority, testcases.type,
               testcases.automation_status, testcases.automation_tags, testcases.status,
@@ -1951,12 +1952,15 @@ export class LegacyService implements OnModuleInit {
               COALESCE(
                 (SELECT jsonb_object_agg(v.definition_id, v.value) FROM custom_field_values v WHERE v.testcase_id = testcases.id),
                 '{}'::jsonb
-              ) AS custom_field_values
+              ) AS custom_field_values,
+              COUNT(*) OVER () AS total_count
        FROM testcases ${customFieldJoinSql} WHERE ${where}
        ORDER BY testcases.updated_at DESC LIMIT $${values.length - 1} OFFSET $${values.length}`,
       values
     );
-    return { rows: res.rows.map(toCamel), total: Number(total.rows[0]?.count || 0) };
+    const total = Number(res.rows[0]?.total_count || 0);
+    // total_count is transport for the header, not part of a test case.
+    return { rows: res.rows.map(({ total_count, ...row }) => toCamel(row)), total };
   }
 
   async exportTestCases(projectId: string, customFieldDefinitions: CustomFieldDefinitionDto[] = []): Promise<Body[]> {
@@ -2077,6 +2081,113 @@ export class LegacyService implements OnModuleInit {
     });
     await this.logProjectActivity(projectId, uid, "testcase_created", "testcase", created.id, `${created.external_id} - ${created.title}`, { after: toCamel(created) });
     return toCamel(created);
+  }
+
+  // Import used to create test cases one HTTP request at a time, each costing ~5 DB round
+  // trips (prefix lookup, MAX(external_id), insert, custom fields, activity row) — a
+  // 500-row sheet meant thousands of sequential round trips, which is why importing crawled.
+  // A batch now costs one request and a handful of statements.
+  static readonly MAX_BULK_TESTCASES = 500;
+
+  async bulkCreateTestCases(projectId: string, actorId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(actorId);
+    const incoming: Body[] = Array.isArray(body.testcases)
+      ? body.testcases.filter((row: unknown): row is Body => !!row && typeof row === "object")
+      : [];
+    if (!incoming.length) return { created: [], createdCount: 0 };
+    if (incoming.length > LegacyService.MAX_BULK_TESTCASES) {
+      throw new BadRequestException({
+        error: `A batch is limited to ${LegacyService.MAX_BULK_TESTCASES} test cases — send larger imports as several batches.`
+      });
+    }
+
+    const created = await this.db.transaction(async (client) => {
+      // Serialize external-id allocation per project: MAX()+1 alone lets two concurrent
+      // imports claim the same block and lose one to the (project_id, external_id) unique
+      // index. Advisory lock is transaction-scoped, so it releases on commit or rollback.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`testcase-external-id:${projectId}`]);
+      const key = await this.externalIdPrefix(projectId, body.testcaseIdPrefix, client);
+      const startSeq = await this.maxExternalIdSeq(projectId, key, client);
+
+      // external_id is derived from the row's index, so it also keys created rows back to
+      // their source row below — RETURNING order is not guaranteed to match the input.
+      const externalIdFor = (index: number) => `${key}-TC-${startSeq + index + 1}`;
+      const payload = incoming.map((row, index) => ({
+        ord: index,
+        suite_id: row.suiteId || null,
+        external_id: row.externalId || externalIdFor(index),
+        title: row.title || "Untitled test case",
+        description: row.description || "",
+        preconditions: row.preconditions || "",
+        postconditions: row.postconditions || "",
+        steps: row.steps || row.stepsJson || [],
+        test_data: row.testData || "",
+        priority: row.priority || "P2",
+        severity: row.severity || null,
+        type: row.type || "Functional",
+        automation_status: row.automationStatus || "Not Automated",
+        automation_repo: row.automationRepo || null,
+        automation_path: row.automationPath || null,
+        automation_test_name: row.automationTestName || null,
+        automation_framework: row.automationFramework || null,
+        automation_tags: row.automationTags || null,
+        owner_id: row.ownerId || null,
+        component: row.component || null,
+        status: row.status || "Draft",
+        jira_issue_key: row.jiraIssueKey || null,
+        jira_url: row.jiraUrl || null,
+        linear_issue_key: row.linearIssueKey || null,
+        linear_url: row.linearUrl || null,
+        attachments: row.attachments || null
+      }));
+
+      // Whole batch as one jsonb parameter rather than 26 placeholders per row, which would
+      // otherwise approach Postgres' parameter ceiling on a full batch. The BEFORE INSERT
+      // trigger still fills search_vector per row, and text columns take the assignment cast
+      // to their varchar widths (over-long values raise the same error as the single insert).
+      const res = await client.query(
+        `INSERT INTO testcases
+           (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
+            priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
+            automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
+            linear_issue_key, linear_url, attachments, created_by, updated_by)
+         SELECT $1::uuid, r.suite_id, r.external_id, r.title, r.description, r.preconditions, r.postconditions,
+                r.steps, r.test_data, r.priority, r.severity, r.type, r.automation_status, r.automation_repo,
+                r.automation_path, r.automation_test_name, r.automation_framework, r.automation_tags, r.owner_id,
+                r.component, r.status, r.jira_issue_key, r.jira_url, r.linear_issue_key, r.linear_url,
+                r.attachments, $2::uuid, $2::uuid
+         FROM jsonb_to_recordset($3::jsonb) AS r(
+           ord int, suite_id uuid, external_id text, title text, description text, preconditions text,
+           postconditions text, steps jsonb, test_data text, priority text, severity text, type text,
+           automation_status text, automation_repo text, automation_path text, automation_test_name text,
+           automation_framework text, automation_tags text, owner_id uuid, component text, status text,
+           jira_issue_key text, jira_url text, linear_issue_key text, linear_url text, attachments text
+         )
+         ORDER BY r.ord
+         RETURNING *`,
+        [projectId, uid, JSON.stringify(payload)]
+      );
+
+      // Only rows that actually carry custom field values pay for a round trip here, so a
+      // plain import (the common case) stays at the statement count above.
+      const idByExternalId = new Map<string, string>(res.rows.map((row) => [row.external_id, row.id]));
+      for (const [index, row] of incoming.entries()) {
+        const values = row.customFieldValues;
+        if (!values || typeof values !== "object" || !Object.keys(values).length) continue;
+        const testcaseId = idByExternalId.get(payload[index].external_id);
+        if (!testcaseId) continue;
+        await this.customFields.setValuesForTestCase(uid, projectId, testcaseId, values, client, "skip-if-disabled");
+      }
+      return res.rows;
+    });
+
+    // One activity row for the batch, matching how bulk delete records itself — an entry per
+    // imported case would bury the rest of the project's history.
+    await this.logProjectActivity(projectId, uid, "testcase_bulk_created", "testcase", null, null, {
+      testcaseIds: created.map((row) => row.id),
+      count: created.length
+    });
+    return { created: created.map(toCamel), createdCount: created.length };
   }
 
   async updateTestCase(id: string, actorId: string | null | undefined, body: Body) {
@@ -2432,16 +2543,19 @@ export class LegacyService implements OnModuleInit {
 
   async listCycles(projectId: string) {
     const res = await this.db.query(
+      // Counted off the live execution rows, matching executions() exactly, so the number shown
+      // on the run card can never disagree with the number of rows the run's own table renders.
+      // Counting cycle_items instead let anything without a live execution inflate the card.
       `SELECT c.*,
-              COUNT(ci.id)::int AS total_cases,
-              COUNT(*) FILTER (WHERE e.status = 'Passed')::int AS passed,
-              COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
-              COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
-              COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+              COUNT(e.id)::int AS total_cases,
+              COUNT(e.id) FILTER (WHERE e.status = 'Passed')::int AS passed,
+              COUNT(e.id) FILTER (WHERE e.status = 'Failed')::int AS failed,
+              COUNT(e.id) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
+              COUNT(e.id) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
+              COUNT(e.id) FILTER (WHERE e.status = 'Untested')::int AS untested
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
-       LEFT JOIN executions e ON e.cycle_item_id = ci.id
+       LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
        WHERE c.project_id = $1
        GROUP BY c.id
        ORDER BY c.created_at DESC`,
@@ -2528,22 +2642,68 @@ export class LegacyService implements OnModuleInit {
   }
 
   async addCycleTestCases(cycleId: string, body: Body) {
-    const ids = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
-    for (const testcaseId of ids) {
-      const tc = await this.db.query<{ title: string }>("SELECT title FROM testcases WHERE id = $1 AND deleted_at IS NULL", [testcaseId]);
-      if (!tc.rows[0]) continue;
-      const item = await this.db.query<{ id: string }>(
-        "INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING RETURNING id",
-        [cycleId, testcaseId, tc.rows[0].title]
-      );
-      if (item.rows[0]) {
-        await this.db.query("INSERT INTO executions (cycle_item_id) VALUES ($1) ON CONFLICT DO NOTHING", [item.rows[0].id]);
-      }
-    }
+    const requested: unknown[] = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
+    // Two copies of one id in a single payload would both reach the INSERT, where only
+    // ON CONFLICT separates them — de-dupe up front so `added` counts distinct test cases.
+    const ids = Array.from(new Set(requested.filter((id): id is string => typeof id === "string" && id.length > 0)));
+    if (!ids.length) return { requested: 0, added: 0, skipped: 0 };
+
+    // One round trip for the whole batch instead of three per test case. Linking a 300-case
+    // suite used to issue ~900 sequential statements and cross the edge proxy's 100s limit
+    // (the 524 users saw), and because each insert autocommitted on its own, the rows written
+    // before the cutoff stayed behind — which is why only part of a selection landed. The
+    // transaction makes a timeout roll back cleanly, and creating the execution row in the
+    // same statement as its cycle_item means an item can no longer be left without one
+    // (an orphan counts toward listCycles' total_cases while staying invisible in
+    // executions(), which is what made run counts disagree with the run table).
+    const res = await this.db.transaction((client) =>
+      client.query<{ id: string }>(
+        `WITH requested AS (
+           SELECT r.testcase_id, r.ord
+           FROM unnest($2::uuid[]) WITH ORDINALITY AS r(testcase_id, ord)
+         ),
+         base AS (
+           SELECT COALESCE(MAX(position), 0) AS max_position FROM cycle_items WHERE cycle_id = $1::uuid
+         ),
+         eligible AS (
+           SELECT req.testcase_id, req.ord, t.title
+           FROM requested req
+           JOIN testcases t ON t.id = req.testcase_id AND t.deleted_at IS NULL
+         ),
+         inserted AS (
+           INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title, position)
+           -- Explicit position: every row in a set-based insert shares one created_at, so the
+           -- executions() "ORDER BY ci.position, ci.created_at" needs positions to keep the
+           -- order the caller asked for. Ordinality runs over the requested array, so skipped
+           -- ids leave harmless gaps rather than reshuffling what remains.
+           SELECT $1::uuid, e.testcase_id, e.title, b.max_position + e.ord
+           FROM eligible e CROSS JOIN base b
+           ON CONFLICT (cycle_id, testcase_id) DO NOTHING
+           RETURNING id
+         )
+         INSERT INTO executions (cycle_item_id)
+         SELECT id FROM inserted
+         RETURNING id`,
+        [cycleId, ids]
+      )
+    );
+    const added = res.rowCount ?? 0;
+    // Skipped = already in the run, or soft-deleted since the picker loaded.
+    return { requested: ids.length, added, skipped: ids.length - added };
   }
 
   async removeCycleTestCase(cycleId: string, testcaseId: string) {
     await this.db.query("DELETE FROM cycle_items WHERE cycle_id = $1 AND testcase_id = $2", [cycleId, testcaseId]);
+  }
+
+  async removeCycleTestCases(cycleId: string, body: Body) {
+    const requested: unknown[] = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
+    const ids = Array.from(new Set(requested.filter((id): id is string => typeof id === "string" && id.length > 0)));
+    if (!ids.length) return { requested: 0, removed: 0 };
+    // Single statement for the whole selection — the alternative users were left with was one
+    // DELETE per case (or dropping the entire run). executions cascade off cycle_items.
+    const res = await this.db.query("DELETE FROM cycle_items WHERE cycle_id = $1 AND testcase_id = ANY($2::uuid[])", [cycleId, ids]);
+    return { requested: ids.length, removed: res.rowCount ?? 0 };
   }
 
   async executions(cycleId: string) {
@@ -9283,19 +9443,29 @@ export class LegacyService implements OnModuleInit {
     return res.rows[0].id;
   }
 
-  private async nextExternalId(projectId: string, requestedPrefix?: unknown): Promise<string> {
-    const project = await this.db.query<{ key: string; settings: unknown }>("SELECT key, settings FROM projects WHERE id = $1", [projectId]);
+  private async externalIdPrefix(projectId: string, requestedPrefix?: unknown, runner: QueryRunner = this.db): Promise<string> {
+    const project = await runner.query<{ key: string; settings: unknown }>("SELECT key, settings FROM projects WHERE id = $1", [projectId]);
     const settings = parseSettings(project.rows[0]?.settings);
-    const key = normalizeTestcaseIdPrefix(requestedPrefix)
+    return normalizeTestcaseIdPrefix(requestedPrefix)
       || normalizeTestcaseIdPrefix(settings.testcaseIdPrefix)
       || normalizeTestcaseIdPrefix(project.rows[0]?.key)
       || "TC";
-    // Use MAX of the trailing numeric part to avoid collisions when IDs have gaps
-    const maxRes = await this.db.query<{ n: string }>(
+  }
+
+  // Highest sequence number already used under this prefix. Callers add 1 for a single id, or
+  // claim a contiguous block for a batch. Use MAX of the trailing numeric part to avoid
+  // collisions when IDs have gaps.
+  private async maxExternalIdSeq(projectId: string, key: string, runner: QueryRunner = this.db): Promise<number> {
+    const maxRes = await runner.query<{ n: string }>(
       "SELECT COALESCE(MAX((regexp_match(external_id, '\\d+$'))[1]::int), 0) AS n FROM testcases WHERE project_id = $1 AND external_id LIKE $2",
       [projectId, `${key}-TC-%`]
     );
-    return `${key}-TC-${Number(maxRes.rows[0]?.n || 0) + 1}`;
+    return Number(maxRes.rows[0]?.n || 0);
+  }
+
+  private async nextExternalId(projectId: string, requestedPrefix?: unknown): Promise<string> {
+    const key = await this.externalIdPrefix(projectId, requestedPrefix);
+    return `${key}-TC-${(await this.maxExternalIdSeq(projectId, key)) + 1}`;
   }
 
   private async groupTestcases(projectId: string, column: string) {

@@ -63,7 +63,11 @@ export const env = {
   // global-setup creates it automatically when autoProvision is enabled (see below).
   testEmail: process.env.E2E_TEST_EMAIL ?? "e2e-smoke@tesbo.local",
   testPassword: process.env.E2E_TEST_PASSWORD ?? "E2eSmokeTest!2026",
-  testName: process.env.E2E_TEST_NAME ?? "E2E Smoke User",
+  // Person names must be letters/spaces/hyphens/apostrophes/periods only (see
+  // validatePersonName) — the digit in "E2E" makes signup reject the account, which fails
+  // global-setup before any spec runs. Only the *person* names are constrained; org and
+  // project names below are free-form and keep the E2E prefix.
+  testName: process.env.E2E_TEST_NAME ?? "EToE Smoke User",
 
   orgName: process.env.E2E_ORG_NAME ?? "E2E Smoke Org",
   projectName: process.env.E2E_PROJECT_NAME ?? "E2E Smoke Project",
@@ -72,7 +76,7 @@ export const env = {
   // (e2e/api/authorization.spec.ts) to prove account B can't reach account A's resources.
   testEmailB: process.env.E2E_TEST_EMAIL_B ?? "e2e-smoke-b@tesbo.local",
   testPasswordB: process.env.E2E_TEST_PASSWORD_B ?? "E2eSmokeTestB!2026",
-  testNameB: process.env.E2E_TEST_NAME_B ?? "E2E Smoke User B",
+  testNameB: process.env.E2E_TEST_NAME_B ?? "EToE Smoke User B",
   orgNameB: process.env.E2E_ORG_NAME_B ?? "E2E Smoke Org B",
   projectNameB: process.env.E2E_PROJECT_NAME_B ?? "E2E Smoke Project B",
 
@@ -92,13 +96,13 @@ export const env = {
    */
   billingApiEmail: process.env.E2E_BILLING_API_EMAIL ?? "e2e-billing-api@tesbo.local",
   billingApiPassword: process.env.E2E_BILLING_API_PASSWORD ?? "E2eBillingApi!2026",
-  billingApiName: process.env.E2E_BILLING_API_NAME ?? "E2E Billing API User",
+  billingApiName: process.env.E2E_BILLING_API_NAME ?? "EToE Billing API User",
   billingApiOrgName: process.env.E2E_BILLING_API_ORG_NAME ?? "E2E Billing API Org",
   billingApiProjectName: process.env.E2E_BILLING_API_PROJECT_NAME ?? "E2E Billing API Project",
 
   billingUiEmail: process.env.E2E_BILLING_UI_EMAIL ?? "e2e-billing-ui@tesbo.local",
   billingUiPassword: process.env.E2E_BILLING_UI_PASSWORD ?? "E2eBillingUi!2026",
-  billingUiName: process.env.E2E_BILLING_UI_NAME ?? "E2E Billing UI User",
+  billingUiName: process.env.E2E_BILLING_UI_NAME ?? "EToE Billing UI User",
   billingUiOrgName: process.env.E2E_BILLING_UI_ORG_NAME ?? "E2E Billing UI Org",
   billingUiProjectName: process.env.E2E_BILLING_UI_PROJECT_NAME ?? "E2E Billing UI Project",
 

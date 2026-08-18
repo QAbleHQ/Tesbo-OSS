@@ -31,6 +31,7 @@ import {
   IconShare,
   IconTag,
   IconTrash,
+  IconX,
 } from "@tabler/icons-react";
 import {
   authMe,
@@ -40,6 +41,7 @@ import {
   updateExecution,
   addTestCasesToRun,
   removeTestCaseFromRun,
+  removeTestCasesFromRun,
   listTestCases,
   listSuites,
   listProjectMembers,
@@ -360,6 +362,11 @@ export default function TestRunDetailPage() {
 
   const [run, setRun] = useState<TestRunDetail | null>(null);
   const [executions, setExecutions] = useState<ExecutionItem[]>([]);
+  // Keyed by testcaseId because that is what the remove endpoints take.
+  const [selectedRunCaseIds, setSelectedRunCaseIds] = useState<Set<string>>(new Set());
+  const [bulkRemoveOpen, setBulkRemoveOpen] = useState(false);
+  const [bulkRemoving, setBulkRemoving] = useState(false);
+  const [bulkRemoveError, setBulkRemoveError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [memberNames, setMemberNames] = useState<Record<string, string>>({});
   const [planNames, setPlanNames] = useState<Record<string, string>>({});
@@ -701,9 +708,51 @@ export default function TestRunDetailPage() {
     try {
       await removeTestCaseFromRun(cycleId, testcaseId);
       setExecutions((prev) => prev.filter((e) => e.testcaseId !== testcaseId));
+      setSelectedRunCaseIds((prev) => {
+        const next = new Set(prev);
+        next.delete(testcaseId);
+        return next;
+      });
     } catch {
       // ignore
     }
+  }
+
+  /* ───── Remove selected test cases ─────
+     The only ways out of a run used to be one case at a time or deleting the whole run. */
+  async function handleRemoveSelectedCases() {
+    const testcaseIds = Array.from(selectedRunCaseIds);
+    if (!testcaseIds.length || bulkRemoving) return;
+    setBulkRemoving(true);
+    try {
+      await removeTestCasesFromRun(cycleId, testcaseIds);
+      const removed = new Set(testcaseIds);
+      setExecutions((prev) => prev.filter((e) => !removed.has(e.testcaseId)));
+      setSelectedRunCaseIds(new Set());
+      setBulkRemoveError(null);
+      setBulkRemoveOpen(false);
+    } catch (err) {
+      setBulkRemoveError(err instanceof Error ? err.message : "Failed to remove the selected test cases.");
+    } finally {
+      setBulkRemoving(false);
+    }
+  }
+
+  function toggleRunCaseSelection(testcaseId: string) {
+    setSelectedRunCaseIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(testcaseId)) next.delete(testcaseId);
+      else next.add(testcaseId);
+      return next;
+    });
+  }
+
+  // Covers every case the current filter matches, not just the visible page — the run keeps all
+  // executions in memory, so there is nothing to fetch.
+  function toggleSelectAllRunCases() {
+    setSelectedRunCaseIds((prev) =>
+      prev.size === filteredExecutions.length ? new Set() : new Set(filteredExecutions.map((e) => e.testcaseId))
+    );
   }
 
   /* ───── Change run status ───── */
@@ -1081,6 +1130,33 @@ export default function TestRunDetailPage() {
             </div>
           </div>
 
+          {selectedRunCaseIds.size > 0 && !isCompleted && (
+            <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--brand-soft)] px-4 text-[12px]">
+              <span className="font-medium text-[var(--brand-primary)]">{selectedRunCaseIds.size} selected</span>
+              <div className="h-4 w-px bg-[var(--border-strong)]" />
+              <button
+                type="button"
+                data-testid="run-bulk-remove"
+                onClick={() => {
+                  setBulkRemoveError(null);
+                  setBulkRemoveOpen(true);
+                }}
+                className="flex items-center gap-1 font-medium text-[var(--error-foreground)] hover:underline"
+              >
+                <IconTrash size={13} />
+                Remove from run
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedRunCaseIds(new Set())}
+                className="ml-auto flex items-center gap-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+              >
+                <IconX size={12} stroke={2} />
+                Clear selection
+              </button>
+            </div>
+          )}
+
           {executions.length === 0 ? (
             <div className="py-12 text-center text-sm text-[var(--muted-soft)]">
               No test cases added yet. Click &quot;Add Test Cases&quot; to get started.
@@ -1096,6 +1172,20 @@ export default function TestRunDetailPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-[var(--border)] bg-[var(--surface-secondary)] text-left text-[11px] uppercase tracking-wide text-[var(--muted-soft)]">
+                    {!isCompleted && (
+                      <th className="w-9 px-3 py-2.5">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all matching test cases in this run"
+                          data-testid="run-select-all"
+                          checked={
+                            filteredExecutions.length > 0 && selectedRunCaseIds.size === filteredExecutions.length
+                          }
+                          onChange={toggleSelectAllRunCases}
+                          className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-primary)]"
+                        />
+                      </th>
+                    )}
                     <th className="px-5 py-2.5 font-semibold">ID</th>
                     <th className="px-5 py-2.5 font-semibold">Test Case</th>
                     <th className="px-5 py-2.5 font-semibold">Priority</th>
@@ -1109,6 +1199,17 @@ export default function TestRunDetailPage() {
                     const assigneeName = e.assigneeId ? memberNames[e.assigneeId] : null;
                     return (
                       <tr key={e.id} className="group hover:bg-[var(--surface-secondary)]">
+                        {!isCompleted && (
+                          <td className="px-3 py-3">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select ${e.title || e.snapshotTitle || "test case"}`}
+                              checked={selectedRunCaseIds.has(e.testcaseId)}
+                              onChange={() => toggleRunCaseSelection(e.testcaseId)}
+                              className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-primary)]"
+                            />
+                          </td>
+                        )}
                         <td className="whitespace-nowrap px-5 py-3 font-mono text-[12px] text-[var(--muted-soft)]">{e.externalId || "—"}</td>
                         <td className="px-5 py-3">
                           <button
@@ -1232,6 +1333,30 @@ export default function TestRunDetailPage() {
       </div>
 
       {/* ───── Test Case Picker Modal ───── */}
+      <Modal
+        open={bulkRemoveOpen}
+        onClose={() => setBulkRemoveOpen(false)}
+        title="Remove test cases from run"
+        className="max-w-[460px]"
+      >
+        <p className="text-[13px] text-[var(--muted)]">
+          Remove <span className="font-semibold text-[var(--foreground)]">{selectedRunCaseIds.size}</span> test case
+          {selectedRunCaseIds.size === 1 ? "" : "s"} from this run? Any execution results recorded against them in this
+          run are discarded. The test cases themselves stay in the repository.
+        </p>
+        {bulkRemoveError && (
+          <p className="mt-3 text-[12.5px] text-[var(--error-foreground)]">{bulkRemoveError}</p>
+        )}
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setBulkRemoveOpen(false)} disabled={bulkRemoving}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={handleRemoveSelectedCases} disabled={bulkRemoving}>
+            {bulkRemoving ? "Removing…" : `Remove ${selectedRunCaseIds.size}`}
+          </Button>
+        </div>
+      </Modal>
+
       <Modal
         open={showPicker}
         onClose={() => setShowPicker(false)}

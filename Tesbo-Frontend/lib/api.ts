@@ -1105,6 +1105,17 @@ export async function createTestCase(projectId: string, data: Record<string, unk
   return api(`/api/projects/${projectId}/testcases`, { method: "POST", body: data });
 }
 
+// Server-side batch creation, used by import. Keep batches at or under the backend's
+// MAX_BULK_TESTCASES (500) — larger sheets should be sent as several calls.
+export const BULK_CREATE_BATCH_SIZE = 200;
+
+export async function bulkCreateTestCases(
+  projectId: string,
+  data: { testcases: Record<string, unknown>[]; testcaseIdPrefix?: string }
+): Promise<{ created: { id: string; externalId: string; title: string }[]; createdCount: number }> {
+  return api(`/api/projects/${projectId}/testcases/bulk-create`, { method: "POST", body: data });
+}
+
 export async function updateTestCase(projectId: string, testcaseId: string, data: Record<string, unknown>): Promise<void> {
   await api(`/api/projects/${projectId}/testcases/${testcaseId}`, { method: "PUT", body: data });
 }
@@ -1943,12 +1954,22 @@ export async function deleteTestRun(cycleId: string): Promise<void> {
   await api(`/api/cycles/${cycleId}`, { method: "DELETE" });
 }
 
-export async function addTestCasesToRun(cycleId: string, testcaseIds: string[]): Promise<void> {
-  await api(`/api/cycles/${cycleId}/testcases`, { method: "POST", body: { testcaseIds } });
+export async function addTestCasesToRun(
+  cycleId: string,
+  testcaseIds: string[]
+): Promise<{ requested: number; added: number; skipped: number }> {
+  return api(`/api/cycles/${cycleId}/testcases`, { method: "POST", body: { testcaseIds } });
 }
 
 export async function removeTestCaseFromRun(cycleId: string, testcaseId: string): Promise<void> {
   await api(`/api/cycles/${cycleId}/testcases/${testcaseId}`, { method: "DELETE" });
+}
+
+export async function removeTestCasesFromRun(
+  cycleId: string,
+  testcaseIds: string[]
+): Promise<{ requested: number; removed: number }> {
+  return api(`/api/cycles/${cycleId}/testcases/bulk-delete`, { method: "POST", body: { testcaseIds } });
 }
 
 export async function createCycleFromPlan(projectId: string, data: { planId: string; name?: string; environment: string; buildVersion?: string }): Promise<{ id: string }> {

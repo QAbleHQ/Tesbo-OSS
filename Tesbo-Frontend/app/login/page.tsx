@@ -1,9 +1,15 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { authMe, getSetupStatus, loginWithPassword, requestOtp } from "@/lib/api";
+import {
+  clearRedirectAttempts,
+  isRedirectBounce,
+  noteRedirectAttempt,
+  safeRedirectPath,
+} from "@/lib/redirect";
 import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { AuthModeToggle } from "@/components/auth/AuthModeToggle";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
@@ -16,10 +22,16 @@ function AuthLoadingScreen() {
   );
 }
 
+function unreachableDestinationMessage(target: string): string {
+  return `Signed in, but we could not open ${target}. Sign in again to continue.`;
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const redirect = searchParams.get("redirect");
+  // Sanitised once, here, so every consumer below — the mount-time redirect, the password path and
+  // the OTP hand-off — inherits the same guarantee that this is a path on our own origin.
+  const redirect = safeRedirectPath(searchParams.get("redirect"));
   const inviteEmail = searchParams.get("inviteEmail")?.trim().toLowerCase() || "";
   const isInviteEmailLocked = Boolean(inviteEmail);
   const [email, setEmail] = useState(inviteEmail);
@@ -29,7 +41,20 @@ function LoginForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  /*
+   * One decision per mount. React re-invokes effects in development, and without this the second
+   * pass would read the marker the first pass had just written and mistake our own attempt for a
+   * bounce — refusing to redirect anyone who signs in with `next dev` running.
+   */
+  const decided = useRef(false);
+  // The destination of a redirect we have asked for but not yet observed leaving for. Also selects
+  // which message the deadline below reports, since "we never got you there" and "the auth check
+  // never answered" are different problems to the person reading it.
+  const [pendingTarget, setPendingTarget] = useState<string | null>(null);
+
   useEffect(() => {
+    if (decided.current) return;
+    decided.current = true;
     getSetupStatus()
       .then((status) => {
         if (status.required) {
@@ -39,18 +64,69 @@ function LoginForm() {
         return authMe();
       })
       .then((me) => {
-        if (me) {
-          router.replace(redirect || "/projects");
+        if (!me) {
+          // Signed out for real, so whatever bounce may have brought the user here is over.
+          clearRedirectAttempts();
+          setCheckingSetup(false);
           return;
         }
-        setCheckingSetup(false);
+        const target = redirect || "/projects";
+        /*
+         * Arriving back with a session still intact means the destination refused us. Redirecting
+         * again would refuse us again, so stop and hand the user the form: the redirect below never
+         * cleared `checkingSetup`, so a destination that bounced left them on "Loading..."
+         * indefinitely with no form, no error and nothing to act on.
+         */
+        if (isRedirectBounce(target)) {
+          clearRedirectAttempts();
+          setError(unreachableDestinationMessage(target));
+          setCheckingSetup(false);
+          return;
+        }
+        noteRedirectAttempt(target);
+        setPendingTarget(target);
+        router.replace(target);
       })
       .catch(() => setCheckingSetup(false));
   }, [router, redirect]);
 
+  /*
+   * A deadline on the loading screen, so it is never a terminal state.
+   *
+   * The marker check above only gets a chance to run if this component is mounted again, and that
+   * turns out not to be guaranteed: when the destination's RSC request answers with a redirect back
+   * to /login, the router re-renders this same page instance rather than remounting it, so the
+   * effect never re-runs and nothing above ever concludes anything. The reported session got the
+   * harder version of the same shape — nothing resolved, and the loading screen was all there was.
+   *
+   * So the deadline, not the marker, is what actually guarantees the user reaches the form. Two
+   * lengths because the two failures are not equally patient: a redirect we have already asked for
+   * has either committed in a couple of seconds or is not going to, while an auth check still in
+   * flight deserves longer before we give up on it. Either way the timer is cancelled the moment
+   * something else resolves, and a navigation that does commit unmounts this before it can land.
+   */
+  useEffect(() => {
+    if (!checkingSetup) return;
+    const timer = setTimeout(() => {
+      // Handled — so the marker has done its job and must not outlive it, or the next visit in this
+      // tab would be refused a redirect it never attempted.
+      clearRedirectAttempts();
+      setError(
+        pendingTarget
+          ? unreachableDestinationMessage(pendingTarget)
+          : "Signing you in is taking longer than expected. Sign in again to continue.",
+      );
+      setCheckingSetup(false);
+    }, pendingTarget ? 2_500 : 6_000);
+    return () => clearTimeout(timer);
+  }, [checkingSetup, pendingTarget]);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    // A deliberate sign-in starts the redirect budget over: the user is asking to be sent onward
+    // again, and a marker left by an earlier bounce must not pre-empt that.
+    clearRedirectAttempts();
     const emailToUse = (isInviteEmailLocked ? inviteEmail : email).trim().toLowerCase();
     if (!emailToUse) {
       setError("Email is required");

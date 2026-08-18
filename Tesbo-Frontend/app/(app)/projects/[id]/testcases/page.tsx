@@ -63,7 +63,11 @@ import CustomFieldsSection from "@/components/customFields/CustomFieldsSection";
 import CustomFieldFilterPopover from "@/components/customFields/CustomFieldFilterPopover";
 import { getConfiguredDefaultValue, validateCustomFieldValues } from "@/components/customFields/customFieldTypes";
 
-const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+// 500 is the server's per-request ceiling (listTestCases clamps `limit`), so it is the largest
+// page we can offer. Paired with "select all matching" below, a 500-case suite no longer has to
+// be bulk-edited in five separate passes.
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 250, 500] as const;
+const MAX_PAGE_SIZE = 500;
 const DEFAULT_PAGE_SIZE = 25;
 const TESTCASE_STATUSES = ["Draft", "In Review", "Approved", "Deprecated", "Archived"];
 const TESTCASE_PRIORITIES = ["P0", "P1", "P2", "P3"];
@@ -188,6 +192,7 @@ export default function TestCasesPage() {
   const [customFieldErrors, setCustomFieldErrors] = useState<Record<string, string>>({});
 
   const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([]);
+  const [selectAllMatchingLoading, setSelectAllMatchingLoading] = useState(false);
   const [bulkAction, setBulkAction] = useState<BulkAction>("");
   const [isBulkActionModalOpen, setIsBulkActionModalOpen] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
@@ -545,6 +550,40 @@ export default function TestCasesPage() {
       return;
     }
     setSelectedCaseIds(selectedSuiteCases.map((tc) => tc.id));
+  }
+
+  // Selects every case matching the current filters, not just the ones on screen. The header
+  // checkbox can only reach the loaded page, which is why bulk-editing a large suite used to
+  // mean repeating the operation once per page.
+  async function selectAllMatchingCases() {
+    if (selectAllMatchingLoading) return;
+    setSelectAllMatchingLoading(true);
+    setSuiteCasesError(null);
+    try {
+      const ids: string[] = [];
+      for (let offset = 0; offset < suiteCasesTotal; offset += MAX_PAGE_SIZE) {
+        const { list } = await listTestCases(projectId, {
+          limit: MAX_PAGE_SIZE,
+          offset,
+          suiteId: activeSuiteId ?? undefined,
+          status: suiteStatusFilter === "all" ? undefined : suiteStatusFilter,
+          priority: suitePriorityFilter === "all" ? undefined : suitePriorityFilter,
+          type: suiteTypeFilter === "all" ? undefined : suiteTypeFilter,
+          automationStatus: suiteAutomationFilter === "all" ? undefined : suiteAutomationFilter,
+          jiraIssueKey: activeJiraIssueKey || undefined,
+          linearIssueKey: activeLinearIssueKey || undefined,
+          search: debouncedSuiteSearch || undefined,
+          customFieldFilters: buildCustomFieldFiltersQueryParam(customFieldFilters),
+        });
+        if (!list.length) break;
+        ids.push(...list.map((tc) => tc.id));
+      }
+      setSelectedCaseIds(ids);
+    } catch (err) {
+      setSuiteCasesError(err instanceof Error ? err.message : "Failed to select all matching test cases.");
+    } finally {
+      setSelectAllMatchingLoading(false);
+    }
   }
 
   function openBulkActionModal() {
@@ -1358,6 +1397,22 @@ export default function TestCasesPage() {
                     >
                       Bulk actions
                     </button>
+                    {selectedCaseIds.length < suiteCasesTotal && (
+                      <>
+                        <div className="h-4 w-px bg-[var(--border-strong)]" />
+                        <button
+                          type="button"
+                          data-testid="select-all-matching"
+                          onClick={selectAllMatchingCases}
+                          disabled={selectAllMatchingLoading}
+                          className="font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60"
+                        >
+                          {selectAllMatchingLoading
+                            ? "Selecting…"
+                            : `Select all ${suiteCasesTotal} matching`}
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       onClick={() => setSelectedCaseIds([])}

@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  BULK_CREATE_BATCH_SIZE,
+  bulkCreateTestCases,
   createSuite,
   createTestCase,
   getTemplateUrl,
@@ -343,6 +345,35 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
         }
         return suiteId;
       };
+      // Rows are sent in batches rather than one request per row — a few hundred test cases
+      // used to mean a few hundred sequential round trips, which is what made import crawl.
+      // A batch is one server-side transaction, so when one fails we replay that batch row by
+      // row to pin the offending row(s) and still import the rest, preserving the per-row
+      // error reporting this modal has always shown.
+      const pending: { rowNumber: number; payload: Record<string, unknown> }[] = [];
+      const flushPending = async () => {
+        if (!pending.length) return;
+        const batch = pending.splice(0, pending.length);
+        try {
+          const { createdCount } = await bulkCreateTestCases(projectId, {
+            testcases: batch.map((entry) => entry.payload),
+          });
+          imported += createdCount;
+        } catch {
+          for (const entry of batch) {
+            try {
+              await createTestCase(projectId, entry.payload);
+              imported += 1;
+            } catch (err) {
+              errors.push({
+                row: entry.rowNumber,
+                message: err instanceof Error ? err.message : "Failed to import row",
+              });
+            }
+          }
+        }
+      };
+
       for (const [index, row] of activeSheet.rows.entries()) {
         const valueFor = (field: string) => {
           const idx = mapping[field];
@@ -401,30 +432,36 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
             }).filter((step) => step.action)
           : [];
         try {
+          // Suite resolution stays per row and sequential: it creates missing suites and the
+          // cache above is what keeps two rows naming the same suite from creating it twice.
           const suiteId = await resolveTestCaseSuiteId(valueFor("suite"), valueFor("component"));
-          await createTestCase(projectId, {
-            title,
-            description: valueFor("description"),
-            preconditions: valueFor("preconditions"),
-            postconditions: valueFor("postconditions"),
-            steps,
-            testData: valueFor("testData"),
-            priority: valueFor("priority") || "P2",
-            severity: valueFor("severity") || undefined,
-            type: valueFor("type") || "Functional",
-            status: valueFor("status") || "Draft",
-            component: valueFor("component") || undefined,
-            suiteId,
-            customFieldValues,
+          pending.push({
+            rowNumber: activeSheet.headerRowIndex + index + 2,
+            payload: {
+              title,
+              description: valueFor("description"),
+              preconditions: valueFor("preconditions"),
+              postconditions: valueFor("postconditions"),
+              steps,
+              testData: valueFor("testData"),
+              priority: valueFor("priority") || "P2",
+              severity: valueFor("severity") || undefined,
+              type: valueFor("type") || "Functional",
+              status: valueFor("status") || "Draft",
+              component: valueFor("component") || undefined,
+              suiteId,
+              customFieldValues,
+            },
           });
-          imported += 1;
         } catch (err) {
           errors.push({
             row: activeSheet.headerRowIndex + index + 2,
             message: err instanceof Error ? err.message : "Failed to import row",
           });
         }
+        if (pending.length >= BULK_CREATE_BATCH_SIZE) await flushPending();
       }
+      await flushPending();
       const res = { imported, errors, total: activeSheet.totalRows, expandSuiteIds: Array.from(expandSuiteIds) };
       setResult(res);
       setStep("result");
