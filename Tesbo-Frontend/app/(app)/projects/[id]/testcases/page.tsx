@@ -38,6 +38,7 @@ import {
   listCustomFieldDefinitions,
   getCustomFieldValues,
   buildCustomFieldFiltersQueryParam,
+  UNASSIGNED_SUITE_ID,
   type TestCaseListItem,
   type SuiteNode,
   type RepositorySummary,
@@ -83,6 +84,12 @@ const EMPTY_STEP: Step = { stepNumber: 1, action: "", expectedResult: "" };
 
 function normalizeTestcaseIdPrefix(value: string): string {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3);
+}
+
+// The "No suite" nav item filters by the UNASSIGNED_SUITE_ID sentinel, which isn't a real
+// suite — a new/imported test case must never be created with it as its suiteId.
+function formSuiteId(id: string | null | undefined): string {
+  return id && id !== UNASSIGNED_SUITE_ID ? id : "";
 }
 
 function parseProjectSettings(raw: unknown): Record<string, unknown> {
@@ -294,10 +301,22 @@ export default function TestCasesPage() {
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const areAllCasesSelected =
     selectedSuiteCases.length > 0 && selectedSuiteCases.every((tc) => selectedCaseIdSet.has(tc.id));
+  // Suite counts only cover test cases assigned to a suite — any test case with no suite
+  // (suite_id NULL, e.g. a Zyra chat "create" that didn't name a target suite) is invisible
+  // to this sum. Prefer the repository summary's real project-wide total, which counts every
+  // test case regardless of suite assignment, and fall back to the suite sum only while that
+  // summary hasn't loaded yet.
   const repositoryCaseCount = useMemo(
-    () => suites.reduce((sum, suite) => sum + suite.testCaseCount, 0),
-    [suites]
+    () => repoSummary?.totalTestCases ?? suites.reduce((sum, suite) => sum + suite.testCaseCount, 0),
+    [suites, repoSummary]
   );
+  // Test cases with no suite assigned are exactly the gap between the project-wide total and
+  // the sum of every suite's count (see repositoryCaseCount above) — no separate API call needed.
+  const noSuiteCaseCount = Math.max(
+    0,
+    repositoryCaseCount - suites.reduce((sum, suite) => sum + suite.testCaseCount, 0)
+  );
+  const isUnassignedSuiteView = activeSuiteId === UNASSIGNED_SUITE_ID;
   const activeFilterCount = [
     suiteSearch.trim() !== "",
     suiteStatusFilter !== "all",
@@ -429,7 +448,7 @@ export default function TestCasesPage() {
     setPriority((data.priority as string) ?? "P2");
     setStatus((data.status as string) ?? "Draft");
     setAutomationStatus((data.automationStatus as string) ?? "Not Automated");
-    setSuiteId((data.suiteId as string) ?? activeSuiteId ?? "");
+    setSuiteId((data.suiteId as string) ?? formSuiteId(activeSuiteId));
     setPanelJiraIssueKey((data.jiraIssueKey as string) ?? "");
     setPanelJiraUrl((data.jiraUrl as string) ?? "");
   }
@@ -446,7 +465,7 @@ export default function TestCasesPage() {
     setPriority("P2");
     setStatus("Draft");
     setAutomationStatus("Not Automated");
-    setSuiteId(defaultSuiteId ?? activeSuiteId ?? "");
+    setSuiteId(defaultSuiteId != null ? formSuiteId(defaultSuiteId) : formSuiteId(activeSuiteId));
     setTestcaseIdPrefix(defaultTestcaseIdPrefix);
     setPanelJiraIssueKey("");
     setPanelJiraUrl("");
@@ -921,7 +940,7 @@ export default function TestCasesPage() {
               Test case repository
             </h1>
             <p className="mt-[3px] text-[13px] text-[var(--muted-soft)]">
-              {repoStats?.total ?? repositoryCaseCount} test case{(repoStats?.total ?? repositoryCaseCount) === 1 ? "" : "s"} across {rootSuites.length} suite{rootSuites.length === 1 ? "" : "s"}
+              {repoStats?.total ?? repositoryCaseCount} test case{(repoStats?.total ?? repositoryCaseCount) === 1 ? "" : "s"} across {suites.length} suite{suites.length === 1 ? "" : "s"}
             </p>
           </div>
           {!loading && repoStats && (
@@ -933,6 +952,10 @@ export default function TestCasesPage() {
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
                 <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-draft-text)]">{repoStats.draft}</div>
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Draft</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--warning-foreground)]">{repoStats.inReview}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">In Review</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
                 <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-pass-text)]">{repoStats.approved}</div>
@@ -960,10 +983,10 @@ export default function TestCasesPage() {
                   {suitePanelOpen && (
                     <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
                       <IconFolders size={14} stroke={1.75} className="text-[var(--accent-light)]" />
-                      Suites
-                      {rootSuites.length > 0 && (
+                      Total Suites
+                      {suites.length > 0 && (
                         <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
-                          {rootSuites.length}
+                          {suites.length}
                         </span>
                       )}
                     </p>
@@ -1013,6 +1036,25 @@ export default function TestCasesPage() {
                       {repositoryCaseCount}
                     </span>
                   </button>
+
+                  {/* No suite — test cases with suite_id NULL (e.g. a Zyra "create" that didn't
+                      name a target suite). Only shown once there's actually one to find. */}
+                  {noSuiteCaseCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => router.push(`/projects/${projectId}/testcases?suiteId=${UNASSIGNED_SUITE_ID}`)}
+                      className={`mb-1 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] transition-colors ${
+                        isUnassignedSuiteView
+                          ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
+                          : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)]"
+                      }`}
+                    >
+                      <span>No suite</span>
+                      <span className={`font-mono text-[11px] ${isUnassignedSuiteView ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
+                        {noSuiteCaseCount}
+                      </span>
+                    </button>
+                  )}
 
                   <div className="my-1.5 mx-1 h-px bg-[var(--border)]" />
                   {rootSuites.length === 0 ? (
@@ -1232,7 +1274,7 @@ export default function TestCasesPage() {
                   </label>
                   {activeSuiteId && (
                     <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--accent-light)]">
-                      {selectedSuite?.name ?? "Suite"}
+                      {isUnassignedSuiteView ? "No suite" : selectedSuite?.name ?? "Suite"}
                     </span>
                   )}
                   <div className="ml-auto flex flex-wrap items-center gap-1.5">
@@ -1395,9 +1437,11 @@ export default function TestCasesPage() {
                     <p className="mt-2 text-[13px] text-[var(--muted)]">
                       {activeFilterCount > 0
                         ? "No test cases match your current filters."
-                        : activeSuiteId
-                          ? "This suite has no test cases yet."
-                          : "No test cases in this project yet."}
+                        : isUnassignedSuiteView
+                          ? "Every test case is assigned to a suite."
+                          : activeSuiteId
+                            ? "This suite has no test cases yet."
+                            : "No test cases in this project yet."}
                     </p>
                     <button
                       type="button"
@@ -2103,7 +2147,7 @@ export default function TestCasesPage() {
         projectId={projectId}
         open={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
-        defaultSuiteId={activeSuiteId ?? undefined}
+        defaultSuiteId={formSuiteId(activeSuiteId) || undefined}
         onImported={(result) => {
           if (result.imported > 0) {
             void loadData();

@@ -29,6 +29,9 @@ type Body = Record<string, any>;
 /** The four buckets V67's bugs_severity_check allows, and the four the dashboard reports. */
 const BUG_SEVERITIES = ["Critical", "High", "Medium", "Low"] as const;
 
+/** Sentinel `suiteId` query value meaning "test cases with no suite assigned" (suite_id IS NULL). */
+export const UNASSIGNED_SUITE_ID = "none";
+
 export interface InvitationRow {
   id: string;
   organization_id: string;
@@ -2223,6 +2226,9 @@ export class LegacyService implements OnModuleInit {
     const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const filters: string[] = ["project_id = $1", "deleted_at IS NULL"];
     const values: any[] = [projectId];
+    if (query.suiteId === UNASSIGNED_SUITE_ID) {
+      filters.push("suite_id IS NULL");
+    }
     for (const [param, column] of [
       ["suiteId", "suite_id"],
       ["status", "status"],
@@ -2232,6 +2238,7 @@ export class LegacyService implements OnModuleInit {
       ["jiraIssueKey", "jira_issue_key"],
       ["linearIssueKey", "linear_issue_key"]
     ] as const) {
+      if (param === "suiteId" && query.suiteId === UNASSIGNED_SUITE_ID) continue;
       if (query[param]) {
         values.push(query[param]);
         // "type" can enter the system with inconsistent casing (e.g. an imported testcase
