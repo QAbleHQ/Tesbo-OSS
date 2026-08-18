@@ -58,7 +58,7 @@ export class AuthService {
     if (!email || !password) throw new BadRequestException({ error: "email and password required" });
     const normalizedEmail = email.trim().toLowerCase();
     const emailKey = this.loginLimitKey(normalizedEmail);
-    const ipKey = this.loginLimitKey(`ip:${this.ip(req)}`);
+    const ipKey = this.loginIpKey(req);
 
     // This account specifically has been guessed too many times — block outright, no
     // need to spend a bcrypt compare on it.
@@ -81,11 +81,11 @@ export class AuthService {
 
     // Wrong password: an IP already locked from prior wrong guesses (against this or other
     // accounts) blocks here instead of recording yet another attempt.
-    if (await this.isLoginRateLimited(ipKey)) {
+    if (ipKey && (await this.isLoginRateLimited(ipKey))) {
       throw new HttpException({ error: "account_temporarily_locked" }, HttpStatus.TOO_MANY_REQUESTS);
     }
     await this.recordLoginAttempt(emailKey);
-    await this.recordLoginAttempt(ipKey);
+    if (ipKey) await this.recordLoginAttempt(ipKey);
     throw new UnauthorizedException({ error: "invalid_email_or_password" });
   }
 
@@ -203,6 +203,14 @@ export class AuthService {
 
   private ip(req: AuthenticatedRequest): string {
     return req.ip ?? "";
+  }
+
+  // Returns null when the IP can't be resolved, rather than keying off "" — a shared empty
+  // key would collapse every unrelated request with no resolvable IP onto the same lockout
+  // bucket, rate-limiting them as if they were one abusive client.
+  private loginIpKey(req: AuthenticatedRequest): string | null {
+    const ip = this.ip(req).trim();
+    return ip ? this.loginLimitKey(`ip:${ip}`) : null;
   }
 
   private loginLimitKey(key: string): string {
