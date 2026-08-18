@@ -14,5 +14,5 @@ export function FieldHint({ className, ...props }: HTMLAttributes<HTMLParagraphE
 }
 
 export function FieldError({ className, ...props }: HTMLAttributes<HTMLParagraphElement>) {
-  return <p className={cx("text-[13px] text-[var(--error)]", className)} role="alert" {...props} />;
+  return <p className={cx("text-[13px] text-[var(--error-foreground)]", className)} role="alert" {...props} />;
 }

@@ -240,7 +240,7 @@ export default function BillingTab() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
-              <span className="text-[13px] font-semibold uppercase tracking-[0.06em] text-[var(--brand-primary)]">
+              <span className="text-[13px] font-semibold uppercase tracking-[0.06em] text-[var(--accent-light)]">
                 {plan === "pro" ? "Pro" : "Launch"}
               </span>
               {billingInfo?.cancelAtPeriodEnd && billingInfo.currentPeriodEnd && (
@@ -361,7 +361,7 @@ export default function BillingTab() {
                 type="button"
                 onClick={handleManageBilling}
                 disabled={redirecting}
-                className="text-[13px] font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60"
+                className="text-[13px] font-medium text-[var(--accent-light)] hover:underline disabled:opacity-60"
               >
                 {redirecting ? "Opening…" : "All invoices & payment methods →"}
               </button>
@@ -393,7 +393,7 @@ export default function BillingTab() {
                       href={inv.hostedInvoiceUrl}
                       target="_blank"
                       rel="noreferrer"
-                      className="font-medium text-[var(--brand-primary)] hover:underline"
+                      className="font-medium text-[var(--accent-light)] hover:underline"
                     >
                       View
                     </a>
@@ -403,7 +403,7 @@ export default function BillingTab() {
                       href={inv.invoicePdf}
                       target="_blank"
                       rel="noreferrer"
-                      className="font-medium text-[var(--brand-primary)] hover:underline"
+                      className="font-medium text-[var(--accent-light)] hover:underline"
                     >
                       PDF
                     </a>

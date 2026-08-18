@@ -68,7 +68,7 @@ const STATUS_FILTERS: { value: string; label: string; dot: string }[] = [
 const STATUS_SORT_ORDER: Record<string, number> = { Planning: 0, "In Progress": 1, Completed: 2 };
 type SortOption = "newest" | "oldest" | "name" | "status";
 
-const RUN_AVATAR_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+import { AVATAR_COLORS as RUN_AVATAR_COLORS } from "@/lib/avatarColors";
 
 function hashSeed(seed: string): number {
   let h = 0;
@@ -434,7 +434,7 @@ export default function TestRunsPage() {
                   onClick={() => setStatusFilter(f.value)}
                   className={`flex h-[26px] items-center gap-1.5 rounded-full border px-3 text-[11.5px] font-medium transition-colors ${
                     active
-                      ? "border-[var(--brand-border)] bg-[var(--brand-soft)] text-[var(--brand-primary)]"
+                      ? "border-[var(--brand-border)] bg-[var(--brand-soft)] text-[var(--accent-light)]"
                       : "border-[var(--border)] bg-[var(--surface)] text-[var(--muted)] hover:border-[var(--brand-border)] hover:text-[var(--foreground)]"
                   }`}
                 >
@@ -474,7 +474,7 @@ export default function TestRunsPage() {
                       <div className="mb-0.5 flex flex-wrap items-center gap-2">
                         <Link
                           href={`/projects/${projectId}/cycles/${r.id}`}
-                          className="text-[14.5px] font-semibold text-[var(--foreground)] hover:text-[var(--brand-primary)]"
+                          className="text-[14.5px] font-semibold text-[var(--foreground)] hover:text-[var(--accent-light)]"
                         >
                           {r.name}
                         </Link>
@@ -582,7 +582,7 @@ export default function TestRunsPage() {
         <form onSubmit={handleCreate} className="space-y-4">
           <Field>
             <FieldLabel>
-              Name <span className="text-[var(--error)]">*</span>
+              Name <span className="text-[var(--error-foreground)]">*</span>
             </FieldLabel>
             <Input
               type="text"
@@ -604,7 +604,7 @@ export default function TestRunsPage() {
           <div className="grid grid-cols-2 gap-3">
             <Field>
               <FieldLabel>
-                Environment <span className="text-[var(--error)]">*</span>
+                Environment <span className="text-[var(--error-foreground)]">*</span>
               </FieldLabel>
               <Select
                 value={environment}
@@ -624,7 +624,7 @@ export default function TestRunsPage() {
                 </p>
               )}
               {environmentOptions.length === 0 && (
-                <p className="mt-1 text-xs text-[var(--warning)]">
+                <p className="mt-1 text-xs text-[var(--warning-foreground)]">
                   No environments configured. Add one in{" "}
                   <Link href={`/projects/${projectId}/settings?tab=general`} className="underline">
                     Project settings
@@ -644,7 +644,7 @@ export default function TestRunsPage() {
             </Field>
           </div>
           {formError && (
-            <p className="rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">
+            <p className="rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
               {formError}
             </p>
           )}
@@ -697,7 +697,7 @@ export default function TestRunsPage() {
           <div className="grid grid-cols-2 gap-3">
             <Field>
               <FieldLabel>
-                Environment <span className="text-[var(--error)]">*</span>
+                Environment <span className="text-[var(--error-foreground)]">*</span>
               </FieldLabel>
               <Select
                 value={environment}
@@ -726,7 +726,7 @@ export default function TestRunsPage() {
             </Field>
           </div>
           {formError && (
-            <p className="rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">
+            <p className="rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
               {formError}
             </p>
           )}
@@ -767,7 +767,7 @@ export default function TestRunsPage() {
           cannot be undone.
         </p>
         {formError && (
-          <p className="mb-4 rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">
+          <p className="mb-4 rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
             {formError}
           </p>
         )}

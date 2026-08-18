@@ -471,7 +471,7 @@ export default function KnowledgeDocumentPage() {
       </div>
 
       {error && (
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)]">
           <span>{error}</span>
           <button onClick={() => setError(null)}><IconX size={16} /></button>
         </div>
@@ -523,7 +523,7 @@ export default function KnowledgeDocumentPage() {
                 <button onClick={handleCopyLink} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-[var(--surface-secondary)]">
                   <IconLink size={14} /> {linkCopied ? "Copied!" : "Copy link"}
                 </button>
-                <button onClick={handleDelete} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-[var(--error)] hover:bg-[var(--error-soft)]">
+                <button onClick={handleDelete} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-[var(--error-foreground)] hover:bg-[var(--error-soft)]">
                   <IconTrash size={14} /> Delete
                 </button>
               </div>
@@ -550,7 +550,7 @@ export default function KnowledgeDocumentPage() {
             <button
               type="button"
               onClick={() => document.getElementById("kb-comments")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-              className="text-[var(--brand-primary)] underline hover:no-underline"
+              className="text-[var(--accent-light)] underline hover:no-underline"
             >
               add a comment below
             </button>
@@ -561,7 +561,7 @@ export default function KnowledgeDocumentPage() {
               href={doc.sourceUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-2 inline-flex items-center gap-1 text-[12px] font-medium text-[var(--brand-primary)] hover:underline"
+              className="mt-2 inline-flex items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] hover:underline"
             >
               Open in {providerLabel} <IconArrowRight size={13} />
             </a>
@@ -580,7 +580,7 @@ export default function KnowledgeDocumentPage() {
       )}
 
       {anchorMissMessage && (
-        <div className="mb-3 flex items-center justify-between rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-soft)] px-4 py-2.5 text-[13px] text-[var(--warning)]">
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-soft)] px-4 py-2.5 text-[13px] text-[var(--warning-foreground)]">
           <span>{anchorMissMessage}</span>
           <button onClick={() => setAnchorMissMessage(null)}><IconX size={15} /></button>
         </div>

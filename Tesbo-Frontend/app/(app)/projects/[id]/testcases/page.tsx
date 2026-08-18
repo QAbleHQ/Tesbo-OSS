@@ -62,6 +62,7 @@ import ImportTestCasesModal from "@/components/ImportTestCasesModal";
 import CustomFieldsSection from "@/components/customFields/CustomFieldsSection";
 import CustomFieldFilterPopover from "@/components/customFields/CustomFieldFilterPopover";
 import { getConfiguredDefaultValue, validateCustomFieldValues } from "@/components/customFields/customFieldTypes";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 // 500 is the server's per-request ceiling (listTestCases clamps `limit`), so it is the largest
 // page we can offer. Paired with "select all matching" below, a 500-case suite no longer has to
@@ -246,7 +247,7 @@ export default function TestCasesPage() {
   }, [projectId]);
 
   useEffect(() => {
-    const saved = localStorage.getItem("tesbo_tc_suite_panel");
+    const saved = readStoredValue("tesbo_tc_suite_panel");
     if (saved === "closed") setSuitePanelOpen(false);
     authMe().then((me) => {
       if (!me) {
@@ -260,7 +261,7 @@ export default function TestCasesPage() {
   function toggleSuitePanel() {
     setSuitePanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem("tesbo_tc_suite_panel", next ? "open" : "closed");
+      writeStoredValue("tesbo_tc_suite_panel", next ? "open" : "closed");
       return next;
     });
   }
@@ -864,14 +865,14 @@ export default function TestCasesPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="font-medium text-[var(--brand-primary)]">Test cases</span>
+              <span className="font-medium text-[var(--accent-light)]">Test cases</span>
             </nav>,
             topBarStartEl,
           )}
@@ -997,10 +998,10 @@ export default function TestCasesPage() {
                 <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${suitePanelOpen ? "justify-between" : "justify-center"}`}>
                   {suitePanelOpen && (
                     <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                      <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                      <IconFolders size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                       Suites
                       {rootSuites.length > 0 && (
-                        <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                        <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                           {rootSuites.length}
                         </span>
                       )}
@@ -1012,7 +1013,7 @@ export default function TestCasesPage() {
                         type="button"
                         title="Add suite"
                         onClick={() => openAddSuiteModal()}
-                        className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                        className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                       >
                         <IconPlus size={14} stroke={2.5} />
                       </button>
@@ -1047,7 +1048,7 @@ export default function TestCasesPage() {
                     }`}
                   >
                     <span>All test cases</span>
-                    <span className={`font-mono text-[11px] ${!activeSuiteId ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                    <span className={`font-mono text-[11px] ${!activeSuiteId ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                       {repositoryCaseCount}
                     </span>
                   </button>
@@ -1059,7 +1060,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => openAddSuiteModal()}
-                        className="mt-2 text-xs text-[var(--brand-primary)] hover:underline"
+                        className="mt-2 text-xs text-[var(--accent-light)] hover:underline"
                       >
                         Create your first suite
                       </button>
@@ -1100,7 +1101,7 @@ export default function TestCasesPage() {
                             <IconFolders
                               size={14}
                               stroke={1.75}
-                              className={`shrink-0 ${isActive ? "text-[var(--brand-primary)]" : "text-[var(--muted)]"}`}
+                              className={`shrink-0 ${isActive ? "text-[var(--accent-light)]" : "text-[var(--muted)]"}`}
                             />
                             <button
                               type="button"
@@ -1114,7 +1115,7 @@ export default function TestCasesPage() {
                               {suite.name}
                             </button>
                             {/* Count → hidden on hover, replaced by actions */}
-                            <span className={`mx-1 shrink-0 font-mono text-[11px] group-hover:hidden ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                            <span className={`mx-1 shrink-0 font-mono text-[11px] group-hover:hidden ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                               {rollupCount}
                             </span>
                             {/* Actions — shown on hover instead of count */}
@@ -1126,7 +1127,7 @@ export default function TestCasesPage() {
                                   e.stopPropagation();
                                   openAddSuiteModal(suite.id);
                                 }}
-                                className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--brand-primary)]"
+                                className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--accent-light)]"
                               >
                                 <IconPlus size={12} stroke={2.5} />
                               </button>
@@ -1148,7 +1149,7 @@ export default function TestCasesPage() {
                                   e.stopPropagation();
                                   setDeleteSuiteId(suite.id);
                                 }}
-                                className="mr-1 flex h-5 w-5 items-center justify-center rounded text-[var(--error)] hover:bg-[var(--surface)] hover:opacity-80"
+                                className="mr-1 flex h-5 w-5 items-center justify-center rounded text-[var(--error-foreground)] hover:bg-[var(--surface)] hover:opacity-80"
                               >
                                 <IconTrash size={12} stroke={1.75} />
                               </button>
@@ -1169,7 +1170,7 @@ export default function TestCasesPage() {
                                     <IconFileText
                                       size={13}
                                       stroke={1.75}
-                                      className={`shrink-0 ${childActive ? "text-[var(--brand-primary)]" : "text-[var(--muted)]"}`}
+                                      className={`shrink-0 ${childActive ? "text-[var(--accent-light)]" : "text-[var(--muted)]"}`}
                                     />
                                     <button
                                       type="button"
@@ -1182,7 +1183,7 @@ export default function TestCasesPage() {
                                     >
                                       {child.name}
                                     </button>
-                                    <span className={`shrink-0 font-mono text-[10px] group-hover:hidden ${childActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                                    <span className={`shrink-0 font-mono text-[10px] group-hover:hidden ${childActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                                       {child.testCaseCount}
                                     </span>
                                     <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
@@ -1193,7 +1194,7 @@ export default function TestCasesPage() {
                                           e.stopPropagation();
                                           void openCreatePanelForSuite(child.id);
                                         }}
-                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--brand-primary)]"
+                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--accent-light)]"
                                       >
                                         <IconPlus size={11} stroke={2.5} />
                                       </button>
@@ -1215,7 +1216,7 @@ export default function TestCasesPage() {
                                           e.stopPropagation();
                                           setDeleteSuiteId(child.id);
                                         }}
-                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--error)] hover:bg-[var(--surface)] hover:opacity-80"
+                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--error-foreground)] hover:bg-[var(--surface)] hover:opacity-80"
                                       >
                                         <IconTrash size={11} stroke={1.75} />
                                       </button>
@@ -1233,7 +1234,7 @@ export default function TestCasesPage() {
                   <button
                     type="button"
                     onClick={() => openAddSuiteModal()}
-                    className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                    className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={13} stroke={1.75} />
                     New suite
@@ -1259,7 +1260,7 @@ export default function TestCasesPage() {
                     />
                   </label>
                   {activeSuiteId && (
-                    <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--brand-primary)]">
+                    <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--accent-light)]">
                       {selectedSuite?.name ?? "Suite"}
                     </span>
                   )}
@@ -1268,7 +1269,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => setSuiteStatusFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Status:</span> {suiteStatusFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1278,7 +1279,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => setSuitePriorityFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Priority:</span> {suitePriorityFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1288,7 +1289,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => setSuiteTypeFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Type:</span> {suiteTypeFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1298,7 +1299,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => setSuiteAutomationFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Automation:</span> {suiteAutomationFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1386,14 +1387,14 @@ export default function TestCasesPage() {
                 {/* Bulk action bar (when rows selected) */}
                 {selectedCaseIds.length > 0 && (
                   <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--brand-soft)] px-4 text-[12px]">
-                    <span className="font-medium text-[var(--brand-primary)]">
+                    <span className="font-medium text-[var(--accent-light)]">
                       {selectedCaseIds.length} selected
                     </span>
                     <div className="h-4 w-px bg-[var(--border-strong)]" />
                     <button
                       type="button"
                       onClick={openBulkActionModal}
-                      className="font-medium text-[var(--brand-primary)] hover:underline"
+                      className="font-medium text-[var(--accent-light)] hover:underline"
                     >
                       Bulk actions
                     </button>
@@ -1504,7 +1505,7 @@ export default function TestCasesPage() {
                           type="button"
                           onClick={() => setSuiteCasesPage((prev) => Math.max(1, prev - 1))}
                           disabled={suiteCasesPage === 1 || suiteCasesLoading}
-                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                         >
                           Previous
                         </button>
@@ -1514,7 +1515,7 @@ export default function TestCasesPage() {
                             setSuiteCasesPage((prev) => (prev >= totalPages ? prev : prev + 1))
                           }
                           disabled={suiteCasesPage >= totalPages || suiteCasesLoading}
-                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                         >
                           Next
                         </button>
@@ -1588,7 +1589,7 @@ export default function TestCasesPage() {
                     onClick={() => setPanelTab(tab)}
                     className={`-mb-px border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
                       panelTab === tab
-                        ? "border-[var(--brand-primary)] text-[var(--brand-primary)]"
+                        ? "border-[var(--brand-primary)] text-[var(--accent-light)]"
                         : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
                     }`}
                   >
@@ -1606,12 +1607,12 @@ export default function TestCasesPage() {
             {(panelError || panelSuccess) && (
               <div className="shrink-0 px-6 pt-3">
                 {panelError && (
-                  <p className="rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error)]">
+                  <p className="rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error-foreground)]">
                     {panelError}
                   </p>
                 )}
                 {panelSuccess && (
-                  <p className="rounded-lg border border-[var(--success)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--success)]">
+                  <p className="rounded-lg border border-[var(--success)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--success-foreground)]">
                     {panelSuccess}
                   </p>
                 )}
@@ -1633,7 +1634,7 @@ export default function TestCasesPage() {
                   {panelMode === "create" && (
                     <div className="space-y-5 px-6 py-5">
                       <Field>
-                        <FieldLabel>Title <span className="text-[var(--error)]">*</span></FieldLabel>
+                        <FieldLabel>Title <span className="text-[var(--error-foreground)]">*</span></FieldLabel>
                         <Input type="text" value={title} onChange={(e) => setTitle(e.target.value)} required placeholder="Describe what this test case validates" />
                       </Field>
                       <Field>
@@ -1702,7 +1703,7 @@ export default function TestCasesPage() {
                       <div>
                         <div className="mb-3 flex items-center justify-between">
                           <FieldLabel>Test Steps</FieldLabel>
-                          <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">+ Add step</Button>
+                          <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--accent-light)]">+ Add step</Button>
                         </div>
                         <div className="space-y-3">
                           {steps.map((step, index) => (
@@ -1713,7 +1714,7 @@ export default function TestCasesPage() {
                                   <p className="text-sm font-medium text-[var(--foreground)]">Step {index + 1}</p>
                                 </div>
                                 {steps.length > 1 && (
-                                  <button type="button" onClick={() => removeStep(index)} className="rounded px-2 py-1 text-xs text-[var(--error)] hover:bg-[var(--surface-secondary)]">Remove</button>
+                                  <button type="button" onClick={() => removeStep(index)} className="rounded px-2 py-1 text-xs text-[var(--error-foreground)] hover:bg-[var(--surface-secondary)]">Remove</button>
                                 )}
                               </div>
                               <div className="grid gap-2">
@@ -1756,7 +1757,7 @@ export default function TestCasesPage() {
                       {panelTab === "overview" && (
                         <div className="space-y-5 px-6 py-5">
                           <Field>
-                            <FieldLabel>Title <span className="text-[var(--error)]">*</span></FieldLabel>
+                            <FieldLabel>Title <span className="text-[var(--error-foreground)]">*</span></FieldLabel>
                             <Input type="text" value={title} onChange={(e) => setTitle(e.target.value)} required />
                           </Field>
                           <Field>
@@ -1818,7 +1819,7 @@ export default function TestCasesPage() {
                         <div className="px-6 py-5">
                           <div className="mb-4 flex items-center justify-between">
                             <p className="text-sm font-medium text-[var(--foreground)]">{steps.length} step{steps.length === 1 ? "" : "s"}</p>
-                            <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">+ Add step</Button>
+                            <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--accent-light)]">+ Add step</Button>
                           </div>
                           {steps.length === 0 ? (
                             <EmptyStateBlock title="No steps yet" description="Add your first step above." />
@@ -1832,7 +1833,7 @@ export default function TestCasesPage() {
                                       <p className="text-sm font-semibold text-[var(--foreground)]">Step {index + 1}</p>
                                     </div>
                                     {steps.length > 1 && (
-                                      <button type="button" onClick={() => removeStep(index)} className="rounded-lg px-2 py-1 text-xs text-[var(--error)] hover:bg-[var(--surface-secondary)]">Remove</button>
+                                      <button type="button" onClick={() => removeStep(index)} className="rounded-lg px-2 py-1 text-xs text-[var(--error-foreground)] hover:bg-[var(--surface-secondary)]">Remove</button>
                                     )}
                                   </div>
                                   <div className="grid gap-3">
@@ -1876,7 +1877,7 @@ export default function TestCasesPage() {
                       {panelSaving ? "Saving..." : panelMode === "create" ? "Create" : "Save changes"}
                     </Button>
                     {panelMode === "create" && (
-                      <Button type="submit" form="panel-form-global" variant="secondary" onClick={() => setSubmitAction("create-next")} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">
+                      <Button type="submit" form="panel-form-global" variant="secondary" onClick={() => setSubmitAction("create-next")} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--accent-light)]">
                         {panelSaving ? "Saving..." : "Create & Add Next"}
                       </Button>
                     )}
@@ -1885,9 +1886,9 @@ export default function TestCasesPage() {
                   {panelMode === "edit" && panelTestcaseId && (
                     <div className="flex items-center gap-2">
                       {status === "Archived" ? (
-                        <Button variant="secondary" size="sm" onClick={() => void handleUnarchivePanelTestCase()} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">Unarchive</Button>
+                        <Button variant="secondary" size="sm" onClick={() => void handleUnarchivePanelTestCase()} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--accent-light)]">Unarchive</Button>
                       ) : (
-                        <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning)]">Archive</Button>
+                        <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning-foreground)]">Archive</Button>
                       )}
                       <Button variant="destructive" size="sm" onClick={() => void handleDeletePanelTestCase()} disabled={panelSaving}>Delete</Button>
                     </div>
@@ -1963,7 +1964,7 @@ export default function TestCasesPage() {
           This suite contains test cases. What would you like to do with them?
         </p>
         {deleteSuiteId && (childrenBySuiteId.get(deleteSuiteId)?.length ?? 0) > 0 && (
-          <p className="mt-2 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--warning)]">
+          <p className="mt-2 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--warning-foreground)]">
             This suite has {childrenBySuiteId.get(deleteSuiteId)?.length} sub-suite
             {childrenBySuiteId.get(deleteSuiteId)?.length === 1 ? "" : "s"}. Deleting it may affect those too.
           </p>
@@ -1984,7 +1985,7 @@ export default function TestCasesPage() {
             onClick={() => void handleDeleteSuiteConfirm("deleteTestcases")}
             className="w-full rounded-lg border border-[var(--error)] px-4 py-3 text-left hover:bg-[var(--surface-secondary)] disabled:opacity-50"
           >
-            <span className="block text-sm font-medium text-[var(--error)]">Delete suite and all test cases</span>
+            <span className="block text-sm font-medium text-[var(--error-foreground)]">Delete suite and all test cases</span>
             <span className="mt-0.5 block text-xs text-[var(--muted)]">Permanently delete the suite and all its test cases</span>
           </button>
         </div>
@@ -2066,19 +2067,19 @@ export default function TestCasesPage() {
         )}
 
         {bulkAction === "archive" && (
-          <p className="mt-4 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--warning)]">
+          <p className="mt-4 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--warning-foreground)]">
             All selected test cases will be archived.
           </p>
         )}
 
         {bulkAction === "delete" && (
-          <p className="mt-4 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error)]">
+          <p className="mt-4 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error-foreground)]">
             This permanently deletes the selected test cases. This action cannot be undone.
           </p>
         )}
 
         {bulkError && (
-          <p className="mt-3 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error)]">
+          <p className="mt-3 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error-foreground)]">
             {bulkError}
           </p>
         )}

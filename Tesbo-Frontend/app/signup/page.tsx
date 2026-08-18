@@ -257,7 +257,7 @@ export default function SignupPage() {
         {step === "form" && (
           <p className="mt-6 text-center text-[13px] text-[var(--muted)]">
             Already have an account?{" "}
-            <Link href="/login" className="font-medium text-[var(--brand-primary)] hover:underline">
+            <Link href="/login" className="font-medium text-[var(--accent-light)] hover:underline">
               Sign in
             </Link>
           </p>

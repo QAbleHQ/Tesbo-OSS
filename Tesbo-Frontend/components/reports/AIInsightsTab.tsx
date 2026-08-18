@@ -162,7 +162,7 @@ export function AIInsightsTab({ insights, loading }: { insights: ReportsInsights
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5">
         <div className="mb-3.5 flex items-center justify-between">
           <div className="flex items-center gap-1.5">
-            <IconMap size={15} stroke={1.75} className="text-[var(--warning)]" />
+            <IconMap size={15} stroke={1.75} className="text-[var(--warning-foreground)]" />
             <span className="text-[13px] font-semibold text-[var(--foreground)]">Coverage by suite</span>
           </div>
           <span className="text-[11px] text-[var(--muted-soft)]">% of cases executed at least once</span>

@@ -413,7 +413,7 @@ export default function ProjectDashboardPage() {
                 <IconPlayerPlay size={15} stroke={1.75} className="text-[var(--muted)]" />
                 <span className="text-[14px] font-medium text-[var(--foreground)]">Recent test runs</span>
               </div>
-              <Link href={`/projects/${projectId}/cycles`} className="text-[12px] font-medium text-[var(--brand-primary)] hover:underline">
+              <Link href={`/projects/${projectId}/cycles`} className="text-[12px] font-medium text-[var(--accent-light)] hover:underline">
                 View all
               </Link>
             </div>

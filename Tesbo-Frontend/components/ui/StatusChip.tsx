@@ -29,7 +29,7 @@ const toneMap: Record<StatusTone, { chip: string; dot: string }> = {
     dot: "bg-[var(--ink-400)]",
   },
   brand: {
-    chip: "border border-[var(--brand-border)] bg-[var(--brand-soft)] text-[var(--brand-primary)]",
+    chip: "border border-[var(--brand-border)] bg-[var(--brand-soft)] text-[var(--accent-light)]",
     dot: "bg-[var(--brand-primary)]",
   },
   ai: {

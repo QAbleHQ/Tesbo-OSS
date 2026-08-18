@@ -184,7 +184,7 @@ export default function ZyraTasksPage() {
       }
     >
       {message && <p className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-2 text-sm">{message}</p>}
-      {error && <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">{error}</p>}
+      {error && <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">{error}</p>}
 
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)]">
         <div className="flex gap-1" role="tablist" aria-label="Zyra task views">
@@ -200,7 +200,7 @@ export default function ZyraTasksPage() {
               onClick={() => setActiveView(tab.key)}
               className={`border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
                 activeView === tab.key
-                  ? "border-[var(--brand-primary)] text-[var(--brand-primary)]"
+                  ? "border-[var(--brand-primary)] text-[var(--accent-light)]"
                   : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
               }`}
             >

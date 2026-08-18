@@ -125,7 +125,7 @@ export default function ScheduleRunsPage() {
       }
     >
       {error && (
-        <div className="rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2 text-sm text-[var(--error)]">
+        <div className="rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2 text-sm text-[var(--error-foreground)]">
           {error}
         </div>
       )}
@@ -258,7 +258,7 @@ export default function ScheduleRunsPage() {
                             Delete
                           </Button>
                         </div>
-                        {s.lastError && <p className="text-xs text-[var(--error)] mt-1">{s.lastError}</p>}
+                        {s.lastError && <p className="text-xs text-[var(--error-foreground)] mt-1">{s.lastError}</p>}
                       </td>
                     </tr>
                   );

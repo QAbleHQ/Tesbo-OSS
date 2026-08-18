@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, forwardRef, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, forwardRef, HttpException, Inject, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -21,10 +21,13 @@ import { RagIngestionService } from "../rag/rag-ingestion.service";
 import { RagRetrievalService } from "../rag/rag-retrieval.service";
 import { IntegrationSyncService } from "../integration-sync/integration-sync.service";
 import { PlanLimitsService } from "../plan-limits/plan-limits.service";
-import { CustomFieldsService } from "../custom-fields/custom-fields.service";
+import { CustomFieldsService, CustomFieldWriteContext } from "../custom-fields/custom-fields.service";
 import { CustomFieldDefinitionDto, QueryRunner } from "../custom-fields/custom-fields.types";
 
 type Body = Record<string, any>;
+
+/** The four buckets V67's bugs_severity_check allows, and the four the dashboard reports. */
+const BUG_SEVERITIES = ["Critical", "High", "Medium", "Low"] as const;
 
 export interface InvitationRow {
   id: string;
@@ -42,6 +45,63 @@ function normalizeTestcaseIdPrefix(value: unknown): string {
     .toUpperCase()
     .replace(/[^A-Z0-9]/g, "")
     .slice(0, 3);
+}
+
+/**
+ * Collapses a title or suite name to the form the import compares on: trimmed, inner runs of
+ * whitespace squeezed to one space, lowercased.
+ *
+ * Deliberately mirrors normalizeTitle/normalizeSuiteName in
+ * Tesbo-Frontend/components/ImportTestCasesModal.tsx character for character. The browser used to
+ * own both comparisons; it still shows the preview, so if the two ever drift a row would look like
+ * a duplicate on one side and a fresh title on the other.
+ */
+function normalizeImportName(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+/** Cache key for a suite, which an import identifies by name within its parent rather than by id. */
+function importSuiteKey(name: string, parentId: string | null): string {
+  return `${parentId ?? "root"}::${normalizeImportName(name)}`;
+}
+
+/** One spreadsheet row that passed validation, with its column values settled and its suite resolved. */
+interface PreparedImportRow {
+  rowNumber: number;
+  title: string;
+  description: string;
+  preconditions: string;
+  postconditions: string;
+  steps: unknown[];
+  testData: string;
+  priority: string;
+  severity: string | null;
+  type: string;
+  status: string;
+  /** Stored on the test case itself, and also the name of the subfolder it goes in. */
+  component: string | null;
+  suiteName: string;
+  componentName: string;
+  customFieldValues: Body;
+  /** The suite the component nests under: the row's own suite, or the folder the user had open. */
+  parentSuiteId: string | null;
+  /** Where the test case actually lands — the component's suite when it names one, else the parent. */
+  suiteId: string | null;
+}
+
+/** The parts of an import that are fixed for the whole request, threaded through its helpers. */
+interface ImportContext {
+  projectId: string;
+  uid: string;
+  organizationId: string;
+  idPrefix: string;
+  defaultSuiteId: string | null;
+  suiteIdByKey: Map<string, string>;
+  expandSuiteIds: Set<string>;
+  customFieldContext: CustomFieldWriteContext | null;
 }
 
 function parseSettings(raw: unknown): Body {
@@ -212,6 +272,40 @@ function normalizeCountryCode(value: unknown): string | null {
   const code = String(value ?? "").trim().toUpperCase();
   return /^[A-Z]{2}$/.test(code) ? code : null;
 }
+
+/**
+ * Every id in this schema is a uuid column, so a malformed id reaches Postgres as a cast error
+ * (22P02) and surfaces to the caller as a 500. Ids that arrive from a URL or a request body are
+ * checked with this first, so "not-a-uuid" is answered the same way a well-formed id that doesn't
+ * exist is — a clean 404/400, not an internal error.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * A pagination parameter as a whole number inside its bounds, falling back when it isn't one.
+ *
+ * `Number("abc")` is NaN, and NaN survives Math.min/Math.max unchanged — so the previous
+ * `Math.max(1, Math.min(100, Number(query.limit || 25)))` passed NaN straight into a LIMIT clause and
+ * Postgres answered the request with an error. Every paginated endpoint could therefore be turned
+ * into a 500 by typing a word into a query string. Non-finite input now reads as "not supplied",
+ * which is the same thing a caller who omitted it gets.
+ *
+ * A limit of 0 is left alone rather than raised to 1: asking for the total without any rows is a
+ * legitimate request, and api/testcases.spec.ts pins it as the contract. Only a negative value and a
+ * non-number are corrected.
+ */
+export function pageNumber(value: unknown, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  const base = Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
+  return Math.min(Math.max(base, min), max);
+}
+
+export function isUuid(value: unknown): boolean {
+  return UUID_RE.test(String(value ?? ""));
+}
+
+/** projects.key is varchar(32); derived keys use 16 and leave the rest for a uniqueness suffix. */
+const PROJECT_KEY_MAX_LENGTH = 32;
 
 function projectKey(value: string): string {
   return value
@@ -692,6 +786,7 @@ export class LegacyService implements OnModuleInit {
 
   async revokeApiKey(userId: string | null | undefined, projectId: string, keyId: string) {
     await this.requireProjectAccess(userId, projectId);
+    if (!isUuid(keyId)) throw new NotFoundException({ error: "API key not found" });
     const removed = await this.apiTokens.revokeToken(projectId, keyId);
     if (!removed) throw new NotFoundException({ error: "API key not found" });
     return { ok: true };
@@ -725,6 +820,16 @@ export class LegacyService implements OnModuleInit {
       this.logger.log(`Resuming interrupted Zyra chat plan for session ${row.id} (${Number(plan?.doneCount) || 0}/${Number(plan?.totalCount) || 0} done)`);
       void this.continueZyraChatPlan(String(row.project_id), row.user_id ? String(row.user_id) : null, String(row.id), planId).catch(() => undefined);
     }
+  }
+
+  /**
+   * "There is a signed-in caller" on its own, for routes with nothing else to authorize against.
+   *
+   * requireUser is private; this is the same check exposed for the notification routes, which have no
+   * project or workspace in their URL to resolve.
+   */
+  requireSession(userId?: string | null): string {
+    return this.requireUser(userId);
   }
 
   private requireUser(userId?: string | null): string {
@@ -913,6 +1018,11 @@ export class LegacyService implements OnModuleInit {
         project.rows[0].id,
         uid
       ]);
+      // The same seeding createProject does. Without it the workspace's FIRST project — the one
+      // every new signup lands in — has no knowledge_folders root, and the whole Knowledge Base is
+      // unusable there: the folder tree 404s ("root folder not found") and createKnowledgeFolder
+      // falls back to parent_folder_id = NULL, quietly making a second orphan root.
+      await this.seedKnowledgeBaseDefaults(client, organizationId, project.rows[0].id);
       await client.query("UPDATE users SET default_project_id = $1, updated_at = now() WHERE id = $2", [project.rows[0].id, uid]);
       return { organizationId, projectId: project.rows[0].id, projectKey: key };
     });
@@ -1012,14 +1122,78 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  /**
+   * The settings screen's project-access matrix: the projects the caller administers, every
+   * workspace member, and the project role each member actually holds.
+   *
+   * Owner-and-manager only. It is the same roster the membership screens are gated on, and it also
+   * discloses which projects exist to someone who may be a member of none of them.
+   */
+  async workspaceProjectAccess(userId: string | null | undefined) {
+    const uid = this.requireUser(userId);
+    const workspace = await this.workspace(uid);
+    if (this.normalizeRole(workspace.role) === "qa_engineer")
+      throw new ForbiddenException({ error: "Only workspace owners and managers can view project access" });
+
+    const projects = await this.listProjects(uid);
+    const members = await this.workspaceMembers(uid);
+    const projectIds = projects.map((p) => String(p.id));
+
+    // Scoped to the projects the caller can already see, so the matrix never reveals a role on a
+    // project they have no access to themselves.
+    const assignments = projectIds.length
+      ? await this.db.query<{ user_id: string; project_id: string; role: string }>(
+          "SELECT user_id, project_id, role FROM project_members WHERE project_id = ANY($1::uuid[])",
+          [projectIds]
+        )
+      : { rows: [] as { user_id: string; project_id: string; role: string }[] };
+
+    const rolesByUser = new Map<string, Record<string, string>>();
+    for (const row of assignments.rows) {
+      const roles = rolesByUser.get(row.user_id) ?? {};
+      roles[row.project_id] = this.normalizeRole(row.role);
+      rolesByUser.set(row.user_id, roles);
+    }
+
+    // A member with no project access gets an empty map rather than a missing key, so "no access"
+    // is distinguishable from "roles weren't loaded" — which is exactly what the hard-coded `{}`
+    // this replaced made impossible.
+    return {
+      projects,
+      members: members.map((m) => ({ ...m, projectRoles: rolesByUser.get(String(m.userId)) ?? {} }))
+    };
+  }
+
   async addWorkspaceMember(userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const workspace = await this.workspace(uid);
+    // Adding a member outright is strictly more powerful than inviting one, so this endpoint cannot
+    // be looser than createInvitation: QA engineers are refused, a manager can only add QA
+    // engineers, and nobody grants owner. changeWorkspaceMemberRole already refuses promotion to
+    // owner — a gate only one of the two endpoints enforces is decoration.
+    const callerRole = this.normalizeRole(workspace.role);
+    if (callerRole === "qa_engineer")
+      throw new ForbiddenException({ error: "QA Engineers cannot add team members" });
+
     const email = String(body.email || "").trim().toLowerCase();
     const target = String(body.userId || "").trim();
-    const role = String(body.role || "member");
     if (!email && !target) throw new BadRequestException({ error: "email or userId is required" });
+    if (target && !isUuid(target)) throw new BadRequestException({ error: "userId is not a valid user id" });
+
+    const roleRaw = body.role === undefined || body.role === null || body.role === "" ? "qa_engineer" : body.role;
+    const role = this.parseRole(roleRaw);
+    if (!role) throw new BadRequestException({ error: `"${String(roleRaw)}" is not a role in this workspace` });
+    if (role === "owner") throw new ForbiddenException({ error: "The owner role cannot be granted" });
+    if (callerRole === "manager" && role !== "qa_engineer")
+      throw new ForbiddenException({ error: "Managers can only add QA Engineers" });
+
     const targetUserId = target || (await this.upsertUser(email));
+    if (target) {
+      // Adding by id skips upsertUser, so an id for an account that doesn't exist would only fail
+      // at the foreign key — a 500 where the caller should be told the user isn't there.
+      const exists = await this.db.query("SELECT 1 FROM users WHERE id = $1", [target]);
+      if (!exists.rows[0]) throw new NotFoundException({ error: "User not found" });
+    }
     await this.db.query(
       "INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
       [workspace.id, targetUserId, role]
@@ -1031,6 +1205,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
     const workspace = await this.workspace(uid);
     if (uid === targetUserId) throw new BadRequestException({ error: "You cannot remove yourself" });
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
     // Protect the last owner
     const targetMember = await this.db.query<{ role: string; email: string }>(
       `SELECT om.role, u.email FROM organization_members om JOIN users u ON u.id = om.user_id
@@ -1081,6 +1256,23 @@ export class LegacyService implements OnModuleInit {
     if (n === "owner") return "owner";
     if (n === "manager" || n === "admin" || n === "test_manager") return "manager";
     return "qa_engineer";
+  }
+
+  /**
+   * The canonical role for a string supplied by a *caller*, or null when it isn't a role we have.
+   *
+   * normalizeRole() collapses anything unrecognised to qa_engineer. That is the right reading for a
+   * role already stored in the database, but the wrong one for input: a typo'd role in a promotion
+   * request would silently DEMOTE the member instead of failing, and an unknown role written
+   * verbatim to organization_members reads back as qa_engineer on every later check. Anything that
+   * takes a role from a request body parses it here and refuses null.
+   */
+  parseRole(role: unknown): "owner" | "manager" | "qa_engineer" | null {
+    const n = String(role ?? "").trim().toLowerCase().replace(/[-\s]+/g, "_");
+    if (n === "owner") return "owner";
+    if (n === "manager" || n === "admin" || n === "test_manager") return "manager";
+    if (n === "qa_engineer" || n === "qa" || n === "tester" || n === "member") return "qa_engineer";
+    return null;
   }
 
   // ─── Invitations ─────────────────────────────────────────────────────────────
@@ -1421,6 +1613,7 @@ export class LegacyService implements OnModuleInit {
     const callerRole = this.normalizeRole(workspace.role);
     if (callerRole !== "owner") throw new ForbiddenException({ error: "Only the owner can change roles" });
     if (uid === targetUserId) throw new BadRequestException({ error: "You cannot change your own role" });
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
 
     const target = await this.db.query<{ role: string; email: string }>(
       `SELECT om.role, u.email FROM organization_members om JOIN users u ON u.id = om.user_id
@@ -1431,7 +1624,10 @@ export class LegacyService implements OnModuleInit {
     const targetRole = this.normalizeRole(target.rows[0].role);
     if (targetRole === "owner") throw new ForbiddenException({ error: "Owner role cannot be changed" });
 
-    const normalized = this.normalizeRole(newRole);
+    // Parsed, not normalized: normalizeRole turns an unrecognised role into qa_engineer, so a typo
+    // in a promotion request used to demote the member it was meant to promote.
+    const normalized = this.parseRole(newRole);
+    if (!normalized) throw new BadRequestException({ error: `"${String(newRole)}" is not a role in this workspace` });
     if (normalized === "owner") throw new ForbiddenException({ error: "Cannot promote to owner" });
 
     await this.db.query(
@@ -1656,6 +1852,8 @@ export class LegacyService implements OnModuleInit {
   async allocateAiKey(userId: string | null | undefined, body: Body) {
     const projectId = String(body.projectId || "");
     if (!projectId) throw new BadRequestException({ error: "projectId is required" });
+    // A malformed id must read as "no such project in this workspace", not as a failed uuid cast.
+    if (!isUuid(projectId)) throw new NotFoundException({ error: "Project not found" });
     const workspace = await this.workspace(userId);
     if (this.normalizeRole(workspace.role) !== "owner") throw new ForbiddenException({ error: "Only the workspace owner can manage AI keys" });
     const project = await this.db.query("SELECT id FROM projects WHERE id = $1 AND organization_id = $2", [projectId, workspace.id]);
@@ -1696,23 +1894,71 @@ export class LegacyService implements OnModuleInit {
     const name = String(body.name || "").trim();
     validateProjectFields(name, body.description != null ? String(body.description) : undefined);
     const workspace = await this.workspace(uid);
+    // Creating a project is an administrative act, not part of authoring or executing tests. The
+    // projects list hides the button from a QA Engineer, but that is presentation — the rule has to
+    // hold for anyone posting to this route directly.
+    if (this.normalizeRole(workspace.role) === "qa_engineer")
+      throw new ForbiddenException({ error: "Only the workspace owner, admin, or manager can create projects" });
     await this.planLimits.assertCanCreateProject(workspace.id);
-    const key = projectKey(String(body.key || name));
-    const res = await this.db.transaction(async (client) => {
-      const project = await client.query(
-        `INSERT INTO projects (organization_id, key, name, description, project_type)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id, key, name, project_type, created_at`,
-        [workspace.id, key, name, body.description || "", body.projectType || "tesbox"]
-      );
-      await client.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner')", [
-        project.rows[0].id,
-        uid
-      ]);
-      await this.seedKnowledgeBaseDefaults(client, workspace.id, project.rows[0].id);
-      return project.rows[0];
-    });
+    const res = await this.insertProjectWithUniqueKey(workspace.id, uid, name, body);
     await this.logProjectActivity(res.id, uid, "project_created", "project", res.id, res.name, {});
     return toCamel(res);
+  }
+
+  /**
+   * Inserts a project under a key that is unique within the workspace.
+   *
+   * projectKey() strips a name down to at most 16 alphanumerics, and (organization_id, key) is
+   * UNIQUE — so any two names agreeing on that prefix derive the same key. "Mobile App Regression
+   * Payments" and "Mobile App Regression Search" are enough, and the second create used to surface
+   * the constraint violation as an unhandled 500. The next free numeric suffix is used instead,
+   * which keeps the key readable and inside the column's 32 characters.
+   *
+   * Archived projects keep their keys, so they count as taken here exactly as the unique index sees
+   * them. The retry exists because two concurrent creates can both read the same free key: rather
+   * than fail the second caller, re-derive and try again.
+   */
+  private async insertProjectWithUniqueKey(organizationId: string, uid: string, name: string, body: Body) {
+    for (let attempt = 1; ; attempt++) {
+      const key = await this.nextFreeProjectKey(organizationId, String(body.key || name));
+      try {
+        return await this.db.transaction(async (client) => {
+          const project = await client.query(
+            `INSERT INTO projects (organization_id, key, name, description, project_type)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id, key, name, project_type, created_at`,
+            [organizationId, key, name, body.description || "", body.projectType || "tesbox"]
+          );
+          await client.query("INSERT INTO project_members (project_id, user_id, role) VALUES ($1, $2, 'owner')", [
+            project.rows[0].id,
+            uid
+          ]);
+          await this.seedKnowledgeBaseDefaults(client, organizationId, project.rows[0].id);
+          return project.rows[0];
+        });
+      } catch (error) {
+        const isKeyCollision =
+          (error as { code?: string })?.code === "23505" &&
+          String((error as { constraint?: string })?.constraint || "").includes("key");
+        if (!isKeyCollision || attempt >= 3) throw error;
+      }
+    }
+  }
+
+  private async nextFreeProjectKey(organizationId: string, requested: string): Promise<string> {
+    const base = projectKey(requested);
+    const res = await this.db.query<{ key: string }>("SELECT key FROM projects WHERE organization_id = $1", [
+      organizationId
+    ]);
+    const taken = new Set(res.rows.map((row) => row.key));
+    if (!taken.has(base)) return base;
+    for (let n = 2; n <= 999; n++) {
+      const suffix = String(n);
+      const candidate = `${base.slice(0, PROJECT_KEY_MAX_LENGTH - suffix.length)}${suffix}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+    // A thousand projects sharing one 16-character prefix is not a case worth refusing a create
+    // over — fall back to a random tail rather than raising.
+    return `${base.slice(0, PROJECT_KEY_MAX_LENGTH - 6)}${randomBytes(3).toString("hex").toUpperCase()}`;
   }
 
   private async seedKnowledgeBaseDefaults(client: PoolClient, organizationId: string, projectId: string) {
@@ -1737,6 +1983,10 @@ export class LegacyService implements OnModuleInit {
   // an action (e.g. addProjectMember) can reuse this instead of a second query.
   async requireProjectAccess(userId: string | null | undefined, projectId: string) {
     const uid = this.requireUser(userId);
+    // A malformed id gets the same answer as a well-formed one that doesn't exist: it isn't a
+    // project this caller can reach, and saying so costs nothing. Without this the uuid cast fails
+    // in Postgres and every project-scoped endpoint answers a typo with a 500.
+    if (!isUuid(projectId)) throw new NotFoundException({ error: "Project not found" });
     const workspace = await this.workspace(uid);
     const res = await this.db.query(
       `SELECT p.*, pm.role AS caller_role FROM projects p
@@ -1767,8 +2017,13 @@ export class LegacyService implements OnModuleInit {
     );
   }
 
+  // Membership alone is not enough to reconfigure a project. Every neighbouring administrative
+  // action — project members, knowledge-base writes, renaming the workspace — is owner-or-manager,
+  // and renaming a project is not part of authoring or executing tests.
   async updateProjectForUser(userId: string | null | undefined, id: string, body: Body) {
-    await this.requireProjectAccess(userId, id);
+    const project = await this.requireProjectAccess(userId, id);
+    if (this.normalizeRole(project.caller_role) === "qa_engineer")
+      throw new ForbiddenException({ error: "QA Engineers cannot change project settings" });
     await this.updateProject(id, body);
   }
 
@@ -1779,6 +2034,9 @@ export class LegacyService implements OnModuleInit {
   async deleteProjectForUser(userId: string | null | undefined, id: string) {
     const uid = this.requireUser(userId);
     const project = await this.requireProjectAccess(uid, id);
+    // The more damaging half of the same gate: archiving takes every child record with it.
+    if (this.normalizeRole(project.caller_role) === "qa_engineer")
+      throw new ForbiddenException({ error: "QA Engineers cannot archive a project" });
     await this.deleteProject(id);
     await this.logProjectActivity(id, uid, "project_deleted", "project", id, project.name, {});
   }
@@ -1803,18 +2061,25 @@ export class LegacyService implements OnModuleInit {
 
     const targetUserId = String(body.userId || "");
     if (!targetUserId) throw new BadRequestException({ error: "userId is required" });
-    const requestedRole = this.normalizeRole(String(body.role || "qa_engineer"));
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
+    const requestedRole = this.parseRole(body.role === undefined || body.role === null || body.role === "" ? "qa_engineer" : body.role);
+    if (!requestedRole) throw new BadRequestException({ error: `"${String(body.role)}" is not a project role` });
     if (requestedRole === "owner") throw new ForbiddenException({ error: "Cannot assign the owner role" });
     if (callerRole === "manager" && requestedRole !== "qa_engineer")
       throw new ForbiddenException({ error: "Managers can only assign the QA Engineer role" });
 
+    // Scoped to the project's workspace on purpose. Resolving the target from `users` alone let any
+    // account in the system be dropped into a project by id, which made workspace membership — and
+    // with it the whole invitation flow — optional.
     const target = await this.db.query<{ email: string; role: string | null }>(
       `SELECT u.email, pm.role
-       FROM users u LEFT JOIN project_members pm ON pm.project_id = $1 AND pm.user_id = u.id
+       FROM users u
+       JOIN organization_members om ON om.user_id = u.id AND om.organization_id = $3
+       LEFT JOIN project_members pm ON pm.project_id = $1 AND pm.user_id = u.id
        WHERE u.id = $2`,
-      [projectId, targetUserId]
+      [projectId, targetUserId, project.organization_id]
     );
-    if (!target.rows[0]) throw new NotFoundException({ error: "User not found" });
+    if (!target.rows[0]) throw new NotFoundException({ error: "That user is not a member of this workspace" });
     const existingRole = target.rows[0].role ? this.normalizeRole(target.rows[0].role) : null;
     if (existingRole === "owner") throw new ForbiddenException({ error: "The project owner's role cannot be changed" });
     if (existingRole && targetUserId === uid) throw new BadRequestException({ error: "You cannot change your own role" });
@@ -1842,6 +2107,7 @@ export class LegacyService implements OnModuleInit {
     const callerRole = this.normalizeRole(project.caller_role);
     if (callerRole === "qa_engineer") throw new ForbiddenException({ error: "QA Engineers cannot manage project members" });
     if (targetUserId === uid) throw new BadRequestException({ error: "You cannot remove yourself from the project" });
+    if (!isUuid(targetUserId)) throw new BadRequestException({ error: "userId is not a valid user id" });
 
     const target = await this.db.query<{ email: string; role: string }>(
       `SELECT u.email, pm.role FROM project_members pm JOIN users u ON u.id = pm.user_id
@@ -1862,6 +2128,28 @@ export class LegacyService implements OnModuleInit {
     await this.logProjectActivity(projectId, uid, "project_member_removed", "project_member", targetUserId, target.rows[0].email, { role: targetRole });
   }
 
+  /**
+   * Resolves a suite and confirms the caller may reach the project it belongs to.
+   *
+   * /api/suites/:suiteId is addressed by suite id with no project in the URL, so PATCH and DELETE
+   * have to resolve the project themselves. They did not, which meant anyone who could guess a suite
+   * id could rename it — or delete it, taking its test cases with it when mode=deleteTestcases.
+   */
+  private async requireSuiteAccess(userId: string | null | undefined, suiteId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    // Same answer for a malformed id as for one that doesn't exist — see requireProjectAccess.
+    if (!isUuid(suiteId)) throw new NotFoundException({ error: "Suite not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM suites WHERE id = $1", [suiteId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Suite not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  async listSuitesForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listSuites(projectId);
+  }
+
   async listSuites(projectId: string) {
     const res = await this.db.query(
       `SELECT s.id, s.parent_id, s.name, s.position, s.created_at, COUNT(t.id)::int AS test_case_count
@@ -1873,6 +2161,18 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  async createSuiteForUser(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.createSuite(projectId, body);
+  }
+
+  /**
+   * The insert itself, without a caller check.
+   *
+   * Kept unguarded for the three callers that have already decided access: the MCP tool (whose API
+   * token is bound to one project, see McpService), the Zyra chat flow, and CSV import — all of which
+   * authorized before they got here. Route traffic goes through createSuiteForUser.
+   */
   async createSuite(projectId: string, body: Body) {
     const name = String(body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "name is required" });
@@ -1883,22 +2183,35 @@ export class LegacyService implements OnModuleInit {
     return { ...toCamel(res.rows[0]), testCaseCount: 0 };
   }
 
-  async updateSuite(suiteId: string, body: Body) {
+  async updateSuite(userId: string | null | undefined, suiteId: string, body: Body) {
+    await this.requireSuiteAccess(userId, suiteId);
     await this.db.query(
       "UPDATE suites SET name = COALESCE($2, name), parent_id = $3, position = COALESCE($4, position), updated_at = now() WHERE id = $1",
       [suiteId, body.name ?? null, body.parentId ?? null, body.position ?? null]
     );
   }
 
-  async deleteSuite(suiteId: string, mode = "moveToDefault") {
+  async deleteSuite(userId: string | null | undefined, suiteId: string, mode = "moveToDefault") {
+    await this.requireSuiteAccess(userId, suiteId);
     if (mode === "deleteTestcases") await this.db.query("DELETE FROM testcases WHERE suite_id = $1", [suiteId]);
     else await this.db.query("UPDATE testcases SET suite_id = NULL WHERE suite_id = $1", [suiteId]);
     await this.db.query("DELETE FROM suites WHERE id = $1", [suiteId]);
   }
 
+  async listTestCasesForUser(userId: string | null | undefined, projectId: string, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listTestCases(projectId, query);
+  }
+
+  /**
+   * The rows themselves, without a caller check.
+   *
+   * Kept unguarded for the MCP tool, whose API token is already bound to a single project. Every row
+   * carries the project's custom field values, so route traffic goes through listTestCasesForUser.
+   */
   async listTestCases(projectId: string, query: Body) {
-    const limit = Math.min(Number(query.limit || 100), 500);
-    const offset = Number(query.offset || 0);
+    const limit = pageNumber(query.limit, 100, 0, 500);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const filters: string[] = ["project_id = $1", "deleted_at IS NULL"];
     const values: any[] = [projectId];
     for (const [param, column] of [
@@ -2025,16 +2338,118 @@ export class LegacyService implements OnModuleInit {
     });
   }
 
+  /**
+   * One test case, scoped to a project the caller can reach.
+   *
+   * The project id is not redundant with the test case id: it is what makes this answerable without
+   * a second round trip, and it means a case belonging to another project is "not found" here rather
+   * than readable by whoever guesses its uuid.
+   */
+  async getTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
+    const res = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL", [
+      testcaseId,
+      projectId
+    ]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+    return toCamel(res.rows[0]);
+  }
+
+  /**
+   * One test case by id alone, without a caller check.
+   *
+   * Kept unguarded for the Zyra chat flow, which re-reads a row it has just written through an
+   * already-authorized path. Route traffic goes through getTestCaseForUser.
+   */
   async getTestCase(id: string) {
     const res = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     return toCamel(res.rows[0]);
   }
 
+  /**
+   * Confirms the caller may reach this project AND that the case actually belongs to it.
+   *
+   * Both halves matter. requireUser alone — which is all these handlers used to do — lets any signed-in
+   * user edit or delete another tenant's case by uuid. Authorizing only the project in the URL is not
+   * enough either: the case id is separate input, so a caller could pass their own project alongside
+   * someone else's case id and have the check pass.
+   */
+  private async requireTestCaseAccess(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
+    const res = await this.db.query("SELECT id FROM testcases WHERE id = $1 AND project_id = $2 AND deleted_at IS NULL", [
+      testcaseId,
+      projectId
+    ]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Test case not found" });
+  }
+
+  async createTestCaseForUser(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.createTestCase(projectId, userId, body);
+  }
+
+  async updateTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string, body: Body) {
+    await this.requireTestCaseAccess(userId, projectId, testcaseId);
+    return this.updateTestCase(testcaseId, userId, body);
+  }
+
+  async duplicateTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireTestCaseAccess(userId, projectId, testcaseId);
+    return this.duplicateTestCase(testcaseId, userId);
+  }
+
+  async deleteTestCaseForUser(userId: string | null | undefined, projectId: string, testcaseId: string) {
+    await this.requireTestCaseAccess(userId, projectId, testcaseId);
+    return this.deleteTestCase(testcaseId, userId);
+  }
+
+  /**
+   * The insert itself, without a project check.
+   *
+   * Kept unguarded for the callers that have already decided access: the MCP tool (token bound to one
+   * project), the Zyra chat flow, and CSV import. Route traffic goes through createTestCaseForUser.
+   */
   async createTestCase(projectId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
-    const externalId = body.externalId || (await this.nextExternalId(projectId, body.testcaseIdPrefix));
+    // nextExternalId reads MAX(trailing number) + 1 in a separate statement from the INSERT below,
+    // so two creates racing in the same project both read the same MAX and both try to write
+    // "<KEY>-TC-<n>". idx_testcases_project_external then rejects the loser, and the caller got a
+    // bare 500 — reachable by two people adding cases at once, a double-clicked Save, or an import
+    // running while someone types. Retry on exactly that collision, recomputing the id each time,
+    // which is the same shape insertProjectWithUniqueKey already uses for project keys.
+    //
+    // Only when the id was allocated for the caller: an externalId they supplied themselves that
+    // collides is their input to correct, and silently renumbering it would lose what they asked for.
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.insertTestCase(projectId, uid, body);
+      } catch (error) {
+        const collided =
+          !body.externalId &&
+          (error as { code?: string })?.code === "23505" &&
+          String((error as { constraint?: string })?.constraint || "") === "idx_testcases_project_external";
+        if (!collided || attempt >= 5) throw error;
+      }
+    }
+  }
+
+  private async insertTestCase(projectId: string, uid: string, body: Body) {
     const created = await this.db.transaction(async (client) => {
+      // Serialize id allocation per project. Reading MAX(n)+1 and inserting are two statements, so
+      // without this every concurrent create in a project reads the same MAX and all but one lose to
+      // idx_testcases_project_external. Retrying alone does not converge: the losers re-read the same
+      // MAX together and collide again, which is why this lock — not the retry above — is the fix.
+      //
+      // Transaction-scoped, so it releases on COMMIT or ROLLBACK with no unlock to leak, and keyed on
+      // the project so creates in different projects never wait on each other. Skipped entirely when
+      // the caller pinned their own externalId, since nothing is being allocated.
+      if (!body.externalId) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`testcase-external-id:${projectId}`]);
+      }
+      const externalId = body.externalId || (await this.nextExternalId(projectId, body.testcaseIdPrefix, client));
       const res = await client.query(
         `INSERT INTO testcases
          (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
@@ -2190,6 +2605,479 @@ export class LegacyService implements OnModuleInit {
     return { created: created.map(toCamel), createdCount: created.length };
   }
 
+  /**
+   * Imports a whole file's worth of test cases in a fixed handful of database round trips.
+   *
+   * Each row used to be its own POST /testcases from the browser, and each of those ran a dozen
+   * statements of its own — the access check, the id allocation, the insert, the custom field writes,
+   * an activity log entry. On this deployment that is essentially the entire cost of the feature: the
+   * database is remote and answers a statement in roughly 290ms, against the ~3ms it spends actually
+   * running one, so a 500-row file spent something close to half an hour waiting on the network to
+   * repeat work that never varied per row.
+   *
+   * So nothing here is per row. Everything checkable without the database is checked in memory first,
+   * and what survives is written with a set-based statement per kind of thing: the suites, the test
+   * cases, their custom field values and the activity log entries each go in as one
+   * jsonb_to_recordset insert no matter how many rows the chunk holds.
+   *
+   * Row-level reporting is unchanged — a row that cannot be imported is named in `errors` and every
+   * other row still lands. Validation catches that up front. In the rare case where the batch insert
+   * itself is rejected, the chunk is rolled back and replayed a row at a time, so the responsible row
+   * is named instead of taking its thousand neighbours down with it.
+   */
+  async importTestCases(userId: string | null | undefined, projectId: string, body: Body) {
+    // Refuses outright rather than tying up a connection on a file nobody meant to send.
+    const MAX_ROWS = 20000;
+    // Rows per transaction. The statement count per chunk is fixed, so this no longer buys much time;
+    // it bounds how long the per-project id lock is held against other people adding test cases, and
+    // how large a single jsonb payload gets.
+    const CHUNK_SIZE = 1000;
+
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
+
+    const rows: Body[] = Array.isArray(body?.rows) ? body.rows : [];
+    if (!rows.length) throw new BadRequestException({ error: "rows must be a non-empty array" });
+    if (rows.length > MAX_ROWS) {
+      throw new BadRequestException({ error: `An import is limited to ${MAX_ROWS} rows per request.` });
+    }
+
+    // The suite the user had open when they hit Import, used as the parent for rows that leave the
+    // suite column blank. It arrives as client input like everything else, so it is confirmed to be a
+    // suite in THIS project before any row is parented to it.
+    let defaultSuiteId: string | null = null;
+    if (body?.defaultSuiteId) {
+      const candidate = String(body.defaultSuiteId);
+      const owned = isUuid(candidate)
+        ? await this.db.query("SELECT 1 FROM suites WHERE id = $1 AND project_id = $2", [candidate, projectId])
+        : { rows: [] };
+      if (!owned.rows[0]) throw new BadRequestException({ error: "defaultSuiteId is not a suite in this project" });
+      defaultSuiteId = candidate;
+    }
+
+    // One query in place of the client's paginated walk of the entire project, 500 rows per HTTP
+    // request. Titles come back raw and are normalized here rather than in SQL because Postgres's \s
+    // class and JavaScript's do not cover the same code points, and this set has to agree exactly
+    // with the browser's own duplicate preview.
+    const existingTitles = await this.db.query<{ title: string }>(
+      "SELECT title FROM testcases WHERE project_id = $1 AND deleted_at IS NULL",
+      [projectId]
+    );
+    const titlesInProject = new Set(existingTitles.rows.map((row) => normalizeImportName(row.title)));
+    const titlesInFile = new Set<string>();
+
+    const suiteRows = await this.db.query<{ id: string; parent_id: string | null; name: string }>(
+      "SELECT id, parent_id, name FROM suites WHERE project_id = $1",
+      [projectId]
+    );
+    const suiteIdByKey = new Map(suiteRows.rows.map((row) => [importSuiteKey(row.name, row.parent_id), row.id]));
+
+    // Null when the workspace's plan has custom fields switched off, which is the same "silently skip
+    // rather than block the import" answer createTestCase gives through its "skip-if-disabled" mode.
+    const customFieldContext = await this.customFields.loadWriteContext(projectId);
+
+    const settings = parseSettings(project.settings);
+    const idPrefix =
+      normalizeTestcaseIdPrefix(body?.testcaseIdPrefix) ||
+      normalizeTestcaseIdPrefix(settings.testcaseIdPrefix) ||
+      normalizeTestcaseIdPrefix(project.key) ||
+      "TC";
+
+    const errors: { row: number; message: string }[] = [];
+    const expandSuiteIds = new Set<string>();
+    let imported = 0;
+
+    const ctx: ImportContext = {
+      projectId,
+      uid,
+      organizationId: project.organization_id,
+      idPrefix,
+      defaultSuiteId,
+      suiteIdByKey,
+      expandSuiteIds,
+      customFieldContext
+    };
+
+    for (let start = 0; start < rows.length; start += CHUNK_SIZE) {
+      const chunk = rows.slice(start, start + CHUNK_SIZE);
+
+      // Validated before a connection is even opened. None of it needs the database, and a chunk that
+      // turns out to be entirely invalid then costs no round trips at all.
+      const prepared: PreparedImportRow[] = [];
+      for (const [index, raw] of chunk.entries()) {
+        const outcome = this.prepareImportRow(raw, start + index, titlesInProject, titlesInFile, customFieldContext);
+        if (outcome.error) errors.push({ row: outcome.rowNumber, message: outcome.error });
+        else if (outcome.prepared) prepared.push(outcome.prepared);
+      }
+      if (!prepared.length) continue;
+
+      await this.db.transaction(async (client) => {
+        // The same lock createTestCase takes, held once for the chunk instead of once per row. It is
+        // what actually serialises id allocation for a project.
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", [`testcase-external-id:${projectId}`]);
+        // Re-read per chunk, not once for the import: the lock only lives as long as this
+        // transaction, so another writer can allocate ids between chunks.
+        const maxRes = await client.query<{ n: string }>(
+          "SELECT COALESCE(MAX((regexp_match(external_id, '\\d+$'))[1]::int), 0) AS n FROM testcases WHERE project_id = $1 AND external_id LIKE $2",
+          [projectId, `${idPrefix}-TC-%`]
+        );
+        const startNumber = Number(maxRes.rows[0]?.n || 0) + 1;
+
+        // Both caches are written to while the chunk is being inserted, so they are snapshotted to be
+        // put back if it rolls back — otherwise the replay below would resolve suite names to ids
+        // that the rollback has just taken away.
+        const suiteSnapshot = new Map(ctx.suiteIdByKey);
+        const expandSnapshot = new Set(ctx.expandSuiteIds);
+
+        await client.query("SAVEPOINT import_chunk");
+        try {
+          await this.resolveImportSuites(client, ctx, prepared);
+          const created = await this.insertImportChunk(client, ctx, prepared, startNumber);
+          await client.query("RELEASE SAVEPOINT import_chunk");
+          imported += created;
+        } catch (error) {
+          await client.query("ROLLBACK TO SAVEPOINT import_chunk");
+          await client.query("RELEASE SAVEPOINT import_chunk");
+          ctx.suiteIdByKey.clear();
+          for (const [key, id] of suiteSnapshot) ctx.suiteIdByKey.set(key, id);
+          ctx.expandSuiteIds.clear();
+          for (const id of expandSnapshot) ctx.expandSuiteIds.add(id);
+
+          // A batch insert is all or nothing, so anything that got past validation would otherwise
+          // cost the whole chunk. Replaying a row at a time is slow, but it only happens when
+          // something genuinely unexpected is in the file, and it is the only way to name the row
+          // responsible rather than failing its thousand neighbours alongside it.
+          this.logger.warn(
+            `Import batch of ${prepared.length} rows failed for project ${projectId}, replaying row by row: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          const replay = await this.insertImportRowsIndividually(client, ctx, prepared, startNumber);
+          imported += replay.imported;
+          errors.push(...replay.errors);
+        }
+      });
+    }
+
+    errors.sort((a, b) => a.row - b.row);
+    return { imported, total: rows.length, errors, expandSuiteIds: Array.from(expandSuiteIds) };
+  }
+
+  /**
+   * Everything about one spreadsheet row that can be decided without asking the database.
+   *
+   * Pulled ahead of the inserts on purpose. The batch insert below is all or nothing, so a cell that
+   * Postgres would reject has to be caught here — otherwise it is raised against the whole chunk and
+   * every other row in it pays for the replay needed to work out which cell was at fault.
+   */
+  private prepareImportRow(
+    raw: Body,
+    fallbackIndex: number,
+    titlesInProject: Set<string>,
+    titlesInFile: Set<string>,
+    customFieldContext: CustomFieldWriteContext | null
+  ): { rowNumber: number; error?: string; prepared?: PreparedImportRow } {
+    const reported = Number(raw?.rowNumber);
+    const rowNumber = Number.isFinite(reported) ? reported : fallbackIndex + 1;
+
+    const title = String(raw?.title ?? "").trim();
+    if (!title) return { rowNumber, error: "Title is required" };
+
+    const priority = String(raw?.priority ?? "").trim() || "P2";
+    const severity = String(raw?.severity ?? "").trim() || null;
+    const type = String(raw?.type ?? "").trim() || "Functional";
+    const status = String(raw?.status ?? "").trim() || "Draft";
+    const component = String(raw?.component ?? "").trim() || null;
+    const suiteName = String(raw?.suite ?? "").trim();
+
+    // Mirrors the column widths in the testcases and suites tables. A message naming the field beats
+    // a driver error naming a constraint.
+    const limits: [string, string | null, number][] = [
+      ["Title", title, 512],
+      ["Priority", priority, 8],
+      ["Severity", severity, 32],
+      ["Type", type, 32],
+      ["Status", status, 32],
+      ["Component", component, 255],
+      ["Suite", suiteName, 255]
+    ];
+    for (const [label, value, limit] of limits) {
+      if (value && value.length > limit) {
+        return { rowNumber, error: `${label} is longer than the ${limit} character limit` };
+      }
+    }
+
+    const normalizedTitle = normalizeImportName(title);
+    if (titlesInProject.has(normalizedTitle)) {
+      return { rowNumber, error: "Skipped duplicate title: already exists in this project" };
+    }
+    if (titlesInFile.has(normalizedTitle)) {
+      return { rowNumber, error: "Skipped duplicate title: repeated in this import file" };
+    }
+    // Claimed before the row is known to be importable, matching the browser's original order: a
+    // title that fails for some other reason still counts as spoken for, so a later identical row
+    // reads as a duplicate within the file rather than being attempted a second time.
+    titlesInFile.add(normalizedTitle);
+
+    let customFieldValues: Body = {};
+    if (customFieldContext) {
+      const { normalized, errors } = this.customFields.normalizeValues(raw?.customFieldValues || {}, customFieldContext);
+      if (errors.length) return { rowNumber, error: errors.map((entry) => entry.message).join("; ") };
+      customFieldValues = normalized;
+    }
+
+    return {
+      rowNumber,
+      prepared: {
+        rowNumber,
+        title,
+        description: String(raw?.description ?? ""),
+        preconditions: String(raw?.preconditions ?? ""),
+        postconditions: String(raw?.postconditions ?? ""),
+        steps: Array.isArray(raw?.steps) ? raw.steps : [],
+        testData: String(raw?.testData ?? ""),
+        priority,
+        severity,
+        type,
+        status,
+        component,
+        suiteName,
+        componentName: component ?? "",
+        customFieldValues,
+        parentSuiteId: null,
+        suiteId: null
+      }
+    };
+  }
+
+  /**
+   * Creates every suite the chunk names but does not have yet, in at most two statements, and settles
+   * which suite each row belongs in.
+   *
+   * Import files name suites by name rather than id, and the browser used to create them one POST at
+   * a time as it walked the rows. The whole chunk's names are known up front, so the missing ones go
+   * in one insert per level — the top-level suites first, since the components need their parents to
+   * exist before they can point at them.
+   */
+  private async resolveImportSuites(client: PoolClient, ctx: ImportContext, prepared: PreparedImportRow[]): Promise<void> {
+    const missingTop = new Map<string, string>();
+    for (const row of prepared) {
+      if (!row.suiteName) continue;
+      const key = importSuiteKey(row.suiteName, null);
+      if (!ctx.suiteIdByKey.has(key)) missingTop.set(key, row.suiteName);
+    }
+    if (missingTop.size) {
+      const created = await client.query<{ id: string; name: string }>(
+        `INSERT INTO suites (project_id, parent_id, name, position)
+         SELECT $1, NULL, v.name, 0 FROM jsonb_to_recordset($2::jsonb) AS v(name text)
+         RETURNING id, name`,
+        [ctx.projectId, JSON.stringify(Array.from(missingTop.values(), (name) => ({ name })))]
+      );
+      for (const row of created.rows) ctx.suiteIdByKey.set(importSuiteKey(row.name, null), row.id);
+    }
+
+    const missingChild = new Map<string, { parent_id: string; name: string }>();
+    for (const row of prepared) {
+      row.parentSuiteId = row.suiteName
+        ? ctx.suiteIdByKey.get(importSuiteKey(row.suiteName, null)) ?? null
+        : ctx.defaultSuiteId;
+      if (!row.componentName || !row.parentSuiteId) continue;
+      // A row that names a component but no suite nests under whatever the user had open, and that
+      // folder wants expanding afterwards whether or not the component itself turned out to be new.
+      if (!row.suiteName) ctx.expandSuiteIds.add(row.parentSuiteId);
+      const key = importSuiteKey(row.componentName, row.parentSuiteId);
+      if (!ctx.suiteIdByKey.has(key)) missingChild.set(key, { parent_id: row.parentSuiteId, name: row.componentName });
+    }
+    if (missingChild.size) {
+      const created = await client.query<{ id: string; parent_id: string; name: string }>(
+        `INSERT INTO suites (project_id, parent_id, name, position)
+         SELECT $1, v.parent_id, v.name, 0 FROM jsonb_to_recordset($2::jsonb) AS v(parent_id uuid, name text)
+         RETURNING id, parent_id, name`,
+        [ctx.projectId, JSON.stringify(Array.from(missingChild.values()))]
+      );
+      for (const row of created.rows) {
+        ctx.suiteIdByKey.set(importSuiteKey(row.name, row.parent_id), row.id);
+        ctx.expandSuiteIds.add(row.parent_id);
+      }
+    }
+
+    for (const row of prepared) {
+      row.suiteId =
+        row.componentName && row.parentSuiteId
+          ? ctx.suiteIdByKey.get(importSuiteKey(row.componentName, row.parentSuiteId)) ?? row.parentSuiteId
+          : row.parentSuiteId;
+    }
+  }
+
+  /**
+   * Writes a prepared chunk: the test cases, their custom field values and the activity log, as one
+   * statement each. Returns how many test cases landed.
+   *
+   * Rows are matched back to what came out of the insert by external id rather than by position —
+   * RETURNING makes no promise about ordering, and the ids are what the custom field values and audit
+   * rows have to hang off.
+   */
+  private async insertImportChunk(
+    client: PoolClient,
+    ctx: ImportContext,
+    prepared: PreparedImportRow[],
+    startNumber: number
+  ): Promise<number> {
+    const payload = prepared.map((row, index) => ({
+      external_id: `${ctx.idPrefix}-TC-${startNumber + index}`,
+      suite_id: row.suiteId,
+      title: row.title,
+      description: row.description,
+      preconditions: row.preconditions,
+      postconditions: row.postconditions,
+      steps: row.steps,
+      test_data: row.testData,
+      priority: row.priority,
+      severity: row.severity,
+      type: row.type,
+      status: row.status,
+      component: row.component
+    }));
+
+    const inserted = await client.query<Body>(
+      `INSERT INTO testcases
+         (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps,
+          test_data, priority, severity, type, status, component, created_by, updated_by)
+       SELECT $1, v.suite_id, v.external_id, v.title, v.description, v.preconditions, v.postconditions,
+              v.steps, v.test_data, v.priority, v.severity, v.type, v.status, v.component, $2, $2
+       FROM jsonb_to_recordset($3::jsonb) AS v(
+         external_id text, suite_id uuid, title text, description text, preconditions text,
+         postconditions text, steps jsonb, test_data text, priority text, severity text,
+         type text, status text, component text)
+       RETURNING *`,
+      [ctx.projectId, ctx.uid, JSON.stringify(payload)]
+    );
+
+    const createdByExternalId = new Map(inserted.rows.map((row) => [row.external_id, row]));
+    const auditRows: { action: string; entity_id: string; entity_name: string; diff: Body }[] = inserted.rows.map((row) => ({
+      action: "testcase_created",
+      entity_id: row.id,
+      entity_name: `${row.external_id} - ${row.title}`,
+      diff: { after: toCamel(row) }
+    }));
+
+    const valueRows: { definition_id: string; testcase_id: string; value: unknown }[] = [];
+    if (ctx.customFieldContext) {
+      for (const [index, row] of prepared.entries()) {
+        const created = createdByExternalId.get(payload[index].external_id);
+        if (!created) continue;
+        for (const { definitionId, value } of this.customFields.writableValuesForNewTestCase(row.customFieldValues)) {
+          valueRows.push({ definition_id: definitionId, testcase_id: created.id, value });
+          const definition = ctx.customFieldContext.definitionsById.get(definitionId);
+          auditRows.push({
+            action: "testcase_custom_field_updated",
+            entity_id: created.id,
+            entity_name: `${created.external_id} - ${created.title}`,
+            diff: {
+              fieldId: definitionId,
+              fieldKey: definition?.key,
+              fieldName: definition?.name,
+              before: null,
+              after: value
+            }
+          });
+        }
+      }
+    }
+
+    if (valueRows.length) {
+      await client.query(
+        `INSERT INTO custom_field_values (definition_id, testcase_id, value, created_by, updated_by)
+         SELECT v.definition_id, v.testcase_id, v.value, $1, $1
+         FROM jsonb_to_recordset($2::jsonb) AS v(definition_id uuid, testcase_id uuid, value jsonb)
+         ON CONFLICT (definition_id, testcase_id) DO UPDATE
+           SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+        [ctx.uid, JSON.stringify(valueRows)]
+      );
+    }
+
+    if (auditRows.length) {
+      // Both kinds of entry go in together — one statement for the chunk in place of
+      // logProjectActivity's insert per test case and per changed field.
+      await client.query(
+        `INSERT INTO audit_logs (project_id, actor_id, action, entity_type, entity_id, entity_name, diff, organization_id)
+         SELECT $1, $2, v.action, 'testcase', v.entity_id, v.entity_name, v.diff, $3
+         FROM jsonb_to_recordset($4::jsonb) AS v(action text, entity_id uuid, entity_name text, diff jsonb)`,
+        [ctx.projectId, ctx.uid, ctx.organizationId, JSON.stringify(auditRows)]
+      );
+    }
+
+    return inserted.rowCount ?? inserted.rows.length;
+  }
+
+  /**
+   * The slow path, taken only after a batch insert was rejected: the same rows again, one at a time,
+   * each inside its own SAVEPOINT so the failure can be pinned on the row that caused it.
+   *
+   * A chunk of one goes through exactly the same code as a chunk of a thousand, which is the point —
+   * there is no second implementation of the insert to keep in step with the first.
+   */
+  private async insertImportRowsIndividually(
+    client: PoolClient,
+    ctx: ImportContext,
+    prepared: PreparedImportRow[],
+    startNumber: number
+  ): Promise<{ imported: number; errors: { row: number; message: string }[] }> {
+    const errors: { row: number; message: string }[] = [];
+    let imported = 0;
+    let nextNumber = startNumber;
+
+    for (const row of prepared) {
+      const suiteSnapshot = new Map(ctx.suiteIdByKey);
+      const expandSnapshot = new Set(ctx.expandSuiteIds);
+      await client.query("SAVEPOINT import_row");
+      try {
+        await this.resolveImportSuites(client, ctx, [row]);
+        await this.insertImportChunk(client, ctx, [row], nextNumber);
+        await client.query("RELEASE SAVEPOINT import_row");
+        // Advanced only once the row is safely in, so a rejected row leaves no gap in the numbering.
+        nextNumber += 1;
+        imported += 1;
+      } catch (error) {
+        await client.query("ROLLBACK TO SAVEPOINT import_row");
+        await client.query("RELEASE SAVEPOINT import_row");
+        ctx.suiteIdByKey.clear();
+        for (const [key, id] of suiteSnapshot) ctx.suiteIdByKey.set(key, id);
+        ctx.expandSuiteIds.clear();
+        for (const id of expandSnapshot) ctx.expandSuiteIds.add(id);
+        errors.push({ row: row.rowNumber, message: this.importRowErrorMessage(ctx.projectId, row.rowNumber, error) });
+      }
+    }
+
+    return { imported, errors };
+  }
+
+  /**
+   * The one line the import result shows against a row that failed.
+   *
+   * Validation rejections carry a message written for the person importing, so those are passed
+   * through. Anything else is a driver or constraint error whose text describes our schema, not their
+   * spreadsheet — it gets logged and reported generically rather than shipped to the browser.
+   */
+  private importRowErrorMessage(projectId: string, rowNumber: number, error: unknown): string {
+    if (error instanceof HttpException) {
+      const response = error.getResponse() as
+        | string
+        | { error?: string; message?: unknown; errors?: { message?: string }[] };
+      if (typeof response === "string") return response;
+      if (response?.error) return String(response.error);
+      const fieldErrors = Array.isArray(response?.errors)
+        ? response.errors.map((entry) => entry?.message).filter(Boolean)
+        : [];
+      if (fieldErrors.length) return fieldErrors.join("; ");
+      if (response?.message) return String(response.message);
+    }
+    this.logger.warn(
+      `Import row ${rowNumber} failed for project ${projectId}: ${error instanceof Error ? error.message : String(error)}`
+    );
+    return "Failed to import row";
+  }
+
   async updateTestCase(id: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
     const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
@@ -2327,6 +3215,7 @@ export class LegacyService implements OnModuleInit {
 
   async bulkUpdateTestCases(projectId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
+    await this.requireProjectAccess(uid, projectId);
     const ids = Array.isArray(body.testcaseIds) ? body.testcaseIds : [];
     if (!ids.length) return;
     await this.db.query(
@@ -2344,6 +3233,7 @@ export class LegacyService implements OnModuleInit {
 
   async bulkDeleteTestCases(projectId: string, actorId: string | null | undefined, ids: string[]) {
     const uid = this.requireUser(actorId);
+    await this.requireProjectAccess(uid, projectId);
     if (!ids.length) return;
     await this.db.query(
       "UPDATE testcases SET deleted_at = now(), deleted_by = $2, updated_by = $2, updated_at = now() WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL",
@@ -2352,7 +3242,8 @@ export class LegacyService implements OnModuleInit {
     await this.logProjectActivity(projectId, uid, "testcase_bulk_deleted", "testcase", null, null, { testcaseIds: ids });
   }
 
-  async linkedJiraKeys(projectId: string) {
+  async linkedJiraKeys(projectId: string, userId?: string | null) {
+    await this.requireProjectAccess(userId, projectId);
     const res = await this.db.query(
       "SELECT jira_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND jira_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY jira_issue_key",
       [projectId]
@@ -2361,13 +3252,49 @@ export class LegacyService implements OnModuleInit {
     return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.jira_issue_key, r.count])) };
   }
 
-  async linkedLinearKeys(projectId: string) {
+  async linkedLinearKeys(projectId: string, userId?: string | null) {
+    await this.requireProjectAccess(userId, projectId);
     const res = await this.db.query(
       "SELECT linear_issue_key, COUNT(*)::int AS count FROM testcases WHERE project_id = $1 AND linear_issue_key IS NOT NULL AND deleted_at IS NULL GROUP BY linear_issue_key",
       [projectId]
     );
     const keys = res.rows.map((r) => r.linear_issue_key);
     return { keys, counts: Object.fromEntries(res.rows.map((r) => [r.linear_issue_key, r.count])) };
+  }
+
+  /**
+   * Resolves a plan and confirms the caller may reach the project it belongs to.
+   *
+   * /api/plans/* is addressed by plan id with no project in the URL — get, update, delete, its items,
+   * its runs and its progress rollup all took no caller at all, so a guessed plan id exposed the
+   * project's test coverage and let anyone rewrite or delete the plan.
+   */
+  private async requirePlanAccess(userId: string | null | undefined, planId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    if (!isUuid(planId)) throw new NotFoundException({ error: "Plan not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM plans WHERE id = $1", [planId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Plan not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  /**
+   * Resolves a plan item's plan, then that plan's project.
+   *
+   * DELETE /api/plans/:planId/items/:itemId is authorized on the plan in the URL, but the item id is
+   * the thing being deleted — so the item has to be confirmed to belong to that plan, or a caller
+   * authorized for their own plan could delete an item out of someone else's.
+   */
+  private async requirePlanItemAccess(userId: string | null | undefined, planId: string, itemId: string) {
+    await this.requirePlanAccess(userId, planId);
+    if (!isUuid(itemId)) throw new NotFoundException({ error: "Plan item not found" });
+    const res = await this.db.query("SELECT id FROM plan_items WHERE id = $1 AND plan_id = $2", [itemId, planId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Plan item not found" });
+  }
+
+  async listPlansForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listPlans(projectId);
   }
 
   async listPlans(projectId: string) {
@@ -2407,7 +3334,8 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
-  async createPlan(projectId: string, body: Body) {
+  async createPlan(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const res = await this.db.query(
       "INSERT INTO plans (project_id, name, description, target_release, owner_id) VALUES ($1,$2,$3,$4,$5) RETURNING *",
       [projectId, body.name || "Untitled plan", body.description || "", body.targetRelease || null, body.ownerId || null]
@@ -2415,24 +3343,32 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
-  async getPlan(planId: string) {
+  async getPlan(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
     const res = await this.db.query("SELECT * FROM plans WHERE id = $1", [planId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Plan not found" });
     return toCamel(res.rows[0]);
   }
 
-  async updatePlan(planId: string, body: Body) {
+  async updatePlan(userId: string | null | undefined, planId: string, body: Body) {
+    await this.requirePlanAccess(userId, planId);
     await this.db.query(
       "UPDATE plans SET name=COALESCE($2,name), description=COALESCE($3,description), target_release=COALESCE($4,target_release), updated_at=now() WHERE id=$1",
       [planId, body.name || null, body.description || null, body.targetRelease || null]
     );
   }
 
-  async deletePlan(planId: string) {
+  async deletePlan(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
     await this.db.query("DELETE FROM plans WHERE id = $1", [planId]);
   }
 
-  async planItems(planId: string) {
+  async planItems(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
+    return this.planItemRows(planId);
+  }
+
+  private async planItemRows(planId: string) {
     const res = await this.db.query(
       `SELECT pi.*,
               t.external_id AS tc_external_id, t.title AS tc_title, t.priority AS tc_priority,
@@ -2457,7 +3393,8 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
-  async addPlanItem(planId: string, body: Body) {
+  async addPlanItem(userId: string | null | undefined, planId: string, body: Body) {
+    await this.requirePlanAccess(userId, planId);
     const res = await this.db.query(
       "INSERT INTO plan_items (plan_id, suite_id, testcase_id, position) VALUES ($1,$2,$3,$4) RETURNING *",
       [planId, body.suiteId || null, body.testcaseId || null, body.position || 0]
@@ -2465,11 +3402,17 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
-  async deletePlanItem(itemId: string) {
+  async deletePlanItem(userId: string | null | undefined, planId: string, itemId: string) {
+    await this.requirePlanItemAccess(userId, planId, itemId);
     await this.db.query("DELETE FROM plan_items WHERE id = $1", [itemId]);
   }
 
-  async planRuns(planId: string) {
+  async planRuns(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
+    return this.planRunRows(planId);
+  }
+
+  private async planRunRows(planId: string) {
     const res = await this.db.query(
       `SELECT c.*,
               COUNT(ci.id)::int AS total_cases,
@@ -2477,7 +3420,10 @@ export class LegacyService implements OnModuleInit {
               COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
               COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
               COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
+              -- settled result for this run. Leaving it out of every bucket made these counters sum
+              -- to less than total_cases.
+              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
        LEFT JOIN executions e ON e.cycle_item_id = ci.id
@@ -2489,7 +3435,12 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
-  async planProgress(planId: string) {
+  async planProgress(userId: string | null | undefined, planId: string) {
+    await this.requirePlanAccess(userId, planId);
+    return this.planProgressRollup(planId);
+  }
+
+  private async planProgressRollup(planId: string) {
     const res = await this.db.query<{
       run_count: number;
       total_cases: number;
@@ -2505,7 +3456,10 @@ export class LegacyService implements OnModuleInit {
               COUNT(*) FILTER (WHERE e.status = 'Failed')::int AS failed,
               COUNT(*) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
               COUNT(*) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status = 'Untested')::int AS untested
+              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
+              -- settled result for this run. Leaving it out of every bucket made these counters sum
+              -- to less than total_cases.
+              COUNT(*) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
        LEFT JOIN executions e ON e.cycle_item_id = ci.id
@@ -2541,6 +3495,11 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
+  async listCyclesForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listCycles(projectId);
+  }
+
   async listCycles(projectId: string) {
     const res = await this.db.query(
       // Counted off the live execution rows, matching executions() exactly, so the number shown
@@ -2552,7 +3511,11 @@ export class LegacyService implements OnModuleInit {
               COUNT(e.id) FILTER (WHERE e.status = 'Failed')::int AS failed,
               COUNT(e.id) FILTER (WHERE e.status = 'Blocked')::int AS blocked,
               COUNT(e.id) FILTER (WHERE e.status = 'Skipped')::int AS skipped,
-              COUNT(e.id) FILTER (WHERE e.status = 'Untested')::int AS untested
+              -- Retest counts as untested, not as its own bucket: a case flagged for retest has no
+              -- settled result for this run. Leaving it out of every bucket made these counters sum
+              -- to less than total_cases. Filtered off e.id like the buckets above, so a cycle_item
+              -- with no live execution stays out of both the numerator and total_cases.
+              COUNT(e.id) FILTER (WHERE e.status IS NULL OR e.status IN ('Untested', 'Retest'))::int AS untested
        FROM cycles c
        LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
        LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
@@ -2564,6 +3527,17 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  async createCycleForUser(userId: string | null | undefined, projectId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.createCycle(projectId, body);
+  }
+
+  /**
+   * The insert itself, without a caller check.
+   *
+   * Kept unguarded for the MCP tool, whose API token is already bound to one project. Route traffic
+   * goes through createCycleForUser.
+   */
   async createCycle(projectId: string, body: Body) {
     const res = await this.db.query(
       `INSERT INTO cycles (project_id, plan_id, name, description, environment, build_version, release_name, owner_id)
@@ -2582,13 +3556,39 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
-  async getCycle(cycleId: string) {
+  /**
+   * Resolves a run and confirms the caller may reach the project it belongs to.
+   *
+   * /api/cycles/* is addressed by cycle id with no project in the URL, so every handler here has to
+   * resolve the project itself. They did not: getCycle, updateCycle, deleteCycle, executions,
+   * shareCycle and the cycle_items routes took no caller at all, which the comment above
+   * exportCycleExecutions already recorded as an open gap. A run carries case titles, actual results
+   * and linked defect keys, DELETE removes it outright, and share mints a public URL to it.
+   */
+  /** requireCycleAccess for controller-level guards that have no service call to hang it off. */
+  async requireCycleAccessForUser(userId: string | null | undefined, cycleId: string): Promise<string> {
+    return this.requireCycleAccess(userId, cycleId);
+  }
+
+  private async requireCycleAccess(userId: string | null | undefined, cycleId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    // Same answer for a malformed id as for one that doesn't exist — see requireProjectAccess.
+    if (!isUuid(cycleId)) throw new NotFoundException({ error: "Cycle not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM cycles WHERE id = $1", [cycleId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  async getCycle(cycleId: string, userId?: string | null) {
+    await this.requireCycleAccess(userId, cycleId);
     const res = await this.db.query("SELECT * FROM cycles WHERE id = $1", [cycleId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
     return toCamel(res.rows[0]);
   }
 
-  async shareCycle(cycleId: string, body: Body) {
+  async shareCycle(cycleId: string, userId: string | null | undefined, body: Body) {
+    await this.requireCycleAccess(userId, cycleId);
     const enabled = body.enabled !== false;
     const existing = await this.db.query("SELECT id, share_token FROM cycles WHERE id = $1", [cycleId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
@@ -2609,13 +3609,35 @@ export class LegacyService implements OnModuleInit {
     return toCamel(res.rows[0]);
   }
 
+  /**
+   * The rows behind a public share link.
+   *
+   * Deliberately NOT this.executions(): that projection carries the full test case body — steps,
+   * preconditions, postconditions, test data, description — plus the tester's actual_result, the
+   * assignee, and the linked defect key and URL. A share link is unauthenticated by design and gets
+   * forwarded into tickets and chats, so everything it returns should be treated as published.
+   *
+   * The columns below are exactly the six the share page renders (app/share/[token]/page.tsx): the
+   * status badge, the external id, the title, the priority and the type. Anything a future column
+   * needs has to be added here on purpose, which is the point — the previous shape leaked by default.
+   */
   async publicCycleExecutions(token: string) {
     const run = await this.db.query("SELECT id FROM cycles WHERE share_token = $1 AND share_enabled = true", [token]);
     if (!run.rows[0]) throw new NotFoundException({ error: "Shared run not found" });
-    return this.executions(run.rows[0].id);
+    const res = await this.db.query(
+      `SELECT e.id, e.status,
+              COALESCE(NULLIF(ci.snapshot_title, ''), NULLIF(t.title, ''), 'Untitled test case') AS title,
+              t.external_id, t.priority, t.type
+       FROM cycle_items ci JOIN executions e ON e.cycle_item_id = ci.id
+       LEFT JOIN testcases t ON t.id = ci.testcase_id AND t.deleted_at IS NULL
+       WHERE ci.cycle_id = $1 AND e.deleted_at IS NULL ORDER BY ci.position, ci.created_at`,
+      [run.rows[0].id]
+    );
+    return res.rows.map(toCamel);
   }
 
-  async updateCycle(cycleId: string, body: Body) {
+  async updateCycle(cycleId: string, userId: string | null | undefined, body: Body) {
+    await this.requireCycleAccess(userId, cycleId);
     await this.db.query(
       `UPDATE cycles SET name=COALESCE($2,name), description=COALESCE($3,description),
        environment=COALESCE($4,environment), build_version=COALESCE($5,build_version),
@@ -2637,75 +3659,105 @@ export class LegacyService implements OnModuleInit {
     );
   }
 
-  async deleteCycle(cycleId: string) {
+  async deleteCycle(cycleId: string, userId?: string | null) {
+    await this.requireCycleAccess(userId, cycleId);
     await this.db.query("DELETE FROM cycles WHERE id = $1", [cycleId]);
   }
 
-  async addCycleTestCases(cycleId: string, body: Body) {
-    const requested: unknown[] = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
-    // Two copies of one id in a single payload would both reach the INSERT, where only
-    // ON CONFLICT separates them — de-dupe up front so `added` counts distinct test cases.
-    const ids = Array.from(new Set(requested.filter((id): id is string => typeof id === "string" && id.length > 0)));
-    if (!ids.length) return { requested: 0, added: 0, skipped: 0 };
+  /**
+   * Adds a selection of test cases to a run, as one statement.
+   *
+   * This used to loop over the selection and issue three sequential round trips per case — read the
+   * title, insert the cycle_item, insert its execution. The UI sends the whole selection in a single
+   * POST, so "select all" on a project with a couple of thousand cases became several thousand
+   * serialized queries and ran for minutes; in production Cloudflare gave up at its 100s proxy limit
+   * and the browser saw a 524.
+   *
+   * The timeout was the visible half. The loop also committed one case at a time, so a request that
+   * died partway left the cases it had already written behind — a run holding an arbitrary prefix of
+   * the selection, with nothing to say where it stopped. Doing the whole thing in one statement makes
+   * it atomic: the run either gains the full selection or none of it.
+   */
+  async addCycleTestCases(cycleId: string, userId: string | null | undefined, body: Body) {
+    const projectId = await this.requireCycleAccess(userId, cycleId);
+    const raw = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
 
-    // One round trip for the whole batch instead of three per test case. Linking a 300-case
-    // suite used to issue ~900 sequential statements and cross the edge proxy's 100s limit
-    // (the 524 users saw), and because each insert autocommitted on its own, the rows written
-    // before the cutoff stayed behind — which is why only part of a selection landed. The
-    // transaction makes a timeout roll back cleanly, and creating the execution row in the
-    // same statement as its cycle_item means an item can no longer be left without one
-    // (an orphan counts toward listCycles' total_cases while staying invisible in
-    // executions(), which is what made run counts disagree with the run table).
-    const res = await this.db.transaction((client) =>
-      client.query<{ id: string }>(
-        `WITH requested AS (
-           SELECT r.testcase_id, r.ord
-           FROM unnest($2::uuid[]) WITH ORDINALITY AS r(testcase_id, ord)
-         ),
-         base AS (
-           SELECT COALESCE(MAX(position), 0) AS max_position FROM cycle_items WHERE cycle_id = $1::uuid
-         ),
-         eligible AS (
-           SELECT req.testcase_id, req.ord, t.title
-           FROM requested req
-           JOIN testcases t ON t.id = req.testcase_id AND t.deleted_at IS NULL
-         ),
-         inserted AS (
-           INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title, position)
-           -- Explicit position: every row in a set-based insert shares one created_at, so the
-           -- executions() "ORDER BY ci.position, ci.created_at" needs positions to keep the
-           -- order the caller asked for. Ordinality runs over the requested array, so skipped
-           -- ids leave harmless gaps rather than reshuffling what remains.
-           SELECT $1::uuid, e.testcase_id, e.title, b.max_position + e.ord
-           FROM eligible e CROSS JOIN base b
-           ON CONFLICT (cycle_id, testcase_id) DO NOTHING
-           RETURNING id
-         )
-         INSERT INTO executions (cycle_item_id)
-         SELECT id FROM inserted
-         RETURNING id`,
-        [cycleId, ids]
-      )
+    // Malformed ids used to reach Postgres as `WHERE id = $1` against a uuid column and fail the
+    // request with a driver error; unknown ones were skipped. Both are dropped here so a single bad
+    // id in a large selection cannot 500 the whole add, and `= ANY($2::uuid[])` never sees a value
+    // it cannot cast.
+    // `requested` is the raw selection size, so added + skipped always accounts for every id the
+    // caller sent — including duplicates and ids dropped as malformed below.
+    const requested = normalizeJsonArray(raw).length;
+    const ids = [...new Set(normalizeJsonArray(raw).map((id) => String(id)).filter((id) => isUuid(id)))];
+    if (!ids.length) return { requested, added: 0, skipped: requested };
+
+    const res = await this.db.query<{ id: string }>(
+      `WITH input AS (
+         SELECT id, ord FROM unnest($2::uuid[]) WITH ORDINALITY AS u(id, ord)
+       ),
+       base AS (
+         SELECT COALESCE(MAX(position), 0) AS pos FROM cycle_items WHERE cycle_id = $1
+       ),
+       ins AS (
+         -- t.project_id = $3 is a tenancy check, not a filter for convenience. The old lookup
+         -- resolved each case by id alone, so any authenticated caller could name a test case
+         -- belonging to another workspace and have this run adopt it — copying that tenant's title
+         -- into snapshot_title on the way. requireCycleAccess already resolved the run's project, so
+         -- scope the join to it and let a foreign id fall out with the unknown ones.
+         INSERT INTO cycle_items (cycle_id, testcase_id, snapshot_title, position)
+         SELECT $1, t.id, t.title, base.pos + i.ord
+           FROM input i
+           JOIN testcases t ON t.id = i.id AND t.deleted_at IS NULL AND t.project_id = $3
+           CROSS JOIN base
+         ON CONFLICT (cycle_id, testcase_id) DO NOTHING
+         RETURNING id
+       )
+       INSERT INTO executions (cycle_item_id)
+       SELECT id FROM ins
+       ON CONFLICT (cycle_item_id) DO NOTHING
+       RETURNING id`,
+      [cycleId, ids, projectId]
     );
-    const added = res.rowCount ?? 0;
-    // Skipped = already in the run, or soft-deleted since the picker loaded.
-    return { requested: ids.length, added, skipped: ids.length - added };
+
+    return { requested, added: res.rows.length, skipped: requested - res.rows.length };
   }
 
-  async removeCycleTestCase(cycleId: string, testcaseId: string) {
+  async removeCycleTestCase(cycleId: string, userId: string | null | undefined, testcaseId: string) {
+    await this.requireCycleAccess(userId, cycleId);
+    if (!isUuid(testcaseId)) throw new NotFoundException({ error: "Test case not found" });
     await this.db.query("DELETE FROM cycle_items WHERE cycle_id = $1 AND testcase_id = $2", [cycleId, testcaseId]);
   }
 
-  async removeCycleTestCases(cycleId: string, body: Body) {
-    const requested: unknown[] = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
-    const ids = Array.from(new Set(requested.filter((id): id is string => typeof id === "string" && id.length > 0)));
-    if (!ids.length) return { requested: 0, removed: 0 };
+  async removeCycleTestCases(cycleId: string, userId: string | null | undefined, body: Body) {
+    // Guarded like every other /api/cycles/* route and like removeCycleTestCase above: without a
+    // caller check a cycle id alone was enough to strip cases out of any workspace's run.
+    await this.requireCycleAccess(userId, cycleId);
+    const raw = body.testcaseIds || (body.testcaseId ? [body.testcaseId] : []);
+    const requested = normalizeJsonArray(raw).length;
+    // isUuid before the query, not after: a malformed id reaching `= ANY($2::uuid[])` fails the whole
+    // request with a driver error, so one bad id in a large selection would 500 the entire remove.
+    const ids = [...new Set(normalizeJsonArray(raw).map((id) => String(id)).filter((id) => isUuid(id)))];
+    if (!ids.length) return { requested, removed: 0 };
     // Single statement for the whole selection — the alternative users were left with was one
     // DELETE per case (or dropping the entire run). executions cascade off cycle_items.
     const res = await this.db.query("DELETE FROM cycle_items WHERE cycle_id = $1 AND testcase_id = ANY($2::uuid[])", [cycleId, ids]);
-    return { requested: ids.length, removed: res.rowCount ?? 0 };
+    return { requested, removed: res.rowCount ?? 0 };
   }
 
+  /** The guarded entry point for GET /api/cycles/:cycleId/executions. */
+  async executionsForUser(cycleId: string, userId: string | null | undefined) {
+    await this.requireCycleAccess(userId, cycleId);
+    return this.executions(cycleId);
+  }
+
+  /**
+   * The rows themselves, without a caller check.
+   *
+   * Kept unguarded for the two callers that have already decided access: exportCycleExecutions
+   * (which authorizes first) and publicCycleExecutions (which is reached through a share token and
+   * is deliberately public).
+   */
   async executions(cycleId: string) {
     const res = await this.db.query(
       `SELECT e.id, e.status, e.assignee_id, e.actual_result, e.executed_at, e.defect_key, e.defect_url,
@@ -2721,6 +3773,103 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  /** The statuses executions.status accepts. Anything else is refused before it reaches Postgres. */
+  static readonly EXECUTION_STATUSES = ["Untested", "Passed", "Failed", "Blocked", "Skipped", "Retest"];
+
+  /**
+   * Resolves the executions a bulk request names, refusing the whole batch if any of them is not in
+   * this run.
+   *
+   * Atomic on purpose, like the knowledge-base upload: a partial application leaves the caller unable
+   * to tell which half of their selection took effect, and the UI offers these actions on a
+   * multi-select where "some of them" is not a state the user can see.
+   */
+  private async resolveBulkExecutions(cycleId: string, body: Body): Promise<string[]> {
+    const ids = normalizeJsonArray(body.executionIds).map((id) => String(id));
+    if (!ids.length) throw new BadRequestException({ error: "executionIds is required" });
+    if (!ids.every((id) => isUuid(id))) throw new NotFoundException({ error: "Execution not found" });
+    const res = await this.db.query<{ id: string }>(
+      `SELECT e.id FROM executions e JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       WHERE ci.cycle_id = $1 AND e.id = ANY($2::uuid[]) AND e.deleted_at IS NULL`,
+      [cycleId, ids]
+    );
+    if (res.rows.length !== ids.length) throw new NotFoundException({ error: "Execution not found" });
+    return res.rows.map((row) => row.id);
+  }
+
+  /**
+   * Sets one status across a selection of a run's executions.
+   *
+   * The controller method was `bulkStatus() {}` — an empty body that answered 2xx and changed
+   * nothing, so the UI's "mark selected as Passed" reported success and left every row Untested.
+   */
+  async bulkUpdateExecutionStatus(cycleId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireCycleAccess(uid, cycleId);
+    const status = String(body.status || "").trim();
+    if (!LegacyService.EXECUTION_STATUSES.includes(status)) {
+      throw new BadRequestException({
+        error: `status must be one of: ${LegacyService.EXECUTION_STATUSES.join(", ")}`
+      });
+    }
+    const executionIds = await this.resolveBulkExecutions(cycleId, body);
+    for (const executionId of executionIds) {
+      await this.updateExecution(executionId, uid, { status });
+    }
+    return { updated: executionIds.length, status };
+  }
+
+  /**
+   * Assigns a selection of a run's executions to one person.
+   *
+   * Also previously an empty method. The assignee has to be a member of the run's project: work
+   * assigned to someone who cannot open the project is an execution nobody can action.
+   */
+  async bulkAssignExecutions(cycleId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    const projectId = await this.requireCycleAccess(uid, cycleId);
+    const assigneeId = body.assigneeId === null || body.assigneeId === undefined ? null : String(body.assigneeId);
+    if (assigneeId !== null) {
+      if (!isUuid(assigneeId)) throw new NotFoundException({ error: "Assignee not found" });
+      const member = await this.db.query(
+        "SELECT 1 FROM project_members WHERE project_id = $1 AND user_id = $2",
+        [projectId, assigneeId]
+      );
+      if (!member.rows[0]) {
+        throw new BadRequestException({ error: "The assignee must be a member of this project" });
+      }
+    }
+    const executionIds = await this.resolveBulkExecutions(cycleId, body);
+    for (const executionId of executionIds) {
+      await this.updateExecution(executionId, uid, { assigneeId });
+    }
+    return { updated: executionIds.length, assigneeId };
+  }
+
+  /**
+   * The rows behind GET /api/cycles/:cycleId/export/csv, resolved through the run's project.
+   *
+   * The export used to take no caller at all: a whole run — case titles, external ids, actual
+   * results and the linked defect keys and URLs — came back to anyone holding a cycle id, with no
+   * session and from any workspace. It also answered a malformed id with a 500 (the uuid cast) and a
+   * well-formed unknown one with a header-only CSV, so a mistyped id downloaded an empty "report"
+   * instead of saying the run wasn't there.
+   *
+   * Note the rest of /api/cycles/* still has the original gap — executions(), getCycle(),
+   * updateCycle(), deleteCycle() and the cycle_items routes take no @Req() either, so these same
+   * rows remain readable through GET /api/cycles/:cycleId/executions. Closing that is a change
+   * across all of those handlers, not this one.
+   */
+  async exportCycleExecutions(userId: string | null | undefined, cycleId: string) {
+    const uid = this.requireUser(userId);
+    // Same answer for a malformed id as for one that doesn't exist — see requireProjectAccess.
+    if (!isUuid(cycleId)) throw new NotFoundException({ error: "Cycle not found" });
+    const cycle = await this.db.query<{ project_id: string }>("SELECT project_id FROM cycles WHERE id = $1", [cycleId]);
+    if (!cycle.rows[0]) throw new NotFoundException({ error: "Cycle not found" });
+    await this.requireProjectAccess(uid, cycle.rows[0].project_id);
+    return this.executions(cycleId);
+  }
+
   async updateExecution(executionId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
     const before = await this.db.query(
@@ -2733,6 +3882,9 @@ export class LegacyService implements OnModuleInit {
       [executionId]
     );
     if (!before.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    // The execution was resolved but its project never was: a signed-in caller from any workspace
+    // could rewrite another team's result by execution id.
+    await this.requireProjectAccess(uid, before.rows[0].project_id);
     const res = await this.db.query(
       `UPDATE executions SET status=COALESCE($2,status), assignee_id=$3, actual_result=COALESCE($4,actual_result),
        executed_at=CASE WHEN $2 IS NULL THEN executed_at ELSE now() END, defect_key=COALESCE($5,defect_key),
@@ -2787,6 +3939,27 @@ export class LegacyService implements OnModuleInit {
       WHERE ${where}`;
   }
 
+  /**
+   * Resolves a bug and confirms the caller may reach the project it belongs to.
+   *
+   * /api/bugs/:bugId is addressed by bug id with no project in the URL. Read, update, delete and both
+   * link routes took no caller at all — a bug carries reproduction steps, severity and links to the
+   * executions that found it, and PATCH let anyone rewrite someone else's defect report.
+   */
+  private async requireBugAccess(userId: string | null | undefined, bugId: string): Promise<string> {
+    const uid = this.requireUser(userId);
+    if (!isUuid(bugId)) throw new NotFoundException({ error: "Bug not found" });
+    const res = await this.db.query<{ project_id: string }>("SELECT project_id FROM bugs WHERE id = $1", [bugId]);
+    if (!res.rows[0]) throw new NotFoundException({ error: "Bug not found" });
+    await this.requireProjectAccess(uid, res.rows[0].project_id);
+    return res.rows[0].project_id;
+  }
+
+  async listBugsForUser(userId: string | null | undefined, projectId: string, query: Body = {}) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.listBugs(projectId, query);
+  }
+
   async listBugs(projectId: string, query: Body = {}) {
     const filters = ["b.project_id = $1"];
     const values: any[] = [projectId];
@@ -2817,11 +3990,31 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
+  /**
+   * The severity a caller asked for, refused as caller error when it isn't one we have.
+   *
+   * V67's bugs_severity_check already stops an unknown value reaching the column, but a raw
+   * constraint violation surfaces as a 500 naming nothing. These are exactly the four buckets the
+   * project dashboard's bySeverity reports, so a fifth would also be counted by the bugs list and
+   * dropped by the dashboard.
+   */
+  private parseBugSeverity(severity: unknown): "Critical" | "High" | "Medium" | "Low" {
+    if (severity === undefined || severity === null || severity === "") return "Medium";
+    const match = BUG_SEVERITIES.find((s) => s.toLowerCase() === String(severity).trim().toLowerCase());
+    if (!match)
+      throw new BadRequestException({
+        error: `severity must be one of ${BUG_SEVERITIES.join(", ")}`,
+        field: "severity"
+      });
+    return match;
+  }
+
   async createBug(projectId: string, userId: string | null | undefined, body: Body) {
     // A link is required whenever the project actually has test cases/runs to link to — enforced
     // client-side (the UI only lets the field be empty when there's nothing to pick). An empty
     // array is accepted here so reporting a bug is never blocked in a project with no test runs yet.
     const links = normalizeJsonArray(body.links);
+    const severity = this.parseBugSeverity(body.severity);
 
     const bugId = await this.db.transaction(async (client) => {
       const res = await client.query(
@@ -2836,7 +4029,7 @@ export class LegacyService implements OnModuleInit {
           body.description || "",
           body.externalUrl || null,
           body.status || "Open",
-          body.severity || "Medium",
+          severity,
           userId || null,
           body.integrationProvider || null,
           body.integrationIssueKey || null,
@@ -2850,6 +4043,18 @@ export class LegacyService implements OnModuleInit {
     return this.getBug(bugId);
   }
 
+  async getBugForUser(userId: string | null | undefined, bugId: string) {
+    await this.requireBugAccess(userId, bugId);
+    return this.getBug(bugId);
+  }
+
+  /**
+   * One bug by id, without a caller check.
+   *
+   * Kept unguarded for the four callers that re-read a row they have just written through an
+   * already-authorized path (create, update, add link, remove link). Route traffic goes through
+   * getBugForUser.
+   */
   async getBug(bugId: string) {
     const res = await this.db.query(this.bugSelect("b.id = $1"), [bugId]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Bug not found" });
@@ -2857,7 +4062,11 @@ export class LegacyService implements OnModuleInit {
     return { ...toCamel(row), links: normalizeJsonArray(row.links).map(toCamel), attachments: normalizeJsonArray(row.attachments).map(toCamel) };
   }
 
-  async updateBug(bugId: string, body: Body) {
+  async updateBug(userId: string | null | undefined, bugId: string, body: Body) {
+    await this.requireBugAccess(userId, bugId);
+    // Same refusal as createBug — an unknown severity on edit hit the same constraint and the same
+    // opaque 500. Absent/empty leaves the stored value alone via COALESCE, so it isn't parsed.
+    if (body.severity) this.parseBugSeverity(body.severity);
     await this.db.query(
       `UPDATE bugs SET title=COALESCE($2,title), description=COALESCE($3,description), external_url=COALESCE($4,external_url),
        status=COALESCE($5,status), severity=COALESCE($6,severity), integration_provider=COALESCE($7,integration_provider), integration_issue_key=COALESCE($8,integration_issue_key),
@@ -2880,7 +4089,8 @@ export class LegacyService implements OnModuleInit {
     return this.getBug(bugId);
   }
 
-  async addBugLink(bugId: string, body: Body) {
+  async addBugLink(userId: string | null | undefined, bugId: string, body: Body) {
+    await this.requireBugAccess(userId, bugId);
     if (!body.testcaseId && !body.cycleId) throw new BadRequestException({ error: "testcaseId or cycleId is required." });
     await this.db.query(
       `INSERT INTO bug_links (bug_id, testcase_id, cycle_id, execution_id) VALUES ($1,$2,$3,$4)
@@ -2890,13 +4100,36 @@ export class LegacyService implements OnModuleInit {
     return this.getBug(bugId);
   }
 
-  async removeBugLink(bugId: string, linkId: string) {
+  async removeBugLink(userId: string | null | undefined, bugId: string, linkId: string) {
+    await this.requireBugAccess(userId, bugId);
     await this.db.query("DELETE FROM bug_links WHERE id = $1 AND bug_id = $2", [linkId, bugId]);
     return this.getBug(bugId);
   }
 
-  async deleteBug(bugId: string) {
+  async deleteBug(userId: string | null | undefined, bugId: string) {
+    await this.requireBugAccess(userId, bugId);
     await this.db.query("DELETE FROM bugs WHERE id = $1", [bugId]);
+  }
+
+  // The client controls the uploaded filename completely, and it is only ever a display label —
+  // the storage key is built from ids plus a fresh uuid, taking nothing but the extension. So the
+  // name is normalised rather than trusted: directory components are stripped (a screenshot named
+  // `../../etc/passwd` is just `passwd`), control characters are dropped so they can't be smuggled
+  // into a Content-Disposition header, and the result is cut to fit file_name's varchar(255).
+  // Without that last step a long-but-legitimate name (240 chars is well inside the filesystem's
+  // own ceiling) makes Postgres reject the insert and the whole upload answers with a 500.
+  private static displayFileName(originalName: string, max = 255): string {
+    const base = path
+      .basename(String(originalName ?? "").replace(/\\/g, "/"))
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim();
+    if (!base || base === "." || base === "..") return "upload";
+    if (base.length <= max) return base;
+    // Keep the extension attached to the truncated stem — it is what tells the browser and the
+    // person downloading it what the file actually is.
+    const ext = path.extname(base);
+    return ext.length > 0 && ext.length < max ? `${base.slice(0, max - ext.length)}${ext}` : base.slice(0, max);
   }
 
   // Bug evidence uploads — reuses the generic `attachments` table (entity_type='bug') rather
@@ -2908,14 +4141,17 @@ export class LegacyService implements OnModuleInit {
     bugId: string,
     files: Array<{ buffer: Buffer; originalname: string; mimetype: string; size: number }>
   ) {
+    // Uploading writes a file into the workspace's storage and bills it to that workspace's plan
+    // allowance, so it needs a caller who is a member of this project — existence of the bug row
+    // is not authorization.
+    const uid = this.requireUser(userId);
+    const project = await this.requireProjectAccess(uid, projectId);
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
-    const bug = await this.db.query(
-      "SELECT b.id, p.organization_id FROM bugs b JOIN projects p ON p.id = b.project_id WHERE b.id = $1 AND b.project_id = $2",
-      [bugId, projectId]
-    );
+    if (!isUuid(bugId)) throw new NotFoundException({ error: "Bug not found" });
+    const bug = await this.db.query("SELECT b.id FROM bugs b WHERE b.id = $1 AND b.project_id = $2", [bugId, projectId]);
     if (!bug.rows[0]) throw new NotFoundException({ error: "Bug not found" });
     await this.planLimits.assertStorageAvailable(
-      bug.rows[0].organization_id,
+      project.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
     );
 
@@ -2927,21 +4163,32 @@ export class LegacyService implements OnModuleInit {
       const res = await this.db.query(
         `INSERT INTO attachments (project_id, entity_type, entity_id, file_name, content_type, file_size, storage_path, uploaded_by)
          VALUES ($1, 'bug', $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [projectId, bugId, file.originalname, file.mimetype, file.size, storageKey, userId || null]
+        [projectId, bugId, LegacyService.displayFileName(file.originalname), file.mimetype, file.size, storageKey, uid]
       );
       created.push(toCamel(res.rows[0]));
     }
     return { list: created, total: created.length };
   }
 
-  private async bugAttachment(attachmentId: string): Promise<Body> {
-    const res = await this.db.query("SELECT * FROM attachments WHERE id = $1 AND entity_type = 'bug'", [attachmentId]);
+  // `scopeProjectId` keeps a lookup by attachment id from crossing into another project's
+  // evidence: the caller has already been authorized for that project, so the row has to
+  // belong to it too or it simply isn't found.
+  private async bugAttachment(attachmentId: string, scopeProjectId?: string): Promise<Body> {
+    if (!isUuid(attachmentId)) throw new NotFoundException({ error: "Attachment not found" });
+    const res = await this.db.query(
+      `SELECT * FROM attachments WHERE id = $1 AND entity_type = 'bug'
+       AND ($2::uuid IS NULL OR project_id = $2::uuid)`,
+      [attachmentId, scopeProjectId ?? null]
+    );
     if (!res.rows[0]) throw new NotFoundException({ error: "Attachment not found" });
     return res.rows[0];
   }
 
-  async getBugAttachmentAccess(attachmentId: string, inline: boolean) {
-    const file = await this.bugAttachment(attachmentId);
+  async getBugAttachmentAccess(projectId: string, userId: string | null | undefined, attachmentId: string, inline: boolean) {
+    // Bug evidence is confidential: an attachment id turning up in a link, a log line or an
+    // exported report must not be enough to hand the file to whoever holds it.
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const file = await this.bugAttachment(attachmentId, projectId);
     if (!file.storage_path || !(await this.storage.exists(file.storage_path))) {
       throw new NotFoundException({ error: "File content is not available" });
     }
@@ -2950,8 +4197,13 @@ export class LegacyService implements OnModuleInit {
     return { ...access, mimeType, originalFileName: file.file_name };
   }
 
-  async deleteBugAttachment(attachmentId: string) {
+  async deleteBugAttachment(attachmentId: string, userId?: string | null) {
+    // This route carries no project id, so the attachment's own project is what the caller is
+    // authorized against. It destroys the stored object as well as the row — an unauthorized
+    // caller here doesn't just read someone's evidence, they lose it for them.
+    const uid = this.requireUser(userId);
     const file = await this.bugAttachment(attachmentId);
+    await this.requireProjectAccess(uid, String(file.project_id));
     await this.storage.delete(file.storage_path);
     await this.db.query("DELETE FROM attachments WHERE id = $1", [attachmentId]);
     return { ok: true };
@@ -2961,6 +4213,24 @@ export class LegacyService implements OnModuleInit {
   // (entity_type='execution'), mirroring uploadBugAttachments. The execution routes are
   // nested under /api/cycles/:cycleId/executions/:executionId (no projectId in the path),
   // so the project is resolved via the cycle/cycle_item join instead of being passed in.
+  // Resolves the project (and org) that owns an execution, which is what both execution
+  // attachment routes authorize against — neither carries a projectId in its path. A malformed
+  // id is answered the same way as a well-formed one that doesn't exist, rather than being handed
+  // to Postgres to fail the uuid cast and turn a typo into a 500.
+  private async executionOwner(cycleId: string, executionId: string): Promise<Body> {
+    if (!isUuid(cycleId) || !isUuid(executionId)) throw new NotFoundException({ error: "Execution not found" });
+    const res = await this.db.query(
+      `SELECT e.id, c.project_id, p.organization_id FROM executions e
+       JOIN cycle_items ci ON ci.id = e.cycle_item_id
+       JOIN cycles c ON c.id = ci.cycle_id
+       JOIN projects p ON p.id = c.project_id
+       WHERE e.id = $1 AND c.id = $2 AND e.deleted_at IS NULL`,
+      [executionId, cycleId]
+    );
+    if (!res.rows[0]) throw new NotFoundException({ error: "Execution not found" });
+    return res.rows[0];
+  }
+
   async uploadExecutionAttachments(
     cycleId: string,
     actorId: string | null | undefined,
@@ -2969,18 +4239,13 @@ export class LegacyService implements OnModuleInit {
   ) {
     const uid = this.requireUser(actorId);
     if (!files || files.length === 0) throw new BadRequestException({ error: "No files were uploaded" });
-    const execution = await this.db.query(
-      `SELECT e.id, c.project_id, p.organization_id FROM executions e
-       JOIN cycle_items ci ON ci.id = e.cycle_item_id
-       JOIN cycles c ON c.id = ci.cycle_id
-       JOIN projects p ON p.id = c.project_id
-       WHERE e.id = $1 AND c.id = $2 AND e.deleted_at IS NULL`,
-      [executionId, cycleId]
-    );
-    if (!execution.rows[0]) throw new NotFoundException({ error: "Execution not found" });
-    const projectId = execution.rows[0].project_id;
+    const execution = await this.executionOwner(cycleId, executionId);
+    const projectId = String(execution.project_id);
+    // Being signed in to the workspace isn't enough: attaching evidence to a run means writing
+    // into that project, so the caller has to be a member of it.
+    await this.requireProjectAccess(uid, projectId);
     await this.planLimits.assertStorageAvailable(
-      execution.rows[0].organization_id,
+      execution.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
     );
 
@@ -2992,7 +4257,7 @@ export class LegacyService implements OnModuleInit {
       const res = await this.db.query(
         `INSERT INTO attachments (project_id, entity_type, entity_id, file_name, content_type, file_size, storage_path, uploaded_by)
          VALUES ($1, 'execution', $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [projectId, executionId, file.originalname, file.mimetype, file.size, storageKey, uid]
+        [projectId, executionId, LegacyService.displayFileName(file.originalname), file.mimetype, file.size, storageKey, uid]
       );
       created.push(toCamel(res.rows[0]));
     }
@@ -3002,12 +4267,66 @@ export class LegacyService implements OnModuleInit {
     return { list: created, total: created.length };
   }
 
-  async listExecutionAttachments(executionId: string) {
+  async listExecutionAttachments(cycleId: string, userId: string | null | undefined, executionId: string) {
+    const uid = this.requireUser(userId);
+    const execution = await this.executionOwner(cycleId, executionId);
+    await this.requireProjectAccess(uid, String(execution.project_id));
+    // Columns are listed rather than SELECT *: storage_path is an internal storage key that no
+    // client needs and that shouldn't travel out of the backend.
     const res = await this.db.query(
-      "SELECT * FROM attachments WHERE entity_type = 'execution' AND entity_id = $1 ORDER BY created_at",
+      `SELECT id, project_id, entity_type, entity_id, file_name, content_type, file_size, uploaded_by, created_at
+       FROM attachments WHERE entity_type = 'execution' AND entity_id = $1 ORDER BY created_at`,
       [executionId]
     );
     return { list: res.rows.map(toCamel), total: res.rowCount };
+  }
+
+  /*
+   * The reporting endpoints, gated.
+   *
+   * Every aggregate below reads real project content — test case titles, bug titles and their
+   * external URLs, assignee names, suite names, per-run results — and until these wrappers existed
+   * their controller methods took no @Req() at all, so there was nothing to authorize against: any
+   * caller who knew (or guessed) a project id could read another workspace's entire reporting
+   * surface, with no session of any kind. requireProjectAccess() also rejects a malformed id, which
+   * is what stops `/api/projects/not-a-uuid/analytics` answering a typo with a 500 from the failed
+   * uuid cast.
+   *
+   * Reads only — the plan-limit write lock deliberately leaves reports readable on a locked project.
+   */
+  async projectAnalyticsForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.analytics(projectId);
+  }
+
+  async executionReportForUser(userId: string | null | undefined, projectId: string, query: Body) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.executionReport(projectId, query);
+  }
+
+  async requirementMatrixForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.requirementMatrix(projectId);
+  }
+
+  async repositorySummaryForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.repositorySummary(projectId);
+  }
+
+  async reportsOverviewForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.reportsOverview(projectId);
+  }
+
+  async reportsInsightsForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.reportsInsights(projectId);
+  }
+
+  async reportsTrendsForUser(userId: string | null | undefined, projectId: string) {
+    await this.requireProjectAccess(userId, projectId);
+    return this.reportsTrends(projectId);
   }
 
   async executionReport(projectId: string, query: Body) {
@@ -3456,7 +4775,7 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(userId, projectId);
     const [counts, requirements, bugSeverity, activeRuns, addedThisWeek, passRateWindows] = await Promise.all([
       this.analytics(projectId),
-      this.requirementsSummary(projectId),
+      this.requirementsSummary(projectId, userId),
       this.db.query<{ severity: string; count: string }>(
         `SELECT severity, COUNT(*)::int AS count FROM bugs WHERE project_id = $1 AND status IN ('Open', 'Reopened') GROUP BY severity`,
         [projectId]
@@ -3472,9 +4791,9 @@ export class LegacyService implements OnModuleInit {
       this.db.query<{ passed_recent: string; executed_recent: string; passed_prior: string; executed_prior: string }>(
         `SELECT
            COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '7 days')::int AS passed_recent,
-           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '7 days')::int AS executed_recent,
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status NOT IN ('Untested', 'Retest') AND e.executed_at >= now() - interval '7 days')::int AS executed_recent,
            COUNT(*) FILTER (WHERE e.status = 'Passed' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS passed_prior,
-           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status <> 'Untested' AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS executed_prior
+           COUNT(*) FILTER (WHERE e.status IS NOT NULL AND e.status NOT IN ('Untested', 'Retest') AND e.executed_at >= now() - interval '14 days' AND e.executed_at < now() - interval '7 days')::int AS executed_prior
          FROM executions e
          JOIN cycle_items ci ON ci.id = e.cycle_item_id
          JOIN cycles c ON c.id = ci.cycle_id
@@ -3489,8 +4808,11 @@ export class LegacyService implements OnModuleInit {
     }
     const openBugsTotal = Object.values(bySeverity).reduce((a, b) => a + b, 0);
 
-    const untested = counts.executionStatus.Untested || 0;
-    const executed = counts.executionTotal - untested;
+    // Retest leaves the denominator alongside Untested. A case sent back for retest has no settled
+    // result, so counting it as executed-but-not-passed silently dragged the headline pass rate down
+    // while changing nothing visible on the run itself.
+    const unsettled = (counts.executionStatus.Untested || 0) + (counts.executionStatus.Retest || 0);
+    const executed = counts.executionTotal - unsettled;
     const passRateValue = executed > 0 ? Math.round(((counts.executionStatus.Passed || 0) / executed) * 100) : null;
 
     const w = passRateWindows.rows[0];
@@ -3526,8 +4848,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   async listActivity(projectId: string, query: Body) {
-    const limit = Math.min(Math.max(Number(query.limit || 30), 1), 100);
-    const offset = Math.max(Number(query.offset || 0), 0);
+    const limit = pageNumber(query.limit, 30, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const entityType = String(query.entityType || "").trim();
     const actorId = String(query.actorId || "").trim();
     const search = String(query.search || "").trim();
@@ -3782,8 +5104,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   private async listWorkspaceActivity(organizationId: string, query: Body) {
-    const limit = Math.min(Math.max(Number(query.limit || 30), 1), 100);
-    const offset = Math.max(Number(query.offset || 0), 0);
+    const limit = pageNumber(query.limit, 30, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const entityType = String(query.entityType || "").trim();
     const actorId = String(query.actorId || "").trim();
     const projectId = String(query.projectId || "").trim();
@@ -3886,7 +5208,17 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async listKnowledge(projectId: string, query: Body) {
+  /*
+   * The v1 flat notes surface, superseded by Knowledge Base v2 above but still routed.
+   *
+   * Every method here now takes the caller and resolves the project first. They previously took no
+   * caller at all — the controller methods had no @Req() — so an anonymous request could list any
+   * project's notes by id, rewrite one, or delete one, with no session and from any workspace. The
+   * item routes also resolve the item WITHIN the project: an id alone is not authority, or a member
+   * of one project could delete another project's note by guessing its id.
+   */
+  async listKnowledge(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const values: any[] = [projectId];
     const filters = ["project_id = $1"];
     if (query.type) {
@@ -3902,29 +5234,63 @@ export class LegacyService implements OnModuleInit {
   }
 
   async createKnowledge(projectId: string, userId: string | null | undefined, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
     const res = await this.db.query(
       `INSERT INTO knowledge_base_items (project_id, item_type, title, content, created_by)
        VALUES ($1, 'note', $2, $3, $4) RETURNING *`,
-      [projectId, body.title || "Untitled note", body.content || "", userId || null]
+      [projectId, body.title || "Untitled note", body.content || "", uid]
     );
     return toCamel(res.rows[0]);
   }
 
-  async getKnowledge(itemId: string) {
-    const res = await this.db.query("SELECT * FROM knowledge_base_items WHERE id = $1", [itemId]);
+  /**
+   * Resolves a v1 note inside the project the caller reached it through.
+   *
+   * Scoping to project_id is the load-bearing half: without it, holding an item id was enough to
+   * read, rewrite or delete a note belonging to any project in the deployment.
+   */
+  private async knowledgeItem(projectId: string, itemId: string): Promise<Body> {
+    if (!isUuid(itemId)) throw new NotFoundException({ error: "Knowledge base item not found" });
+    const res = await this.db.query("SELECT * FROM knowledge_base_items WHERE id = $1 AND project_id = $2", [
+      itemId,
+      projectId
+    ]);
     if (!res.rows[0]) throw new NotFoundException({ error: "Knowledge base item not found" });
-    return toCamel(res.rows[0]);
+    return res.rows[0];
   }
 
-  async updateKnowledge(itemId: string, body: Body) {
+  async getKnowledge(projectId: string, userId: string | null | undefined, itemId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return toCamel(await this.knowledgeItem(projectId, itemId));
+  }
+
+  async updateKnowledge(projectId: string, userId: string | null | undefined, itemId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.knowledgeItem(projectId, itemId);
     await this.db.query(
       "UPDATE knowledge_base_items SET title=COALESCE($2,title), content=COALESCE($3,content), updated_at=now() WHERE id=$1",
       [itemId, body.title || null, body.content || null]
     );
   }
 
-  async deleteKnowledge(itemId: string) {
+  async deleteKnowledge(projectId: string, userId: string | null | undefined, itemId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.knowledgeItem(projectId, itemId);
     await this.db.query("DELETE FROM knowledge_base_items WHERE id = $1", [itemId]);
+  }
+
+  /**
+   * The v1 per-item file route, which has never served bytes — it returns an empty object.
+   *
+   * Kept routed for the old clients that still call it, but no longer answers without a session: an
+   * unauthenticated 200 on a project-scoped path is the shape that let bug 14 through, and a route
+   * that looks like it serves a file must not be the one exception.
+   */
+  async knowledgeItemFile(projectId: string, userId: string | null | undefined, itemId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    await this.knowledgeItem(projectId, itemId);
+    return {};
   }
 
   // ─── Knowledge Base v2 (folders / documents / files) ──────────────────────────
@@ -3954,7 +5320,11 @@ export class LegacyService implements OnModuleInit {
     throw new ForbiddenException({ error: "You can only modify items you created" });
   }
 
+  // A malformed id gets the same answer as a well-formed one that doesn't exist. Without the guard
+  // the failed uuid cast surfaces as a 500, so a URL typo reads as a server fault — the same reason
+  // isUuid() guards the custom-field and attachment resolvers.
   private async kbFolder(projectId: string, folderId: string): Promise<Body> {
+    if (!isUuid(folderId)) throw new NotFoundException({ error: "Folder not found" });
     const res = await this.db.query(
       "SELECT * FROM knowledge_folders WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [folderId, projectId]
@@ -4176,6 +5546,9 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireOwnerOrManager(role);
+    // Restore resolves nothing first (a deleted row is invisible to kbFolder), so the uuid guard
+    // has to sit here rather than in the resolver.
+    if (!isUuid(folderId)) throw new NotFoundException({ error: "Folder not found" });
     const res = await this.db.query(
       "UPDATE knowledge_folders SET is_deleted = false, deleted_at = NULL, updated_by = $2, updated_at = now() WHERE id = $1 AND project_id = $3 RETURNING *",
       [folderId, uid, projectId]
@@ -4296,7 +5669,7 @@ export class LegacyService implements OnModuleInit {
         delete camelled.searchVector;
         return Object.assign(camelled, { type: "document" });
       }),
-      ...files.rows.map((row) => Object.assign(toCamel(row), { type: "file" }))
+      ...files.rows.map((row) => Object.assign(this.kbFileView(row), { type: "file" }))
     ];
 
     const search = String(query.search || "").trim().toLowerCase();
@@ -4355,6 +5728,7 @@ export class LegacyService implements OnModuleInit {
   }
 
   private async kbDocument(projectId: string, documentId: string): Promise<Body> {
+    if (!isUuid(documentId)) throw new NotFoundException({ error: "Document not found" });
     const res = await this.db.query(
       `SELECT ${LegacyService.KB_DOCUMENT_COLUMNS} FROM knowledge_documents WHERE id = $1 AND project_id = $2 AND is_deleted = false`,
       [documentId, projectId]
@@ -4516,6 +5890,7 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireOwnerOrManager(role);
+    if (!isUuid(documentId)) throw new NotFoundException({ error: "Document not found" });
     const res = await this.db.query(
       `UPDATE knowledge_documents SET is_deleted = false, deleted_at = NULL, updated_by = $2, updated_at = now()
        WHERE id = $1 AND project_id = $3 RETURNING ${LegacyService.KB_DOCUMENT_COLUMNS}`,
@@ -4605,6 +5980,8 @@ export class LegacyService implements OnModuleInit {
 
     const parentCommentId = body?.parentCommentId ? String(body.parentCommentId) : null;
     if (parentCommentId) {
+      if (!isUuid(parentCommentId))
+        throw new NotFoundException({ error: "The comment you're replying to no longer exists." });
       const parent = await this.db.query<{ id: string; parent_comment_id: string | null }>(
         "SELECT id, parent_comment_id FROM knowledge_document_comments WHERE id = $1 AND document_id = $2 AND is_deleted = false",
         [parentCommentId, documentId]
@@ -4652,6 +6029,7 @@ export class LegacyService implements OnModuleInit {
   async updateKnowledgeDocumentComment(projectId: string, userId: string | null | undefined, commentId: string, body: Body) {
     const uid = this.requireUser(userId);
     await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(commentId)) throw new NotFoundException({ error: "Comment not found" });
     const existing = await this.db.query<{ id: string; author_id: string | null; parent_comment_id: string | null; document_id: string }>(
       "SELECT id, author_id, parent_comment_id, document_id FROM knowledge_document_comments WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [commentId, projectId]
@@ -4688,6 +6066,7 @@ export class LegacyService implements OnModuleInit {
   async deleteKnowledgeDocumentComment(projectId: string, userId: string | null | undefined, commentId: string) {
     const uid = this.requireUser(userId);
     await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(commentId)) throw new NotFoundException({ error: "Comment not found" });
     const existing = await this.db.query<{ id: string; author_id: string | null }>(
       "SELECT id, author_id FROM knowledge_document_comments WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [commentId, projectId]
@@ -4779,10 +6158,26 @@ export class LegacyService implements OnModuleInit {
       this.logger.warn(`OCR skipped — no tessdata found at ${LegacyService.KB_TESSDATA_PATH}`);
       return null;
     }
+    /*
+     * errorHandler is not optional here, despite the try/catch around every caller.
+     *
+     * tesseract.js's worker message handler does `if (errorHandler) errorHandler(data); else throw
+     * Error(data)` (createWorker.js). That throw happens inside the worker's message callback, not
+     * inside the promise recognize() returns — so it lands as an uncaught exception and takes the
+     * whole Node process down. An image libpng cannot decode is enough to trigger it, which made
+     * uploading one slightly-corrupt PNG to a knowledge base a way for any project member to
+     * restart the API for everybody.
+     *
+     * With a handler installed, the same failure only rejects recognize(), which the caller's catch
+     * already turns into "no extractable text".
+     */
     const worker = await createWorker("eng", 1, {
       langPath: LegacyService.KB_TESSDATA_PATH,
       cachePath: LegacyService.KB_TESSDATA_PATH,
-      gzip: true
+      gzip: true,
+      errorHandler: (error: unknown) => {
+        this.logger.warn(`OCR worker reported an error: ${error instanceof Error ? error.message : String(error)}`);
+      }
     });
     try {
       const { data } = await worker.recognize(buffer);
@@ -4832,7 +6227,25 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
+  /**
+   * A knowledge file as it goes to a client, with the storage key removed.
+   *
+   * storage_key is the object's address inside the bucket. Handing it out contradicts the rule
+   * getAccessUrl states for itself ("Never expose storage_key/paths to the client directly") and
+   * undermines the download route's whole purpose: every read is supposed to pass through an
+   * access check first, and a caller holding the key can address the object without one wherever
+   * the bucket is reachable. file_name is dropped with it — it is the generated basename of that
+   * same key, not a name any user chose (original_file_name is the one the UI shows).
+   */
+  private kbFileView(row: Body): Body {
+    const camelled = toCamel(row);
+    delete camelled.storageKey;
+    delete camelled.fileName;
+    return camelled;
+  }
+
   private async kbFile(projectId: string, fileId: string): Promise<Body> {
+    if (!isUuid(fileId)) throw new NotFoundException({ error: "File not found" });
     const res = await this.db.query(
       "SELECT * FROM knowledge_files WHERE id = $1 AND project_id = $2 AND is_deleted = false",
       [fileId, projectId]
@@ -4896,7 +6309,7 @@ export class LegacyService implements OnModuleInit {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *`,
         [project.organization_id, projectId, folderId, path.basename(storageKey), originalFileName, file.mimetype, ext, file.size, storageKey, uid, extractedText, extractionStatus]
       );
-      created.push(toCamel(res.rows[0]));
+      created.push(this.kbFileView(res.rows[0]));
       await this.logProjectActivity(projectId, uid, "uploaded", "knowledge_file", res.rows[0].id, originalFileName, {});
       if (isTranscribable) {
         // Embedding is enqueued once the transcript lands (transcribeKnowledgeFile), not here —
@@ -4913,7 +6326,7 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
     const file = await this.kbFile(projectId, fileId);
     const breadcrumb = await this.kbBreadcrumb(file.folder_id);
-    return { ...toCamel(file), breadcrumb };
+    return { ...this.kbFileView(file), breadcrumb };
   }
 
   async updateKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string, body: Body) {
@@ -4929,7 +6342,7 @@ export class LegacyService implements OnModuleInit {
       [fileId, nextName]
     );
     await this.logProjectActivity(projectId, uid, "renamed", "knowledge_file", fileId, nextName, {});
-    return toCamel(res.rows[0]);
+    return this.kbFileView(res.rows[0]);
   }
 
   async moveKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string, body: Body) {
@@ -4947,7 +6360,7 @@ export class LegacyService implements OnModuleInit {
       [fileId, folderId]
     );
     await this.logProjectActivity(projectId, uid, "moved", "knowledge_file", fileId, res.rows[0].original_file_name, {});
-    return toCamel(res.rows[0]);
+    return this.kbFileView(res.rows[0]);
   }
 
   async deleteKnowledgeFile(projectId: string, userId: string | null | undefined, fileId: string) {
@@ -4971,13 +6384,14 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireOwnerOrManager(role);
+    if (!isUuid(fileId)) throw new NotFoundException({ error: "File not found" });
     const res = await this.db.query(
       "UPDATE knowledge_files SET is_deleted = false, deleted_at = NULL, updated_at = now() WHERE id = $1 AND project_id = $2 RETURNING *",
       [fileId, projectId]
     );
     if (!res.rows[0]) throw new NotFoundException({ error: "File not found" });
     await this.logProjectActivity(projectId, uid, "restored", "knowledge_file", fileId, res.rows[0].original_file_name, {});
-    return toCamel(res.rows[0]);
+    return this.kbFileView(res.rows[0]);
   }
 
   // Resolves how to serve a file's bytes after the caller's own access check has passed:
@@ -4995,7 +6409,12 @@ export class LegacyService implements OnModuleInit {
     // directly (instead of redirecting to a presigned URL) avoids needing the storage bucket's
     // CORS policy to allow credentialed cross-origin requests.
     if (inline && LegacyService.KB_PLAINTEXT_EXTENSIONS.has(ext)) {
-      const buffer = await this.storage.getBuffer(file.storage_key);
+      // The exists() check above is a no-op on S3 (it answers true and lets the signed-URL request
+      // do the checking), so this branch — the only one that reads the bytes here rather than
+      // redirecting — is where a missing object actually surfaces. Without the catch it escapes as
+      // a 500, reporting a server fault for a file that is merely gone.
+      const buffer = await this.storage.getBuffer(file.storage_key).catch(() => null);
+      if (!buffer) throw new NotFoundException({ error: "File content is not available" });
       return { buffer, mimeType, originalFileName: file.original_file_name };
     }
     const access = await this.storage.getAccessUrl(file.storage_key, { filename: file.original_file_name, inline, contentType: mimeType });
@@ -5048,7 +6467,7 @@ export class LegacyService implements OnModuleInit {
          LIMIT 50`,
         [projectId, `%${q}%`]
       );
-      results.push(...res.rows.map((row) => Object.assign(toCamel(row), { type: "file" })));
+      results.push(...res.rows.map((row) => Object.assign(this.kbFileView(row), { type: "file" })));
     }
 
     const withBreadcrumb = await Promise.all(
@@ -5081,7 +6500,10 @@ export class LegacyService implements OnModuleInit {
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, doc.created_by, uid);
 
+    // versionId is client input, so a missing or malformed one must read as "no such version"
+    // rather than a failed uuid cast.
     const versionId = String(body.versionId || "");
+    if (!isUuid(versionId)) throw new NotFoundException({ error: "Version not found" });
     const version = await this.db.query(
       "SELECT * FROM knowledge_document_versions WHERE id = $1 AND document_id = $2",
       [versionId, documentId]
@@ -5471,7 +6893,29 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async jiraStatus(projectId: string) {
+  /*
+   * Every project-scoped integration method below takes the caller and resolves the project first.
+   *
+   * None of them did. Their controller methods had no @Req(), so the whole Jira/Linear surface
+   * answered anyone who knew a project id, with no session and from any workspace: the mirrored
+   * ticket store (issue keys, summaries, assignees and URLs from the customer's tracker) was
+   * readable, the project-to-remote-project mapping was rewritable, and jiraComment/linearComment
+   * posted to the customer's real Jira or Linear using the workspace's stored OAuth token.
+   */
+  async jiraStatus(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    return this.jiraStatusForProject(projectId);
+  }
+
+  /**
+   * jiraStatus without the caller check, for internal callers that have already authorized.
+   *
+   * The Zyra helpers below reach this from a chat turn whose project access was resolved when the
+   * session was opened, and they hold no userId to re-check with. Keeping the unguarded body
+   * private — rather than leaving the public method unguarded, which is what it used to be — means
+   * every route still goes through the check.
+   */
+  private async jiraStatusForProject(projectId: string) {
     const connection = await this.getJiraConnection(projectId, false);
     if (!connection) return { connected: false, connectedProjects: [] };
     const projects = await this.db.query(
@@ -5493,7 +6937,8 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async jiraProjects(projectId: string) {
+  async jiraProjects(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const { baseUrl, headers } = this.jiraBaseUrlAndAuth(connection);
@@ -5512,7 +6957,8 @@ export class LegacyService implements OnModuleInit {
     })).filter((project) => project.id && project.key);
   }
 
-  async connectJiraProjects(projectId: string, body: Body) {
+  async connectJiraProjects(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, false);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const projects = normalizeJsonArray(body.projects)
@@ -5600,9 +7046,10 @@ export class LegacyService implements OnModuleInit {
     return { runs: await this.integrationSync.listRecentRuns(projectId) };
   }
 
-  async jiraTickets(projectId: string, query: Body) {
-    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
-    const offset = Math.max(0, Number(query.offset || 0));
+  async jiraTickets(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 25, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const search = String(query.search || "").trim();
     const filters = ["project_id = $1"];
     const values: any[] = [projectId];
@@ -5634,7 +7081,8 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel), total: count.rows[0]?.count ?? 0 };
   }
 
-  async jiraComment(projectId: string, body: Body) {
+  async jiraComment(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const issueKey = String(body.issueKey || body.jiraIssueKey || "").trim();
@@ -5660,7 +7108,8 @@ export class LegacyService implements OnModuleInit {
 
   // Live search against Jira (not the jira_tickets sync cache) — used by the bug-linking picker,
   // where a ticket filed moments ago may not have synced yet.
-  async jiraSearchIssues(projectId: string, query: Body) {
+  async jiraSearchIssues(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const connection = await this.getJiraConnection(projectId, true);
     if (!connection) throw new NotFoundException({ error: "Jira is not connected." });
     const mappings = await this.db.query(
@@ -5773,7 +7222,8 @@ export class LegacyService implements OnModuleInit {
   // Linear's API is GraphQL (not REST like Jira's) and its unit of work is a "team" rather than a
   // "project" — kept as separate methods/tables rather than forcing a shared shape onto both APIs.
 
-  async linearStatus(projectId: string) {
+  async linearStatus(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", false);
     if (!connection) return { connected: false, connectedProjects: [] };
@@ -5795,7 +7245,8 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async linearTeams(projectId: string) {
+  async linearTeams(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -5814,7 +7265,8 @@ export class LegacyService implements OnModuleInit {
     })).filter((team) => team.id && team.key);
   }
 
-  async connectLinearTeams(projectId: string, body: Body) {
+  async connectLinearTeams(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", false);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -5848,9 +7300,10 @@ export class LegacyService implements OnModuleInit {
     return this.startIntegrationSync(userId, projectId, "linear");
   }
 
-  async linearTickets(projectId: string, query: Body) {
-    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
-    const offset = Math.max(0, Number(query.offset || 0));
+  async linearTickets(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 25, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const search = String(query.search || "").trim();
     const filters = ["project_id = $1"];
     const values: any[] = [projectId];
@@ -5885,9 +7338,10 @@ export class LegacyService implements OnModuleInit {
   // Merged view for the Requirements page's "All Sources" tab — UNION ALL over jira_tickets and
   // linear_tickets into one shape (source discriminator + shared coverage flag), sharing one
   // pagination/search/filter pass instead of stitching two independently-paginated lists client-side.
-  async allTickets(projectId: string, query: Body) {
-    const limit = Math.max(1, Math.min(100, Number(query.limit || 25)));
-    const offset = Math.max(0, Number(query.offset || 0));
+  async allTickets(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 25, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const search = String(query.search || "").trim();
     const combined = `
       SELECT id, 'jira' AS source, jira_issue_key AS key, summary, description, issue_type, status, priority,
@@ -5935,7 +7389,8 @@ export class LegacyService implements OnModuleInit {
   // Coverage/type/status aggregates for the Requirements page's stat strip + filter dropdown
   // options. Type/status are free-text synced verbatim from Jira/Linear (no fixed enum), so option
   // lists are derived from what's actually in the project rather than a hardcoded set.
-  async requirementsSummary(projectId: string) {
+  async requirementsSummary(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const bySource = async (table: "jira_tickets" | "linear_tickets", keyColumn: "jira_issue_key" | "linear_issue_key") => {
       const stats = await this.db.query(
         `SELECT COUNT(*)::int AS total,
@@ -5971,7 +7426,8 @@ export class LegacyService implements OnModuleInit {
     return { all, jira, linear };
   }
 
-  async linearComment(projectId: string, body: Body) {
+  async linearComment(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -5990,7 +7446,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   // Live search against Linear (not the linear_tickets sync cache) — same rationale as jiraSearchIssues.
-  async linearSearchIssues(projectId: string, query: Body) {
+  async linearSearchIssues(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const organizationId = await this.projectOrganizationId(projectId);
     const connection = await this.getIntegrationConnection(organizationId, "linear", true);
     if (!connection) throw new NotFoundException({ error: "Linear is not connected." });
@@ -6029,7 +7486,16 @@ export class LegacyService implements OnModuleInit {
     return { list: results.slice(0, 20) };
   }
 
-  async zyraAgent(projectId: string) {
+  /*
+   * Every Zyra route below takes the caller and resolves the project first.
+   *
+   * None of the read routes did, and neither did settings, close-task or draft-delete: the
+   * controller methods had no @Req(). A chat session holds whatever the team told the agent about
+   * their product and a task holds the test cases it generated, and both were readable — and
+   * mutable — by anyone who knew a project id, from any workspace and with no session at all.
+   */
+  async zyraAgent(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const [project, allocation, usage, tasks] = await Promise.all([
       this.getProject(projectId),
       this.zyraAiAllocation(projectId),
@@ -6081,7 +7547,8 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async testZyraAiConnection(projectId: string): Promise<{ ok: boolean; provider: string; model: string; error?: string; latencyMs: number }> {
+  async testZyraAiConnection(projectId: string, userId: string | null | undefined): Promise<{ ok: boolean; provider: string; model: string; error?: string; latencyMs: number }> {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const allocation = await this.zyraAiAllocation(projectId);
     if (!allocation.key) {
       return { ok: false, provider: "none", model: "none", error: allocation.reason, latencyMs: 0 };
@@ -6144,7 +7611,9 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
-  async zyraTask(projectId: string, taskId: string) {
+  async zyraTask(projectId: string, userId: string | null | undefined, taskId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const res = await this.db.query(
       `SELECT id, requested_by, provider, model, user_story, acceptance_criteria, custom_prompt, style,
               requested_count, generated_count, generated_payload, saved_count, save_events, created_at, updated_at,
@@ -6158,7 +7627,8 @@ export class LegacyService implements OnModuleInit {
     return this.formatAiTask(res.rows[0]);
   }
 
-  async updateZyraSettings(projectId: string, body: Body) {
+  async updateZyraSettings(projectId: string, userId: string | null | undefined, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const project = await this.getProject(projectId);
     const settings = this.parseProjectSettings(project.settings);
     const current = (settings.zyraAgent || {}) as Body;
@@ -6177,7 +7647,8 @@ export class LegacyService implements OnModuleInit {
     return { testcaseCount: requestedCount, testcaseRange, capabilities };
   }
 
-  async zyraChatSessions(projectId: string) {
+  async zyraChatSessions(projectId: string, userId: string | null | undefined) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
     const res = await this.db.query(
       `SELECT id, project_id, user_id, title, created_at, updated_at, active_plan
        FROM zyra_chat_sessions
@@ -6189,7 +7660,9 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel) };
   }
 
-  async zyraChatSession(projectId: string, sessionId: string) {
+  async zyraChatSession(projectId: string, userId: string | null | undefined, sessionId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Chat session not found" });
     const session = await this.db.query(
       "SELECT id, project_id, user_id, title, created_at, updated_at, active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2",
       [sessionId, projectId]
@@ -6215,6 +7688,10 @@ export class LegacyService implements OnModuleInit {
   }
 
   async createZyraChatSession(projectId: string, userId: string | null | undefined, body: Body) {
+    // The caller was passed in but never checked: an anonymous request opened a session with a null
+    // user_id in any project by id, and a member of one project could open a chat in another.
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
     const title = String(body.title || "Zyra chat").trim().slice(0, 240) || "Zyra chat";
     const res = await this.db.query(
       `INSERT INTO zyra_chat_sessions (project_id, user_id, title)
@@ -6227,6 +7704,8 @@ export class LegacyService implements OnModuleInit {
 
   async sendZyraChatMessage(projectId: string, userId: string | null | undefined, sessionId: string, body: Body) {
     const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Zyra chat session not found" });
     const message = String(body.message || "").trim();
     if (!message) throw new BadRequestException({ error: "message is required" });
     const sessionRes = await this.db.query("SELECT * FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
@@ -6292,7 +7771,7 @@ export class LegacyService implements OnModuleInit {
     const item = toCamel(assistant.rows[0]);
     item.testcases = normalizeJsonArray(assistant.rows[0].testcases);
     item.activity = normalizeJsonArray(assistant.rows[0].activity);
-    return { message: item, session: await this.zyraChatSession(projectId, sessionId) };
+    return { message: item, session: await this.zyraChatSession(projectId, userId, sessionId) };
   }
 
   // Lets the user cut short a batched "all possible cases" plan. A batch already in flight
@@ -6302,6 +7781,8 @@ export class LegacyService implements OnModuleInit {
   // resumeZyraChatPlan — or just typing "continue" — can pick it back up later.
   async stopZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
     const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Zyra chat session not found" });
     const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
     if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
     const plan = sessionRes.rows[0].active_plan as Body | undefined;
@@ -6321,7 +7802,7 @@ export class LegacyService implements OnModuleInit {
         []
       );
     }
-    return this.zyraChatSession(projectId, sessionId);
+    return this.zyraChatSession(projectId, userId, sessionId);
   }
 
   private isZyraResumeIntent(message: string): boolean {
@@ -6333,12 +7814,14 @@ export class LegacyService implements OnModuleInit {
   // continueZyraChatPlan. No-ops quietly if there's nothing paused to resume.
   async resumeZyraChatPlan(projectId: string, userId: string | null | undefined, sessionId: string) {
     const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(sessionId)) throw new NotFoundException({ error: "Zyra chat session not found" });
     const sessionRes = await this.db.query("SELECT active_plan FROM zyra_chat_sessions WHERE id = $1 AND project_id = $2", [sessionId, projectId]);
     if (!sessionRes.rows[0]) throw new NotFoundException({ error: "Zyra chat session not found" });
     const plan = sessionRes.rows[0].active_plan as Body | undefined;
     const remainingScenarios = normalizeJsonArray(plan?.remainingScenarios).map(String);
     if (!plan || plan.status !== "paused" || !remainingScenarios.length) {
-      return this.zyraChatSession(projectId, sessionId);
+      return this.zyraChatSession(projectId, userId, sessionId);
     }
     const planId = randomUUID();
     const doneCount = Number(plan.doneCount || 0);
@@ -6356,7 +7839,7 @@ export class LegacyService implements OnModuleInit {
       []
     );
     void this.continueZyraChatPlan(projectId, uid, sessionId, planId).catch(() => undefined);
-    return this.zyraChatSession(projectId, sessionId);
+    return this.zyraChatSession(projectId, userId, sessionId);
   }
 
   // One AI call understands the request, then the system executes it. There is deliberately no
@@ -7157,6 +8640,9 @@ export class LegacyService implements OnModuleInit {
 
   async aiGenerate(projectId: string, userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
+    // Resolved before the allocation lookup: without it a malformed project id reached a uuid column
+    // and answered with a 500, and any workspace member could spend another project's AI allowance.
+    await this.requireProjectAccess(uid, projectId);
     const allocation = await this.db.query(
       `SELECT k.provider, k.default_model, k.api_key, k.base_url, k.auth_header_name, k.auth_scheme
        FROM project_ai_key_allocations a
@@ -7352,9 +8838,10 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
-  async aiHistory(projectId: string, query: Body) {
-    const limit = Math.min(Number(query.limit || 50), 100);
-    const offset = Number(query.offset || 0);
+  async aiHistory(projectId: string, userId: string | null | undefined, query: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    const limit = pageNumber(query.limit, 50, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
     const res = await this.db.query(
       `SELECT * FROM ai_generation_requests WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3`,
       [projectId, limit, offset]
@@ -7362,7 +8849,9 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel) };
   }
 
-  async aiSave(projectId: string, requestId: string, body: Body) {
+  async aiSave(projectId: string, userId: string | null | undefined, requestId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(requestId)) throw new NotFoundException({ error: "Zyra task not found" });
     const savedAt = new Date().toISOString();
     const events = [{ suiteId: body.suiteId || null, testcaseIds: body.testcaseIds || [], savedAt }];
     const activity = [{
@@ -7382,9 +8871,11 @@ export class LegacyService implements OnModuleInit {
   }
 
   async zyraFeedback(projectId: string, userId: string | null | undefined, taskId: string, body: Body) {
+    const uid = this.requireUser(userId);
+    await this.requireProjectAccess(uid, projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
-    const uid = this.requireUser(userId);
     const feedbackText = String(body.feedback || "").trim();
     const referenceNote = String(body.referenceNote || "").trim();
     const additionalJiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String).filter(Boolean);
@@ -7507,7 +8998,9 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  async zyraDeleteDraft(projectId: string, taskId: string, draftIndex: number) {
+  async zyraDeleteDraft(projectId: string, userId: string | null | undefined, taskId: string, draftIndex: number) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT generated_payload FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     const drafts = normalizeJsonArray(existing.rows[0].generated_payload);
@@ -7534,7 +9027,9 @@ export class LegacyService implements OnModuleInit {
     return this.formatAiTask(res.rows[0]);
   }
 
-  async zyraCloseTask(projectId: string, taskId: string) {
+  async zyraCloseTask(projectId: string, userId: string | null | undefined, taskId: string) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT id, task_status FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     const now = new Date().toISOString();
@@ -7556,6 +9051,8 @@ export class LegacyService implements OnModuleInit {
   }
 
   async zyraSave(projectId: string, userId: string | null | undefined, taskId: string, body: Body) {
+    await this.requireProjectAccess(this.requireUser(userId), projectId);
+    if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
     let suiteId = body.suiteId || null;
@@ -7627,7 +9124,7 @@ export class LegacyService implements OnModuleInit {
         touched.push(testcase);
       }
     }
-    await this.aiSave(projectId, taskId, { suiteId, testcaseIds: touched.map((item) => item.id) });
+    await this.aiSave(projectId, userId, taskId, { suiteId, testcaseIds: touched.map((item) => item.id) });
     return { savedCount: touched.length, suiteId, testcases: touched };
   }
 
@@ -9203,7 +10700,7 @@ export class LegacyService implements OnModuleInit {
          WHERE j.project_id = $1 AND l.jira_issue_key IS NULL`,
         [projectId]
       ).catch(() => ({ rows: [{}] as Body[] })),
-      this.jiraStatus(projectId).catch(() => ({ connected: false, connectedProjects: [] }))
+      this.jiraStatusForProject(projectId).catch(() => ({ connected: false, connectedProjects: [] }))
     ]);
     return {
       knowledgeCount: knowledge.rows.length + files.rows.length,
@@ -9224,7 +10721,7 @@ export class LegacyService implements OnModuleInit {
 
   private async analyzeZyraJiraTestcaseCoverage(projectId: string): Promise<ZyraChatDecision> {
     const [status, totals, pending] = await Promise.all([
-      this.jiraStatus(projectId).catch(() => ({ connected: false, connectedProjects: [] })),
+      this.jiraStatusForProject(projectId).catch(() => ({ connected: false, connectedProjects: [] })),
       this.db.query(
         `WITH linked AS (
            SELECT jira_issue_key, COUNT(*)::int AS testcase_count
@@ -9443,6 +10940,7 @@ export class LegacyService implements OnModuleInit {
     return res.rows[0].id;
   }
 
+  /** The `<KEY>` half of `<KEY>-TC-<n>`: the project's configured prefix, its key, or "TC". */
   private async externalIdPrefix(projectId: string, requestedPrefix?: unknown, runner: QueryRunner = this.db): Promise<string> {
     const project = await runner.query<{ key: string; settings: unknown }>("SELECT key, settings FROM projects WHERE id = $1", [projectId]);
     const settings = parseSettings(project.rows[0]?.settings);
@@ -9455,6 +10953,9 @@ export class LegacyService implements OnModuleInit {
   // Highest sequence number already used under this prefix. Callers add 1 for a single id, or
   // claim a contiguous block for a batch. Use MAX of the trailing numeric part to avoid
   // collisions when IDs have gaps.
+  //
+  // Counts soft-deleted rows too: the unique index does not exclude them, so skipping a deleted
+  // row's number would hand out an id that still exists and fail the insert.
   private async maxExternalIdSeq(projectId: string, key: string, runner: QueryRunner = this.db): Promise<number> {
     const maxRes = await runner.query<{ n: string }>(
       "SELECT COALESCE(MAX((regexp_match(external_id, '\\d+$'))[1]::int), 0) AS n FROM testcases WHERE project_id = $1 AND external_id LIKE $2",
@@ -9463,9 +10964,17 @@ export class LegacyService implements OnModuleInit {
     return Number(maxRes.rows[0]?.n || 0);
   }
 
-  private async nextExternalId(projectId: string, requestedPrefix?: unknown): Promise<string> {
-    const key = await this.externalIdPrefix(projectId, requestedPrefix);
-    return `${key}-TC-${(await this.maxExternalIdSeq(projectId, key)) + 1}`;
+  /**
+   * The next free `<KEY>-TC-<n>` for a project.
+   *
+   * `runner` matters: when allocating for an insert, this must read through the SAME transaction that
+   * holds the advisory lock and will do the writing (see insertTestCase). Reading on the pool instead
+   * would read outside that lock and reintroduce the race it exists to close. QueryRunner is
+   * structurally typed so a PoolClient and DatabaseService both satisfy it.
+   */
+  private async nextExternalId(projectId: string, requestedPrefix?: unknown, runner: QueryRunner = this.db): Promise<string> {
+    const key = await this.externalIdPrefix(projectId, requestedPrefix, runner);
+    return `${key}-TC-${(await this.maxExternalIdSeq(projectId, key, runner)) + 1}`;
   }
 
   private async groupTestcases(projectId: string, column: string) {

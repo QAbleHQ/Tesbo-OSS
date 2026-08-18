@@ -52,7 +52,7 @@ export default function AiProviderDetailsPage() {
         />
       }
     >
-      {error && <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">{error}</p>}
+      {error && <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">{error}</p>}
       {role !== "owner" && (
         <Card className="p-4">
           <p className="text-sm text-[var(--muted)]">Only workspace owners can add or change providers. This page is read-only for your role.</p>

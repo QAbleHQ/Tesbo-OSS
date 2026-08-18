@@ -124,8 +124,8 @@ export function JiraProjectSettings() {
             <p
               className={`rounded-lg border px-3 py-2 text-sm ${
                 message.type === "success"
-                  ? "border-[var(--success)]/30 bg-[color-mix(in_oklab,var(--success)_8%,white)] text-[var(--success)]"
-                  : "border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] text-[var(--error)]"
+                  ? "border-[var(--success)]/30 bg-[color-mix(in_oklab,var(--success)_8%,white)] text-[var(--success-foreground)]"
+                  : "border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] text-[var(--error-foreground)]"
               }`}
             >
               {message.text}

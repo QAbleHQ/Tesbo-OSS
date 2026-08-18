@@ -54,6 +54,36 @@ function backendValue(key: string): string {
   return process.env[`E2E_${key}`] ?? process.env[key] ?? rootEnv()[key] ?? "";
 }
 
+/*
+ * The domain every address this suite invents lives at. Keep it a real, mail-accepting one.
+ *
+ * History: this suite used to mint addresses at `tesbo.local` / `tesbo-e2e.local`, domains that do
+ * not exist, while a LIVE Postmark token sat in the repo-root .env — so every signup, OTP and invite
+ * was a real delivery attempt to nowhere. ~1100 bounces accumulated and the sending account was
+ * flagged.
+ *
+ * The backend now refuses to deliver unless it is explicitly in EMAIL_DELIVERY_MODE=live against a
+ * Live Postmark server (see Tesbo-Backend-Nest/src/config/email-delivery.policy.ts, and the guard
+ * spec in e2e/api/email-delivery.spec.ts that fails the run if this stack could email real people).
+ * That, not this domain, is what makes a run bounce-proof.
+ *
+ * mailinator.com stays the default anyway, as the second line of defence for anything that reaches
+ * a mail server despite the above — it accepts every address without bouncing, and its inboxes are
+ * readable over a public API if a spec ever does need to read a real message. Keep local-parts to
+ * [a-z0-9-] so they remain valid inbox names.
+ *
+ * Note that Mailinator inboxes are PUBLIC. That's fine for throwaway tenants on a local stack;
+ * don't point this at a domain whose mail matters, and don't rely on these addresses being
+ * private on a deployed target.
+ */
+export const emailDomain = process.env.E2E_EMAIL_DOMAIN ?? "mailinator.com";
+
+/** `testAddress("invite-badcode")` → `e2e-invite-badcode-<unique>@<emailDomain>`. */
+export function testAddress(label: string, unique: string | number = Date.now()): string {
+  const slug = `e2e-${label}-${unique}`.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+  return `${slug}@${emailDomain}`;
+}
+
 export const env = {
   apiBaseUrl,
   webBaseUrl,
@@ -61,22 +91,24 @@ export const env = {
 
   // Disposable smoke-test account. On a fresh stack this user doesn't exist yet —
   // global-setup creates it automatically when autoProvision is enabled (see below).
-  testEmail: process.env.E2E_TEST_EMAIL ?? "e2e-smoke@tesbo.local",
+  //
+  // Every *person* name below is deliberately "EndToEnd ...", not "E2E ...": validatePersonName()
+  // allows only letters, marks, space, hyphen, apostrophe and period, so the "2" in "E2E" is a 400
+  // on signup/start and on invite registration. Org and project names keep the "E2E " prefix — they
+  // are not name-validated, and global-setup finds existing fixtures by matching projectName, so
+  // renaming those would orphan every tenant already provisioned in the shared database.
+  testEmail: process.env.E2E_TEST_EMAIL ?? `e2e-smoke@${emailDomain}`,
   testPassword: process.env.E2E_TEST_PASSWORD ?? "E2eSmokeTest!2026",
-  // Person names must be letters/spaces/hyphens/apostrophes/periods only (see
-  // validatePersonName) — the digit in "E2E" makes signup reject the account, which fails
-  // global-setup before any spec runs. Only the *person* names are constrained; org and
-  // project names below are free-form and keep the E2E prefix.
-  testName: process.env.E2E_TEST_NAME ?? "EToE Smoke User",
+  testName: process.env.E2E_TEST_NAME ?? "EndToEnd Smoke User",
 
   orgName: process.env.E2E_ORG_NAME ?? "E2E Smoke Org",
   projectName: process.env.E2E_PROJECT_NAME ?? "E2E Smoke Project",
 
   // Second, fully independent tenant — used only by the cross-tenant authorization suite
   // (e2e/api/authorization.spec.ts) to prove account B can't reach account A's resources.
-  testEmailB: process.env.E2E_TEST_EMAIL_B ?? "e2e-smoke-b@tesbo.local",
+  testEmailB: process.env.E2E_TEST_EMAIL_B ?? `e2e-smoke-b@${emailDomain}`,
   testPasswordB: process.env.E2E_TEST_PASSWORD_B ?? "E2eSmokeTestB!2026",
-  testNameB: process.env.E2E_TEST_NAME_B ?? "EToE Smoke User B",
+  testNameB: process.env.E2E_TEST_NAME_B ?? "EndToEnd Smoke User B",
   orgNameB: process.env.E2E_ORG_NAME_B ?? "E2E Smoke Org B",
   projectNameB: process.env.E2E_PROJECT_NAME_B ?? "E2E Smoke Project B",
 
@@ -94,17 +126,55 @@ export const env = {
    * workers. Sharing a workspace between the API and UI billing specs would let one file's
    * "downgrade now" land in the middle of the other file's "we're on Pro" assertions.
    */
-  billingApiEmail: process.env.E2E_BILLING_API_EMAIL ?? "e2e-billing-api@tesbo.local",
+  billingApiEmail: process.env.E2E_BILLING_API_EMAIL ?? `e2e-billing-api@${emailDomain}`,
   billingApiPassword: process.env.E2E_BILLING_API_PASSWORD ?? "E2eBillingApi!2026",
-  billingApiName: process.env.E2E_BILLING_API_NAME ?? "EToE Billing API User",
+  billingApiName: process.env.E2E_BILLING_API_NAME ?? "EndToEnd Billing API User",
   billingApiOrgName: process.env.E2E_BILLING_API_ORG_NAME ?? "E2E Billing API Org",
   billingApiProjectName: process.env.E2E_BILLING_API_PROJECT_NAME ?? "E2E Billing API Project",
 
-  billingUiEmail: process.env.E2E_BILLING_UI_EMAIL ?? "e2e-billing-ui@tesbo.local",
+  billingUiEmail: process.env.E2E_BILLING_UI_EMAIL ?? `e2e-billing-ui@${emailDomain}`,
   billingUiPassword: process.env.E2E_BILLING_UI_PASSWORD ?? "E2eBillingUi!2026",
-  billingUiName: process.env.E2E_BILLING_UI_NAME ?? "EToE Billing UI User",
+  billingUiName: process.env.E2E_BILLING_UI_NAME ?? "EndToEnd Billing UI User",
   billingUiOrgName: process.env.E2E_BILLING_UI_ORG_NAME ?? "E2E Billing UI Org",
   billingUiProjectName: process.env.E2E_BILLING_UI_PROJECT_NAME ?? "E2E Billing UI Project",
+
+  /*
+   * One more disposable tenant, for the screen-level UI suites (projects list, navigation, theme,
+   * project dashboard) and the project-dashboard API suite.
+   *
+   * These suites need to create and delete SEVERAL projects at once — to assert list ordering, the
+   * grid/list parity, per-status cards, and per-project dashboard arithmetic — and they need the
+   * project list to hold nothing but their own fixtures so a count or an order is deterministic.
+   *
+   * Account A can't give them that. It's a Launch workspace, and PROJECT_LIMITS.launch is 2, so with
+   * its own smoke project already in place there is exactly ONE spare project slot in the entire
+   * workspace. Different spec FILES run concurrently across workers (fullyParallel only serialises
+   * within a file), so two files both reaching for that slot would 403 each other at random. Hence a
+   * tenant of its own, which global-setup puts on Pro for unlimited projects.
+   */
+  screensEmail: process.env.E2E_SCREENS_EMAIL ?? `e2e-screens@${emailDomain}`,
+  screensPassword: process.env.E2E_SCREENS_PASSWORD ?? "E2eScreens!2026",
+  screensName: process.env.E2E_SCREENS_NAME ?? "EndToEnd Screens User",
+  screensOrgName: process.env.E2E_SCREENS_ORG_NAME ?? "E2E Screens Org",
+  screensProjectName: process.env.E2E_SCREENS_PROJECT_NAME ?? "E2E Screens Base Project",
+
+  /*
+   * One more disposable tenant, for the workspace-creation suite.
+   *
+   * That suite creates additional workspaces, and POST /api/workspaces switches the caller's
+   * ACTIVE workspace to the one it just made. Every other spec resolves its data through the
+   * caller's active workspace, so running this against account A would silently repoint account A
+   * at an empty org — and since fullyParallel is false but different FILES still run concurrently,
+   * it could do that in the middle of another file's assertions. Hence a tenant of its own.
+   *
+   * It also needs a name that is NOT any other tenant's org name: the suite asserts on how many
+   * workspaces this account owns, so a shared name would make those counts depend on run order.
+   */
+  workspacesEmail: process.env.E2E_WORKSPACES_EMAIL ?? `e2e-workspaces@${emailDomain}`,
+  workspacesPassword: process.env.E2E_WORKSPACES_PASSWORD ?? "E2eWorkspaces!2026",
+  workspacesName: process.env.E2E_WORKSPACES_NAME ?? "EndToEnd Workspaces User",
+  workspacesOrgName: process.env.E2E_WORKSPACES_ORG_NAME ?? "E2E Workspaces Org",
+  workspacesProjectName: process.env.E2E_WORKSPACES_PROJECT_NAME ?? "E2E Workspaces Project",
 
   /*
    * Stripe values mirrored from the backend's own configuration.
@@ -145,7 +215,22 @@ export const env = {
   dockerComposeFile:
     process.env.E2E_DOCKER_COMPOSE_FILE ?? path.resolve(__dirname, "../../docker-compose.yml"),
   dockerService: process.env.E2E_DOCKER_SERVICE ?? "backend",
+  // Only the container that supplies the psql binary and the network path. It is never the database
+  // itself — see dbUrl.
   dbService: process.env.E2E_DB_SERVICE ?? "postgres",
-  dbUser: process.env.E2E_DB_USER ?? process.env.POSTGRES_USER ?? "postgres",
-  dbName: process.env.E2E_DB_NAME ?? process.env.POSTGRES_DB ?? "tesbo",
+  /*
+   * The one database this suite is allowed to touch: whatever DATABASE_URL the stack under test is
+   * booted from.
+   *
+   * There is deliberately no E2E_DB_USER / E2E_DB_NAME pair any more. Those fed a `psql -U postgres
+   * -d tesbo` call against the compose postgres container, which on this stack is an orphan holding
+   * its own unrelated copy of the schema — so it connected, answered SELECT 1, and served a
+   * database the API had never written to. dbControlAvailable() reported true, fixtures landed
+   * where the API could not see them, and suites failed on assertions about rows that had genuinely
+   * been inserted, into the wrong server. Removing the pair removes the fallback that made that
+   * reachable; psql.ts throws when this is unset rather than guessing.
+   *
+   * The repo's CLAUDE.md carries this as a standing rule: no local database, for any reason.
+   */
+  dbUrl: backendValue("DATABASE_URL"),
 };
