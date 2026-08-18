@@ -71,9 +71,6 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
     exec(`DELETE FROM zyra_chat_sessions WHERE project_id IN (${projects});`);
     exec(`DELETE FROM ai_generation_requests WHERE project_id IN (${projects});`);
     exec(`DELETE FROM workspace_ai_keys WHERE organization_id = ${literal(t.organizationId)};`);
-    // ZYR-A-31 counts these, and provisionRbacTenant reuses this workspace across runs — a run that
-    // died mid-test would otherwise leave rows that move the next run's baseline off zero.
-    exec(`DELETE FROM audit_logs WHERE project_id IN (${projects}) AND action = 'zyra_created';`);
   }
 
   async function expectRefused(res: APIResponse, what: string): Promise<void> {
@@ -813,24 +810,33 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
     const taskCase = await zyraCase(`E2E Zyra task case ${stamp}`);
     const manualCase = await zyraCase(`E2E manual case ${stamp}`);
     try {
-      // A case Zyra did not create must not be counted, so the baseline is taken with it present.
-      expect(await countReported(), "a manually created case was counted as Zyra's").toBe(0);
+      /*
+       * Asserted as DELTAS from a baseline, not absolute counts.
+       *
+       * audit_logs is append-only — migration V62_audit_logs_immutable.sql installs a trigger that
+       * rejects DELETE — so these rows cannot be cleaned up afterwards and a re-run against the
+       * persistent volume starts from whatever previous runs left behind. The first attempt at this
+       * test cleaned up with a DELETE and failed on that trigger; the counts are relative now, which
+       * needs no cleanup and is what the assertion actually cares about.
+       */
+      const baseline = await countReported();
+      // A case Zyra did not create must not be counted: the manual one is already present here.
+      expect(await countReported(), "creating a case manually changed Zyra's count").toBe(baseline);
 
       markCreatedByZyra(chatCase, "zyra_chat");
-      expect(await countReported(), "a chat-created case was not counted").toBe(1);
+      expect(await countReported(), "a chat-created case was not counted").toBe(baseline + 1);
 
       markCreatedByZyra(taskCase, "zyra_task");
-      expect(await countReported(), "both modes should be counted").toBe(2);
+      expect(await countReported(), "both modes should be counted").toBe(baseline + 2);
 
       // Re-saving the same draft writes a second audit row for one case; DISTINCT keeps it at one.
       markCreatedByZyra(taskCase, "zyra_task");
-      expect(await countReported(), "one case counted twice").toBe(2);
+      expect(await countReported(), "one case counted twice").toBe(baseline + 2);
 
       // Deleting a Zyra case takes it back out — the count describes what the repository holds.
       await asOwner.delete(url(`/testcases/${chatCase}`), { failOnStatusCode: false });
-      expect(await countReported(), "a deleted case is still being counted").toBe(1);
+      expect(await countReported(), "a deleted case is still being counted").toBe(baseline + 1);
     } finally {
-      exec(`DELETE FROM audit_logs WHERE project_id = ${literal(tenant!.mainProjectId)} AND action = 'zyra_created';`);
       for (const id of [chatCase, taskCase, manualCase]) {
         await asOwner.delete(url(`/testcases/${id}`), { failOnStatusCode: false });
       }

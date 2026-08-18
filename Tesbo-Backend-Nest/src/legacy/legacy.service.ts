@@ -2220,8 +2220,9 @@ export class LegacyService implements OnModuleInit {
    * could be returned on both pages while another was never returned at all.
    *
    * external_id is assigned sequentially at creation, so created_at DESC IS the ID sequence the
-   * screen displays, and no edit reshuffles it. exportTestCases is ordered the same way so a
-   * downloaded file matches the list it was exported from.
+   * screen displays, and no edit reshuffles it. exportTestCases deliberately keeps its own
+   * most-recently-updated order, which api/import-export.spec.ts pins — it gained only the id
+   * tiebreaker, so a bulk update can no longer make two exports of the same data disagree.
    */
   async listTestCases(projectId: string, query: Body) {
     const limit = pageNumber(query.limit, 100, 0, 500);
@@ -2333,7 +2334,12 @@ export class LegacyService implements OnModuleInit {
        FROM testcases t
        LEFT JOIN suites s ON s.id = t.suite_id
        WHERE t.project_id = $1 AND t.deleted_at IS NULL
-       ORDER BY t.created_at DESC, t.id DESC`,
+       -- Export keeps its documented "most recently updated first" contract (pinned by
+       -- api/import-export.spec.ts "orders rows by most recently updated"); only the repository LIST
+       -- moved to ID sequence, which is what card 10212941059 asked for. The id tiebreaker is the part
+       -- that mattered here: a bulk update ties every touched row on one updated_at, and without it the
+       -- export's row order was arbitrary between two exports of the same data.
+       ORDER BY t.updated_at DESC, t.id DESC`,
       [projectId]
     );
 
