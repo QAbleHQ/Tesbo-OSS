@@ -44,23 +44,32 @@ export class OtpService {
   async verifyOtpCode(rawEmail: string, code: string, ipAddress?: string | null): Promise<boolean> {
     const email = rawEmail.trim().toLowerCase();
     const ipKey = this.rateLimitKeyForIp(ipAddress);
-    if ((await this.isRateLimited(this.verifyLimitKey(email))) || (await this.isRateLimited(this.verifyLimitKey(ipKey)))) return false;
+
+    // This account specifically has been guessed too many times — block outright.
+    if (await this.isRateLimited(this.verifyLimitKey(email))) return false;
 
     const result = await this.db.query<{ id: string }>(
       "SELECT id FROM otp_codes WHERE email = $1 AND code_hash = $2 AND expires_at > now() AND used_at IS NULL ORDER BY created_at DESC LIMIT 1",
       [email, this.hash(code.trim())]
     );
     const otpId = result.rows[0]?.id;
-    if (!otpId) {
-      await this.recordOtpAttempt(this.verifyLimitKey(email));
-      await this.recordOtpAttempt(this.verifyLimitKey(ipKey));
-      return false;
+
+    if (otpId) {
+      // A correct code always succeeds, even if this IP has an unrelated lockout in
+      // progress from wrong guesses against other accounts — the IP limiter exists to slow
+      // down guessing, not to block a code that's already been proven valid.
+      await this.markOtpUsed(otpId);
+      await this.clearRateLimit(this.verifyLimitKey(email));
+      await this.clearRateLimit(this.verifyLimitKey(ipKey));
+      return true;
     }
 
-    await this.markOtpUsed(otpId);
-    await this.clearRateLimit(this.verifyLimitKey(email));
-    await this.clearRateLimit(this.verifyLimitKey(ipKey));
-    return true;
+    // Wrong code: an IP already locked from prior wrong guesses (against this or other
+    // accounts) blocks here instead of recording yet another attempt.
+    if (await this.isRateLimited(this.verifyLimitKey(ipKey))) return false;
+    await this.recordOtpAttempt(this.verifyLimitKey(email));
+    await this.recordOtpAttempt(this.verifyLimitKey(ipKey));
+    return false;
   }
 
   async createSession(userId: string, ipAddress?: string | null, userAgent?: string | null): Promise<string> {

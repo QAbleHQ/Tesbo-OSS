@@ -60,24 +60,33 @@ export class AuthService {
     const emailKey = this.loginLimitKey(normalizedEmail);
     const ipKey = this.loginLimitKey(`ip:${this.ip(req)}`);
 
-    if ((await this.isLoginRateLimited(emailKey)) || (await this.isLoginRateLimited(ipKey))) {
+    // This account specifically has been guessed too many times — block outright, no
+    // need to spend a bcrypt compare on it.
+    if (await this.isLoginRateLimited(emailKey)) {
       throw new HttpException({ error: "account_temporarily_locked" }, HttpStatus.TOO_MANY_REQUESTS);
     }
 
     const userId = await this.password.verifyLogin(email, password);
-    if (!userId) {
-      await this.recordLoginAttempt(emailKey);
-      await this.recordLoginAttempt(ipKey);
-      throw new UnauthorizedException({ error: "invalid_email_or_password" });
-    }
-    // A successful login only clears this account's own counter — a shared IP (e.g. an
-    // office NAT) with a lockout in progress for a *different* account must stay locked.
-    await this.clearLoginRateLimit(emailKey);
 
-    const token = await this.otp.createSession(userId, this.ip(req), req.get("user-agent"));
-    await this.audit.log(userId, "login", "auth", normalizedEmail, "{}", this.ip(req), req.get("user-agent"));
-    this.setSessionCookie(req, res, token, 86400 * this.config.sessionDays);
-    return { ok: true, userId };
+    if (userId) {
+      // Correct credentials always succeed, even if this IP has an unrelated lockout in
+      // progress from wrong guesses against other accounts — the IP limiter exists to slow
+      // down guessing, not to block a login that's already been proven valid.
+      await this.clearLoginRateLimit(emailKey);
+      const token = await this.otp.createSession(userId, this.ip(req), req.get("user-agent"));
+      await this.audit.log(userId, "login", "auth", normalizedEmail, "{}", this.ip(req), req.get("user-agent"));
+      this.setSessionCookie(req, res, token, 86400 * this.config.sessionDays);
+      return { ok: true, userId };
+    }
+
+    // Wrong password: an IP already locked from prior wrong guesses (against this or other
+    // accounts) blocks here instead of recording yet another attempt.
+    if (await this.isLoginRateLimited(ipKey)) {
+      throw new HttpException({ error: "account_temporarily_locked" }, HttpStatus.TOO_MANY_REQUESTS);
+    }
+    await this.recordLoginAttempt(emailKey);
+    await this.recordLoginAttempt(ipKey);
+    throw new UnauthorizedException({ error: "invalid_email_or_password" });
   }
 
   async forgotPassword(email: string | undefined, req: AuthenticatedRequest): Promise<void> {

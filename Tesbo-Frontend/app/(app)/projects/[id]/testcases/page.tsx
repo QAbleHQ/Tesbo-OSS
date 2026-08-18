@@ -1219,6 +1219,16 @@ export default function TestCasesPage() {
                       placeholder="Search by ID, title, or type"
                       className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
                     />
+                    {suiteSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setSuiteSearch("")}
+                        aria-label="Clear search"
+                        className="shrink-0 rounded-full p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                      >
+                        <IconX size={12} stroke={2} />
+                      </button>
+                    )}
                   </label>
                   {activeSuiteId && (
                     <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--accent-light)]">

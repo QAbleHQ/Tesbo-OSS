@@ -1,4 +1,16 @@
 import "reflect-metadata";
+
+// Must run before AppModule (or anything it transitively imports) is loaded: several classes
+// read process.env in a `static readonly` field initializer, which evaluates the moment the
+// module is imported — well before AppConfigService's own dotenv.config() call would otherwise
+// run during Nest's DI instantiation. Without this, those fields silently fall back to their
+// hardcoded defaults, ignoring whatever the .env file actually says (e.g. MAX_UPLOAD_SIZE).
+import * as dotenv from "dotenv";
+import { existsSync } from "fs";
+import { join } from "path";
+const earlyEnvPath = [join(process.cwd(), ".env"), join(process.cwd(), "backend", ".env")].find(existsSync);
+if (earlyEnvPath) dotenv.config({ path: earlyEnvPath });
+
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import compression from "compression";
@@ -72,7 +84,7 @@ async function bootstrap() {
     maxAge: 86400
   });
 
-  app.useGlobalFilters(new HttpExceptionFilter());
+  app.useGlobalFilters(new HttpExceptionFilter(config.maxUploadSize));
   await app.listen(config.port, "0.0.0.0");
   console.log(`Nest backend running on http://localhost:${config.port}`);
 

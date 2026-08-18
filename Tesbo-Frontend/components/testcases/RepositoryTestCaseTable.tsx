@@ -70,6 +70,11 @@ const DEFAULT_DATA_ORDER: RepoDataColumnId[] = [
   "updated",
 ];
 
+// Always shown, can't be hidden via the "Show fields" menu — a test case is illegible
+// without an ID, a title, and a priority to triage by.
+const LOCKED_COLUMN_IDS: RepoDataColumnId[] = ["id", "title", "priority"];
+const LOCKED_COLUMN_SET = new Set(LOCKED_COLUMN_IDS);
+
 const DEFAULT_VISIBLE: Record<RepoDataColumnId, boolean> = {
   id: true,
   title: true,
@@ -167,6 +172,8 @@ function normalizeVisible(raw: unknown): Record<RepoDataColumnId, boolean> {
       if (typeof v === "boolean") next[id] = v;
     }
   }
+  // Force locked columns back on, in case a preference saved before they were locked had them hidden.
+  for (const id of LOCKED_COLUMN_IDS) next[id] = true;
   return next;
 }
 
@@ -331,6 +338,7 @@ export function RepositoryTestCaseTable({
   }, []);
 
   const toggleColumnVisible = useCallback((id: RepoDataColumnId) => {
+    if (LOCKED_COLUMN_SET.has(id)) return;
     setVisible((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
 
@@ -586,23 +594,31 @@ export function RepositoryTestCaseTable({
           <p className="px-3 pb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted-soft)]">
             Show fields · {visibleDataColumns.length} of {DATA_COLUMN_IDS.length}
           </p>
-          {DATA_COLUMN_IDS.map((id) => (
+          {DATA_COLUMN_IDS.map((id) => {
+            const locked = LOCKED_COLUMN_SET.has(id);
+            return (
             <label
               key={id}
-              className="flex cursor-pointer items-start gap-2 px-3 py-1.5 text-sm hover:bg-[var(--surface-secondary)]"
+              title={locked ? "Always shown" : undefined}
+              className={`flex items-start gap-2 px-3 py-1.5 text-sm ${locked ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-[var(--surface-secondary)]"}`}
             >
               <input
                 type="checkbox"
                 className="mt-0.5"
                 checked={visible[id]}
+                disabled={locked}
                 onChange={() => toggleColumnVisible(id)}
               />
               <span className="min-w-0 flex-1">
-                <span className="text-[var(--foreground)]">{COLUMN_LABELS[id]}</span>
+                <span className="text-[var(--foreground)]">
+                  {COLUMN_LABELS[id]}
+                  {locked && <span className="ml-1.5 text-[11px] font-normal text-[var(--muted-soft)]">(always shown)</span>}
+                </span>
                 <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted)]">{FIELD_IDS[id]}</span>
               </span>
             </label>
-          ))}
+            );
+          })}
           <p className="mt-2 border-t border-[var(--border-subtle)] px-3 pt-2 text-[11px] text-[var(--muted)]">
             {
               "The selection column stays first. Drag headers to reorder data fields, and drag header edges to resize columns."
