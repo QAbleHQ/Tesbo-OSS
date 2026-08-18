@@ -249,7 +249,10 @@ test.describe("workspace setup and analytics", () => {
       ).toBe(listedAfter.length);
     } finally {
       await asOwner.delete(`/api/projects/${unjoinedId}`, { failOnStatusCode: false });
-      exec(`DELETE FROM projects WHERE id = ${literal(unjoinedId)};`);
+      // Archived, not deleted: audit_logs.project_id is ON DELETE SET NULL and audit_logs is
+      // append-only, so a project that has been audited can never be removed — and archiving is
+      // exactly what the product's own delete does. See utils/psql.ts.
+      exec(`UPDATE projects SET archived_at = now(), updated_at = now() WHERE id = ${literal(unjoinedId)};`);
     }
   });
 
@@ -295,7 +298,10 @@ test.describe("workspace setup and analytics", () => {
       exec(`DELETE FROM testcases WHERE project_id = ${literal(unjoinedId)};`);
       exec(`DELETE FROM suites WHERE project_id = ${literal(unjoinedId)};`);
       exec(`DELETE FROM project_members WHERE project_id = ${literal(unjoinedId)};`);
-      exec(`DELETE FROM projects WHERE id = ${literal(unjoinedId)};`);
+      // Archived, not deleted: audit_logs.project_id is ON DELETE SET NULL and audit_logs is
+      // append-only, so a project that has been audited can never be removed — and archiving is
+      // exactly what the product's own delete does. See utils/psql.ts.
+      exec(`UPDATE projects SET archived_at = now(), updated_at = now() WHERE id = ${literal(unjoinedId)};`);
     }
   });
 });

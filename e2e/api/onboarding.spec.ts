@@ -1,6 +1,6 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { testAddress } from "../utils/env";
-import { dbControlAvailable, exec, literal, scalar } from "../utils/psql";
+import { dbControlAvailable, exec, execAllowingAuditImmutability, literal, scalar } from "../utils/psql";
 import { anonymousContext, detachUserByEmail, loginAs, seedFixtureUser } from "../utils/rbac-tenant";
 
 /*
@@ -71,15 +71,15 @@ test.describe("onboarding — naming the first workspace", () => {
     if (orgIds) {
       exec(`DELETE FROM project_members WHERE project_id IN (SELECT id FROM projects WHERE organization_id IN (${orgIds}));`);
       exec(`DELETE FROM knowledge_folders WHERE project_id IN (SELECT id FROM projects WHERE organization_id IN (${orgIds}));`);
-      exec(`DELETE FROM projects WHERE organization_id IN (${orgIds});`);
+      execAllowingAuditImmutability(`DELETE FROM projects WHERE organization_id IN (${orgIds});`);
       exec(`DELETE FROM organization_members WHERE organization_id IN (${orgIds});`);
       exec(`UPDATE users SET active_organization_id = NULL, default_project_id = NULL WHERE email = ${literal(email.toLowerCase())};`);
-      exec(`DELETE FROM organizations WHERE id IN (${orgIds});`);
+      execAllowingAuditImmutability(`DELETE FROM organizations WHERE id IN (${orgIds});`);
     }
     // detachUserByEmail clears the memberships; the row itself goes too, because these addresses are
     // timestamped and would otherwise accumulate one dead user per run on the persistent volume.
     detachUserByEmail(email);
-    exec(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
+    execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
   }
 
   function ownedOrgName(email: string): string {

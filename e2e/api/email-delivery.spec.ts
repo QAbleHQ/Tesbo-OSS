@@ -8,7 +8,7 @@ import {
 } from "../utils/backend-logs";
 import { env, testAddress } from "../utils/env";
 import { clearOtpIpRateLimit, disposableEmail } from "../utils/otp";
-import { dbControlAvailable, exec, literal, scalar } from "../utils/psql";
+import { dbControlAvailable, exec, execAllowingAuditImmutability, literal, scalar } from "../utils/psql";
 import {
   loginAs,
   provisionRbacTenant,
@@ -116,7 +116,7 @@ test.describe("email delivery gating", () => {
     } finally {
       clearOtpIpRateLimit();
       // OTP sign-in auto-creates the account, so this disposable user has to be swept up.
-      if (dbControlAvailable()) exec(`DELETE FROM users WHERE email = ${literal(email)};`);
+      if (dbControlAvailable()) execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(email)};`);
       await anon.dispose();
     }
   });
@@ -140,7 +140,7 @@ test.describe("email delivery gating", () => {
       expect(res.status()).toBe(401);
     } finally {
       clearOtpIpRateLimit();
-      if (dbControlAvailable()) exec(`DELETE FROM users WHERE email = ${literal(email)};`);
+      if (dbControlAvailable()) execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(email)};`);
       await anon.dispose();
     }
   });
@@ -229,7 +229,7 @@ test.describe("the admin health endpoint reports email delivery", () => {
     await asAdmin?.dispose();
     if (admin && dbControlAvailable()) {
       exec(`DELETE FROM platform_admins WHERE user_id = ${literal(admin.userId)};`);
-      exec(`DELETE FROM users WHERE id = ${literal(admin.userId)};`);
+      execAllowingAuditImmutability(`DELETE FROM users WHERE id = ${literal(admin.userId)};`);
     }
   });
 

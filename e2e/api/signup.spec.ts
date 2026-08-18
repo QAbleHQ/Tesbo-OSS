@@ -1,7 +1,7 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { emailDomain } from "../utils/env";
 import { clearOtpIpRateLimit, clearOtpRateLimit, seedOtpCode } from "../utils/otp";
-import { dbControlAvailable, exec, literal, scalar } from "../utils/psql";
+import { dbControlAvailable, exec, execAllowingAuditImmutability, literal, scalar } from "../utils/psql";
 import { anonymousContext } from "../utils/rbac-tenant";
 
 /*
@@ -75,7 +75,7 @@ test.describe("self-serve signup", () => {
     exec(
       `DELETE FROM project_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(email.toLowerCase())});`,
     );
-    exec(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
+    execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
     clearOtpRateLimit(email.toLowerCase());
   }
 

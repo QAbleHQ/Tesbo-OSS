@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { request as pwRequest, type APIRequestContext } from "@playwright/test";
 import { emailDomain, env } from "./env";
-import { exec, literal, scalar } from "./psql";
+import { exec, execAllowingAuditImmutability, literal, scalar } from "./psql";
 
 /*
  * The disposable tenant the screen-level suites own, plus the fixture builders they share.
@@ -362,7 +362,7 @@ export async function seedWorkspaceMember(
 }
 
 export function removeWorkspaceMember(userId: string | undefined, storageStatePath?: string): void {
-  if (userId) exec(`DELETE FROM users WHERE id = ${literal(userId)};`);
+  if (userId) execAllowingAuditImmutability(`DELETE FROM users WHERE id = ${literal(userId)};`);
   if (storageStatePath) fs.rmSync(storageStatePath, { force: true });
 }
 

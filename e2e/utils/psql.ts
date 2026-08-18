@@ -70,6 +70,37 @@ export function exec(sql: string): void {
   run(sql);
 }
 
+/**
+ * Runs a teardown statement, tolerating ONLY the append-only audit_logs trigger.
+ *
+ * `audit_logs` is tamper-evident by design: migration V62_audit_logs_immutable.sql installs a trigger
+ * that rejects UPDATE and DELETE for every role, and revokes those grants from the app role as a second
+ * layer. Its foreign keys to projects/organizations/users are all ON DELETE SET NULL — so Postgres
+ * answers `DELETE FROM users`/`organizations`/`projects` by trying to NULL the audit reference, the
+ * trigger rejects that UPDATE, and the delete fails with:
+ *
+ *   ERROR: audit_logs is append-only: UPDATE is not permitted
+ *
+ * The consequence is deliberate and not a bug: once anything has been audited against a row, that row
+ * can never be hard-deleted. The product agrees — deleteProject archives (`archived_at`) and logs a
+ * `project_deleted` entry rather than removing anything. Fixtures have to live with the same rule.
+ *
+ * So cleanup is attempted and this ONE error is swallowed: un-audited fixture rows (an abandoned signup,
+ * an org that never saw an action) still delete cleanly, and audited ones are simply left behind instead
+ * of exploding in afterAll and leaving the whole workspace dirty for the next test in the file — which
+ * is what turned a handful of un-deletable rows into ~127 failures across unrelated specs.
+ *
+ * Every other error still throws. A teardown that fails for a real reason must not be silent.
+ */
+export function execAllowingAuditImmutability(sql: string): void {
+  try {
+    run(sql);
+  } catch (error) {
+    const text = `${(error as { stderr?: unknown })?.stderr ?? ""}${(error as Error)?.message ?? ""}`;
+    if (!/audit_logs is append-only/.test(text)) throw error;
+  }
+}
+
 /** Runs a single-row, single-column SELECT and returns it as raw text ("" for NULL). */
 export function scalar(sql: string): string {
   return run(sql, ["-At"]).trim();

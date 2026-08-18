@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
-import { exec, literal } from "../utils/psql";
+import { exec, execAllowingAuditImmutability, literal } from "../utils/psql";
 import {
   anonymousContext,
   loginAs,
@@ -81,7 +81,30 @@ test.describe("activity feed", () => {
    */
   function purgeActivity(): void {
     const projects = `${literal(tenant!.mainProjectId)}, ${literal(tenant!.secondProjectId)}`;
-    exec(`DELETE FROM audit_logs WHERE project_id IN (${projects});`);
+    /*
+     * audit_logs is NOT cleared here, and cannot be — that is the point of an audit log.
+     *
+     * Migration V62_audit_logs_immutable.sql makes it tamper-evident: a trigger rejects UPDATE and DELETE
+     * for every role, and the grants are revoked from the app role as a second layer. The statement is
+     * kept (harmless, and it still clears anything not yet protected) but its refusal is tolerated,
+     * because throwing here fired in beforeAll AND afterEach — killing all 17 tests in this file and
+     * leaving the workspace dirty for whatever ran next.
+     *
+     * CONSEQUENCE FOR EVERY ASSERTION BELOW: this project's feed ACCUMULATES across tests and across
+     * runs. No test may assume an empty feed, a specific feed length, or an absolute position. Instead:
+     *
+     *   - every entity is created with stamp(), which embeds Date.now() + a random suffix, so a name can
+     *     never collide with another test's or an earlier run's;
+     *   - entries are located with entryFor(name), never by index;
+     *   - ordering is asserted on the RELATIVE positions of this test's own stamped entries;
+     *   - counts are asserted as "at least", or scoped by a filter that isolates this test's rows.
+     *
+     * The other tables ARE cleared: the feed synthesizes rows from suites/plans/cycles/bugs, and those
+     * deletes still work, so a purged entity's synthesized row disappears while its audit row remains.
+     * A feed entry for an entity that no longer exists is therefore normal here, not a bug — ACT-A-11
+     * asserts exactly that survival.
+     */
+    execAllowingAuditImmutability(`DELETE FROM audit_logs WHERE project_id IN (${projects});`);
     exec(`DELETE FROM executions WHERE cycle_item_id IN (SELECT ci.id FROM cycle_items ci JOIN cycles c ON c.id = ci.cycle_id WHERE c.project_id IN (${projects}));`);
     exec(`DELETE FROM cycle_items WHERE cycle_id IN (SELECT id FROM cycles WHERE project_id IN (${projects}));`);
     exec(`DELETE FROM cycles WHERE project_id IN (${projects});`);
@@ -235,12 +258,27 @@ test.describe("activity feed", () => {
     for (const name of [first, second, third]) await createSuite(name);
 
     const { list } = await feed({ limit: 100 });
+
+    // Global ordering still holds however many entries have accumulated.
     const times = list.map((i) => Date.parse(i.createdAt ?? ""));
     const sorted = [...times].sort((a, b) => b - a);
     expect(times, "entries must arrive in descending time order").toEqual(sorted);
 
+    /*
+     * Ordering is checked on THIS test's three entries only.
+     *
+     * The feed accumulates (see purgeActivity), so absolute positions mean nothing. The previous form
+     * compared `names.indexOf(third)` with `names.indexOf(first)` — and indexOf returns -1 for a name
+     * that is not in the window at all, so a feed that had dropped these entries scored -1 < -1 = false,
+     * or worse, -1 < 5 = true and passed while proving nothing.
+     */
     const names = list.map((i) => i.entityName);
-    expect(names.indexOf(third)).toBeLessThan(names.indexOf(first));
+    for (const name of [first, second, third]) {
+      expect(names, `${name} is missing from the feed, so ordering cannot be judged`).toContain(name);
+    }
+    const [iFirst, iSecond, iThird] = [first, second, third].map((n) => names.indexOf(n));
+    expect(iThird, "the newest suite should sit above the middle one").toBeLessThan(iSecond);
+    expect(iSecond, "the middle suite should sit above the oldest one").toBeLessThan(iFirst);
   });
 
   test("ACT-A-06 one action produces one entry, not two", async () => {
@@ -419,13 +457,22 @@ test.describe("activity feed", () => {
     // The panel beside the feed reads from this, so a summary that disagrees with the list next to it
     // is the same class of "displayed incorrectly" as a missing actor.
     expect(Array.isArray(summary.activity) || typeof summary === "object").toBe(true);
-    const { list } = await feed({ limit: 100 });
+    /*
+     * Each named actor is confirmed with a FILTERED query rather than by scanning a window of the feed.
+     *
+     * The feed accumulates, so the newest 100 entries are not the whole history: a legitimate top actor
+     * whose entries sit beyond that window would have read as "absent from the feed" and failed a
+     * correct summary. Asking the feed for that actor specifically is accumulation-proof and is the
+     * consistency the panel actually needs — the summary must not name anyone the feed cannot produce.
+     */
     if (Array.isArray(summary.topActors) && summary.topActors.length) {
-      const actorIds = new Set(list.map((i) => i.actorId).filter(Boolean));
       for (const actor of summary.topActors) {
-        if (actor?.actorId) {
-          expect(actorIds.has(actor.actorId), `summary names actor ${actor.actorId}, absent from the feed`).toBe(true);
-        }
+        if (!actor?.actorId) continue;
+        const theirs = await feed({ actorId: actor.actorId, limit: 5 });
+        expect(
+          theirs.list.length,
+          `summary names actor ${actor.actorId}, but the feed returns nothing for them`,
+        ).toBeGreaterThan(0);
       }
     }
   });
