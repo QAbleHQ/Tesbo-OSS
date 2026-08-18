@@ -5178,6 +5178,10 @@ export class LegacyService implements OnModuleInit {
   // Mirrors knowledge_documents.title VARCHAR(512) — checked here so an over-limit title comes
   // back as a clear 400 instead of a raw Postgres "value too long" error.
   private static readonly KB_DOCUMENT_TITLE_MAX_LENGTH = 512;
+  // A product-level cap, tighter than the knowledge_folders.name VARCHAR(255) column — folder
+  // names render in narrow tree/breadcrumb UI, so they're kept short rather than merely DB-legal.
+  // Mirrored in the frontend at lib/validation.ts (KB_FOLDER_NAME_MAX_LENGTH) — keep both in sync.
+  private static readonly KB_FOLDER_NAME_MAX_LENGTH = 50;
   // Mirrors the frontend's own payload-size guard (MAX_DOCUMENT_PAYLOAD_BYTES in the document
   // editor page). The API is reachable directly, so the limit needs to be enforced here too.
   private static readonly KB_DOCUMENT_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024;
@@ -5237,6 +5241,9 @@ export class LegacyService implements OnModuleInit {
     const project = await this.requireProjectAccess(uid, projectId);
     const name = String(body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "Folder name is required" });
+    if (name.length > LegacyService.KB_FOLDER_NAME_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Folder name must be at most ${LegacyService.KB_FOLDER_NAME_MAX_LENGTH} characters` });
+    }
 
     let parentFolderId = body.parentFolderId ? String(body.parentFolderId) : null;
     if (parentFolderId) {
@@ -5322,11 +5329,19 @@ export class LegacyService implements OnModuleInit {
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, folder.created_by, uid);
 
+    const trimmedName = body.name ? String(body.name).trim() : null;
+    if (trimmedName !== null) {
+      if (!trimmedName) throw new BadRequestException({ error: "Folder name is required" });
+      if (trimmedName.length > LegacyService.KB_FOLDER_NAME_MAX_LENGTH) {
+        throw new BadRequestException({ error: `Folder name must be at most ${LegacyService.KB_FOLDER_NAME_MAX_LENGTH} characters` });
+      }
+    }
+
     try {
       const res = await this.db.query(
         `UPDATE knowledge_folders SET name = COALESCE($3, name), description = COALESCE($4, description),
          updated_by = $2, updated_at = now() WHERE id = $1 RETURNING *`,
-        [folderId, uid, body.name ? String(body.name).trim() : null, body.description ?? null]
+        [folderId, uid, trimmedName, body.description ?? null]
       );
       await this.logProjectActivity(projectId, uid, "updated", "knowledge_folder", folderId, res.rows[0].name, {});
       return toCamel(res.rows[0]);

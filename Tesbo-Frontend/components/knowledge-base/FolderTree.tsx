@@ -58,7 +58,7 @@ export function FolderTreeNodeRow({
           <span className="w-[14px] shrink-0" />
         )}
         <IconFolder size={15} stroke={1.75} className="shrink-0 text-[var(--muted)]" />
-        <span className="truncate flex-1">{node.name}</span>
+        <span className="truncate flex-1" title={node.name}>{node.name}</span>
         {!node.isRoot && (
           <Menu
             align="right"

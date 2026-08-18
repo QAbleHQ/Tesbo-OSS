@@ -60,6 +60,8 @@ import {
   validateKnowledgeBaseFile,
   KB_DOCUMENT_TITLE_MAX_LENGTH,
   validateKnowledgeDocumentTitle,
+  KB_FOLDER_NAME_MAX_LENGTH,
+  validateKnowledgeFolderName,
   blankDocumentFlagKey,
 } from "@/lib/validation";
 import { readStoredValue, writeStoredValue } from "@/lib/storage";
@@ -248,18 +250,40 @@ function CreateFolderModal({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [nameError, setNameError] = useState("");
   useEffect(() => {
     if (open) {
       setName("");
       setDescription("");
+      setNameError("");
     }
   }, [open]);
+  function handleCreateClick() {
+    const trimmed = name.trim();
+    const error = validateKnowledgeFolderName(trimmed);
+    if (error) {
+      setNameError(error);
+      return;
+    }
+    onCreate(trimmed, description.trim());
+  }
   return (
     <Modal open={open} onClose={onClose} title="Create folder">
       <div className="space-y-4">
         <Field>
           <FieldLabel>Folder name</FieldLabel>
-          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="e.g. Payment Module" />
+          <Input
+            value={name}
+            onChange={(e) => {
+              const value = e.target.value;
+              setName(value);
+              if (nameError && !validateKnowledgeFolderName(value)) setNameError("");
+            }}
+            autoFocus
+            placeholder="e.g. Payment Module"
+            maxLength={KB_FOLDER_NAME_MAX_LENGTH}
+          />
+          {nameError && <FieldError>{nameError}</FieldError>}
         </Field>
         <Field>
           <FieldLabel>Description (optional)</FieldLabel>
@@ -267,7 +291,7 @@ function CreateFolderModal({
         </Field>
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button disabled={!name.trim() || saving} onClick={() => onCreate(name.trim(), description.trim())}>
+          <Button disabled={!name.trim() || saving} onClick={handleCreateClick}>
             {saving ? "Creating…" : "Create folder"}
           </Button>
         </div>
@@ -290,19 +314,42 @@ function RenameFolderModal({
   saving: boolean;
 }) {
   const [name, setName] = useState(initialName);
+  const [nameError, setNameError] = useState("");
   useEffect(() => {
-    if (open) setName(initialName);
+    if (open) {
+      setName(initialName);
+      setNameError("");
+    }
   }, [open, initialName]);
+  function handleSaveClick() {
+    const trimmed = name.trim();
+    const error = validateKnowledgeFolderName(trimmed);
+    if (error) {
+      setNameError(error);
+      return;
+    }
+    onSave(trimmed);
+  }
   return (
     <Modal open={open} onClose={onClose} title="Rename folder">
       <div className="space-y-4">
         <Field>
           <FieldLabel>Folder name</FieldLabel>
-          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          <Input
+            value={name}
+            onChange={(e) => {
+              const value = e.target.value;
+              setName(value);
+              if (nameError && !validateKnowledgeFolderName(value)) setNameError("");
+            }}
+            autoFocus
+            maxLength={KB_FOLDER_NAME_MAX_LENGTH}
+          />
+          {nameError && <FieldError>{nameError}</FieldError>}
         </Field>
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button disabled={!name.trim() || saving} onClick={() => onSave(name.trim())}>{saving ? "Saving…" : "Save"}</Button>
+          <Button disabled={!name.trim() || saving} onClick={handleSaveClick}>{saving ? "Saving…" : "Save"}</Button>
         </div>
       </div>
     </Modal>
@@ -1285,7 +1332,7 @@ function KnowledgeBasePageInner() {
                           <td className="px-4 py-2.5">
                             <button onClick={() => openItem(item)} className="flex items-center gap-2 text-left hover:underline">
                               {itemIcon(item)}
-                              <span className="truncate max-w-[280px] font-medium text-[var(--foreground)]">{itemLabel(item)}</span>
+                              <span className="truncate max-w-[280px] font-medium text-[var(--foreground)]" title={itemLabel(item)}>{itemLabel(item)}</span>
                             </button>
                           </td>
                           <td className="px-4 py-2.5">
