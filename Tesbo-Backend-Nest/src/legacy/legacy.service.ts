@@ -29,6 +29,9 @@ type Body = Record<string, any>;
 /** The four buckets V67's bugs_severity_check allows, and the four the dashboard reports. */
 const BUG_SEVERITIES = ["Critical", "High", "Medium", "Low"] as const;
 
+/** Sentinel `suiteId` query value meaning "test cases with no suite assigned" (suite_id IS NULL). */
+export const UNASSIGNED_SUITE_ID = "none";
+
 export interface InvitationRow {
   id: string;
   organization_id: string;
@@ -1224,7 +1227,16 @@ export class LegacyService implements OnModuleInit {
     // Only owner can remove members; manager cannot remove members (per spec)
     const callerRole = this.normalizeRole(workspace.role);
     if (callerRole !== "owner") throw new ForbiddenException({ error: "Only the owner can remove team members" });
-    await this.db.query("DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2", [workspace.id, targetUserId]);
+    await this.db.transaction(async (client) => {
+      await client.query("DELETE FROM organization_members WHERE organization_id = $1 AND user_id = $2", [workspace.id, targetUserId]);
+      // A workspace-level removal must also drop the user from every project in this
+      // workspace — otherwise they keep showing up as a project member (and keep project
+      // access) despite no longer being part of the workspace at all.
+      await client.query(
+        "DELETE FROM project_members WHERE user_id = $2 AND project_id IN (SELECT id FROM projects WHERE organization_id = $1)",
+        [workspace.id, targetUserId]
+      );
+    });
     await this.logWorkspaceActivity(workspace.id, uid, "workspace_member_removed", "workspace_member", targetUserId, targetMember.rows[0].email, { role: targetMember.rows[0].role });
   }
 
@@ -2242,7 +2254,7 @@ export class LegacyService implements OnModuleInit {
      * `suite_id = 'none'` comparison against a uuid column.
      */
     const suiteFilter = String(query.suiteId ?? "");
-    const wantsUnfiled = suiteFilter.toLowerCase() === "none";
+    const wantsUnfiled = suiteFilter.toLowerCase() === UNASSIGNED_SUITE_ID;
     if (wantsUnfiled) filters.push("suite_id IS NULL");
     /*
      * Archived cases are out of the working list unless they are asked for.
@@ -4527,7 +4539,7 @@ export class LegacyService implements OnModuleInit {
   }
 
   /*
-   * `callerId` narrows the workspace-wide scope to the projects that caller is a member of.
+   * `userId` narrows the workspace-wide scope to the projects that caller is a member of.
    *
    * Basecamp 10199551447 — "[Dashboard / Project Access] QA Engineer can view project details of all
    * owner projects". /api/workspace/analytics scoped by organization_id alone, with no membership
@@ -4536,31 +4548,27 @@ export class LegacyService implements OnModuleInit {
    * cannot open. listProjects and requireProjectAccess both scope by project_members; this endpoint
    * was the one that did not, and the dashboard is the first screen a member lands on.
    *
-   * Only applied to the non-privileged roles. Owner, admin and manager administer the whole workspace
-   * and their totals are meant to span it, so narrowing theirs would be a different change with a
-   * different blast radius — and it is not what was reported.
+   * Applied to every role, privileged ones included, which is the point of Basecamp 10199487634 /
+   * 10194293482 ("[Dashboard] Project count displayed incorrectly"): the tile and the Projects page
+   * must count the same population, and the page is membership-scoped for everyone. An owner who is
+   * not a project_member of some project in their own workspace — the normal state once a manager
+   * creates one — otherwise reads a tile the Projects page cannot reproduce. WSA-A-01/WSA-A-02 pin
+   * that; RBAC-A-31 pins the QA half.
    */
-  async analytics(projectId?: string, organizationId?: string, callerId?: string | null, callerRole?: string | null) {
-    const scopeValue = projectId ?? organizationId;
-    const scopeToMemberships =
-      !projectId && !!organizationId && !!callerId && !["owner", "admin", "manager"].includes(this.normalizeRole(String(callerRole ?? "")));
-    // $1 stays the organization id; the caller becomes $2 only where the narrowing applies.
-    const memberProjects = " AND id IN (SELECT project_id FROM project_members WHERE user_id = $2)";
-    const memberChildProjects = " AND project_id IN (SELECT project_id FROM project_members WHERE user_id = $2)";
+  async analytics(projectId?: string, organizationId?: string, userId?: string | null) {
+    const orgProjectsSubquery =
+      "SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL AND id IN (SELECT project_id FROM project_members WHERE user_id = $2)";
     const projectsWhere = projectId
       ? " WHERE id = $1 AND archived_at IS NULL"
       : organizationId
-        ? ` WHERE organization_id = $1 AND archived_at IS NULL${scopeToMemberships ? memberProjects : ""}`
+        ? ` WHERE organization_id = $1 AND archived_at IS NULL AND id IN (SELECT project_id FROM project_members WHERE user_id = $2)`
         : " WHERE archived_at IS NULL";
     const childWhere = projectId
       ? " WHERE project_id = $1"
       : organizationId
-        ? ` WHERE project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)${
-            scopeToMemberships ? memberChildProjects : ""
-          }`
+        ? ` WHERE project_id IN (${orgProjectsSubquery})`
         : "";
-    const values: any[] = scopeValue ? [scopeValue] : [];
-    if (scopeToMemberships) values.push(callerId);
+    const values = projectId ? [projectId] : organizationId ? [organizationId, userId] : [];
     const [projects, testcases, suites, plans, cycles, statuses] = await Promise.all([
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM projects${projectsWhere}`, values),
       this.db.query<{ count: string }>(`SELECT COUNT(*) AS count FROM testcases_active${childWhere}`, values),
@@ -4572,11 +4580,7 @@ export class LegacyService implements OnModuleInit {
           projectId
             ? " WHERE c.project_id = $1"
             : organizationId
-              ? ` WHERE c.project_id IN (SELECT id FROM projects WHERE organization_id = $1 AND archived_at IS NULL)${
-                  scopeToMemberships
-                    ? " AND c.project_id IN (SELECT project_id FROM project_members WHERE user_id = $2)"
-                    : ""
-                }`
+              ? ` WHERE c.project_id IN (${orgProjectsSubquery})`
               : ""
         } GROUP BY e.status`,
         values
@@ -5403,6 +5407,16 @@ export class LegacyService implements OnModuleInit {
   // ─── Knowledge Base v2 (folders / documents / files) ──────────────────────────
 
   private static readonly KB_VERSION_SNAPSHOT_MINUTES = 15;
+  // Mirrors knowledge_documents.title VARCHAR(512) — checked here so an over-limit title comes
+  // back as a clear 400 instead of a raw Postgres "value too long" error.
+  private static readonly KB_DOCUMENT_TITLE_MAX_LENGTH = 512;
+  // A product-level cap, tighter than the knowledge_folders.name VARCHAR(255) column — folder
+  // names render in narrow tree/breadcrumb UI, so they're kept short rather than merely DB-legal.
+  // Mirrored in the frontend at lib/validation.ts (KB_FOLDER_NAME_MAX_LENGTH) — keep both in sync.
+  private static readonly KB_FOLDER_NAME_MAX_LENGTH = 50;
+  // Mirrors the frontend's own payload-size guard (MAX_DOCUMENT_PAYLOAD_BYTES in the document
+  // editor page). The API is reachable directly, so the limit needs to be enforced here too.
+  private static readonly KB_DOCUMENT_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024;
   private static readonly KB_DOCUMENT_COLUMNS = `id, organization_id, project_id, folder_id, title, content_json, content_html, content_text,
     document_type, status, is_ai_generated, source_provider, source_external_id, source_url,
     source_role, source_synced_by, source_synced_at, is_read_only,
@@ -5455,24 +5469,28 @@ export class LegacyService implements OnModuleInit {
   }
 
   /**
-   * A folder name that the column can actually hold.
+   * A folder name that is both column-legal and short enough to render.
    *
    * `knowledge_folders.name` is VARCHAR(255). Neither create nor rename bounded the input, so a longer
    * name reached Postgres and raised 22001 (string_data_right_truncation) — an error code no handler
    * caught, so the request answered 500 Internal Server Error. Basecamp 10199204536 reported that
    * against rename; create had the identical gap.
    *
-   * Validated at the edge so the caller gets a field-level 400 naming the limit. The 22001 catch in
-   * both callers stays as a backstop for any path that reaches the column another way.
+   * The enforced limit is the tighter product cap, KB_FOLDER_NAME_MAX_LENGTH, not the column width —
+   * folder names render in narrow tree/breadcrumb UI. The frontend mirrors the same constant in
+   * lib/validation.ts, so both surfaces refuse at the same length with the same message.
+   *
+   * Validated at the edge so the caller gets a field-level 400 naming the limit. Since the product cap
+   * is well under the column width, 22001 is now unreachable through either folder method; the catch
+   * that updateKnowledgeFolder still carries is left as a backstop for any path that reaches the
+   * column another way.
    */
-  private static readonly KB_FOLDER_NAME_MAX = 255;
-
   private kbFolderName(raw: unknown): string {
     const name = String(raw ?? "").trim();
     if (!name) throw new BadRequestException({ error: "Folder name is required" });
-    if (name.length > LegacyService.KB_FOLDER_NAME_MAX) {
+    if (name.length > LegacyService.KB_FOLDER_NAME_MAX_LENGTH) {
       throw new BadRequestException({
-        error: `Folder name is too long (${LegacyService.KB_FOLDER_NAME_MAX} character limit).`
+        error: `Folder name must be at most ${LegacyService.KB_FOLDER_NAME_MAX_LENGTH} characters`
       });
     }
     return name;
@@ -5567,8 +5585,8 @@ export class LegacyService implements OnModuleInit {
     const role = await this.kbProjectRole(uid, projectId);
     this.kbRequireMutateAccess(role, folder.created_by, uid);
 
-    // Bounded before the statement runs: an over-long name used to reach the VARCHAR(255) column and
-    // come back as 22001, which nothing caught — so a rename answered 500. Basecamp 10199204536.
+    // Bounded before the statement runs: an over-long name used to reach the column and come back as
+    // 22001, which nothing caught — so a rename answered 500. Basecamp 10199204536.
     const nextName = body.name === undefined || body.name === null ? null : this.kbFolderName(body.name);
 
     try {
@@ -5585,7 +5603,7 @@ export class LegacyService implements OnModuleInit {
       // Backstop: any other route to an over-long value must still be a 400, never a 500.
       if ((error as { code?: string }).code === "22001")
         throw new BadRequestException({
-          error: `Folder name is too long (${LegacyService.KB_FOLDER_NAME_MAX} character limit).`
+          error: `Folder name must be at most ${LegacyService.KB_FOLDER_NAME_MAX_LENGTH} characters`
         });
       throw error;
     }
@@ -5911,11 +5929,30 @@ export class LegacyService implements OnModuleInit {
     return { list: res.rows.map(toCamel), total: res.rowCount };
   }
 
+  // Same limit the document editor enforces client-side before ever calling this endpoint —
+  // repeated here because the API is reachable directly, bypassing that check entirely.
+  private assertKnowledgeDocumentPayloadSize(body: Body) {
+    const jsonSize = body.contentJson ? Buffer.byteLength(JSON.stringify(body.contentJson), "utf8") : 0;
+    const htmlSize = body.contentHtml ? Buffer.byteLength(String(body.contentHtml), "utf8") : 0;
+    const textSize = body.contentText ? Buffer.byteLength(String(body.contentText), "utf8") : 0;
+    const size = jsonSize + htmlSize + textSize;
+    if (size > LegacyService.KB_DOCUMENT_MAX_PAYLOAD_BYTES) {
+      const limitMb = LegacyService.KB_DOCUMENT_MAX_PAYLOAD_BYTES / (1024 * 1024);
+      throw new BadRequestException({
+        error: `This document is over the ${limitMb}MB limit we currently support. Split it into smaller documents to save.`
+      });
+    }
+  }
+
   async createKnowledgeDocument(projectId: string, userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const project = await this.requireProjectAccess(uid, projectId);
     const title = String(body.title || "").trim();
     if (!title) throw new BadRequestException({ error: "Document title is required" });
+    if (title.length > LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Title must be at most ${LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH} characters` });
+    }
+    this.assertKnowledgeDocumentPayloadSize(body);
     const folderId = String(body.folderId || "");
     if (!folderId) throw new BadRequestException({ error: "folderId is required" });
     await this.kbFolder(projectId, folderId);
@@ -5997,6 +6034,14 @@ export class LegacyService implements OnModuleInit {
     const nextJson = body.contentJson !== undefined ? JSON.stringify(body.contentJson) : doc.content_json ? JSON.stringify(doc.content_json) : null;
     const nextHtml = body.contentHtml !== undefined ? body.contentHtml : doc.content_html;
     const nextText = body.contentText !== undefined ? body.contentText : doc.content_text;
+
+    if (!nextTitle && !String(nextText || "").trim()) {
+      throw new BadRequestException({ error: "A document needs a title or some content — it can't be saved blank." });
+    }
+    if (nextTitle.length > LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH) {
+      throw new BadRequestException({ error: `Title must be at most ${LegacyService.KB_DOCUMENT_TITLE_MAX_LENGTH} characters` });
+    }
+    this.assertKnowledgeDocumentPayloadSize(body);
 
     const contentChanged =
       nextTitle !== doc.title || nextHtml !== doc.content_html || nextText !== doc.content_text;
@@ -6320,6 +6365,8 @@ export class LegacyService implements OnModuleInit {
   // ─── Knowledge Base v2: files ──────────────────────────────────────────────
 
   static readonly KB_MAX_UPLOAD_SIZE = Number(process.env.MAX_UPLOAD_SIZE) || 100 * 1024 * 1024;
+  // Archives (zip) and executables (exe) are deliberately excluded — a zip can hide anything,
+  // including an executable, past this extension check.
   static readonly KB_ALLOWED_EXTENSIONS = new Set([
     "png", "jpg", "jpeg", "webp", "svg",
     "pdf", "doc", "docx", "txt", "md",
@@ -6327,8 +6374,7 @@ export class LegacyService implements OnModuleInit {
     "ppt", "pptx",
     "js", "ts", "java", "py", "json", "xml", "yaml", "yml", "sql", "html", "css",
     "mp3", "wav", "m4a",
-    "mp4", "mov", "webm",
-    "zip"
+    "mp4", "mov", "webm"
   ]);
   // Extensions we can read as plain UTF-8 text without any parsing library.
   static readonly KB_PLAINTEXT_EXTENSIONS = new Set([

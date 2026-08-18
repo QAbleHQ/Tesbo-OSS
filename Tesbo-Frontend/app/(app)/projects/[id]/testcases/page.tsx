@@ -40,6 +40,7 @@ import {
   listCustomFieldDefinitions,
   getCustomFieldValues,
   buildCustomFieldFiltersQueryParam,
+  UNASSIGNED_SUITE_ID,
   type TestCaseListItem,
   type SuiteNode,
   type RepositorySummary,
@@ -71,8 +72,6 @@ import { readStoredValue, writeStoredValue } from "@/lib/storage";
 // be bulk-edited in five separate passes.
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 250, 500] as const;
 const MAX_PAGE_SIZE = 500;
-/* Matches the `suiteId=none` the list endpoint reads as "suite_id IS NULL" — see listTestCases. */
-const UNFILED_SUITE_ID = "none";
 /* The bulk-edit selects' "don't touch this field" value. Empty so the API reads it as omitted. */
 const BULK_NO_CHANGE = "";
 const DEFAULT_PAGE_SIZE = 25;
@@ -138,7 +137,7 @@ export default function TestCasesPage() {
    * pre-select from it: the sentinel is not a suite, so it must resolve to "no suite chosen" there
    * rather than being written to a testcase's suite_id.
    */
-  const isUnfiledView = activeSuiteId === UNFILED_SUITE_ID;
+  const isUnfiledView = activeSuiteId === UNASSIGNED_SUITE_ID;
   const formSuiteId = isUnfiledView ? null : activeSuiteId;
   const activeJiraIssueKey = searchParams.get("jiraIssueKey") || "";
   const activeLinearIssueKey = searchParams.get("linearIssueKey") || "";
@@ -692,10 +691,10 @@ export default function TestCasesPage() {
       } else if (bulkAction === "move") {
         // An empty target used to become `undefined`, which the API COALESCE'd back to each case's
         // existing suite — so "Unassigned (no suite)" reported success and moved nothing (Basecamp
-        // 10194174342). UNFILED_SUITE_ID is the explicit "clear it" value the API now understands.
+        // 10194174342). UNASSIGNED_SUITE_ID is the explicit "clear it" value the API now understands.
         await bulkUpdateTestCases(projectId, {
           testcaseIds: selectedCaseIds,
-          suiteId: bulkTargetSuiteId || UNFILED_SUITE_ID,
+          suiteId: bulkTargetSuiteId || UNASSIGNED_SUITE_ID,
         });
       }
       const refreshPanelTestcaseId = panelTestcaseId && selectedCaseIdSet.has(panelTestcaseId) ? panelTestcaseId : null;
@@ -1030,7 +1029,8 @@ export default function TestCasesPage() {
               Test case repository
             </h1>
             <p className="mt-[3px] text-[13px] text-[var(--muted-soft)]">
-              {repositoryTotalCount} test case{repositoryTotalCount === 1 ? "" : "s"} across {rootSuites.length} suite{rootSuites.length === 1 ? "" : "s"}
+              {/* Counts every suite, not just the top-level ones, to agree with the "Total Suites" badge below. */}
+              {repositoryTotalCount} test case{repositoryTotalCount === 1 ? "" : "s"} across {suites.length} suite{suites.length === 1 ? "" : "s"}
             </p>
           </div>
           {!loading && repoStats && (
@@ -1042,6 +1042,10 @@ export default function TestCasesPage() {
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
                 <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-draft-text)]">{repoStats.draft}</div>
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Draft</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--warning-foreground)]">{repoStats.inReview}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">In Review</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
                 <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-pass-text)]">{repoStats.approved}</div>
@@ -1069,10 +1073,10 @@ export default function TestCasesPage() {
                   {suitePanelOpen && (
                     <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
                       <IconFolders size={14} stroke={1.75} className="text-[var(--accent-light)]" />
-                      Suites
-                      {rootSuites.length > 0 && (
+                      Total Suites
+                      {suites.length > 0 && (
                         <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
-                          {rootSuites.length}
+                          {suites.length}
                         </span>
                       )}
                     </p>
@@ -1315,7 +1319,7 @@ export default function TestCasesPage() {
                   {unfiledCaseCount > 0 && (
                     <button
                       type="button"
-                      onClick={() => router.push(`/projects/${projectId}/testcases?suiteId=${UNFILED_SUITE_ID}`)}
+                      onClick={() => router.push(`/projects/${projectId}/testcases?suiteId=${UNASSIGNED_SUITE_ID}`)}
                       className={`mt-0.5 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] transition-colors ${
                         isUnfiledView
                           ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
@@ -1359,6 +1363,16 @@ export default function TestCasesPage() {
                       placeholder="Search by ID, title, or type"
                       className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
                     />
+                    {suiteSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setSuiteSearch("")}
+                        aria-label="Clear search"
+                        className="shrink-0 rounded-full p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                      >
+                        <IconX size={12} stroke={2} />
+                      </button>
+                    )}
                   </label>
                   {activeSuiteId && (
                     <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--accent-light)]">
@@ -1554,9 +1568,11 @@ export default function TestCasesPage() {
                     <p className="mt-2 text-[13px] text-[var(--muted)]">
                       {activeFilterCount > 0
                         ? "No test cases match your current filters."
-                        : activeSuiteId
-                          ? "This suite has no test cases yet."
-                          : "No test cases in this project yet."}
+                        : isUnfiledView
+                          ? "Every test case is assigned to a suite."
+                          : activeSuiteId
+                            ? "This suite has no test cases yet."
+                            : "No test cases in this project yet."}
                     </p>
                     <button
                       type="button"
@@ -2271,7 +2287,7 @@ export default function TestCasesPage() {
         projectId={projectId}
         open={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
-        defaultSuiteId={activeSuiteId ?? undefined}
+        defaultSuiteId={formSuiteId || undefined}
         onImported={(result) => {
           if (result.imported > 0) {
             void loadData();

@@ -361,7 +361,7 @@ function SidebarContent() {
       <div className="space-y-1 border-t border-[var(--glass-border)] p-2.5">
         <NavLink
           href="/account"
-          label="Account"
+          label="My Account"
           icon="account"
           active={pathname === "/account"}
           collapsed={isCollapsed}

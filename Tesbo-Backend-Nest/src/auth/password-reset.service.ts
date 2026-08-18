@@ -20,15 +20,9 @@ export class PasswordResetService {
    * Reports whether the email is registered — the UI shows a distinct "no account with that
    * email" message rather than a generic "check your email", so callers can surface it.
    */
-  async requestReset(rawEmail: string, ipAddress?: string | null): Promise<"sent" | "rate_limited" | "not_found"> {
+  async requestReset(rawEmail: string): Promise<"sent" | "not_found"> {
     const email = rawEmail.trim().toLowerCase();
     if (!email) return "not_found";
-    const ipKey = `ip:${ipAddress?.trim() ?? ""}`;
-    if ((await this.isRateLimited(this.sendLimitKey(email))) || (await this.isRateLimited(this.sendLimitKey(ipKey)))) {
-      return "rate_limited";
-    }
-    await this.recordAttempt(this.sendLimitKey(email));
-    await this.recordAttempt(this.sendLimitKey(ipKey));
 
     const result = await this.db.query<{ id: string }>("SELECT id FROM users WHERE email = $1", [email]);
     const userId = result.rows[0]?.id;
@@ -69,31 +63,6 @@ export class PasswordResetService {
       [this.hash(token)]
     );
     return result.rows[0] ?? null;
-  }
-
-  private async isRateLimited(key: string): Promise<boolean> {
-    const result = await this.db.query<{ locked_until: Date | null }>("SELECT locked_until FROM otp_rate_limit WHERE email = $1", [key]);
-    const lockedUntil = result.rows[0]?.locked_until;
-    return !!lockedUntil && lockedUntil.getTime() > Date.now();
-  }
-
-  private async recordAttempt(key: string): Promise<void> {
-    const sql = `
-      INSERT INTO otp_rate_limit (email, attempt_count, locked_until, updated_at)
-      VALUES ($1, 1, NULL, now())
-      ON CONFLICT (email) DO UPDATE
-      SET attempt_count = otp_rate_limit.attempt_count + 1,
-          locked_until = CASE
-            WHEN otp_rate_limit.attempt_count + 1 >= $2 THEN now() + ($3 || ' minutes')::interval
-            ELSE otp_rate_limit.locked_until
-          END,
-          updated_at = now()
-    `;
-    await this.db.query(sql, [key, this.config.otpMaxAttempts, this.config.otpRateLimitWindowMinutes]);
-  }
-
-  private sendLimitKey(key: string): string {
-    return `reset:send:${key}`;
   }
 
   private hash(value: string): string {

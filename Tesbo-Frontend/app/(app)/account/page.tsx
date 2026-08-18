@@ -81,7 +81,7 @@ export default function AccountPage() {
   return (
     <div className="mx-auto max-w-2xl space-y-5 p-6">
       <div>
-        <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">Account</h1>
+        <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">My Account</h1>
         <p className="mt-1 text-[13px] text-[var(--muted-soft)]">Manage your personal account settings.</p>
       </div>
 

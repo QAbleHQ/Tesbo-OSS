@@ -845,8 +845,17 @@ test.describe("knowledge base (UI)", () => {
    * Expected RED.
    */
   test("KBU-30 a long folder name is readable in full from a tooltip", async ({ browser }) => {
-    // Comfortably past the tree's width, so it genuinely truncates.
-    const longName = `${stamp("VeryLongFolderName")} ${"Segment".repeat(12)}`;
+    /*
+     * Comfortably past the tree's width, so it genuinely truncates, but within the folder-name cap.
+     *
+     * The cap is KB_FOLDER_NAME_MAX_LENGTH = 50 (LegacyService, mirrored in Tesbo-Frontend's
+     * lib/validation.ts) — a name longer than that is a 400 now, so the old 124-character fixture
+     * could no longer be created at all. 50 characters in a sidebar tree still truncates, which is
+     * all this test needs; the subject here is the tooltip, not the length limit (KB-A-58 owns that).
+     * Sliced rather than hand-sized because stamp()'s random suffix varies in width, and the slice
+     * keeps the whole timestamp so re-runs still can't collide.
+     */
+    const longName = `${stamp("VeryLongFolderName")} ${"Segment".repeat(12)}`.slice(0, 50);
     const created = await api.post(kbUrl("/folders"), {
       data: { name: longName, parentFolderId: rootFolderId },
     });

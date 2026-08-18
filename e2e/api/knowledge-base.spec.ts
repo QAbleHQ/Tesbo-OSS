@@ -1588,37 +1588,55 @@ test.describe("knowledge base v2 — folders and documents", () => {
      * bounded the input, so a longer name reached Postgres, raised 22001
      * (string_data_right_truncation), and — no handler catching that code — answered 500.
      *
+     * The enforced limit is the product cap, KB_FOLDER_NAME_MAX_LENGTH = 50, not the column width:
+     * folder names render in narrow tree/breadcrumb UI, and the frontend refuses at the same 50 via
+     * lib/validation.ts. The boundary asserted here moved from 255 to 50 with that cap — the 500 this
+     * ticket reported is still pinned by the 256-character case below, which now has to be a 400 for
+     * the product reason before it can ever reach the column.
+     *
      * Both paths are asserted: rename is what was reported, create had the identical gap.
      */
     const folder = await createFolder({ name: stamp("Rename target") });
-    const tooLong = "L".repeat(256);
+    const overCap = "L".repeat(51);
+    const overColumn = "L".repeat(256);
     try {
       const renamed = await asOwner.patch(kbUrl(`/folders/${folder.id}`), {
-        data: { name: tooLong },
+        data: { name: overCap },
         failOnStatusCode: false,
       });
       expect(
         renamed.status(),
-        `renaming to a 256-character name answered ${renamed.status()}: ${await renamed.text()}`,
+        `renaming to a 51-character name answered ${renamed.status()}: ${await renamed.text()}`,
       ).toBe(400);
       // The message has to name the limit, or the user cannot tell what to shorten it to.
-      expect(await renamed.text()).toMatch(/too long/i);
+      expect(await renamed.text()).toMatch(/at most 50 characters/i);
       // And nothing was written.
-      expect(scalar(`SELECT name FROM knowledge_folders WHERE id = ${literal(folder.id)};`)).not.toBe(tooLong);
+      expect(scalar(`SELECT name FROM knowledge_folders WHERE id = ${literal(folder.id)};`)).not.toBe(overCap);
 
-      const created = await asOwner.post(kbUrl("/folders"), {
-        data: { name: tooLong, parentFolderId: rootFolderId },
+      // The original repro — longer than the column itself — must still be a 400, never a 500.
+      const renamedLong = await asOwner.patch(kbUrl(`/folders/${folder.id}`), {
+        data: { name: overColumn },
         failOnStatusCode: false,
       });
-      expect(created.status(), `creating a 256-character name answered ${created.status()}`).toBe(400);
+      expect(
+        renamedLong.status(),
+        `renaming to a 256-character name answered ${renamedLong.status()}: ${await renamedLong.text()}`,
+      ).toBe(400);
+      expect(scalar(`SELECT name FROM knowledge_folders WHERE id = ${literal(folder.id)};`)).not.toBe(overColumn);
 
-      // The boundary itself is accepted — 255 is a legal name, so the guard must be off-by-none.
-      const atLimit = "A".repeat(255);
+      const created = await asOwner.post(kbUrl("/folders"), {
+        data: { name: overCap, parentFolderId: rootFolderId },
+        failOnStatusCode: false,
+      });
+      expect(created.status(), `creating a 51-character name answered ${created.status()}`).toBe(400);
+
+      // The boundary itself is accepted — 50 is a legal name, so the guard must be off-by-none.
+      const atLimit = "A".repeat(50);
       const ok = await asOwner.patch(kbUrl(`/folders/${folder.id}`), {
         data: { name: atLimit },
         failOnStatusCode: false,
       });
-      expect(ok.status(), `a 255-character name was refused — ${await ok.text()}`).toBeLessThan(400);
+      expect(ok.status(), `a 50-character name was refused — ${await ok.text()}`).toBeLessThan(400);
       expect(scalar(`SELECT name FROM knowledge_folders WHERE id = ${literal(folder.id)};`)).toBe(atLimit);
     } finally {
       exec(`DELETE FROM knowledge_folders WHERE id = ${literal(folder.id)};`);

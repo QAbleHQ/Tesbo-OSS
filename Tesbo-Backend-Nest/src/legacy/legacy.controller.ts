@@ -116,7 +116,7 @@ export class LegacyController {
     const workspace = await this.legacy.workspace(req.userId);
     // The caller is passed through so the workspace dashboard can be narrowed to the projects they can
     // actually reach — see analytics(). Basecamp 10199551447.
-    return this.legacy.analytics(undefined, workspace.id, req.userId, workspace.role);
+    return this.legacy.analytics(undefined, workspace.id, req.userId);
   }
 
   @Get("/api/workspace/members")

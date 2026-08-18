@@ -678,6 +678,37 @@ test.describe("filters", () => {
     }
   });
 
+  test("suiteId=none filters to test cases with no suite assigned", async ({ request }) => {
+    const suite = await createSuite(request, `E2E NoSuite Filter Suite ${Date.now()}`);
+    const marker = Date.now();
+    const inSuite = await createCase(request, { title: `E2E NoSuite InSuite ${marker}`, suiteId: suite.id });
+    const unassigned = await createCase(request, { title: `E2E NoSuite Unassigned ${marker}` });
+
+    try {
+      const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+        params: { suiteId: "none" },
+      });
+      expect(res.ok()).toBeTruthy();
+      const rows = await res.json();
+      expect(rows.some((tc: { id: string }) => tc.id === unassigned.id)).toBeTruthy();
+      expect(rows.some((tc: { id: string }) => tc.id === inSuite.id)).toBeFalsy();
+
+      // Moving the unassigned case into the suite must remove it from the "no suite" filter —
+      // proves the sentinel isn't just matching a literal suite_id of "none".
+      await request.put(`/api/projects/${ctx.projectId}/testcases/${unassigned.id}`, {
+        data: { suiteId: suite.id },
+      });
+      const afterMove = await (
+        await request.get(`/api/projects/${ctx.projectId}/testcases`, { params: { suiteId: "none" } })
+      ).json();
+      expect(afterMove.some((tc: { id: string }) => tc.id === unassigned.id)).toBeFalsy();
+    } finally {
+      await deleteCase(request, inSuite.id);
+      await deleteCase(request, unassigned.id);
+      await deleteSuite(request, suite.id);
+    }
+  });
+
   test("combining status and priority filters applies AND logic", async ({ request }) => {
     const marker = Date.now();
     const match = await createCase(request, { title: `E2E Combo Match ${marker}`, status: "In Review", priority: "P0" });
