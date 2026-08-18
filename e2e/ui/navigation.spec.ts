@@ -399,4 +399,96 @@ test.describe("side navigation — behaviour", () => {
       await context.close();
     }
   });
+  test("NAV-B-13 the workspace menu scrolls its own list and keeps Create new workspace reachable", async ({
+    page,
+  }) => {
+    /*
+     * Basecamp 10212564946 — "Workspace menu should have an independent scrollbar when multiple
+     * workspaces are added". The menu had no height bound and grew one row per workspace; the reporter
+     * had 11 and the list ran off the bottom of the viewport, taking "Create new workspace" with it —
+     * so the only way to add a workspace became unreachable once you had enough of them.
+     *
+     * Asserted at a short viewport rather than by provisioning eleven organizations: the defect is a
+     * missing height bound, and a short viewport reaches it with the workspaces this tenant already
+     * has. Fails against the unfixed markup, which has no scroll container at all.
+     */
+    await page.setViewportSize({ width: 1280, height: 500 });
+    await page.goto("/projects");
+
+    await page.getByRole("button", { name: "Switch workspace" }).click();
+
+    const list = page.getByTestId("workspace-switcher-list");
+    await expect(list, "the workspace menu has no scroll container of its own").toBeVisible();
+
+    // The list is what scrolls, not the page.
+    const overflow = await list.evaluate((el) => getComputedStyle(el).overflowY);
+    expect(["auto", "scroll"], `the workspace list overflow-y is "${overflow}"`).toContain(overflow);
+
+    // The menu is bounded, so it cannot grow past the viewport however many workspaces there are.
+    const menu = page.locator("div").filter({ has: list }).first();
+    const bounded = await menu.evaluate((el) => {
+      const maxHeight = getComputedStyle(el).maxHeight;
+      const rect = el.getBoundingClientRect();
+      return { maxHeight, bottom: rect.bottom, viewport: window.innerHeight };
+    });
+    expect(bounded.maxHeight, "the workspace menu has no max-height").not.toBe("none");
+    expect(
+      bounded.bottom,
+      `the menu bottom is at ${Math.round(bounded.bottom)} in a ${bounded.viewport}px viewport`,
+    ).toBeLessThanOrEqual(bounded.viewport + 1);
+
+    // And the action the reporter lost stays pinned and clickable.
+    const create = page.getByTestId("create-workspace-action");
+    await expect(create, "Create new workspace is not reachable").toBeInViewport();
+    await create.click();
+    await expect(page.getByRole("heading", { name: "Create workspace" })).toBeVisible();
+  });
+  test("NAV-B-14 the signed-in user's avatar is the same colour on every screen", async ({ page }) => {
+    /*
+     * Basecamp 10198836413 — "[UI] Display picture initials show different colours across the website".
+     *
+     * One person's initials were painted five different ways: the seeded palette from
+     * lib/avatarColors.ts on cycles and plan cards, a flat --cta-primary in the top bar and the
+     * workspace switcher, a flat --brand-soft in knowledge base comments, and a flat
+     * --surface-tertiary in Manage Admins. app/(app)/projects/page.tsx also carried its own
+     * byte-identical copy of the palette and hash, which is how they drift apart in the first place.
+     *
+     * Everything now seeds through avatarColor(). Asserted as an INVARIANT rather than against a fixed
+     * hex: the avatar has one colour, that colour is the same on every screen, and it is one of the
+     * palette's swatches. A future palette change stays green; a screen falling back to a flat brand
+     * fill does not.
+     */
+    const PALETTE = ["#7C5FCC", "#4C5FD5", "#1F7A3D", "#1D7FA8", "#A85F06", "#D83A3A"];
+    const toRgb = (hex: string) => {
+      const n = parseInt(hex.slice(1), 16);
+      return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+    };
+    const paletteRgb = PALETTE.map(toRgb);
+
+    /** The top bar's own avatar — the one element present on every authenticated screen. */
+    const avatarColourOn = async (path: string): Promise<string> => {
+      await page.goto(path);
+      const avatar = page.locator("header span.rounded-full").first();
+      await expect(avatar, `no top-bar avatar on ${path}`).toBeVisible();
+      return avatar.evaluate((el) => getComputedStyle(el).backgroundColor);
+    };
+
+    const first = await avatarColourOn("/projects");
+    expect(
+      paletteRgb,
+      `the avatar is ${first}, which is not one of the seeded palette swatches — the screen is ` +
+        "probably still painting a flat brand fill",
+    ).toContain(first);
+
+    // Same identity, different screens: the colour must not move.
+    for (const path of [
+      `/projects/${tenant!.projectId}/dashboard`,
+      `/projects/${tenant!.projectId}/testcases`,
+      `/projects/${tenant!.projectId}/cycles`,
+      "/settings?tab=general",
+      "/account",
+    ]) {
+      expect(await avatarColourOn(path), `the avatar changes colour on ${path}`).toBe(first);
+    }
+  });
 });

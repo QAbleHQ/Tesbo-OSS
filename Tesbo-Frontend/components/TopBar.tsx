@@ -8,6 +8,8 @@ import { useTopBarSlots } from "@/components/TopBarSlots";
 
 const MAX_RESULTS = 8;
 
+import { avatarColor } from "@/lib/avatarColors";
+
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "U";
@@ -99,6 +101,9 @@ export default function TopBar() {
   }
 
   const displayName = user?.name || user?.email || "";
+  // Seeded on the email: a display name can be edited or shared between two people, so it would move
+  // someone's colour or collide two of them. The email is the stable identity.
+  const avatarSeed = user?.email || user?.name || "";
 
   return (
     <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-4 border-b border-[var(--border-subtle)] bg-[var(--surface)] px-8">
@@ -171,7 +176,17 @@ export default function TopBar() {
         </button>
         <span
           title={displayName || undefined}
-          className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full bg-[var(--cta-primary)] text-[11px] font-semibold text-white"
+          /*
+           * Seeded from the identity, not a flat brand fill.
+           *
+           * Basecamp 10198836413 — "Display picture initials show different colours across the
+           * website". One person's initials were painted five different ways: the seeded palette on
+           * cycles and plan cards, a flat --cta-primary here and in the workspace switcher, a flat
+           * --brand-soft in knowledge base comments, and a flat --surface-tertiary in Manage Admins.
+           * avatarColor() is the single source, and every swatch in it clears 4.5:1 under white text.
+           */
+          className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full text-[11px] font-semibold text-white"
+          style={{ backgroundColor: avatarColor(avatarSeed || "?") }}
         >
           {displayName ? getInitials(displayName) : ""}
         </span>

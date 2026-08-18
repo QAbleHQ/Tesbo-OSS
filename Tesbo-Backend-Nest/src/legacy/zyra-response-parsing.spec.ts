@@ -34,6 +34,10 @@ function makeLegacy(): LegacyService {
 type Internals = {
   parseModelJson: (raw: string, salvageFields?: string[]) => Record<string, unknown> | null;
   sanitizeZyraReply: (raw: unknown, fallback: string) => string;
+  reconcileZyraReply: (
+    decision: { reply: string; actionType: string; operations: { type: string }[] },
+    applied: { testcases: unknown[]; activity: { title?: string; detail?: string }[] }
+  ) => string;
 };
 
 function internals(svc: LegacyService): Internals {
@@ -131,6 +135,82 @@ describe("Zyra model-response parsing", () => {
         expect(out.trim().startsWith("{")).toBe(false);
         expect(out).not.toContain('"actionType"');
       }
+    });
+  });
+  /*
+   * Basecamp 10212827246 ("AI Test Case Creation Shows Success but Test Cases Are Not Reflected") and
+   * the "Created 20 edge case test scenarios..." / "7 test cases generated" mismatch on 10212918496.
+   *
+   * decision.reply is model prose describing what the model INTENDED. applyZyraChatOperations is what
+   * writes, and it drops operations for the per-message cap, external-id conflicts, missing test cases
+   * or suites, and capability gating. reconcileZyraReply used to correct only the all-or-nothing case,
+   * so a partial application returned the model's larger number verbatim.
+   *
+   * Driven directly rather than through the API for the reason the whole file exists: this is a
+   * text-in/text-out contract, and the e2e suite deliberately never calls a model.
+   */
+  describe("reconcileZyraReply", () => {
+    const creates = (n: number) => Array.from({ length: n }, () => ({ type: "create" }));
+    const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `tc-${i}` }));
+
+    it("passes the reply through when every requested operation was applied", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "Created 3 test cases.", actionType: "create", operations: creates(3) },
+        { testcases: rows(3), activity: [] }
+      );
+      expect(out).toBe("Created 3 test cases.");
+    });
+
+    it("flags a partial application instead of repeating the model's larger number", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "Created 20 edge case test scenarios.", actionType: "create", operations: creates(20) },
+        { testcases: rows(7), activity: [] }
+      );
+      expect(out).toContain("7 of 20");
+      // The model's own prose is kept below the correction rather than discarded.
+      expect(out).toContain("Created 20 edge case test scenarios.");
+    });
+
+    it("names the reason a partial application dropped operations", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "Created 30 test cases.", actionType: "create", operations: creates(30) },
+        {
+          testcases: rows(25),
+          activity: [
+            { title: "Skipped some operations", detail: "5 operation(s) beyond the 25-per-message limit were not applied." },
+            { title: "Created testcase", detail: "AIP-TC-1 Login" }
+          ]
+        }
+      );
+      expect(out).toContain("25 of 30");
+      expect(out).toContain("25-per-message limit");
+      // An ordinary success entry is not a failure reason and must not be quoted as one.
+      expect(out).not.toContain("AIP-TC-1 Login");
+    });
+
+    it("still reports the all-or-nothing case as nothing saved", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "Created 5 test cases.", actionType: "create", operations: creates(5) },
+        { testcases: [], activity: [] }
+      );
+      expect(out).toContain("Nothing was saved");
+    });
+
+    it("treats a suite-only turn as a complete success", () => {
+      // create_suite touches no test case, so it must not read as a partial application.
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "Created the Smoke Tests suite.", actionType: "create_suite", operations: [{ type: "create_suite" }] },
+        { testcases: [], activity: [] }
+      );
+      expect(out).toBe("Created the Smoke Tests suite.");
+    });
+
+    it("leaves a plain answer alone", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "There are 12 login test cases.", actionType: "answer", operations: [] },
+        { testcases: [], activity: [] }
+      );
+      expect(out).toBe("There are 12 login test cases.");
     });
   });
 });

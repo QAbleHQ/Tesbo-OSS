@@ -7,6 +7,7 @@ import {
   addPlatformAdmin,
   removePlatformAdmin,
 } from "@/lib/api";
+import { avatarColor } from "@/lib/avatarColors";
 
 type PlatformAdmin = {
   id: string;
@@ -157,7 +158,11 @@ export default function AdminsTab() {
           >
             <div className="flex items-center gap-4">
               {/* Avatar */}
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--surface-tertiary)] text-[14px] font-bold text-[var(--muted)]">
+              {/* Seeded like every other person avatar — part of Basecamp 10198836413. */}
+              <div
+                className="flex h-10 w-10 items-center justify-center rounded-full text-[14px] font-bold text-white"
+                style={{ backgroundColor: avatarColor(admin.email || admin.name || admin.id) }}
+              >
                 {admin.name
                   ? admin.name
                       .split(" ")

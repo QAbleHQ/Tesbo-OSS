@@ -644,6 +644,42 @@ fix belongs on the test side and is the narrow case §3's rule allows, because t
 is wrong — it should scope the query to the two accounts this spec created. Left in place for whoever
 owns that file; do not "fix" it by relaxing the number.
 
+### Fixed on 2026-08-18 — the plan roll-up ("Overall progress percentage not matching")
+
+Basecamp 10213208002. The plan detail header read **30% over 7 untested** above a single run reading
+**40% over 6**. Three separate defects, all closed by one invariant: *the header is the sum of the
+runs the plan lists, and each run's buckets sum to its own total.*
+
+| # | Defect | Where | Regression test |
+|---|---|---|---|
+| A | A run with no cases contributed a phantom untested case — the untested bucket was `COUNT(*) FILTER (...)`, which counts the LEFT JOIN's all-NULL placeholder row for a cycle with no items | `planProgressRollup`, `planRunRows`, `listPlans` | `PLN-A-02`, `PLN-A-03`, `PLN-U-09` |
+| B | The plan screens counted `ci.id` against the raw `executions` table while the run screen and the run list count live execution rows, so one run carried two different case counts | same three, plus `planItemRows`' last-status lateral | `PLN-A-04` |
+| C | The runs list dropped every run that was not `In Progress`/`Completed` while the header kept aggregating them. `Planning` is the status every run is created with — including from this page's own Create test run button — so a run vanished the moment it was made and its cases were counted anyway | `plans/[planId]/page.tsx` | `PLN-U-08` |
+
+The fix is one shared SQL fragment, `LegacyService.EXECUTION_BUCKET_COUNTS`, now used by `listCycles`,
+`planRunRows`, `planProgressRollup` and `listPlans`: counted off `e.id`, joined with
+`AND e.deleted_at IS NULL`, every status in exactly one bucket. The four queries can no longer drift.
+The per-run percentage on the plan screen was also changed to `passed+failed+blocked+skipped`, the
+same arithmetic the header's `completionPercent` uses, rather than `total - untested`.
+
+Verified failing-first against a rebuilt image with the product change stashed out
+(`PLN-A-02/03/04`, `PLN-U-08/09` red, 27 passed), then green after: **126 of 129 passed** across
+`api/plans`, `api/cycles`, `api/projects`, `api/authorization`, `api/reports`, `ui/plans`.
+
+`DSH-A-21` and `DSH-A-22` were **stale pins**, red at HEAD before this change: both read `listCycles`,
+which an earlier session had already moved onto `COUNT(e.id)` + `deleted_at IS NULL` without updating
+the tests that pinned the old behaviour (`DSH-A-22`'s own comment asked for the fix to be "a
+deliberate change" — this was it). Their expectations were corrected, not weakened, and the SQL was
+checked against all 101 cycles in the database to confirm this change leaves `listCycles` results
+identical. `RPT-A-48` (`/api/cycles/<unknown-id>/report/summary` answers 404 where the spec expects
+200 with zeros) is **unrelated and still red** — it is on a different query, and it regressed
+somewhere between the 2026-08-17 image and HEAD.
+
+**Watch out: the local images go stale silently.** A run against the 2026-08-17 image reported 34
+failures across authorization, cycles, dashboard and reports; every one of them vanished on a rebuild
+from HEAD. Rebuild before believing a red, and check
+`docker compose exec backend grep -c Retest dist/legacy/legacy.service.js` against the source count.
+
 ### Fixed and verified green on 2026-08-14
 
 Fourteen numbered defects, plus the pattern instances behind them. Every one was found by a test that
@@ -925,6 +961,170 @@ sessions share this stack and a rebuild mid-run invalidates someone else's resul
 
 The DB-backed fixtures need `docker compose exec postgres psql` to be reachable. Where it isn't,
 those suites skip themselves with a reason rather than failing — see `rbacSuiteSkipReason`.
+
+---
+
+## 6b. Wave 12 — the reported-bug wave (2026-08-18)
+
+Not a coverage wave. The 14 cards in the Basecamp board's **Writing Tests** column, each with a
+BetterBugs session behind it, turned into specs. Source of the requirement is the BetterBugs
+description in every case — the Basecamp card title is often looser than the report (card 3 says
+"Internal Server Error while creating account"; the session says **workspace**, on `/onboarding`).
+
+**69 tests across 9 files.** Suite total 972 → **1041 tests in 55 files**. Landed on `BugFixes` after
+merging `E2ETest` into it.
+
+> **Not yet executed.** These specs typecheck and enumerate (`--list`), and the counts above are
+> measured from `--list`. **No test in this wave has been run**, at explicit request. Every "RED" and
+> "green" in the table below is therefore a **prediction from reading the product code**, not a
+> measurement — §5's rule applies: re-measure, don't re-quote. The first job for whoever runs them is
+> to replace this table's states with observed ones, and to move the confirmed product bugs into §3.
+
+| Ticket (BetterBugs) | Tests | File | State |
+|---|---|---|---|
+| Projects search not working (6a7c203d) | `PRJ-S-01..07` | `ui/projects-list.spec.ts` | green — implemented since the report |
+| Projects sort/filter not working (6a7c1f28) | `PRJ-S-08..11` | same | green — sort implemented; there is no separate filter control, the search box *is* the filter |
+| 500 creating a workspace (6a7afa2d) | `ONB-A-01..08` | `api/onboarding.spec.ts` (new) | **ONB-A-04 predicted RED** |
+| Sign Up validation missing (6a7c621b) | `SGN-A-12..17` | `api/signup.spec.ts` | green — enforced both sides |
+| Account label should be "My Account" (6a840253) | `ACU-01` | `ui/account.spec.ts` (new) | **RED** — still `<h1>Account</h1>` + sidebar "Account" |
+| Password change needs a success message (6a8400e2) | `ACU-02..04` | same | green — `showToast` already there |
+| Forgot/Reset password missing (6a7b24ef) | `ACU-05..10` | same | green — built end to end since the report |
+| Onboarded without accepting invite (6a7d8189) | `INV-P-01..05` | `api/invitations.spec.ts` | green — pending invites confer nothing |
+| KB blank documents need validation (6a7da01c) | `KBU-25..26` | `ui/knowledge-base.spec.ts` | **RED** — editor autosaves an emptied title |
+| Search only works on Enter (6a7dae14) | `KBU-27` | same | **RED** for the KB screen; the repository screen debounces correctly |
+| Repository count stale after delete (6a7c17a8) | `TCR-01..04` | `ui/testcases-repository.spec.ts` (new) | to be measured |
+| Search clear button (6a7c1f86) | `TCR-05` | same | **RED** — no clear control on this screen (the KB screen has one) |
+| Unselect all Columns (6a7c217f) | `TCR-06..07` | same | **RED** — `toggleColumnVisible` has no locked-column concept |
+| Loading error after accepting invite (6a82d9a3) | 2 tests in "login reached from an already-accepted invite" | `ui/login-redirect.spec.ts` | green — root cause already fixed and covered; these add the entry path |
+| Activity data not displayed correctly (6a7c763c) | `ACT-A-01..17` | `api/activity.spec.ts` (new) | **ACT-A-02 and ACT-A-11 predicted RED** |
+
+### New tenant kinds
+
+`account-ui`, `repo-ui`, `invite-signin`, `activity` — added to `RbacTenantKind`. Each exists for a
+reason worth keeping:
+
+- **`account-ui`** — every test in that file changes a real password. Sharing an account would leave
+  the next spec (and `global-setup` on the following run) authenticating with a password that no
+  longer exists. The file restores `FIXTURE_PASSWORD` in `afterEach`, through the product's own
+  change endpoint rather than a hand-written hash.
+- **`repo-ui`** — the repository header counters are absolute project-wide numbers. Any concurrent
+  spec creating or deleting a case in the same project moves them mid-assertion.
+- **`invite-signin`** — needs a redeemable invitation, and `api/invitations.spec.ts` clears its
+  tenant's pending invites in `beforeEach`, so borrowing `invites` would delete the token mid-test.
+- **`activity`** — the assertions are about which events exist and in what order, so any other spec
+  acting in the same project inserts events into the middle of them. The workspace rollup is
+  owner-only and spans every project in the workspace, which rules out sharing one too.
+
+### Findings worth keeping
+
+- **`KBU-13` was a false positive.** It filled the knowledge-base search box and asserted the
+  matching document was visible — but that screen's search is a `<form>` and `searchQuery` is only set
+  in `onSubmit`, so `fill()` never searched. The document it asserted on was visible in the
+  *unfiltered* list, so the test passed while testing nothing. Now presses Enter and asserts a decoy
+  document drops out. This is the narrow spec-side fix §3 allows: the method was wrong, not the
+  expectation.
+- **`signup/start`'s rate-limit budget is nearly spent.** `OTP_MAX_ATTEMPTS` is 5 and the file now
+  makes 3 attempts. A rate-limited `start` still answers **204** while writing no `pending_signups`
+  row, so overspending does not fail loudly — it makes assertions flaky by file order. Any new test
+  there expecting a 204 has to justify the attempt.
+- **The invite-email half of 6a7d8189 is not a defect.** The invite *is* sent and
+  `api/email-delivery.spec.ts` already pins that its accept link is emitted and works. Outside
+  production `EMAIL_DELIVERY_MODE=log` means nothing reaches an inbox on purpose, which is what the
+  reporter saw on stage. Only the authorization half was worth new tests.
+- **`removeCycleTestCases` had no caller check** — found while merging `E2ETest` into `BugFixes`, not
+  by a test. `BugFixes` added the bulk-delete on a base where `/api/cycles/*` was unguarded; `E2ETest`
+  guarded every sibling route. The merge put an unauthenticated destructive route next to nine guarded
+  ones. Fixed in the merge commit with the standard two lines plus `isUuid` filtering, matching
+  `addCycleTestCases`.
+- **The activity feed shows a person's action as "System".** `activityEventsSql` UNIONs `audit_logs`
+  (real actor) with rows SYNTHESIZED from the base tables, and every synthetic branch selects
+  `NULL::uuid AS actor_id, NULL AS actor_name` except plan/cycle/bug-*created*. So suite created and
+  suite updated have no actor ever, plan-updated and cycle-updated have none, and bug-updated is
+  attributed to `reported_by` — whoever FILED the bug, not whoever changed it. The UI prints
+  `actorName || actorEmail || "System"`, so all of those render as **System**. That is the whole of
+  "Activity data is not displayed correctly", and the suite half is **downstream of §3 bug 1**:
+  `createSuite(projectId, body)` takes no `userId` at all, so there is no actor to record even in
+  principle. Fixing bug 1 is a prerequisite for `ACT-A-02`, which makes bug 1 worth more than its own
+  entry suggests — it is two reported defects, not one.
+- **The "audit log" forgets.** `deleteSuite` and `deleteCycle` are HARD deletes and the synthetic rows
+  read from the live row, so deleting an entity retroactively erases every trace it ever existed —
+  while the page calls itself "a full audit log of all actions taken across this project". `ACT-A-11`
+  states the expectation; whether the fix is real audit rows on create/update/delete or a softer
+  delete is a product decision, but the present behaviour cannot be what was intended.
+- **Two counters disagreeing is the shape of 6a7c17a8.** The repository renders its numbers from
+  `repoStats` (one fetch) and the suite tree from another, so `TCR-04` asserts the tree specifically
+  rather than trusting that the stat cards standing in for it.
+
+---
+
+## 6c. Wave 13 — the second reported-bug bucket (2026-08-18)
+
+The 16 cards that refilled the board's **Writing Tests** column. **Ten were already covered by a
+concurrent session** working the same bucket — check before writing: `grep -rn <card-id> e2e/` finds
+most of it, but not all, because not every spec cites the card id (`10213212329` is covered by
+`PLN-U-01/02/04/06` and names none). The six below are this session's.
+
+**12 tests across 4 files.** Suite 1041 → **1087 tests in 58 files** (the rest of that delta is the
+concurrent session's plans/shared-report work).
+
+| Ticket (BetterBugs) | Tests | File | State |
+|---|---|---|---|
+| Dashboard project count wrong (6a7dbf42) | `WSA-A-01` | `api/workspace-setup.spec.ts` | **predicted RED** |
+| Project dashboard suite count wrong (6a7c1abd) | `WSA-A-02` | same | **predicted RED** |
+| KB upload popup hides types/size (6a7da3ff) | `KBU-28` | `ui/knowledge-base.spec.ts` | **predicted RED** |
+| KB shows API/CORS diagnostic (6a7da27f) | `KBU-29` | same | **predicted RED** |
+| KB folder name truncated with no tooltip (6a7da94c) | `KBU-30` | same | **predicted RED** |
+| Zyra success but cases missing (6a841e18) | `ZCC-A-01..05` | `api/zyra-chat-consistency.spec.ts` (new) | partial — see below |
+
+Same honesty rule as Wave 12: **none of these has been run.** They typecheck and enumerate; every
+state above is a prediction from reading product code.
+
+### The dashboard counts are one defect, and it is not the archived-projects one
+
+`analytics()` was already fixed to filter `archived_at`, so §3 bug 3 is closed. What remains is that
+the two surfaces count **different populations**:
+
+```
+listProjects   JOIN project_members pm ... WHERE pm.user_id = $1 AND organization_id = $2
+analytics()    FROM projects WHERE organization_id = $1 AND archived_at IS NULL
+```
+
+The tile is workspace-wide; the list is membership-scoped. An owner who is not a `project_members` row
+on every project in their own workspace — the normal state as soon as a manager creates one — reads a
+Projects tile the Projects page cannot reproduce, which is exactly the reporter's repro ("note the
+count, go to Projects, compare"). `analytics()`'s `childWhere` resolves projects by organization too,
+so `suiteCount` and `testCaseCount` count the contents of projects the caller cannot open — a small
+disclosure as well as a wrong number.
+
+### `lib/api.ts` leaks a developer diagnostic to every user
+
+`api()` turns any network failure into
+
+> `Failed to fetch — browser blocked or could not reach the API. Confirm NEXT_PUBLIC_API_URL, HTTPS,
+> and that the backend allows this page's origin in CORS_ALLOWED_ORIGINS.`
+
+and throws it as the user-facing message. It names three environment variables and asks the user to
+check a CORS allowlist. Because it lives in the shared wrapper, **every** screen shows it, not just the
+KB upload the ticket was filed against — so `KBU-29` provokes it by aborting the upload request rather
+than by dropping a folder (Playwright cannot synthesise a directory drop, and the folder handling is
+not where the defect is).
+
+### The Zyra ticket is only half reachable
+
+`ZCC-A-01..05` pin the half that needs no model: an assistant turn's `testcases` array is the only
+honest record of what was written (`zyraTranscript` derives its annotation from it), and it must never
+advertise a case the repository does not have — deleted, or belonging to another project.
+
+The other half cannot be tested yet. Every decision about whether to create runs **behind** the
+provider call: `zyraCapabilityDisabled` is invoked only after `zyraChatWithAnthropic` /
+`zyraChatWithOpenAi` return, as does the per-turn operation ceiling. So "the reply claimed 15 and saved
+10" needs `utils/fake-ai-server.ts` — Wave 0 item 3, still the gap that blocks real Zyra behaviour
+testing. The product's own prompt is the clearest statement of the problem: it tells the model to
+"trust the annotation over the wording of the reply, which may describe testcases that were never
+saved". The annotation exists for the model; the human reading the chat gets the wording.
+
+`ZCC-A-03` therefore asserts something slightly unusual: that a turn which saved nothing exposes
+*some* field the UI could use to contradict its own prose. Which field is the product's call.
 
 ---
 

@@ -174,6 +174,74 @@ test.describe("test cycle / run CRUD", () => {
   });
 });
 
+test.describe("linking test cases to a run at scale", () => {
+  // Regression cover for the reported 524: linking used to issue three sequential statements per
+  // test case, so a few hundred cases exceeded the edge proxy's timeout and, because each insert
+  // autocommitted separately, only part of the selection survived. 300 is the size users reported
+  // failing at.
+  const CASE_COUNT = 300;
+
+  test("adds 300 cases in one request, reports them consistently, and bulk-removes them", async ({ request }) => {
+    // Comfortably above what the batched path needs (~7s end to end locally) while still
+    // failing rather than hanging if the per-row behaviour ever comes back.
+    test.setTimeout(180_000);
+    const stamp = Date.now();
+    const cycle = await (
+      await request.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `E2E Bulk Link ${stamp}` } })
+    ).json();
+
+    const created = await (
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-create`, {
+        data: {
+          testcases: Array.from({ length: CASE_COUNT }, (_, i) => ({
+            title: `E2E Bulk Link Case ${stamp}-${i}`,
+            status: "Approved",
+          })),
+        },
+      })
+    ).json();
+    const testcaseIds: string[] = created.created.map((c: { id: string }) => c.id);
+
+    try {
+      expect(created.createdCount).toBe(CASE_COUNT);
+
+      const addRes = await request.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds } });
+      expect(addRes.ok()).toBeTruthy();
+      expect(await addRes.json()).toMatchObject({ requested: CASE_COUNT, added: CASE_COUNT, skipped: 0 });
+
+      // Every linked case must be visible in the run, not just counted by it.
+      const executions = await (await request.get(`/api/cycles/${cycle.id}/executions`)).json();
+      expect(executions).toHaveLength(CASE_COUNT);
+      expect(executions.every((e: { status: string }) => e.status === "Untested")).toBeTruthy();
+
+      // The run card's total is what used to drift from the table above.
+      const runs = await (await request.get(`/api/projects/${ctx.projectId}/cycles`)).json();
+      const thisRun = runs.find((r: { id: string }) => r.id === cycle.id);
+      expect(thisRun.totalCases).toBe(executions.length);
+      expect(thisRun.untested).toBe(CASE_COUNT);
+
+      // Re-adding the same selection is a no-op rather than a source of duplicate rows.
+      const readdRes = await request.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds } });
+      expect(await readdRes.json()).toMatchObject({ requested: CASE_COUNT, added: 0, skipped: CASE_COUNT });
+      expect(await (await request.get(`/api/cycles/${cycle.id}/executions`)).json()).toHaveLength(CASE_COUNT);
+
+      const removeRes = await request.post(`/api/cycles/${cycle.id}/testcases/bulk-delete`, {
+        data: { testcaseIds: testcaseIds.slice(0, 250) },
+      });
+      expect(await removeRes.json()).toMatchObject({ requested: 250, removed: 250 });
+      expect(await (await request.get(`/api/cycles/${cycle.id}/executions`)).json()).toHaveLength(CASE_COUNT - 250);
+    } finally {
+      await request.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+      if (testcaseIds.length) {
+        await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-delete`, {
+          data: { testcaseIds },
+          failOnStatusCode: false,
+        });
+      }
+    }
+  });
+});
+
 /*
  * POST /api/cycles/:cycleId/testcases — putting test cases into a run.
  *

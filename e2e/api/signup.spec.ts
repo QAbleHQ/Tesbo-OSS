@@ -1,7 +1,7 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { emailDomain } from "../utils/env";
 import { clearOtpIpRateLimit, clearOtpRateLimit, seedOtpCode } from "../utils/otp";
-import { dbControlAvailable, exec, literal, scalar } from "../utils/psql";
+import { dbControlAvailable, exec, execAllowingAuditImmutability, literal, scalar } from "../utils/psql";
 import { anonymousContext } from "../utils/rbac-tenant";
 
 /*
@@ -21,7 +21,10 @@ import { anonymousContext } from "../utils/rbac-tenant";
  *     validates email, name and password and checks for an existing user *before* it calls sendOtp, so
  *     a refused request costs nothing.
  *   - the IP limit is cleared in beforeAll and afterAll, so whatever this file spends is returned. It
- *     makes exactly two rate-limited attempts in total.
+ *     makes exactly THREE rate-limited attempts in total (SGN-A-10, SGN-A-11 twice... and SGN-A-13's
+ *     single accepted name). OTP_MAX_ATTEMPTS defaults to 5, so there is very little headroom: any
+ *     new test here that expects a 204 from signup/start has to justify the attempt it spends, and a
+ *     rate-limited start fails quietly — it still answers 204 but writes no pending_signups row.
  *
  * The OTP is seeded rather than read from a mailbox (utils/otp.ts), the same way the invitation specs
  * do it: the code goes out by email and is stored hashed, so there is nothing to read back.
@@ -72,7 +75,7 @@ test.describe("self-serve signup", () => {
     exec(
       `DELETE FROM project_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(email.toLowerCase())});`,
     );
-    exec(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
+    execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
     clearOtpRateLimit(email.toLowerCase());
   }
 
@@ -308,5 +311,99 @@ test.describe("self-serve signup", () => {
     const verified = await verify({ email, code: "555555" });
     expect(verified.status(), `verify after a restarted signup — ${await verified.text()}`).toBe(201);
     expect(userCount(email)).toBe(1);
+  });
+  // ─── Field rules (BetterBugs 6a7c621b) ─────────────────────────────────────
+  //
+  // "Validation and maximum character limits are missing for Sign Up fields" — first name, last name
+  // and password took digits, specials and unbounded length. All three are enforced now, in
+  // person-name.util.ts (validatePersonName) and password.service.ts (assertValidPassword), and
+  // mirrored in the frontend's lib/validation.ts.
+  //
+  // Every case below is refused BEFORE sendOtp, so like SGN-A-01..03 these cost nothing from the IP
+  // rate-limit allowance this file is careful with.
+
+  test("SGN-A-12 a name containing digits or special characters is refused", async () => {
+    const email = signupEmail("badnamechars");
+    // The reporter typed exactly these kinds of values into First/Last name and the form took them.
+    const rejected = [
+      "Namrata123",
+      "Test@User",
+      "N4me",
+      "<script>alert(1)</script>",
+      "Robert'); DROP TABLE users;--",
+      "名前 42",
+      "Name_With_Underscore",
+      "Name+Plus",
+    ];
+    for (const name of rejected) {
+      const res = await start({ name, email, password: "E2E-Signup-Pass-9f3!" });
+      expect(res.status(), `name ${JSON.stringify(name)} was accepted`).toBe(400);
+      expect(JSON.stringify(await res.json())).toContain("can only contain letters");
+    }
+    expect(pendingCount(email)).toBe(0);
+  });
+
+  test("SGN-A-13 the punctuation real names use is still accepted", async () => {
+    // The rule has to reject digits without rejecting people, so one accepted name carries every
+    // allowed class at once: an accented letter, a space, a hyphen, an apostrophe and a period.
+    //
+    // Exactly ONE successful start in this whole block, on purpose. A start that passes validation
+    // reaches sendOtp and spends from the 5-attempt IP allowance (OTP_MAX_ATTEMPTS) that every
+    // worker shares — and a rate-limited start still answers 204 while storing no pending row, so
+    // overspending here would not fail loudly, it would make these assertions flaky by file order.
+    const email = signupEmail("goodname");
+    const name = "José Mary-Jane O'Neill Jr.";
+    const res = await start({ name, email, password: "E2E-Signup-Pass-9f3!" });
+    expect(res.status(), `name ${JSON.stringify(name)} was refused: ${await res.text()}`).toBe(204);
+
+    // Stored trimmed, so padding never becomes part of the person's name.
+    expect(
+      scalar(
+        `SELECT name FROM pending_signups WHERE email = ${literal(email.toLowerCase())} ORDER BY created_at DESC LIMIT 1;`,
+      ),
+    ).toBe(name);
+  });
+
+  test("SGN-A-14 a name longer than 100 characters is refused", async () => {
+    const email = signupEmail("longname");
+    const res = await start({ name: "A".repeat(101), email, password: "E2E-Signup-Pass-9f3!" });
+    expect(res.status(), `a 101-character name — ${await res.text()}`).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain("at most 100 characters");
+    expect(pendingCount(email)).toBe(0);
+    // The accepting side of the boundary is not exercised here — it would cost another
+    // rate-limited attempt (see SGN-A-13). SGN-A-10 already proves a legal name signs up.
+  });
+
+  test("SGN-A-15 a password over 128 characters is refused rather than silently truncated", async () => {
+    const email = signupEmail("longpass");
+    // Silent truncation would be the dangerous outcome: the user would set a 200-character password
+    // and later be unable to sign in with it.
+    const res = await start({ name: "EndToEnd Signup", email, password: `Aa1${"x".repeat(126)}` });
+    expect(res.status(), `a 129-character password — ${await res.text()}`).toBe(400);
+    expect(JSON.stringify(await res.json())).toContain("at most 128 characters");
+    expect(pendingCount(email)).toBe(0);
+  });
+
+  test("SGN-A-16 a password must mix upper case, lower case and a digit", async () => {
+    const email = signupEmail("passclasses");
+    const cases: Array<[string, string]> = [
+      ["alllowercase1", "uppercase"],
+      ["ALLUPPERCASE1", "lowercase"],
+      ["NoDigitsAtAll", "number"],
+    ];
+    for (const [password, expected] of cases) {
+      const res = await start({ name: "EndToEnd Signup", email, password });
+      expect(res.status(), `password ${JSON.stringify(password)} was accepted`).toBe(400);
+      // The message has to name the missing class — "invalid password" makes the user guess.
+      expect(JSON.stringify(await res.json()).toLowerCase()).toContain(expected);
+    }
+    expect(pendingCount(email)).toBe(0);
+  });
+
+  test("SGN-A-17 an email longer than 255 characters is refused", async () => {
+    // users.email is VARCHAR(255); without the check the insert would fail as a 500 rather than a 400.
+    const local = "a".repeat(250);
+    const res = await start({ name: "EndToEnd Signup", email: `${local}@${emailDomain}`, password: "E2E-Signup-Pass-9f3!" });
+    expect(res.status(), `a ${local.length + emailDomain.length + 1}-character email — ${await res.text()}`).toBe(400);
   });
 });

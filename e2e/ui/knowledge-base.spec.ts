@@ -511,11 +511,26 @@ test.describe("knowledge base (UI)", () => {
       data: { contentText: `A body containing ${needle}`, contentHtml: `<p>A body containing ${needle}</p>` },
     });
 
+    // A second document that cannot match, so the assertion proves FILTERING and not merely that a
+    // freshly created document is somewhere in the list.
+    const decoyTitle = stamp("Unfindable");
+    await api.post(kbUrl("/documents"), {
+      data: { title: decoyTitle, folderId: rootFolderId, documentType: "general" },
+    });
+
     const page = await openKb(browser);
+    await expect(row(page, title)).toBeVisible();
+    await expect(row(page, decoyTitle)).toBeVisible();
+
+    // Enter, not fill() alone: this screen's search is a FORM, and searchQuery — the only state the
+    // results read — is set in onSubmit. Typing without submitting leaves the unfiltered list on
+    // screen, so an assertion that the document is visible would pass without searching at all.
     await page.getByPlaceholder("Search knowledge base…").fill(needle);
+    await page.getByPlaceholder("Search knowledge base…").press("Enter");
 
     // The title does not contain the needle, so a hit proves the body was searched.
     await expect(row(page, title)).toBeVisible();
+    await expect(row(page, decoyTitle), "a non-matching document must drop out").toHaveCount(0);
   });
 
   test("KBU-14 a whitespace-only search term matches nothing rather than everything", async ({ browser }) => {
@@ -626,5 +641,307 @@ test.describe("knowledge base (UI)", () => {
     // But the endpoint exists and works, which is what makes this a gap rather than a design.
     const restored = await api.patch(kbUrl(`/folders/${folderId}/restore`));
     expect(restored.status(), "restore works over the API — only the UI cannot reach it").toBe(200);
+  });
+  // ─── Blank documents (BetterBugs 6a7da01c) ─────────────────────────────────
+  //
+  // "user should not be able to save blank documents add some validation".
+  //
+  // KBU-07 already covers the CREATE modal refusing an empty title. These two are about the editor,
+  // which is a different code path and currently unguarded: handleTitleChange feeds scheduleSave
+  // directly, and scheduleSave's only precondition is a payload size ceiling. So a title can be
+  // cleared to nothing and autosaved, and the document then shows as "Untitled" everywhere it is
+  // listed. Both tests are expected RED until the editor validates before saving.
+
+  test("KBU-25 a document's title cannot be emptied and saved", async ({ browser }) => {
+    const title = stamp("KeepsTitle");
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title, folderId: rootFolderId, documentType: "general" },
+    });
+    const documentId = (await created.json()).id;
+
+    const ctx = await browser.newContext({ storageState: states.get("owner") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/${documentId}`);
+
+    const titleBox = page.getByPlaceholder("Untitled document");
+    await expect(titleBox).toHaveValue(title);
+    await titleBox.fill("");
+    await titleBox.blur();
+
+    // The editor autosaves on a debounce, so give it longer than the debounce to do the wrong thing
+    // before concluding it did not.
+    await expect(page.getByText(/Unsaved changes|Saving…|Saved/)).toBeVisible();
+    await page.waitForTimeout(2_000);
+
+    expect(
+      scalar(`SELECT title FROM knowledge_documents WHERE id = ${literal(documentId)};`),
+      "an emptied title must not be persisted",
+    ).toBe(title);
+  });
+
+  test("KBU-26 a whitespace-only title is refused the same way an empty one is", async ({ browser }) => {
+    const title = stamp("WhitespaceTitle");
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title, folderId: rootFolderId, documentType: "general" },
+    });
+    const documentId = (await created.json()).id;
+
+    const ctx = await browser.newContext({ storageState: states.get("owner") });
+    contexts.push(ctx);
+    const page = await ctx.newPage();
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/${documentId}`);
+
+    const titleBox = page.getByPlaceholder("Untitled document");
+    await expect(titleBox).toHaveValue(title);
+    // Spaces are the loophole an empty-string check alone leaves open — the stored title then looks
+    // present to the database and blank to every human reading the list.
+    await titleBox.fill("      ");
+    await titleBox.blur();
+    await page.waitForTimeout(2_000);
+
+    const stored = scalar(`SELECT title FROM knowledge_documents WHERE id = ${literal(documentId)};`);
+    expect(stored.trim(), "a whitespace-only title must not be persisted").not.toBe("");
+  });
+
+  // ─── Search feedback while typing (BetterBugs 6a7dae14) ────────────────────
+
+  test("KBU-27 search either filters as you type or offers a visible Search control", async ({ browser }) => {
+    const present = stamp("TypeAheadHit");
+    const absent = stamp("TypeAheadMiss");
+    for (const name of [present, absent]) {
+      await api.post(kbUrl("/folders"), { data: { name, parentFolderId: rootFolderId } });
+    }
+
+    const page = await openKb(browser);
+    await expect(row(page, present)).toBeVisible();
+    await expect(row(page, absent)).toBeVisible();
+
+    // Typed character by character and deliberately NOT submitted.
+    await page.getByPlaceholder("Search knowledge base…").pressSequentially(present, { delay: 20 });
+
+    /*
+     * The ticket accepts either resolution, so this test does too — it fails only if NEITHER is
+     * offered, which is the state the reporter hit: results arrive only on Enter and there is no
+     * button saying so, leaving the screen looking broken mid-type.
+     *
+     * The "Clear" button next to the box does not count: it appears only once a search has already
+     * been submitted, so it cannot tell a user how to submit one.
+     */
+    const filteredAsTyped = await row(page, absent)
+      .waitFor({ state: "detached", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+
+    const searchControl = page
+      .getByRole("button", { name: /^Search$/i })
+      .or(page.locator('button[type="submit"]').filter({ hasText: /search/i }));
+    const hasSearchButton = await searchControl.first().isVisible().catch(() => false);
+
+    expect(
+      filteredAsTyped || hasSearchButton,
+      "typing filtered nothing and no Search button was offered — the user cannot tell how to search",
+    ).toBe(true);
+  });
+  // ─── Upload affordances and error copy ─────────────────────────────────────
+
+  /*
+   * Basecamp 10199159265 / BetterBugs 6a7da3ff — "Supported file types and maximum file size are not
+   * displayed in Knowledge Base upload popup".
+   *
+   * The modal says only "Drag and drop files here, or click to browse". The rules it does not mention
+   * are real and enforced server-side:
+   *
+   *   - `KB_ALLOWED_EXTENSIONS` — 33 extensions; anything else is refused with
+   *     "This file type is not supported: <name>"
+   *   - `KB_MAX_UPLOAD_SIZE` — MAX_UPLOAD_SIZE or 100 MB, enforced by FilesInterceptor
+   *   - `FilesInterceptor("files", 10)` — at most 10 files per request
+   *
+   * and the refusal is ATOMIC: one unsupported file in a batch rejects the whole batch. So a user who
+   * is not told the rules loses the entire upload to a single wrong file. The `<input type="file">`
+   * also carries no `accept`, so the OS picker offers files the product will reject.
+   *
+   * Expected RED. The assertion is deliberately about the limits being DISCLOSED, not about exact
+   * wording — any copy naming the formats and the size satisfies it.
+   */
+  test("KBU-28 the upload modal states which files are allowed and how large they may be", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    await newMenu(page, "Upload file");
+    const dialog = modal(page, "Upload file");
+    await expect(dialog).toBeVisible();
+
+    const copy = ((await dialog.textContent()) ?? "").toLowerCase();
+
+    // The size ceiling, however it is phrased ("100 MB", "100MB", "max 100 mb").
+    expect(copy, "the modal never mentions a maximum file size").toMatch(/\d+\s*(mb|gb)/);
+
+    // A representative sample of the allowed list, so the copy has to actually enumerate formats
+    // rather than say "supported files only".
+    const named = ["pdf", "docx", "xlsx", "png", "csv"].filter((ext) => copy.includes(ext));
+    expect(
+      named.length,
+      `the modal names none of the supported formats — copy was: ${copy.trim().slice(0, 200)}`,
+    ).toBeGreaterThan(0);
+
+    // And the picker itself should not offer what the server will refuse.
+    const accept = await dialog.locator('input[type="file"]').getAttribute("accept");
+    expect(accept, "the file input has no accept attribute, so the OS picker offers rejected types").toBeTruthy();
+  });
+
+  /*
+   * Basecamp 10199144861 / BetterBugs 6a7da27f — "Technical API error displayed to user during folder
+   * drag-and-drop upload".
+   *
+   * Dropping a FOLDER yields DataTransfer entries with no readable file, the upload request fails, and
+   * the page renders what `lib/api.ts` threw:
+   *
+   *   "Failed to fetch — browser blocked or could not reach the API. Confirm NEXT_PUBLIC_API_URL,
+   *    HTTPS, and that the backend allows this page's origin in CORS_ALLOWED_ORIGINS."
+   *
+   * That string is a developer diagnostic. It names three environment variables and tells the user to
+   * check a CORS allowlist, which is not theirs to check — and because the throw lives in the shared
+   * `api()` wrapper, EVERY network failure anywhere in the app shows it, not just this upload.
+   *
+   * The failure is provoked here by aborting the upload request rather than by dropping a real folder:
+   * Playwright cannot synthesise a directory drop, and the defect is not in the folder handling — it
+   * is in what the page does with any failed request. Aborting reproduces the exact `Failed to fetch`
+   * branch the reporter hit.
+   *
+   * Expected RED until the diagnostic moves to the console and the user gets plain copy.
+   */
+  test("KBU-29 a failed upload shows plain copy, not the API/CORS diagnostic", async ({ browser }) => {
+    const page = await openKb(browser);
+
+    await page.route(/\/knowledge-base\/files/, (route) =>
+      route.request().method() === "POST" ? route.abort("failed") : route.continue(),
+    );
+
+    await newMenu(page, "Upload file");
+    const dialog = modal(page, "Upload file");
+    await dialog
+      .locator('input[type="file"]')
+      .setInputFiles({ name: "kbu29.txt", mimeType: "text/plain", buffer: Buffer.from("KBU-29") });
+    await dialog.getByRole("button", { name: /^Upload/ }).click();
+
+    // Something must be said — silence would be its own bug.
+    const alert = page.getByText(/fail|error|unable|could not/i).first();
+    await expect(alert).toBeVisible();
+    const shown = (await page.locator("body").textContent()) ?? "";
+
+    for (const leak of ["NEXT_PUBLIC_API_URL", "CORS_ALLOWED_ORIGINS", "HTTPS", "Failed to fetch"]) {
+      expect(shown, `the page showed the internal diagnostic "${leak}" to the user`).not.toContain(leak);
+    }
+  });
+
+  /*
+   * Basecamp 10199215592 / BetterBugs 6a7da94c — "Full folder name is not visible when truncated".
+   *
+   * Both places a folder name appears clip it with `className="truncate"` and neither carries a
+   * `title`: `FolderTree.tsx`'s tree node and the item table's name cell. The reporter asked for a
+   * tooltip on hover, which `title` is the accessible, zero-JS way to provide.
+   *
+   * Expected RED.
+   */
+  test("KBU-30 a long folder name is readable in full from a tooltip", async ({ browser }) => {
+    /*
+     * Comfortably past the tree's width, so it genuinely truncates, but within the folder-name cap.
+     *
+     * The cap is KB_FOLDER_NAME_MAX_LENGTH = 50 (LegacyService, mirrored in Tesbo-Frontend's
+     * lib/validation.ts) — a name longer than that is a 400 now, so the old 124-character fixture
+     * could no longer be created at all. 50 characters in a sidebar tree still truncates, which is
+     * all this test needs; the subject here is the tooltip, not the length limit (KB-A-58 owns that).
+     * Sliced rather than hand-sized because stamp()'s random suffix varies in width, and the slice
+     * keeps the whole timestamp so re-runs still can't collide.
+     */
+    const longName = `${stamp("VeryLongFolderName")} ${"Segment".repeat(12)}`.slice(0, 50);
+    const created = await api.post(kbUrl("/folders"), {
+      data: { name: longName, parentFolderId: rootFolderId },
+    });
+    expect(created.ok(), `creating the long-named folder — ${await created.text()}`).toBeTruthy();
+
+    const page = await openKb(browser);
+
+    // The tree node and the table cell are two separate renders of the same name; the reporter saw
+    // the tree, but a user reads whichever is in front of them.
+    const treeNode = page.locator("span.truncate", { hasText: longName.slice(0, 40) }).first();
+    await expect(treeNode).toBeVisible();
+
+    const withTitle = page.locator(`[title=${JSON.stringify(longName)}]`);
+    await expect(
+      withTitle.first(),
+      "no element exposes the full folder name, so a truncated name cannot be read at all",
+    ).toBeAttached();
+  });
+  /*
+   * Basecamp 10199290648 — "Resolving a comment deletes the comment and its replies".
+   *
+   * It does not: resolve sets is_resolved (delete is a separate endpoint), the list endpoint still
+   * returns the thread, and it can be reopened — all pinned API-side by KBC-A-10..13. What the
+   * reporter actually hit was a disappearance: a resolved thread is hidden from the default view, and
+   * the only thing saying so was a 12px grey underlined link in the header's far corner. When the
+   * resolved thread is the LAST open one the entire list empties at once, which reads as destruction.
+   *
+   * Asserts the behaviour is non-destructive AND that the screen says so. Fails against the old UI on
+   * the chip locator and on the empty-state wording.
+   */
+  test("KBU-31 resolving a comment hides it without ever looking like a deletion", async ({ browser }) => {
+    const docName = stamp("Comment doc");
+    const created = await api.post(kbUrl("/documents"), {
+      data: { title: docName, folderId: rootFolderId, contentText: "Body under discussion." },
+      failOnStatusCode: false,
+    });
+    expect(created.status(), `seeding the document — ${await created.text()}`).toBe(201);
+    const documentId = (await created.json()).id;
+
+    const threadBody = stamp("Please review this passage");
+    const thread = await api.post(kbUrl(`/documents/${documentId}/comments`), {
+      data: { body: threadBody },
+      failOnStatusCode: false,
+    });
+    expect(thread.status(), `seeding the thread — ${await thread.text()}`).toBe(201);
+    const threadId = (await thread.json()).id;
+    const replyBody = stamp("Agreed");
+    await api.post(kbUrl(`/documents/${documentId}/comments`), {
+      data: { body: replyBody, parentCommentId: threadId },
+      failOnStatusCode: false,
+    });
+
+    const page = await openKb(browser);
+    await page.goto(`/projects/${tenant!.mainProjectId}/knowledge-base/documents/${documentId}`);
+
+    // The thread and its reply are both on screen, and there is nothing resolved yet.
+    await expect(page.getByText(threadBody)).toBeVisible();
+    await expect(page.getByText(replyBody)).toBeVisible();
+    await expect(page.getByTestId("toggle-resolved-comments")).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Resolve/ }).first().click();
+
+    // It leaves the default view — that part is intended.
+    await expect(page.getByText(threadBody)).toHaveCount(0);
+    await expect(page.getByText(replyBody)).toHaveCount(0);
+
+    // But the screen must make it obvious the thread was kept, not destroyed.
+    const chip = page.getByTestId("toggle-resolved-comments");
+    await expect(chip, "nothing prominent says where the resolved thread went").toBeVisible();
+    await expect(chip).toContainText("1 resolved");
+    // This was the only open thread, so the list is now empty — the moment the reporter read as a
+    // deletion. The empty state has to say otherwise.
+    await expect(page.getByText(/Nothing was deleted/i)).toBeVisible();
+
+    // And it is genuinely recoverable from the UI.
+    await chip.click();
+    await expect(page.getByText(threadBody)).toBeVisible();
+    await expect(page.getByText(replyBody), "the reply was not restored with its thread").toBeVisible();
+    await page.getByRole("button", { name: /Reopen/ }).first().click();
+    await expect(page.getByTestId("toggle-resolved-comments")).toHaveCount(0);
+    await expect(page.getByText(threadBody)).toBeVisible();
+
+    // Proof it was never deleted: the API still serves both rows, undeleted.
+    const listed = await (await api.get(kbUrl(`/documents/${documentId}/comments`))).json();
+    const bodies = listed.map((c: { body: string }) => c.body);
+    expect(bodies, "the thread or its reply was actually deleted").toContain(threadBody);
+    expect(bodies).toContain(replyBody);
   });
 });

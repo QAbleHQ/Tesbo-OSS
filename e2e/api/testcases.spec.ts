@@ -849,4 +849,256 @@ test.describe("pagination", () => {
     expect(huge.status()).toBe(200);
     expect((await huge.json()).length).toBeLessThanOrEqual(500);
   });
+  test("the list stays in ID sequence after a bulk action, and pages stay stable", async ({ request }) => {
+    /*
+     * Basecamp 10212941059 / BetterBugs 6a8428b9 — "Test Case ID Sequence Is Incorrect After
+     * Performing Bulk Actions". The reported screen read AIP-TC-33, then 25, 26, 27, 28, 29, 30.
+     *
+     * The list was `ORDER BY updated_at DESC` with no tiebreaker. A bulk update writes
+     * `updated_at = now()` to every selected row in a single statement, so those rows all carry one
+     * identical timestamp and an ORDER BY on a non-unique key leaves them in whatever order the plan
+     * emits. Two consequences, and this test covers both:
+     *
+     *   1. the freshly bulk-updated rows jump ahead of untouched newer ones, so the ID column is no
+     *      longer a sequence — the reported symptom;
+     *   2. each page is its own query, so under LIMIT/OFFSET a tied row could come back on two pages
+     *      while another was never returned at all. That is silent data loss in a list, not cosmetics.
+     *
+     * Ordering is now created_at DESC, id DESC. external_id is assigned sequentially at creation, so
+     * that IS the ID sequence, and no edit reshuffles it.
+     *
+     * Deliberately bulk-updates the two OLDEST cases: under the old ordering they are exactly the two
+     * that jump to the front, so this fails on the unfixed code rather than relying on how Postgres
+     * happens to break a tie.
+     */
+    const marker = `E2E Order ${Date.now()}`;
+    const created: string[] = [];
+    try {
+      // Sequential, not Promise.all — creation order is what defines the expected order.
+      for (let i = 0; i < 6; i++) {
+        created.push((await createCase(request, { title: `${marker} ${String(i).padStart(2, "0")}` })).id);
+      }
+      const newestFirst = [...created].reverse();
+
+      const listIds = async (params: Record<string, unknown> = {}) => {
+        const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+          params: { search: marker, limit: 100, ...params },
+        });
+        expect(res.ok(), `listing — ${await res.text()}`).toBeTruthy();
+        return (await res.json()).map((tc: { id: string }) => tc.id);
+      };
+
+      expect(await listIds(), "the list should start in ID sequence, newest first").toEqual(newestFirst);
+
+      // The bulk action from the report, over the two oldest cases.
+      const bulk = await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-update`, {
+        data: { testcaseIds: [created[0], created[1]], priority: "P1" },
+        failOnStatusCode: false,
+      });
+      expect(bulk.status(), `bulk-update — ${await bulk.text()}`).toBeLessThan(400);
+      // The bulk really did land, so the ordering assertion below is not passing on a no-op.
+      const afterBulk = await request.get(`/api/projects/${ctx.projectId}/testcases/${created[0]}`);
+      expect((await afterBulk.json()).priority).toBe("P1");
+
+      expect(await listIds(), "a bulk action must not reorder the list").toEqual(newestFirst);
+
+      // Every page of the same result set, walked in slices of 2.
+      const paged: string[] = [];
+      for (let offset = 0; offset < 6; offset += 2) {
+        const page = await listIds({ limit: 2, offset });
+        expect(page, `page at offset ${offset} should be full`).toHaveLength(2);
+        paged.push(...page);
+      }
+      // No row repeated, none missing, and the pages reassemble the unpaged order exactly.
+      expect(new Set(paged).size, `paging returned a duplicate: ${paged.join(", ")}`).toBe(6);
+      expect(paged, "the pages do not reassemble the unpaged order").toEqual(newestFirst);
+    } finally {
+      for (const id of created) await deleteCase(request, id);
+    }
+  });
+  test("suiteId=none returns exactly the cases that belong to no suite", async ({ request }) => {
+    /*
+     * Basecamp 10212879823 / 10212867874 — "Test Case Counts Are Inconsistent Between Test Case
+     * Repository and Test Suite" / "Test Cases Created Through Zyra AI Are Missing from Test Suite".
+     * The reported project held 33 cases while the suite tree totalled 26: the other 7 had a null
+     * suite_id, and there was no way to ask for them. The filter loop only ever built
+     * `suite_id = $n`, and `if (query[param])` skipped an empty value, so unfiled cases matched no
+     * suite filter at all and the repository's new "No suites" node had nothing to select with.
+     *
+     * Cases land unfiled routinely — the create form defaults to no suite, an import with no suite
+     * column mapped leaves it null, and Zyra's chat only files a case when the model names a suite.
+     */
+    const marker = `E2E Unfiled ${Date.now()}`;
+    const suite = await createSuite(request, `${marker} suite`);
+    const filed: string[] = [];
+    const unfiled: string[] = [];
+    try {
+      for (let i = 0; i < 2; i++) {
+        filed.push((await createCase(request, { title: `${marker} filed ${i}`, suiteId: suite.id })).id);
+      }
+      for (let i = 0; i < 3; i++) {
+        unfiled.push((await createCase(request, { title: `${marker} unfiled ${i}` })).id);
+      }
+
+      const listIds = async (params: Record<string, unknown>) => {
+        const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+          params: { search: marker, limit: 100, ...params },
+        });
+        expect(res.ok(), `listing — ${await res.text()}`).toBeTruthy();
+        return new Set((await res.json()).map((tc: { id: string }) => tc.id));
+      };
+
+      // The sentinel returns the unfiled cases and nothing else.
+      expect(await listIds({ suiteId: "none" })).toEqual(new Set(unfiled));
+      // The real suite still returns only its own, so the sentinel did not weaken the normal path.
+      expect(await listIds({ suiteId: suite.id })).toEqual(new Set(filed));
+      // And unfiltered still returns both, so the two views partition the project.
+      expect(await listIds({})).toEqual(new Set([...filed, ...unfiled]));
+
+      // The repository summary's Unassigned bucket is what the "No suites" badge counts, so it has to
+      // agree with the rows the sentinel returns.
+      const summary = await (
+        await request.get(`/api/projects/${ctx.projectId}/reports/repository-summary`)
+      ).json();
+      const unassigned = summary.bySuite.find((b: { name: string }) => b.name === "Unassigned");
+      expect(unassigned, "the summary reports no Unassigned bucket").toBeTruthy();
+      expect(unassigned.count).toBeGreaterThanOrEqual(unfiled.length);
+
+      // "none" is a sentinel, not a uuid — it must not reach the column as one and 500.
+      const bogus = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+        params: { search: marker, suiteId: "not-a-uuid" },
+        failOnStatusCode: false,
+      });
+      expect(bogus.status(), `a malformed suiteId answered ${bogus.status()}`).toBeLessThan(500);
+    } finally {
+      for (const id of [...filed, ...unfiled]) await deleteCase(request, id);
+      await deleteSuite(request, suite.id);
+    }
+  });
+  test("archived cases are out of the default list but still reachable and still counted", async ({
+    request,
+  }) => {
+    /*
+     * Basecamp 10212766570 — "Test Case Edit, Update, and Delete Actions via Zyra Are Not Properly
+     * Reflected in Test Case Repository", reported as duplicates and incorrect repository data.
+     *
+     * Zyra has no delete operation: "remove these test cases" maps to its `archive` op, which sets
+     * status = "Archived". listTestCases only excluded `deleted_at IS NULL`, so those rows stayed in
+     * the working list looking exactly like live ones — the user concluded nothing had happened, asked
+     * again, and ended up with duplicates. Archiving itself is correct and stays as it is; what
+     * changed is that an archived case is no longer in the default list.
+     *
+     * Deliberately pins all three halves of the contract, because hiding rows by default is the kind
+     * of change that quietly loses data if it goes too far: excluded by default, reachable on request,
+     * and still counted by the summary the DEPRECATED tile reads.
+     */
+    const marker = `E2E Archived ${Date.now()}`;
+    const live: string[] = [];
+    let archived = "";
+    try {
+      for (let i = 0; i < 2; i++) {
+        live.push((await createCase(request, { title: `${marker} live ${i}` })).id);
+      }
+      archived = (await createCase(request, { title: `${marker} archived`, status: "Archived" })).id;
+
+      const list = async (params: Record<string, unknown> = {}) => {
+        const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+          params: { search: marker, limit: 100, ...params },
+        });
+        expect(res.ok(), `listing — ${await res.text()}`).toBeTruthy();
+        return { ids: new Set((await res.json()).map((tc: { id: string }) => tc.id)), res };
+      };
+
+      // 1. Out of the default list, and out of the reported total with it — the "N results" footer
+      //    has to agree with the rows, or the screen is inconsistent in the other direction.
+      const dflt = await list();
+      expect(dflt.ids, "an archived case is still in the default list").toEqual(new Set(live));
+      expect(dflt.res.headers()["x-total-count"]).toBe("2");
+
+      // 2. Reachable two ways, so nothing becomes unreachable.
+      expect((await list({ status: "Archived" })).ids).toEqual(new Set([archived]));
+      expect((await list({ includeArchived: "true" })).ids).toEqual(new Set([...live, archived]));
+
+      // 3. Another status filter must not accidentally re-admit archived rows.
+      expect((await list({ status: "Draft" })).ids).toEqual(new Set(live));
+
+      // 4. Still counted by the summary — the DEPRECATED tile is Deprecated + Archived, so hiding the
+      //    rows must not remove them from the repository's own accounting.
+      const summary = await (
+        await request.get(`/api/projects/${ctx.projectId}/reports/repository-summary`)
+      ).json();
+      const archivedBucket = summary.byStatus.find((b: { name: string }) => b.name === "Archived");
+      expect(archivedBucket, "the summary lost its Archived bucket").toBeTruthy();
+      expect(archivedBucket.count).toBeGreaterThanOrEqual(1);
+    } finally {
+      for (const id of [...live, archived].filter(Boolean)) await deleteCase(request, id);
+    }
+  });
+  test("bulk-move can take a case out of its suite, not only into another one", async ({ request }) => {
+    /*
+     * Basecamp 10194174342 — "test cases count and test cases discrepancy after suite move". The
+     * reported screen showed TOTAL 136 against a suite tree summing to 108.
+     *
+     * Two causes, and this test covers the one specific to moving. The repository's bulk-move modal
+     * offers "Unassigned (no suite)" as its FIRST option, which sent `suiteId: ""` -> `undefined`, and
+     * the API's `suite_id = COALESCE($3, suite_id)` then wrote the case's existing suite straight back.
+     * Choosing it reported success and moved nothing, so the counts never changed — a silent no-op on
+     * the default option of a destructive-looking action.
+     *
+     * COALESCE cannot distinguish "not supplied" from "set to nothing", so an explicit sentinel does:
+     * `suiteId: "none"` clears it, and it is the same value listTestCases reads as `suite_id IS NULL`.
+     * (The other cause was the repository counters ignoring unfiled cases — see TCR-08.)
+     */
+    const marker = `E2E MoveOut ${Date.now()}`;
+    const from = await createSuite(request, `${marker} from`);
+    const to = await createSuite(request, `${marker} to`);
+    const caseId = (await createCase(request, { title: `${marker} case`, suiteId: from.id })).id;
+
+    const suiteOf = async (): Promise<string | null> => {
+      const res = await request.get(`/api/projects/${ctx.projectId}/testcases/${caseId}`);
+      expect(res.ok(), `reading the case — ${await res.text()}`).toBeTruthy();
+      return (await res.json()).suiteId ?? null;
+    };
+
+    try {
+      expect(await suiteOf()).toBe(from.id);
+
+      // Moving into another suite always worked — kept here so the sentinel cannot regress it.
+      const moved = await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-update`, {
+        data: { testcaseIds: [caseId], suiteId: to.id },
+        failOnStatusCode: false,
+      });
+      expect(moved.status(), `moving into a suite — ${await moved.text()}`).toBeLessThan(400);
+      expect(await suiteOf()).toBe(to.id);
+
+      // The reported case: move it out of every suite.
+      const cleared = await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-update`, {
+        data: { testcaseIds: [caseId], suiteId: "none" },
+        failOnStatusCode: false,
+      });
+      expect(cleared.status(), `unassigning — ${await cleared.text()}`).toBeLessThan(400);
+      expect(await suiteOf(), "the case is still filed — unassigning was a silent no-op").toBeNull();
+
+      // It is now reachable exactly where the repository's "No suites" node looks for it.
+      const unfiled = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+        params: { search: marker, suiteId: "none", limit: 50 },
+      });
+      expect((await unfiled.json()).map((tc: { id: string }) => tc.id)).toContain(caseId);
+
+      // And an omitted suiteId must still leave the suite alone — the behaviour COALESCE was there for.
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-update`, {
+        data: { testcaseIds: [caseId], suiteId: to.id },
+        failOnStatusCode: false,
+      });
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-update`, {
+        data: { testcaseIds: [caseId], priority: "P1" },
+        failOnStatusCode: false,
+      });
+      expect(await suiteOf(), "a bulk edit with no suiteId moved the case anyway").toBe(to.id);
+    } finally {
+      await deleteCase(request, caseId);
+      await deleteSuite(request, from.id);
+      await deleteSuite(request, to.id);
+    }
+  });
 });

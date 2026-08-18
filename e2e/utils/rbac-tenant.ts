@@ -62,7 +62,28 @@ export type RbacTenantKind =
   | "tesbo-reports"
   // Email delivery gating: needs an owner who can send an invite, in a workspace whose pending
   // invites nobody else clears mid-test (api/invitations.spec.ts clears its own tenant's).
-  | "email-delivery";
+  | "email-delivery"
+  // The account screen and the forgot/reset-password flow. Its own tenant because both suites
+  // CHANGE their user's password: run against a shared account and every later login — including
+  // global-setup's on the next run — signs in with a password that no longer exists.
+  | "account-ui"
+  // The test case repository screen: absolute header counters (Total/Draft/Approved/Deprecated) and
+  // the suite tree counts. A concurrent spec creating or deleting a case in the same project moves
+  // those numbers mid-assertion, so this screen needs a project nobody else writes to.
+  | "repo-ui"
+  // The already-accepted invite → "Sign in" entry path into /login. Needs an invitation it can
+  // actually redeem, and api/invitations.spec.ts clears its own tenant's pending invites in
+  // beforeEach — sharing "invites" would delete this suite's token out from under it mid-test.
+  | "invite-signin"
+  // The activity / audit feed. Its assertions are about WHICH events exist and in what order, so any
+  // other spec acting in the same project inserts events into the middle of them. The workspace-wide
+  // feed is also owner-only and rolls up every project in the workspace, which makes a shared
+  // workspace unusable here for the same reason.
+  | "activity"
+  // Zyra chat ↔ repository consistency. Separate from "zyra" because api/zyra.spec.ts owns that
+  // tenant and these tests delete test cases out from under a stored transcript, which would change
+  // what that file's assertions see.
+  | "zyra-chat";
 
 /** The three roles legacy.service.ts's normalizeRole() collapses every stored role into. */
 export type RbacRole = "owner" | "manager" | "qa_engineer";

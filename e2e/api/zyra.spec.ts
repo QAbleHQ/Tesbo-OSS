@@ -761,4 +761,85 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
       expect(stored, "the API key is stored in plaintext").not.toContain("sk-e2e-not-a-real-key-000000");
     }
   });
+  // ─── The agent's "tests generated" counter ─────────────────────────────────
+
+  test("ZYR-A-31 the agent reports every test case Zyra created, in either mode", async () => {
+    /*
+     * Basecamp 10212918496 / BetterBugs 6a842687 — "Zyra Test Generator Displays 0 Tests Generated
+     * After Creating 33 Test Cases".
+     *
+     * The Agents screen summed `generatedCount` over the project's generation tasks, and
+     * `generated_count` is written ONLY by the task-board draft flow. Chat mode creates test cases
+     * straight through applyZyraChatOperations and writes no generation row at all, so a project
+     * whose cases were all made by talking to Zyra — the reporter's 33 — added up to zero.
+     *
+     * `testcasesCreated` on the agent payload now counts the `zyra_created` audit action, which BOTH
+     * modes write (chat mode already did; zyraSave now does too). Fails on the unfixed code, where
+     * the field is absent entirely.
+     *
+     * The audit rows are written directly here for the same reason seedTask() exists: reaching them
+     * through the product means a live model, which this suite deliberately never calls. What is
+     * being asserted is the counter over those rows — the half that was broken.
+     */
+    const zyraCase = async (title: string): Promise<string> => {
+      const res = await asOwner.post(url("/testcases"), { data: { title }, failOnStatusCode: false });
+      expect(res.status(), `seeding a case — ${await res.text()}`).toBe(201);
+      return (await res.json()).id;
+    };
+    /** The audit row applyZyraChatOperations / zyraSave write when Zyra creates a case. */
+    const markCreatedByZyra = (testcaseId: string, source: string): void => {
+      exec(
+        "INSERT INTO audit_logs (project_id, actor_id, action, entity_type, entity_id, entity_name, diff, organization_id) " +
+          `VALUES (${literal(tenant!.mainProjectId)}, NULL, 'zyra_created', 'testcase', ${literal(testcaseId)}, ` +
+          `'E2E zyra case', ${literal(JSON.stringify({ source }))}::jsonb, ${literal(tenant!.organizationId)});`,
+      );
+    };
+    const countReported = async (): Promise<number> => {
+      const res = await asOwner.get(url("/agents/zyra"), { failOnStatusCode: false });
+      expect(res.status(), `reading the agent — ${await res.text()}`).toBe(200);
+      const body = await res.json();
+      expect(
+        body.testcasesCreated,
+        "the agent payload carries no testcasesCreated — the tile can only sum task drafts",
+      ).toBeDefined();
+      return Number(body.testcasesCreated);
+    };
+
+    const stamp = Date.now();
+    const chatCase = await zyraCase(`E2E Zyra chat case ${stamp}`);
+    const taskCase = await zyraCase(`E2E Zyra task case ${stamp}`);
+    const manualCase = await zyraCase(`E2E manual case ${stamp}`);
+    try {
+      /*
+       * Asserted as DELTAS from a baseline, not absolute counts.
+       *
+       * audit_logs is append-only — migration V62_audit_logs_immutable.sql installs a trigger that
+       * rejects DELETE — so these rows cannot be cleaned up afterwards and a re-run against the
+       * persistent volume starts from whatever previous runs left behind. The first attempt at this
+       * test cleaned up with a DELETE and failed on that trigger; the counts are relative now, which
+       * needs no cleanup and is what the assertion actually cares about.
+       */
+      const baseline = await countReported();
+      // A case Zyra did not create must not be counted: the manual one is already present here.
+      expect(await countReported(), "creating a case manually changed Zyra's count").toBe(baseline);
+
+      markCreatedByZyra(chatCase, "zyra_chat");
+      expect(await countReported(), "a chat-created case was not counted").toBe(baseline + 1);
+
+      markCreatedByZyra(taskCase, "zyra_task");
+      expect(await countReported(), "both modes should be counted").toBe(baseline + 2);
+
+      // Re-saving the same draft writes a second audit row for one case; DISTINCT keeps it at one.
+      markCreatedByZyra(taskCase, "zyra_task");
+      expect(await countReported(), "one case counted twice").toBe(baseline + 2);
+
+      // Deleting a Zyra case takes it back out — the count describes what the repository holds.
+      await asOwner.delete(url(`/testcases/${chatCase}`), { failOnStatusCode: false });
+      expect(await countReported(), "a deleted case is still being counted").toBe(baseline + 1);
+    } finally {
+      for (const id of [chatCase, taskCase, manualCase]) {
+        await asOwner.delete(url(`/testcases/${id}`), { failOnStatusCode: false });
+      }
+    }
+  });
 });

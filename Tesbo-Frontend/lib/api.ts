@@ -802,6 +802,13 @@ export interface ZyraAgentState {
     maskedKey: string;
   } | null;
   tokenUsage: { total: number };
+  /**
+   * Test cases Zyra has created in this project, counted across chat mode AND task mode.
+   *
+   * Authoritative, and not derivable from `tasks`: chat mode writes no generation row, so summing
+   * task.generatedCount reports 0 for a project whose cases were all made by talking to Zyra.
+   */
+  testcasesCreated: number;
   tasks: ZyraTask[];
 }
 
@@ -1109,6 +1116,17 @@ export async function getTestCase(projectId: string, testcaseId: string): Promis
 
 export async function createTestCase(projectId: string, data: Record<string, unknown>): Promise<{ id: string; externalId: string; title: string; createdAt: string }> {
   return api(`/api/projects/${projectId}/testcases`, { method: "POST", body: data });
+}
+
+// Server-side batch creation, used by import. Keep batches at or under the backend's
+// MAX_BULK_TESTCASES (500) — larger sheets should be sent as several calls.
+export const BULK_CREATE_BATCH_SIZE = 200;
+
+export async function bulkCreateTestCases(
+  projectId: string,
+  data: { testcases: Record<string, unknown>[]; testcaseIdPrefix?: string }
+): Promise<{ created: { id: string; externalId: string; title: string }[]; createdCount: number }> {
+  return api(`/api/projects/${projectId}/testcases/bulk-create`, { method: "POST", body: data });
 }
 
 export async function updateTestCase(projectId: string, testcaseId: string, data: Record<string, unknown>): Promise<void> {
@@ -1954,12 +1972,22 @@ export async function deleteTestRun(cycleId: string): Promise<void> {
   await api(`/api/cycles/${cycleId}`, { method: "DELETE" });
 }
 
-export async function addTestCasesToRun(cycleId: string, testcaseIds: string[]): Promise<void> {
-  await api(`/api/cycles/${cycleId}/testcases`, { method: "POST", body: { testcaseIds } });
+export async function addTestCasesToRun(
+  cycleId: string,
+  testcaseIds: string[]
+): Promise<{ requested: number; added: number; skipped: number }> {
+  return api(`/api/cycles/${cycleId}/testcases`, { method: "POST", body: { testcaseIds } });
 }
 
 export async function removeTestCaseFromRun(cycleId: string, testcaseId: string): Promise<void> {
   await api(`/api/cycles/${cycleId}/testcases/${testcaseId}`, { method: "DELETE" });
+}
+
+export async function removeTestCasesFromRun(
+  cycleId: string,
+  testcaseIds: string[]
+): Promise<{ requested: number; removed: number }> {
+  return api(`/api/cycles/${cycleId}/testcases/bulk-delete`, { method: "POST", body: { testcaseIds } });
 }
 
 export async function createCycleFromPlan(projectId: string, data: { planId: string; name?: string; environment: string; buildVersion?: string }): Promise<{ id: string }> {

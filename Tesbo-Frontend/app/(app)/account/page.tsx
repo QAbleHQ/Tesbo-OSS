@@ -10,6 +10,7 @@ export default function AccountPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
   const [hasPassword, setHasPassword] = useState(false);
 
   const [currentPassword, setCurrentPassword] = useState("");
@@ -26,6 +27,7 @@ export default function AccountPage() {
       return;
     }
     setEmail(me.email ?? "");
+    setName((me.name ?? "").trim());
     setHasPassword(Boolean(me.hasPassword));
     setLoading(false);
   }, [router]);
@@ -84,7 +86,7 @@ export default function AccountPage() {
       </div>
 
       {toast && (
-        <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--ink-800)] px-4 py-2.5 text-sm text-white shadow-lg">
+        <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--toast-surface)] px-4 py-2.5 text-sm text-[var(--toast-foreground)] shadow-lg">
           {toast}
         </div>
       )}
@@ -93,6 +95,21 @@ export default function AccountPage() {
         <div>
           <h2 className="text-base font-semibold text-[var(--foreground)]">Profile</h2>
         </div>
+        {/*
+          * Basecamp 10212498688 — the profile showed nothing but the email. Signup collects First name
+          * and Last name and GET /me has always returned them as a single `name`; this screen simply
+          * never rendered it. Read-only for now: there is no PATCH /me to save an edit through.
+          *
+          * The mobile number the card also asks for is NOT shown, because signup never collects one —
+          * there is no field, no column and no value to fetch. Raised separately for Specification
+          * rather than rendered as a permanently empty row.
+          */}
+        <Field>
+          <FieldLabel htmlFor="account-name">Name</FieldLabel>
+          <div id="account-name" className="text-sm text-[var(--foreground)]">
+            {name || <span className="text-[var(--muted-soft)]">Not set</span>}
+          </div>
+        </Field>
         <Field>
           <FieldLabel htmlFor="account-email">Email</FieldLabel>
           <div id="account-email" className="text-sm text-[var(--foreground)]">

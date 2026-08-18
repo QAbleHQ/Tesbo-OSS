@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { request as pwRequest, type APIRequestContext } from "@playwright/test";
 import { emailDomain, env } from "./env";
-import { exec, literal, scalar } from "./psql";
+import { exec, execAllowingAuditImmutability, literal, scalar } from "./psql";
 
 /*
  * The disposable tenant the screen-level suites own, plus the fixture builders they share.
@@ -137,6 +137,23 @@ export async function createSuite(
   return { id: created.id, name };
 }
 
+export interface SeededPlan {
+  id: string;
+  name: string;
+}
+
+export async function createPlan(
+  api: APIRequestContext,
+  projectId: string,
+  data: { name?: string; description?: string; targetRelease?: string } = {},
+): Promise<SeededPlan> {
+  const name = data.name ?? `E2E Screens Plan ${uniqueSuffix()}`;
+  const res = await api.post(`/api/projects/${projectId}/plans`, { data: { ...data, name } });
+  if (!res.ok()) throw new Error(`Could not seed a plan (${res.status()}): ${await res.text()}`);
+  const created = await res.json();
+  return { id: created.id, name };
+}
+
 export async function createBug(
   api: APIRequestContext,
   projectId: string,
@@ -174,13 +191,15 @@ export interface SeededRun {
 export async function seedRun(
   api: APIRequestContext,
   projectId: string,
-  options: { statuses?: ExecStatus[]; name?: string; status?: string } = {},
+  options: { statuses?: ExecStatus[]; name?: string; status?: string; planId?: string } = {},
 ): Promise<SeededRun> {
   const statuses = options.statuses ?? [];
   const name = options.name ?? `E2E Screens Run ${uniqueSuffix()}`;
 
   const cycle = await (
-    await api.post(`/api/projects/${projectId}/cycles`, { data: { name } })
+    await api.post(`/api/projects/${projectId}/cycles`, {
+      data: { name, ...(options.planId ? { planId: options.planId } : {}) },
+    })
   ).json();
 
   const testcaseIds: string[] = [];
@@ -343,7 +362,7 @@ export async function seedWorkspaceMember(
 }
 
 export function removeWorkspaceMember(userId: string | undefined, storageStatePath?: string): void {
-  if (userId) exec(`DELETE FROM users WHERE id = ${literal(userId)};`);
+  if (userId) execAllowingAuditImmutability(`DELETE FROM users WHERE id = ${literal(userId)};`);
   if (storageStatePath) fs.rmSync(storageStatePath, { force: true });
 }
 

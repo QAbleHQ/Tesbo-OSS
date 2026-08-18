@@ -666,9 +666,19 @@ export function RepositoryTestCaseTable({
               <tr
                 key={tc.id}
                 onClick={() => void onOpenRow(tc.id)}
+                /*
+                 * An archived case reads differently from a live one.
+                 *
+                 * Basecamp 10212766570: archived cases were indistinguishable from working ones in the
+                 * table, so a user who had just archived three of them could not tell they had been
+                 * acted on. They are excluded from the list by default now, but they still appear when
+                 * the Archived status filter is on, and there they must not look like live rows.
+                 * Muted and struck through, not hidden — the row still opens.
+                 */
+                data-archived={tc.status === "Archived" ? "true" : undefined}
                 className={`cursor-pointer transition-colors hover:bg-[var(--surface-secondary)] ${
                   rowHighlightId === tc.id ? "bg-[var(--brand-soft)]" : ""
-                }`}
+                } ${tc.status === "Archived" ? "opacity-55 [&_td]:line-through [&_td:has(input)]:no-underline" : ""}`}
               >
                 {orderedColumns.map((col) => renderBodyCell(col, tc))}
               </tr>

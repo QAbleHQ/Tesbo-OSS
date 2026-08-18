@@ -21,9 +21,9 @@ import {
 /*
  * The projects list at /projects: creating projects, what the cards report, and the view toggle.
  *
- * Sort, filter and the top-bar search are deliberately absent. Those controls render but are inert
- * — ProjectsToolbar's Sort/Filter are plain buttons with no handler and TopBar's search input has
- * no value/onChange — so there is no behaviour to assert yet. They get specs when they get built.
+ * Search and sort are now live and specified below ("projects list — search and sort"). They used to
+ * be inert controls with no handler, which is why this file had no coverage for them; the toolbar's
+ * search input and Sort menu both drive `filteredProjects` now.
  *
  * Assertions locate projects by their own unique names rather than by position or count: the
  * project-dashboard API suite creates and deletes projects in this same workspace, and different
@@ -901,5 +901,223 @@ test.describe("projects list — the grid/list toggle", () => {
     } finally {
       await deleteProjects(api, [project.id]);
     }
+  });
+});
+
+/*
+ * Search and sort on the projects list toolbar.
+ *
+ * Both were reported broken from production (BetterBugs 6a7c203d — "Search functionality is not
+ * working in Projects"; 6a7c1f28 — "Sorting and filters are not working in Projects"). Both are now
+ * implemented client-side in ProjectsToolbar/`filteredProjects`, so these tests are the regression
+ * cover that keeps them working.
+ *
+ * Two things shape every assertion here:
+ *
+ *   1. This workspace is SHARED with the project-dashboard API suite, and spec files run
+ *      concurrently — so the list can hold projects this file did not create. Nothing below asserts
+ *      a total count or an absolute position. Search is asserted by "mine are present, my decoy is
+ *      not", and sort by the relative order of this test's own fixtures (`indexOf` pairs), which
+ *      holds no matter what else is interleaved between them.
+ *   2. Filtering is client-side over the already-loaded list, with no request per keystroke. So the
+ *      assertions wait on the DOM settling rather than on a response.
+ *
+ * There is no separate status/role *filter* control on this screen — the reporter's "filters" is the
+ * search box, which filters name, key and description. If a distinct filter dropdown is ever added,
+ * it wants its own tests here.
+ */
+test.describe("projects list — search and sort", () => {
+  test.skip(!!skipReason, skipReason ?? "");
+
+  let api: APIRequestContext;
+  const created: string[] = [];
+
+  /** Distinct enough that no other spec's fixture can match it. */
+  const token = `Zqx${uniqueSuffix()}`;
+  const names = {
+    alpha: `E2E ${token} Alpha Search`,
+    beta: `E2E ${token} Beta Search`,
+    gamma: `E2E ${token} Gamma Search`,
+  };
+  let describedId = "";
+  let alphaKey = "";
+
+  test.beforeAll(async () => {
+    api = await screensApi();
+    // Created oldest-first and awaited in turn, so createdAt order is alpha < beta < gamma. The
+    // "Newest created" sort must therefore read gamma, beta, alpha.
+    for (const which of ["alpha", "beta", "gamma"] as const) {
+      const project = await createProject(api, { name: names[which], key: uniqueKey("SRCH") });
+      created.push(project.id);
+      if (which === "alpha") alphaKey = project.key;
+    }
+    // A fourth project whose NAME cannot match the search token, but whose description can — the
+    // search covers name, key and description, and only a description-only hit proves the last one.
+    const described = await createProject(api, {
+      name: `E2E Described ${uniqueSuffix()}`,
+      key: uniqueKey("SRCD"),
+      description: `Owned by the ${token} programme`,
+    });
+    describedId = described.id;
+    created.push(described.id);
+  });
+
+  test.afterAll(async () => {
+    await deleteProjects(api, created);
+    await api?.dispose();
+  });
+
+  function searchBox(page: Page): Locator {
+    return page.getByPlaceholder("Search projects by name or keyword");
+  }
+
+  /** The Sort trigger reports the current option in its own label ("Sort: Last updated"). */
+  function sortTrigger(page: Page): Locator {
+    return page.getByRole("button", { name: /^Sort:/ });
+  }
+
+  async function chooseSort(page: Page, option: string) {
+    await sortTrigger(page).click();
+    await page.getByRole("button", { name: option, exact: true }).click();
+    await expect(sortTrigger(page)).toHaveText(new RegExp(option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+
+  test("PRJ-S-01 typing a project name filters the list down to it", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    await searchBox(page).fill(names.alpha);
+
+    await expect(projectCard(page, names.alpha)).toBeVisible();
+    // The other two share the token but not the full name, so they must drop out.
+    await expect(projectCard(page, names.beta)).toHaveCount(0);
+    await expect(projectCard(page, names.gamma)).toHaveCount(0);
+  });
+
+  test("PRJ-S-02 a shared keyword keeps every project that matches it", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    await searchBox(page).fill(token);
+
+    for (const name of [names.alpha, names.beta, names.gamma]) {
+      await expect(projectCard(page, name), `${name} should match "${token}"`).toBeVisible();
+    }
+  });
+
+  test("PRJ-S-03 search is case-insensitive and ignores surrounding whitespace", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    await searchBox(page).fill(`   ${token.toUpperCase()}   `);
+    await expect(projectCard(page, names.alpha)).toBeVisible();
+
+    await searchBox(page).fill(token.toLowerCase());
+    await expect(projectCard(page, names.alpha)).toBeVisible();
+  });
+
+  test("PRJ-S-04 search matches a project's key and its description, not only its name", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    // Description-only hit: this project's name contains no part of the token, so the only way it
+    // can survive the filter is through its description.
+    await searchBox(page).fill(token);
+    await expect(page.locator(`a[href="/projects/${describedId}"]`)).toBeVisible();
+
+    // Key-only hit: searching the key must find alpha, and must not drag in the other two.
+    await searchBox(page).fill(alphaKey);
+    await expect(projectCard(page, names.alpha)).toBeVisible();
+    await expect(projectCard(page, names.beta)).toHaveCount(0);
+  });
+
+  test("PRJ-S-05 filtering happens as you type, with no Enter and no request per keystroke", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    let projectRequests = 0;
+    page.on("request", (req) => {
+      if (new URL(req.url()).pathname === "/api/projects") projectRequests += 1;
+    });
+
+    // Typed character by character, and never submitted.
+    await searchBox(page).pressSequentially(names.beta, { delay: 20 });
+
+    await expect(projectCard(page, names.beta)).toBeVisible();
+    await expect(projectCard(page, names.alpha)).toHaveCount(0);
+    expect(projectRequests, "filtering is client-side over the loaded list").toBe(0);
+  });
+
+  test("PRJ-S-06 a term matching nothing says so and offers the term back", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    const miss = `NoSuchProject${uniqueSuffix()}`;
+    await searchBox(page).fill(miss);
+
+    await expect(page.getByText("No projects match your search")).toBeVisible();
+    await expect(page.getByText(miss, { exact: false })).toBeVisible();
+    await expect(projectCard(page, names.alpha)).toHaveCount(0);
+  });
+
+  test("PRJ-S-07 clearing the search restores the projects it had hidden", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    await searchBox(page).fill(names.alpha);
+    await expect(projectCard(page, names.beta)).toHaveCount(0);
+
+    await searchBox(page).fill("");
+
+    await expect(projectCard(page, names.alpha)).toBeVisible();
+    await expect(projectCard(page, names.beta)).toBeVisible();
+    await expect(projectCard(page, names.gamma)).toBeVisible();
+  });
+
+  test("PRJ-S-08 Name (A–Z) and (Z–A) are exact reverses of each other", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+    // Narrowed to this test's own three projects so unrelated fixtures cannot sit between them.
+    await searchBox(page).fill(token);
+    await expect(projectCard(page, names.gamma)).toBeVisible();
+
+    await chooseSort(page, "Name (A–Z)");
+    const ascending = (await renderedProjectNames(page)).filter((n) => n.includes(token));
+    expect(ascending).toEqual([names.alpha, names.beta, names.gamma]);
+
+    await chooseSort(page, "Name (Z–A)");
+    const descending = (await renderedProjectNames(page)).filter((n) => n.includes(token));
+    expect(descending).toEqual([names.gamma, names.beta, names.alpha]);
+  });
+
+  test("PRJ-S-09 Newest created puts the most recently created project first", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+    await searchBox(page).fill(token);
+    await expect(projectCard(page, names.gamma)).toBeVisible();
+
+    await chooseSort(page, "Newest created");
+
+    const order = (await renderedProjectNames(page)).filter((n) => n.includes(token));
+    expect(order).toEqual([names.gamma, names.beta, names.alpha]);
+  });
+
+  test("PRJ-S-10 the chosen sort still applies after the search term changes", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+
+    await chooseSort(page, "Name (Z–A)");
+    await searchBox(page).fill(token);
+
+    const order = (await renderedProjectNames(page)).filter((n) => n.includes(token));
+    expect(order, "sort and search compose — one must not reset the other").toEqual([
+      names.gamma,
+      names.beta,
+      names.alpha,
+    ]);
+  });
+
+  test("PRJ-S-11 sorting survives switching between grid and list view", async ({ page }) => {
+    await gotoProjectsAndFind(page, names.alpha);
+    await searchBox(page).fill(token);
+    await chooseSort(page, "Name (A–Z)");
+
+    await page.getByRole("button", { name: "List view" }).click();
+    const inList = (await renderedProjectNames(page)).filter((n) => n.includes(token));
+    expect(inList).toEqual([names.alpha, names.beta, names.gamma]);
+
+    await page.getByRole("button", { name: "Grid view" }).click();
+    const inGrid = (await renderedProjectNames(page)).filter((n) => n.includes(token));
+    expect(inGrid).toEqual([names.alpha, names.beta, names.gamma]);
   });
 });

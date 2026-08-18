@@ -79,6 +79,15 @@ export async function waitForInviteLinkInLogs(email: string, timeoutMs = 8_000):
   return match?.[1] ?? null;
 }
 
+/** The reset URL the backend printed for a forgot-password request, or null. */
+export async function waitForPasswordResetLinkInLogs(email: string, timeoutMs = 8_000): Promise<string | null> {
+  // Format is fixed by EmailService.sendPasswordReset — "PASSWORD RESET for <email>: <url>".
+  const match = await waitForBackendLog(new RegExp(`PASSWORD RESET for ${escapeRegExp(email)}: (\\S+)`), {
+    timeoutMs,
+  });
+  return match?.[1] ?? null;
+}
+
 export interface EmailDeliveryReport {
   mode: "live" | "log";
   server: string;

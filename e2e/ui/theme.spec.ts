@@ -483,4 +483,98 @@ test.describe("every screen follows the theme", () => {
     // The softer bar: 4.5:1 for body text, 3:1 for large or bold text, per WCAG 2.1 AA.
     expect(await sweepContrast(page, "subAA")).toEqual([]);
   });
+  test("THM-15 a toast is readable in both themes", async ({ page }) => {
+    /*
+     * Basecamp 10212550781 — "[work space settings] success message fonts are not visible".
+     *
+     * Every toast in the app was `bg-[var(--ink-800)] ... text-white`. --ink-800 flips with the theme
+     * (#1C1E2A light, #F0EEFF dark) but `text-white` does not, so in dark mode a toast was near-white
+     * text on a near-white chip — about 1.06:1, invisible. Five screens shared the markup.
+     *
+     * THM-13/THM-14 sweep every screen for exactly this and did not catch it, because a toast only
+     * exists for a few seconds after a successful save and the sweep only ever walks resting screens.
+     * This test closes that gap by actually producing one.
+     *
+     * Drives the workspace General tab's COUNTRY field rather than the workspace name: the save button
+     * is disabled until something changes, and country is a harmless round-trip that no other spec
+     * asserts on. The original value is restored at the end.
+     */
+    const contrastOf = (locator: import("@playwright/test").Locator) =>
+      locator.evaluate((el) => {
+        const parse = (value: string): [number, number, number] | null => {
+          const m = value.match(/rgba?\(([^)]+)\)/);
+          if (!m) return null;
+          const parts = m[1].split(",").map((x) => parseFloat(x.trim()));
+          return parts.length >= 3 ? [parts[0], parts[1], parts[2]] : null;
+        };
+        const lum = ([r, g, b]: [number, number, number]) => {
+          const ch = (c: number) => {
+            const v = c / 255;
+            return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+          };
+          return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(b);
+        };
+        const style = getComputedStyle(el);
+        const fg = parse(style.color);
+        const bg = parse(style.backgroundColor);
+        if (!fg || !bg) return { ratio: 0, color: style.color, background: style.backgroundColor };
+        const a = lum(fg);
+        const b = lum(bg);
+        return {
+          ratio: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05),
+          color: style.color,
+          background: style.backgroundColor,
+        };
+      });
+
+    let original = "";
+    try {
+      for (const theme of ["dark", "light"] as const) {
+        await setStoredTheme(page, theme);
+        /*
+         * The page reloads shortly after a successful save so the sidebar and header pick the new name
+         * up, which would tear the toast down mid-assertion. Neutralised for this test only — the
+         * reload is not what is under test, the toast's legibility is.
+         */
+        await page.addInitScript(() => {
+          Object.defineProperty(window.location, "reload", { configurable: true, value: () => {} });
+        });
+        await page.goto("/settings?tab=general");
+
+        const country = page.locator("select").first();
+        await expect(country).toBeVisible();
+        if (!original) original = await country.inputValue();
+
+        // Any value other than the one already saved, so Save is enabled.
+        const options = await country.locator("option").evaluateAll((els) =>
+          els.map((el) => (el as HTMLOptionElement).value).filter(Boolean),
+        );
+        const next = options.find((v) => v !== original);
+        expect(next, "the country list offers only one value, so nothing can be changed").toBeTruthy();
+        await country.selectOption(next!);
+
+        await page.getByRole("button", { name: /Save changes/ }).click();
+
+        const toast = page.getByText("Workspace details updated");
+        await expect(toast, `no confirmation appeared in ${theme} mode`).toBeVisible();
+
+        const measured = await contrastOf(toast);
+        expect(
+          measured.ratio,
+          `the toast is ${measured.color} on ${measured.background} in ${theme} mode — ` +
+            `${measured.ratio.toFixed(2)}:1, below the 4.5:1 AA bar`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    } finally {
+      if (original) {
+        // Put the workspace back the way it was found.
+        await page.goto("/settings?tab=general");
+        const country = page.locator("select").first();
+        if (await country.isVisible().catch(() => false)) {
+          await country.selectOption(original).catch(() => {});
+          await page.getByRole("button", { name: /Save changes/ }).click().catch(() => {});
+        }
+      }
+    }
+  });
 });

@@ -681,4 +681,51 @@ test.describe("role-based permissions", () => {
     expect(res.ok(), `could not create a throwaway project: ${res.status()} ${await res.text()}`).toBeTruthy();
     return { id: (await res.json()).id, name };
   }
+  test("RBAC-A-31 the workspace dashboard counts only the projects the caller can reach", async () => {
+    /*
+     * Basecamp 10199551447 — "[Dashboard / Project Access] QA Engineer can view project details of all
+     * owner projects", reported against /dashboard.
+     *
+     * /api/workspace/analytics scoped by organization_id alone with no membership filter, so a QA
+     * Engineer belonging to ONE project still received counts and a full execution-status breakdown
+     * covering every project in the workspace — including ones they cannot open. listProjects and
+     * requireProjectAccess both scope by project_members; this endpoint was the one that did not, and
+     * the dashboard is the first screen a member lands on.
+     *
+     * The tenant has two projects and provisionRbacTenant puts the qa user in the main one only, so the
+     * leak is measurable: the owner sees both, the QA engineer must see one.
+     */
+    const ownerView = await asOwner.get("/api/workspace/analytics", { failOnStatusCode: false });
+    expect(ownerView.status(), `owner analytics — ${await ownerView.text()}`).toBe(200);
+    const ownerCounts = await ownerView.json();
+
+    const qaView = await asQa.get("/api/workspace/analytics", { failOnStatusCode: false });
+    expect(qaView.status(), `qa analytics — ${await qaView.text()}`).toBe(200);
+    const qaCounts = await qaView.json();
+
+    // The owner administers the whole workspace, so their totals still span both projects.
+    expect(ownerCounts.projectCount, "the owner should see both of the tenant's projects").toBeGreaterThanOrEqual(2);
+
+    // The QA engineer is a member of one, and must be told about one.
+    expect(
+      qaCounts.projectCount,
+      `a qa_engineer in 1 project was shown ${qaCounts.projectCount} projects on the dashboard`,
+    ).toBe(1);
+    expect(
+      qaCounts.projectCount,
+      "the qa_engineer's dashboard still spans the whole workspace",
+    ).toBeLessThan(ownerCounts.projectCount);
+
+    // Every child count has to be narrowed too, not just the project tally — these are the numbers the
+    // dashboard actually renders, and they described projects the caller cannot open.
+    for (const field of ["testCaseCount", "suiteCount", "planCount", "cycleCount"] as const) {
+      if (typeof ownerCounts[field] !== "number") continue;
+      expect(
+        qaCounts[field],
+        `${field} is not scoped to the caller's projects (qa ${qaCounts[field]} vs owner ${ownerCounts[field]})`,
+      ).toBeLessThanOrEqual(ownerCounts[field]);
+    }
+    // And the response must still be well formed rather than erroring on the extra bind parameter.
+    expect(qaCounts.executionStatus ?? {}, "the execution breakdown is missing").toBeTruthy();
+  });
 });

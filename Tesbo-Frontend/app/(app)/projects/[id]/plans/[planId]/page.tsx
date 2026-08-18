@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import {
@@ -92,13 +92,27 @@ function pctColor(pct: number): string {
 
 /* ───── Shared UI pieces ───── */
 
-function SegmentedBar({ passed, failed, blocked, skipped, total }: { passed: number; failed: number; blocked: number; skipped: number; total: number }) {
+/*
+ * Untested is a segment like any other, not the leftover track.
+ *
+ * Basecamp 10213200614 ("Untested mark color not match on bar"): this screen showed three different
+ * colours for one status — the UNTESTED stat tile in --status-notrun-*, the legend dot in
+ * --muted-soft, and the bar in whatever --surface-tertiary happened to be, because untested was
+ * never passed in and simply went unpainted. --status-notrun-dot is the app's untested colour
+ * everywhere else (components/reports/charts.tsx, StatusChip, StatusBadge), so it is the one used
+ * here for both the segment and the dot.
+ *
+ * Consequence, accepted deliberately: the bar now always totals 100%, so its fill length no longer
+ * doubles as the progress reading. The percentage beside it is the progress reading.
+ */
+function SegmentedBar({ passed, failed, blocked, skipped, untested, total }: { passed: number; failed: number; blocked: number; skipped: number; untested: number; total: number }) {
   if (total === 0) return <div className="h-2 rounded-full bg-[var(--surface-tertiary)] w-full" />;
   const segments = [
     { value: passed, color: "var(--status-pass-dot)" },
     { value: failed, color: "var(--status-fail-dot)" },
     { value: blocked, color: "var(--status-blocked-dot)" },
     { value: skipped, color: "var(--status-skipped-dot)" },
+    { value: untested, color: "var(--status-notrun-dot)" },
   ];
   return (
     <div className="flex h-2 w-full overflow-hidden rounded-full bg-[var(--surface-tertiary)]">
@@ -142,6 +156,19 @@ export default function PlanDetailPage() {
   const [plan, setPlan] = useState<Record<string, unknown> | null>(null);
   const [items, setItems] = useState<PlanItem[]>([]);
   const [runs, setRuns] = useState<PlanRunItem[]>([]);
+  /*
+   * The header is DERIVED from the runs below it, not fetched separately.
+   *
+   * Basecamp 10213208002 — "Test plan: Overall progress percentage not matching", reported as the
+   * header disagreeing with the run listed beneath it. The two numbers were two independent reads of
+   * the same rows: getPlanProgress aggregates `cycles WHERE plan_id = $1` and listPlanRuns groups the
+   * very same join per cycle, so the header was only ever the sum of the rows — but nothing enforced
+   * that, and two round trips against a live database can land either side of a status change.
+   *
+   * Summing the rows the screen is already showing makes the agreement structural instead of
+   * coincidental, and drops a request. Same arithmetic the run rows use for their own percentage
+   * (passed + failed + blocked + skipped), so a run's figure and the plan's cannot diverge.
+   */
   const [progress, setProgress] = useState<PlanProgress | null>(null);
   const [projectName, setProjectName] = useState("");
   const [allPlans, setAllPlans] = useState<PlanListItem[]>([]);
@@ -330,8 +357,38 @@ export default function PlanDetailPage() {
     );
   }
 
-  const total = progress?.totalCases || 0;
-  const visibleRuns = runs.filter((run) => run.status === "In Progress" || run.status === "Completed");
+  const derivedProgress = useMemo<PlanProgress | null>(() => {
+    if (!runs.length) return progress;
+    const sum = (pick: (r: (typeof runs)[number]) => number) => runs.reduce((acc, r) => acc + (pick(r) || 0), 0);
+    const totalCases = sum((r) => r.totalCases);
+    const passed = sum((r) => r.passed);
+    const failed = sum((r) => r.failed);
+    const blocked = sum((r) => r.blocked);
+    const skipped = sum((r) => r.skipped);
+    const untested = sum((r) => r.untested);
+    const executed = passed + failed + blocked + skipped;
+    return {
+      ...(progress ?? ({} as PlanProgress)),
+      runCount: runs.length,
+      totalCases,
+      passed,
+      failed,
+      blocked,
+      skipped,
+      untested,
+      completionPercent: totalCases > 0 ? Math.round((executed / totalCases) * 100) : 0,
+    };
+  }, [runs, progress]);
+
+  const total = derivedProgress?.totalCases || 0;
+  /*
+   * Every run linked to the plan, whatever its status. The list used to drop anything that was not
+   * "In Progress" or "Completed" while the Overall progress header above it kept aggregating all of
+   * them, so the two disagreed by exactly the runs that were hidden. "Planning" is the status every
+   * run is created with — including the ones this page's own Create test run button makes — so the
+   * filter hid a run the moment it was created and then counted its cases in the header anyway.
+   */
+  const visibleRuns = runs;
   const planName = typeof plan.name === "string" ? plan.name : "";
   const planDescription = typeof plan.description === "string" ? plan.description : "";
   const planTargetRelease = typeof plan.targetRelease === "string" ? plan.targetRelease : "";
@@ -561,22 +618,22 @@ export default function PlanDetailPage() {
             {/* Scrollable content */}
             <div className="min-h-0 flex-1 overflow-y-auto p-6">
               {/* Overall progress */}
-              {progress && total > 0 && (
+              {derivedProgress && total > 0 && (
                 <section className="mb-5 rounded-[10px] border border-[var(--border)] p-5">
                   <div className="mb-3 flex items-center justify-between">
                     <span className="text-[13px] font-medium text-[var(--muted)]">Overall progress</span>
-                    <span className="font-mono text-[24px] font-bold tracking-tight" style={{ color: pctColor(progress.completionPercent) }}>
-                      {progress.completionPercent}%
+                    <span className="font-mono text-[24px] font-bold tracking-tight" style={{ color: pctColor(derivedProgress.completionPercent) }}>
+                      {derivedProgress.completionPercent}%
                     </span>
                   </div>
-                  <SegmentedBar passed={progress.passed} failed={progress.failed} blocked={progress.blocked} skipped={progress.skipped} total={total} />
+                  <SegmentedBar passed={derivedProgress.passed} failed={derivedProgress.failed} blocked={derivedProgress.blocked} skipped={derivedProgress.skipped} untested={derivedProgress.untested} total={total} />
                   <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
                     <StatTile label="Total" value={total} textVar="--foreground" fillVar="--surface-tertiary" icon={<IconClipboardList size={12} stroke={1.75} />} />
-                    <StatTile label="Passed" value={progress.passed} textVar="--status-pass-text" fillVar="--status-pass-fill" icon={<IconCircleCheck size={12} stroke={1.75} />} />
-                    <StatTile label="Failed" value={progress.failed} textVar="--status-fail-text" fillVar="--status-fail-fill" icon={<IconCircleX size={12} stroke={1.75} />} />
-                    <StatTile label="Blocked" value={progress.blocked} textVar="--status-blocked-text" fillVar="--status-blocked-fill" icon={<IconAlertTriangle size={12} stroke={1.75} />} />
-                    <StatTile label="Skipped" value={progress.skipped} textVar="--status-skipped-text" fillVar="--status-skipped-fill" icon={<IconPlayerSkipForward size={12} stroke={1.75} />} />
-                    <StatTile label="Untested" value={progress.untested} textVar="--status-notrun-text" fillVar="--status-notrun-fill" icon={<IconClock size={12} stroke={1.75} />} />
+                    <StatTile label="Passed" value={derivedProgress.passed} textVar="--status-pass-text" fillVar="--status-pass-fill" icon={<IconCircleCheck size={12} stroke={1.75} />} />
+                    <StatTile label="Failed" value={derivedProgress.failed} textVar="--status-fail-text" fillVar="--status-fail-fill" icon={<IconCircleX size={12} stroke={1.75} />} />
+                    <StatTile label="Blocked" value={derivedProgress.blocked} textVar="--status-blocked-text" fillVar="--status-blocked-fill" icon={<IconAlertTriangle size={12} stroke={1.75} />} />
+                    <StatTile label="Skipped" value={derivedProgress.skipped} textVar="--status-skipped-text" fillVar="--status-skipped-fill" icon={<IconPlayerSkipForward size={12} stroke={1.75} />} />
+                    <StatTile label="Untested" value={derivedProgress.untested} textVar="--status-notrun-text" fillVar="--status-notrun-fill" icon={<IconClock size={12} stroke={1.75} />} />
                   </div>
                 </section>
               )}
@@ -673,7 +730,10 @@ export default function PlanDetailPage() {
                     <div className="flex flex-col gap-3">
                       {visibleRuns.map((run) => {
                         const runTotal = run.totalCases;
-                        const runExecuted = runTotal - run.untested;
+                        // Executed is spelled out the same way the header's completionPercent is
+                        // (passed + failed + blocked + skipped), rather than total - untested, so a
+                        // run's percentage and the plan's are the same arithmetic on the same rows.
+                        const runExecuted = run.passed + run.failed + run.blocked + run.skipped;
                         const runPercent = runTotal > 0 ? Math.round((runExecuted / runTotal) * 100) : 0;
                         return (
                           <div key={run.id} className="rounded-[10px] border border-[var(--border)] bg-[var(--background)] p-4 transition-colors hover:border-[var(--brand-primary)]">
@@ -707,14 +767,14 @@ export default function PlanDetailPage() {
 
                             {runTotal > 0 && (
                               <div className="mt-3">
-                                <SegmentedBar passed={run.passed} failed={run.failed} blocked={run.blocked} skipped={run.skipped} total={runTotal} />
+                                <SegmentedBar passed={run.passed} failed={run.failed} blocked={run.blocked} skipped={run.skipped} untested={run.untested} total={runTotal} />
                                 <div className="mt-1.5 flex flex-wrap items-center gap-3">
                                   <span className="font-mono text-[11px] text-[var(--muted)]">{runTotal} cases</span>
                                   {run.passed > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-pass-dot)" />{run.passed} passed</span>}
                                   {run.failed > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-fail-dot)" />{run.failed} failed</span>}
                                   {run.blocked > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-blocked-dot)" />{run.blocked} blocked</span>}
                                   {run.skipped > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-skipped-dot)" />{run.skipped} skipped</span>}
-                                  {run.untested > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--muted-soft)" />{run.untested} untested</span>}
+                                  {run.untested > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-notrun-dot)" />{run.untested} untested</span>}
                                 </div>
                               </div>
                             )}

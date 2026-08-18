@@ -1,6 +1,6 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { testAddress } from "../utils/env";
-import { literal, scalar } from "../utils/psql";
+import { exec, literal, scalar } from "../utils/psql";
 import {
   anonymousContext,
   detachUserByEmail,
@@ -181,5 +181,127 @@ test.describe("workspace setup and analytics", () => {
   test("workspace analytics needs a session", async () => {
     const res = await anon.get("/api/workspace/analytics", { failOnStatusCode: false });
     expect([400, 401]).toContain(res.status());
+  });
+  // ─── The tiles must count what the caller can actually reach ───────────────
+  //
+  // Basecamp 10199487634 / BetterBugs 6a7dbf42 — "[Dashboard] Project count displayed incorrectly on
+  // Dashboard", whose repro is literally "note the Dashboard count, go to Projects, count them, and
+  // compare". Basecamp 10194293482 / BetterBugs 6a7c1abd reports the same mismatch for the suite
+  // count.
+  //
+  // The two surfaces count different populations:
+  //
+  //   listProjects   JOIN project_members pm ... WHERE pm.user_id = $1 AND organization_id = $2
+  //   analytics()    FROM projects WHERE organization_id = $1 AND archived_at IS NULL
+  //
+  // So the tile is workspace-wide and the list is membership-scoped. An owner who is not a
+  // project_member of every project in their own workspace — which is the normal state as soon as a
+  // manager creates one — reads a Projects tile the Projects page cannot reproduce. The archived-project
+  // half of this was fixed (both queries now filter archived_at); the membership half was not.
+  //
+  // The child tiles inherit it: analytics()'s childWhere resolves projects by organization only, so
+  // suiteCount and testCaseCount count the contents of projects the caller cannot open either. That
+  // makes this a small disclosure as well as a wrong number — the tile reports how much work exists
+  // in projects the caller has no access to.
+
+  /** Drops the caller out of a project's membership without touching the project itself. */
+  function removeProjectMembership(projectId: string, userId: string): void {
+    exec(
+      `DELETE FROM project_members WHERE project_id = ${literal(projectId)} AND user_id = ${literal(userId)};`,
+    );
+  }
+
+  function suiteCountIn(projectId: string): number {
+    return Number(scalar(`SELECT COUNT(*) FROM suites WHERE project_id = ${literal(projectId)};`));
+  }
+
+  test("WSA-A-01 the Projects tile counts the same projects the projects list shows", async () => {
+    // A project in this workspace that the owner is deliberately not a member of.
+    const created = await asOwner.post("/api/projects", {
+      data: { name: `E2E Unjoined Project ${Date.now()}` },
+      failOnStatusCode: false,
+    });
+    expect(created.ok(), `creating the fixture project — ${await created.text()}`).toBeTruthy();
+    const unjoinedId = (await created.json()).id;
+
+    try {
+      const before = await (await asOwner.get("/api/workspace/analytics")).json();
+      const listedBefore = await (await asOwner.get("/api/projects")).json();
+      expect(before.projectCount, "the tile and the list must start in agreement").toBe(listedBefore.length);
+
+      removeProjectMembership(unjoinedId, tenant!.owner.userId);
+
+      const after = await (await asOwner.get("/api/workspace/analytics")).json();
+      const listedAfter = await (await asOwner.get("/api/projects")).json();
+
+      // The list drops it, because the list is membership-scoped.
+      expect(listedAfter.length, "the projects list should no longer show it").toBe(listedBefore.length - 1);
+      expect(
+        listedAfter.some((p: { id: string }) => p.id === unjoinedId),
+        "the unjoined project is still in the list",
+      ).toBe(false);
+
+      // The tile must drop it too, or the two screens disagree and the user is right to report it.
+      expect(
+        after.projectCount,
+        `the Dashboard tile says ${after.projectCount} project(s) while the Projects page lists ` +
+          `${listedAfter.length} — the tile is counting a project the caller cannot open`,
+      ).toBe(listedAfter.length);
+    } finally {
+      await asOwner.delete(`/api/projects/${unjoinedId}`, { failOnStatusCode: false });
+      // Archived, not deleted: audit_logs.project_id is ON DELETE SET NULL and audit_logs is
+      // append-only, so a project that has been audited can never be removed — and archiving is
+      // exactly what the product's own delete does. See utils/psql.ts.
+      exec(`UPDATE projects SET archived_at = now(), updated_at = now() WHERE id = ${literal(unjoinedId)};`);
+    }
+  });
+
+  test("WSA-A-02 the Suites and Test cases tiles exclude projects the caller cannot open", async () => {
+    const created = await asOwner.post("/api/projects", {
+      data: { name: `E2E Unjoined Counted ${Date.now()}` },
+      failOnStatusCode: false,
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+    const unjoinedId = (await created.json()).id;
+
+    try {
+      // Give it contents worth counting, while still a member.
+      for (let i = 0; i < 2; i++) {
+        const suite = await asOwner.post(`/api/projects/${unjoinedId}/suites`, {
+          data: { name: `E2E Unjoined Suite ${Date.now()}-${i}` },
+          failOnStatusCode: false,
+        });
+        expect(suite.ok(), await suite.text()).toBeTruthy();
+      }
+      const caseRes = await asOwner.post(`/api/projects/${unjoinedId}/testcases`, {
+        data: { title: `E2E Unjoined Case ${Date.now()}` },
+        failOnStatusCode: false,
+      });
+      expect(caseRes.ok(), await caseRes.text()).toBeTruthy();
+      expect(suiteCountIn(unjoinedId)).toBe(2);
+
+      const before = await (await asOwner.get("/api/workspace/analytics")).json();
+
+      removeProjectMembership(unjoinedId, tenant!.owner.userId);
+
+      const after = await (await asOwner.get("/api/workspace/analytics")).json();
+
+      expect(
+        after.suiteCount,
+        "the Suites tile still counts the 2 suites of a project the caller was just removed from",
+      ).toBe(before.suiteCount - 2);
+      expect(
+        after.testCaseCount,
+        "the Test cases tile still counts a case in a project the caller cannot open",
+      ).toBe(before.testCaseCount - 1);
+    } finally {
+      exec(`DELETE FROM testcases WHERE project_id = ${literal(unjoinedId)};`);
+      exec(`DELETE FROM suites WHERE project_id = ${literal(unjoinedId)};`);
+      exec(`DELETE FROM project_members WHERE project_id = ${literal(unjoinedId)};`);
+      // Archived, not deleted: audit_logs.project_id is ON DELETE SET NULL and audit_logs is
+      // append-only, so a project that has been audited can never be removed — and archiving is
+      // exactly what the product's own delete does. See utils/psql.ts.
+      exec(`UPDATE projects SET archived_at = now(), updated_at = now() WHERE id = ${literal(unjoinedId)};`);
+    }
   });
 });

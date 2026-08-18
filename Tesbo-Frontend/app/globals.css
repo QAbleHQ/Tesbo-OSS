@@ -65,6 +65,17 @@
     linear-gradient(45deg, rgba(196, 181, 253, 0.06), transparent 32%),
     linear-gradient(180deg, #f5f2ff 0%, #ede8fb 100%);
 
+  /* ── Toast chip ───────────────────────────────────────────────────
+     Deliberately inverted against the page so a toast reads as an overlay.
+
+     Both aliases resolve at use time, so this single definition follows the theme: --ink-800 is
+     #1C1E2A in light and #F0EEFF in dark, and --background is the opposite in each. That flip is
+     exactly what the previous markup missed — every toast in the app was hard-coded `text-white`
+     over --ink-800, which in dark mode is near-white text on a near-white chip (contrast ~1.06:1,
+     i.e. unreadable). Basecamp 10212550781. */
+  --toast-surface: var(--ink-800);
+  --toast-foreground: var(--background);
+
   /* ── Foreground / text ───────────────────────────────────────────── */
   --foreground: #0D0E14;
   --muted: #3A3D4E;

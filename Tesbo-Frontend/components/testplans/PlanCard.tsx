@@ -1,6 +1,5 @@
 import Link from "next/link";
 import {
-  IconFileDescription,
   IconPencil,
   IconPlayerPlay,
   IconClock,
@@ -183,10 +182,6 @@ export function PlanCard({ plan, projectId, ownerName, canManage, onDelete }: Pl
       </div>
 
       <div className="mt-auto flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border-subtle)] pt-3">
-        <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
-          <IconFileDescription size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
-          <span className="font-mono text-[var(--foreground)]">{plan.caseCount}</span> cases
-        </span>
         <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
           <IconPlayerPlay size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
           <span className="font-mono text-[var(--foreground)]">{plan.runCount}</span> runs
