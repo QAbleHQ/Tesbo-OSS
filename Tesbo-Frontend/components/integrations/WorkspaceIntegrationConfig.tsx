@@ -118,7 +118,7 @@ function WorkspaceIntegrationConfigInner({
   }
 
   const breadcrumb = (
-    <Link href="/settings?tab=integrations" className="text-[var(--brand-primary)] hover:underline">
+    <Link href="/settings?tab=integrations" className="text-[var(--accent-light)] hover:underline">
       &larr; Back to Integrations
     </Link>
   );
@@ -132,7 +132,7 @@ function WorkspaceIntegrationConfigInner({
             status?.connected && status.siteUrl ? (
               <>
                 Connected to{" "}
-                <a href={status.siteUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--brand-primary)] hover:underline">
+                <a href={status.siteUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent-light)] hover:underline">
                   {status.siteUrl}
                 </a>
               </>
@@ -148,8 +148,8 @@ function WorkspaceIntegrationConfigInner({
         <div
           className={`rounded-lg border px-3 py-2 text-sm ${
             message.type === "success"
-              ? "border-[var(--success)]/30 bg-[color-mix(in_oklab,var(--success)_8%,white)] text-[var(--success)]"
-              : "border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] text-[var(--error)]"
+              ? "border-[var(--success)]/30 bg-[color-mix(in_oklab,var(--success)_8%,white)] text-[var(--success-foreground)]"
+              : "border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] text-[var(--error-foreground)]"
           }`}
         >
           {message.text}
@@ -191,7 +191,7 @@ function WorkspaceIntegrationConfigInner({
               variant="secondary"
               onClick={handleDisconnect}
               disabled={disconnecting}
-              className="border-[var(--error)]/50 text-[var(--error)] hover:bg-[color-mix(in_oklab,var(--error)_8%,white)]"
+              className="border-[var(--error)]/50 text-[var(--error-foreground)] hover:bg-[color-mix(in_oklab,var(--error)_8%,white)]"
             >
               {disconnecting ? "Disconnecting..." : `Disconnect ${label}`}
             </Button>

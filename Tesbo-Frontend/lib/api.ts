@@ -1,3 +1,5 @@
+import { readStoredValue } from "./storage";
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 
 type RequestInitWithBody = Omit<RequestInit, "body"> & { body?: unknown };
@@ -633,6 +635,25 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return api<ProjectSummary[]>("/api/projects");
 }
 
+/**
+ * Every projects-list card's stats in one response, replacing the five per-project calls the
+ * screen used to fan out (test cases, suites, activity, members, runs). See
+ * LegacyService.projectsOverview for why the fan-out had to go.
+ */
+export interface ProjectOverview extends ProjectSummary {
+  testCaseCount: number;
+  suiteCount: number;
+  teamMembers: { userId: string; name: string }[];
+  lastActivityAt: string | null;
+  status: "setup_required" | "configured" | "active";
+  runCounts: { passed: number; failed: number; blocked: number; total: number } | null;
+  currentPassRate: number | null;
+}
+
+export async function listProjectsOverview(): Promise<ProjectOverview[]> {
+  return api<ProjectOverview[]>("/api/projects/overview");
+}
+
 export interface CreateProjectResponse {
   id: string;
   key: string;
@@ -800,6 +821,13 @@ export interface ZyraAgentState {
     maskedKey: string;
   } | null;
   tokenUsage: { total: number };
+  /**
+   * Test cases Zyra has created in this project, counted across chat mode AND task mode.
+   *
+   * Authoritative, and not derivable from `tasks`: chat mode writes no generation row, so summing
+   * task.generatedCount reports 0 for a project whose cases were all made by talking to Zyra.
+   */
+  testcasesCreated: number;
   tasks: ZyraTask[];
 }
 
@@ -1008,6 +1036,10 @@ export function getMcpUrl(projectId: string): string {
 }
 
 // Suites
+
+/** Sentinel `suiteId` filter value meaning "test cases with no suite assigned". Matches the backend's UNASSIGNED_SUITE_ID. */
+export const UNASSIGNED_SUITE_ID = "none";
+
 export interface SuiteNode {
   id: string;
   parentId: string | null;
@@ -1103,6 +1135,17 @@ export async function getTestCase(projectId: string, testcaseId: string): Promis
 
 export async function createTestCase(projectId: string, data: Record<string, unknown>): Promise<{ id: string; externalId: string; title: string; createdAt: string }> {
   return api(`/api/projects/${projectId}/testcases`, { method: "POST", body: data });
+}
+
+// Server-side batch creation, used by import. Keep batches at or under the backend's
+// MAX_BULK_TESTCASES (500) — larger sheets should be sent as several calls.
+export const BULK_CREATE_BATCH_SIZE = 200;
+
+export async function bulkCreateTestCases(
+  projectId: string,
+  data: { testcases: Record<string, unknown>[]; testcaseIdPrefix?: string }
+): Promise<{ created: { id: string; externalId: string; title: string }[]; createdCount: number }> {
+  return api(`/api/projects/${projectId}/testcases/bulk-create`, { method: "POST", body: data });
 }
 
 export async function updateTestCase(projectId: string, testcaseId: string, data: Record<string, unknown>): Promise<void> {
@@ -1310,28 +1353,6 @@ export function getTemplateUrl(projectId: string, format: "csv" | "xlsx"): strin
   return `${API_BASE}/api/projects/${projectId}/testcases/import/template?format=${format}`;
 }
 
-export interface ImportPreviewResult {
-  uploadId: string;
-  headers: string[];
-  previewRows: string[][];
-  totalRows: number;
-}
-
-export async function previewImport(projectId: string, file: File): Promise<ImportPreviewResult> {
-  const fd = new FormData();
-  fd.append("file", file);
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/testcases/import/preview`, {
-    method: "POST",
-    credentials: "include",
-    body: fd,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error?: string }).error || String(res.status));
-  }
-  return res.json() as Promise<ImportPreviewResult>;
-}
-
 export interface ImportResult {
   imported: number;
   errors: { row: number; message: string }[];
@@ -1341,14 +1362,41 @@ export interface ImportResult {
   expandSuiteIds?: string[];
 }
 
-export async function executeImport(
+/**
+ * One mapped spreadsheet row, ready to insert. `rowNumber` is the line in the user's file, carried
+ * through so the server can report an error against the row they can actually go and look at.
+ */
+export interface ImportTestCaseRow {
+  rowNumber: number;
+  title: string;
+  description?: string;
+  preconditions?: string;
+  postconditions?: string;
+  steps?: { stepNumber: number; action: string; expectedResult: string }[];
+  testData?: string;
+  priority?: string;
+  severity?: string;
+  type?: string;
+  status?: string;
+  suite?: string;
+  component?: string;
+  // definitionId -> already-coerced value. The modal resolves select labels to option ids before
+  // sending, since it is the side that loaded the option lists to build the mapping UI.
+  customFieldValues?: Record<string, unknown>;
+}
+
+/**
+ * Commits a parsed import in one request.
+ *
+ * The modal used to POST createTestCase per row, which made a large file that many serial round
+ * trips — and had the browser paginate the entire project first just to spot duplicate titles. Both
+ * of those are the server's job now; the browser still parses the workbook and maps the columns.
+ */
+export async function importTestCases(
   projectId: string,
-  body: { uploadId: string; columnMapping: Record<string, number> }
+  data: { rows: ImportTestCaseRow[]; defaultSuiteId?: string }
 ): Promise<ImportResult> {
-  return api<ImportResult>(`/api/projects/${projectId}/testcases/import`, {
-    method: "POST",
-    body,
-  });
+  return api<ImportResult>(`/api/projects/${projectId}/testcases/import`, { method: "POST", body: data });
 }
 
 export interface AutomationSession {
@@ -1943,12 +1991,22 @@ export async function deleteTestRun(cycleId: string): Promise<void> {
   await api(`/api/cycles/${cycleId}`, { method: "DELETE" });
 }
 
-export async function addTestCasesToRun(cycleId: string, testcaseIds: string[]): Promise<void> {
-  await api(`/api/cycles/${cycleId}/testcases`, { method: "POST", body: { testcaseIds } });
+export async function addTestCasesToRun(
+  cycleId: string,
+  testcaseIds: string[]
+): Promise<{ requested: number; added: number; skipped: number }> {
+  return api(`/api/cycles/${cycleId}/testcases`, { method: "POST", body: { testcaseIds } });
 }
 
 export async function removeTestCaseFromRun(cycleId: string, testcaseId: string): Promise<void> {
   await api(`/api/cycles/${cycleId}/testcases/${testcaseId}`, { method: "DELETE" });
+}
+
+export async function removeTestCasesFromRun(
+  cycleId: string,
+  testcaseIds: string[]
+): Promise<{ requested: number; removed: number }> {
+  return api(`/api/cycles/${cycleId}/testcases/bulk-delete`, { method: "POST", body: { testcaseIds } });
 }
 
 export async function createCycleFromPlan(projectId: string, data: { planId: string; name?: string; environment: string; buildVersion?: string }): Promise<{ id: string }> {
@@ -3459,7 +3517,7 @@ export async function ingestTesboPlaywright(projectId: string, payload: unknown)
 export async function ingestTesboPlaywrightUpload(projectId: string, file: File): Promise<{ runId: string }> {
   const form = new FormData();
   form.append("result", file);
-  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  const token = typeof window !== "undefined" ? readStoredValue("token") : null;
   const res = await fetch(`${API_BASE}/api/projects/${projectId}/tesbo-reports/ingest/playwright/upload`, {
     method: "POST",
     credentials: "include",
@@ -3482,7 +3540,7 @@ export async function uploadTesboCaseArtifact(
 ): Promise<{ caseId: string; kind: string; url: string }> {
   const form = new FormData();
   form.append("file", file);
-  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  const token = typeof window !== "undefined" ? readStoredValue("token") : null;
   const res = await fetch(
     `${API_BASE}/api/projects/${projectId}/tesbo-reports/runs/${runId}/cases/${caseId}/artifacts/${kind}/upload`,
     {

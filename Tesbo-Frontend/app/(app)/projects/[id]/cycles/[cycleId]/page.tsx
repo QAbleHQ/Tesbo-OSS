@@ -31,6 +31,7 @@ import {
   IconShare,
   IconTag,
   IconTrash,
+  IconX,
 } from "@tabler/icons-react";
 import {
   authMe,
@@ -40,6 +41,7 @@ import {
   updateExecution,
   addTestCasesToRun,
   removeTestCaseFromRun,
+  removeTestCasesFromRun,
   listTestCases,
   listSuites,
   listProjectMembers,
@@ -68,6 +70,7 @@ import TrackingDestinationField, { type TrackingDestination } from "@/components
 import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
 import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 
@@ -76,7 +79,7 @@ const EXEC_STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Re
 const RUN_TABS = ["All", "Passed", "Failed", "Blocked", "Skipped", "Pending"] as const;
 type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
-const AVATAR_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+import { AVATAR_COLORS } from "@/lib/avatarColors";
 const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
 
 /* ───── Status tone helpers ───── */
@@ -360,6 +363,11 @@ export default function TestRunDetailPage() {
 
   const [run, setRun] = useState<TestRunDetail | null>(null);
   const [executions, setExecutions] = useState<ExecutionItem[]>([]);
+  // Keyed by testcaseId because that is what the remove endpoints take.
+  const [selectedRunCaseIds, setSelectedRunCaseIds] = useState<Set<string>>(new Set());
+  const [bulkRemoveOpen, setBulkRemoveOpen] = useState(false);
+  const [bulkRemoving, setBulkRemoving] = useState(false);
+  const [bulkRemoveError, setBulkRemoveError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [memberNames, setMemberNames] = useState<Record<string, string>>({});
   const [planNames, setPlanNames] = useState<Record<string, string>>({});
@@ -441,10 +449,31 @@ export default function TestRunDetailPage() {
       .finally(() => setLoading(false));
   }, [cycleId, projectId, router]);
 
+  /*
+   * Re-reads the run list the left panel's per-run counts come from.
+   *
+   * Basecamp 10199377404 — "[Test Run] Count does not match when deleted test cases from run". The
+   * removal handlers filtered `executions` locally, which is what the detail's Total and table render,
+   * but `allRuns` was only ever fetched by load() on mount. Its `totalCases` therefore kept the
+   * pre-delete number, so the panel showed 11 beside a run whose own Total said 10.
+   *
+   * Refetched rather than decremented locally: removing cases also moves the run's status buckets, and
+   * the server already computes all of them off live execution rows (listCycles). handleAddCases calls
+   * the full load() for the same reason.
+   */
+  const refreshRunList = useCallback(async () => {
+    try {
+      setAllRuns(await listTestRuns(projectId));
+    } catch {
+      // The panel's counts are secondary to the removal that just succeeded — a failed refresh must
+      // not present itself as a failed delete.
+    }
+  }, [projectId]);
+
   function toggleRunPanel() {
     setRunPanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem(PANEL_STORAGE_KEY, next ? "open" : "closed");
+      writeStoredValue(PANEL_STORAGE_KEY, next ? "open" : "closed");
       return next;
     });
   }
@@ -456,7 +485,7 @@ export default function TestRunDetailPage() {
 
 
   useEffect(() => {
-    const saved = localStorage.getItem(PANEL_STORAGE_KEY);
+    const saved = readStoredValue(PANEL_STORAGE_KEY);
     if (saved === "closed") setRunPanelOpen(false);
     authMe().then((me) => {
       if (!me) {
@@ -701,9 +730,56 @@ export default function TestRunDetailPage() {
     try {
       await removeTestCaseFromRun(cycleId, testcaseId);
       setExecutions((prev) => prev.filter((e) => e.testcaseId !== testcaseId));
-    } catch {
-      // ignore
+      setSelectedRunCaseIds((prev) => {
+        const next = new Set(prev);
+        next.delete(testcaseId);
+        return next;
+      });
+      // The left panel's count for this run is now one behind.
+      await refreshRunList();
+    } catch (err) {
+      // Was a bare `// ignore`: a removal that failed left the row on screen with no explanation, so
+      // it read as an unresponsive button.
+      setBulkRemoveError(err instanceof Error ? err.message : "Failed to remove the test case.");
     }
+  }
+
+  /* ───── Remove selected test cases ─────
+     The only ways out of a run used to be one case at a time or deleting the whole run. */
+  async function handleRemoveSelectedCases() {
+    const testcaseIds = Array.from(selectedRunCaseIds);
+    if (!testcaseIds.length || bulkRemoving) return;
+    setBulkRemoving(true);
+    try {
+      await removeTestCasesFromRun(cycleId, testcaseIds);
+      const removed = new Set(testcaseIds);
+      setExecutions((prev) => prev.filter((e) => !removed.has(e.testcaseId)));
+      setSelectedRunCaseIds(new Set());
+      setBulkRemoveError(null);
+      setBulkRemoveOpen(false);
+      await refreshRunList();
+    } catch (err) {
+      setBulkRemoveError(err instanceof Error ? err.message : "Failed to remove the selected test cases.");
+    } finally {
+      setBulkRemoving(false);
+    }
+  }
+
+  function toggleRunCaseSelection(testcaseId: string) {
+    setSelectedRunCaseIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(testcaseId)) next.delete(testcaseId);
+      else next.add(testcaseId);
+      return next;
+    });
+  }
+
+  // Covers every case the current filter matches, not just the visible page — the run keeps all
+  // executions in memory, so there is nothing to fetch.
+  function toggleSelectAllRunCases() {
+    setSelectedRunCaseIds((prev) =>
+      prev.size === filteredExecutions.length ? new Set() : new Set(filteredExecutions.map((e) => e.testcaseId))
+    );
   }
 
   /* ───── Change run status ───── */
@@ -835,7 +911,7 @@ export default function TestRunDetailPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
@@ -845,12 +921,12 @@ export default function TestRunDetailPage() {
               <button
                 type="button"
                 onClick={() => router.push(`/projects/${projectId}/cycles`)}
-                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
               >
                 Test Runs
               </button>
               <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
-              <span className="truncate font-medium text-[var(--brand-primary)]">{run.name}</span>
+              <span className="truncate font-medium text-[var(--accent-light)]">{run.name}</span>
             </nav>,
             topBarStartEl,
           )}
@@ -940,9 +1016,9 @@ export default function TestRunDetailPage() {
             <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${runPanelOpen ? "justify-between" : "justify-center"}`}>
               {runPanelOpen && (
                 <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                   Runs
-                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                     {allRuns.length}
                   </span>
                 </p>
@@ -953,7 +1029,7 @@ export default function TestRunDetailPage() {
                     type="button"
                     title="New test run"
                     onClick={() => router.push(`/projects/${projectId}/cycles?create=1`)}
-                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={14} stroke={2.5} />
                   </button>
@@ -995,7 +1071,11 @@ export default function TestRunDetailPage() {
                       <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
                         {r.name}
                       </span>
-                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                      <span
+                        data-testid="run-list-count"
+                        data-run-id={r.id}
+                        className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}
+                      >
                         {r.totalCases}
                       </span>
                     </button>
@@ -1005,7 +1085,7 @@ export default function TestRunDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/cycles?create=1`)}
-                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                 >
                   <IconPlus size={13} stroke={1.75} />
                   New test run
@@ -1081,6 +1161,33 @@ export default function TestRunDetailPage() {
             </div>
           </div>
 
+          {selectedRunCaseIds.size > 0 && !isCompleted && (
+            <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--brand-soft)] px-4 text-[12px]">
+              <span className="font-medium text-[var(--brand-primary)]">{selectedRunCaseIds.size} selected</span>
+              <div className="h-4 w-px bg-[var(--border-strong)]" />
+              <button
+                type="button"
+                data-testid="run-bulk-remove"
+                onClick={() => {
+                  setBulkRemoveError(null);
+                  setBulkRemoveOpen(true);
+                }}
+                className="flex items-center gap-1 font-medium text-[var(--error-foreground)] hover:underline"
+              >
+                <IconTrash size={13} />
+                Remove from run
+              </button>
+              <button
+                type="button"
+                onClick={() => setSelectedRunCaseIds(new Set())}
+                className="ml-auto flex items-center gap-1 text-[var(--muted)] hover:text-[var(--foreground)]"
+              >
+                <IconX size={12} stroke={2} />
+                Clear selection
+              </button>
+            </div>
+          )}
+
           {executions.length === 0 ? (
             <div className="py-12 text-center text-sm text-[var(--muted-soft)]">
               No test cases added yet. Click &quot;Add Test Cases&quot; to get started.
@@ -1096,6 +1203,20 @@ export default function TestRunDetailPage() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-[var(--border)] bg-[var(--surface-secondary)] text-left text-[11px] uppercase tracking-wide text-[var(--muted-soft)]">
+                    {!isCompleted && (
+                      <th className="w-9 px-3 py-2.5">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all matching test cases in this run"
+                          data-testid="run-select-all"
+                          checked={
+                            filteredExecutions.length > 0 && selectedRunCaseIds.size === filteredExecutions.length
+                          }
+                          onChange={toggleSelectAllRunCases}
+                          className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-primary)]"
+                        />
+                      </th>
+                    )}
                     <th className="px-5 py-2.5 font-semibold">ID</th>
                     <th className="px-5 py-2.5 font-semibold">Test Case</th>
                     <th className="px-5 py-2.5 font-semibold">Priority</th>
@@ -1109,12 +1230,23 @@ export default function TestRunDetailPage() {
                     const assigneeName = e.assigneeId ? memberNames[e.assigneeId] : null;
                     return (
                       <tr key={e.id} className="group hover:bg-[var(--surface-secondary)]">
+                        {!isCompleted && (
+                          <td className="px-3 py-3">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select ${e.title || e.snapshotTitle || "test case"}`}
+                              checked={selectedRunCaseIds.has(e.testcaseId)}
+                              onChange={() => toggleRunCaseSelection(e.testcaseId)}
+                              className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-primary)]"
+                            />
+                          </td>
+                        )}
                         <td className="whitespace-nowrap px-5 py-3 font-mono text-[12px] text-[var(--muted-soft)]">{e.externalId || "—"}</td>
                         <td className="px-5 py-3">
                           <button
                             type="button"
                             onClick={() => openExecutionPanel(e)}
-                            className="text-left text-[13px] text-[var(--brand-primary)] hover:underline"
+                            className="text-left text-[13px] text-[var(--accent-light)] hover:underline"
                           >
                             {e.title || e.snapshotTitle || "Untitled test case"}
                           </button>
@@ -1232,6 +1364,30 @@ export default function TestRunDetailPage() {
       </div>
 
       {/* ───── Test Case Picker Modal ───── */}
+      <Modal
+        open={bulkRemoveOpen}
+        onClose={() => setBulkRemoveOpen(false)}
+        title="Remove test cases from run"
+        className="max-w-[460px]"
+      >
+        <p className="text-[13px] text-[var(--muted)]">
+          Remove <span className="font-semibold text-[var(--foreground)]">{selectedRunCaseIds.size}</span> test case
+          {selectedRunCaseIds.size === 1 ? "" : "s"} from this run? Any execution results recorded against them in this
+          run are discarded. The test cases themselves stay in the repository.
+        </p>
+        {bulkRemoveError && (
+          <p className="mt-3 text-[12.5px] text-[var(--error-foreground)]">{bulkRemoveError}</p>
+        )}
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="secondary" onClick={() => setBulkRemoveOpen(false)} disabled={bulkRemoving}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={handleRemoveSelectedCases} disabled={bulkRemoving}>
+            {bulkRemoving ? "Removing…" : `Remove ${selectedRunCaseIds.size}`}
+          </Button>
+        </div>
+      </Modal>
+
       <Modal
         open={showPicker}
         onClose={() => setShowPicker(false)}
@@ -1372,7 +1528,7 @@ export default function TestRunDetailPage() {
                         <td className="px-3 py-2">
                           <span className={`text-xs ${
                             isApproved
-                              ? "text-[var(--success)] font-medium"
+                              ? "text-[var(--success-foreground)] font-medium"
                               : "text-[var(--muted)]"
                           }`}>
                             {tc.status}
@@ -1491,7 +1647,7 @@ export default function TestRunDetailPage() {
               {selectedExistingBug ? (
                 <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-[13px]">
                   <span className="font-medium text-[var(--foreground)]">{selectedExistingBug.title}</span>
-                  <button type="button" onClick={() => setSelectedExistingBug(null)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                  <button type="button" onClick={() => setSelectedExistingBug(null)} className="text-[var(--muted)] hover:text-[var(--error-foreground)]">
                     ✕
                   </button>
                 </div>
@@ -1505,7 +1661,7 @@ export default function TestRunDetailPage() {
             <>
               <div>
                 <label className="block text-sm font-medium text-[var(--muted)] mb-1">
-                  Bug Title <span className="text-[var(--error)]">*</span>
+                  Bug Title <span className="text-[var(--error-foreground)]">*</span>
                 </label>
                 <Input
                   type="text"
@@ -1539,7 +1695,7 @@ export default function TestRunDetailPage() {
                   {bugIssue ? (
                     <div className="flex items-center justify-between rounded-[var(--radius-control)] border border-[var(--border)] bg-[var(--surface-secondary)] px-3 py-1.5 text-[13px]">
                       <span className="font-medium text-[var(--foreground)]">{bugIssue.key} — {bugIssue.summary}</span>
-                      <button type="button" onClick={() => setBugIssue(null)} className="text-[var(--muted)] hover:text-[var(--error)]">
+                      <button type="button" onClick={() => setBugIssue(null)} className="text-[var(--muted)] hover:text-[var(--error-foreground)]">
                         ✕
                       </button>
                     </div>
@@ -1639,7 +1795,7 @@ export default function TestRunDetailPage() {
             Create a public link to share this test run&apos;s results with anyone &mdash; no login required.
           </p>
           {shareError && (
-            <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">
+            <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
               {shareError}
             </p>
           )}

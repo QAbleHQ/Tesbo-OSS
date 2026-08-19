@@ -52,7 +52,7 @@ export class SignupService {
   async verifySelfServeSignup(rawEmail: string | undefined, code: string | undefined, ip: string, ua: string | null | undefined, req: AuthenticatedRequest, res: Response) {
     const email = this.validateEmail(rawEmail);
     if (!code?.trim()) throw new BadRequestException({ error: "code is required" });
-    if (!(await this.otp.verifyOtpCode(email, code, ip))) throw new UnauthorizedException({ error: "invalid_or_expired_otp" });
+    if (!(await this.otp.verifyOtpCode(email, code))) throw new UnauthorizedException({ error: "invalid_or_expired_otp" });
 
     const pending = await this.findPendingSignup(email, null);
     if (!pending) throw new BadRequestException({ error: "No pending signup found for this email. Please start again." });
@@ -96,7 +96,7 @@ export class SignupService {
   private async completeInviteVerification(token: string, code: string | undefined, ip: string, ua: string | null | undefined, req: AuthenticatedRequest, res: Response) {
     const inv = await this.legacy.getInvitationRowOrThrow(token);
     if (!code?.trim()) throw new BadRequestException({ error: "code is required" });
-    if (!(await this.otp.verifyOtpCode(inv.email, code, ip))) throw new UnauthorizedException({ error: "invalid_or_expired_otp" });
+    if (!(await this.otp.verifyOtpCode(inv.email, code))) throw new UnauthorizedException({ error: "invalid_or_expired_otp" });
 
     const pending = await this.findPendingSignup(inv.email, inv.id);
     if (!pending) throw new BadRequestException({ error: "No pending registration found for this invite. Please start again." });
@@ -190,7 +190,7 @@ export class SignupService {
     } catch {
       throw new ServiceUnavailableException({ error: "otp_delivery_failed" });
     }
-    if (!sent) throw new BadRequestException({ error: "rate_limited_or_invalid" });
+    if (!sent) throw new BadRequestException({ error: "email required" });
   }
 
   private async assertEmailNotTaken(email: string): Promise<void> {

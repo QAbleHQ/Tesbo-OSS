@@ -110,7 +110,7 @@ function PriorityIcon({ priority }: { priority: string }) {
   if (p === "highest" || p === "critical") color = "text-red-500";
   else if (p === "high") color = "text-orange-500";
   else if (p === "medium") color = "text-yellow-500";
-  else if (p === "low") color = "text-[var(--brand-primary)]";
+  else if (p === "low") color = "text-[var(--accent-light)]";
   else if (p === "lowest") color = "text-[var(--muted-soft)]";
   return (
     <span className={`text-xs font-medium ${color}`} title={priority}>
@@ -122,13 +122,13 @@ function PriorityIcon({ priority }: { priority: string }) {
 function IssueTypeIcon({ type }: { type: string }) {
   const t = type?.toLowerCase() ?? "";
   let color = "bg-[var(--surface-tertiary)] text-[var(--muted)]";
-  if (t === "bug") color = "bg-[var(--error-soft)] text-[var(--error)]";
+  if (t === "bug") color = "bg-[var(--error-soft)] text-[var(--error-foreground)]";
   else if (t === "story" || t === "user story")
-    color = "bg-[var(--success-soft)] text-[var(--success)]";
+    color = "bg-[var(--success-soft)] text-[var(--success-foreground)]";
   else if (t === "epic")
     color = "bg-[var(--ai-soft)] text-[var(--ai-primary)]";
   else if (t === "task" || t === "sub-task")
-    color = "bg-[var(--brand-soft)] text-[var(--brand-primary)]";
+    color = "bg-[var(--brand-soft)] text-[var(--accent-light)]";
   return (
     <span className={`inline-block rounded px-1.5 py-0.5 text-xs font-medium ${color}`}>
       {type || "—"}
@@ -534,9 +534,9 @@ export default function RequirementsPage() {
         ))}
 
       {(syncError || jiraSync.error || linearSync.error) && (
-        <div className="flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
+        <div className="flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)]">
           <span>{syncError || jiraSync.error || linearSync.error}</span>
-          <button type="button" onClick={() => setSyncError(null)} className="ml-3 text-[var(--error)] hover:opacity-80">
+          <button type="button" onClick={() => setSyncError(null)} className="ml-3 text-[var(--error-foreground)] hover:opacity-80">
             Dismiss
           </button>
         </div>
@@ -545,7 +545,7 @@ export default function RequirementsPage() {
       {!sourceConnected && tickets.length === 0 && (
         <div className="rounded-xl border border-dashed border-[var(--border)] p-12 text-center">
           <div className="mx-auto w-14 h-14 rounded-full bg-[var(--brand-soft)] flex items-center justify-center">
-            <IconPlug size={26} stroke={1.75} className="text-[var(--brand-primary)]" />
+            <IconPlug size={26} stroke={1.75} className="text-[var(--accent-light)]" />
           </div>
           <h2 className="mt-4 text-lg font-semibold text-[var(--foreground)]">
             {source === "all"
@@ -643,7 +643,7 @@ export default function RequirementsPage() {
                   setCoverageFilter("");
                   setPage(0);
                 }}
-                className="text-sm text-[var(--brand-primary)] hover:underline"
+                className="text-sm text-[var(--accent-light)] hover:underline"
               >
                 Clear filters
               </button>
@@ -692,7 +692,7 @@ export default function RequirementsPage() {
                               target="_blank"
                               rel="noopener noreferrer"
                               onClick={(e) => e.stopPropagation()}
-                              className="font-mono text-xs text-[var(--brand-primary)] hover:underline"
+                              className="font-mono text-xs text-[var(--accent-light)] hover:underline"
                             >
                               {ticket.key}
                             </a>
@@ -728,7 +728,7 @@ export default function RequirementsPage() {
                         <td className="px-4 py-2.5 text-right">
                           <div className="inline-flex items-center gap-2">
                             {linked && (
-                              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
+                              <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-xs font-medium text-[var(--success-foreground)]">
                                 <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                                 </svg>
@@ -804,7 +804,7 @@ export default function RequirementsPage() {
                                 href={ticket.url}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="inline-block text-xs text-[var(--brand-primary)] hover:underline"
+                                className="inline-block text-xs text-[var(--accent-light)] hover:underline"
                               >
                                 Open in {providerLabel(ticket.source)} →
                               </a>

@@ -48,11 +48,23 @@ import {
   type KnowledgeFile,
   type KnowledgeBaseSummary,
 } from "@/lib/api";
-import { Button, Input, Modal, Field, FieldLabel, StatusChip, EmptyStateBlock } from "@/components/ui";
+import { Button, Input, Textarea, Modal, Field, FieldLabel, FieldError, StatusChip, EmptyStateBlock } from "@/components/ui";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import FileViewerModal from "@/components/knowledge-base/FileViewerModal";
 import { Menu, MenuItem } from "@/components/knowledge-base/Menu";
 import { FolderTreeNodeRow, flattenFolders, findAncestorIds, type FolderAction } from "@/components/knowledge-base/FolderTree";
+import {
+  KB_ACCEPT_ATTR,
+  KB_MAX_FILES_PER_UPLOAD,
+  KB_UPLOAD_HINT,
+  validateKnowledgeBaseFile,
+  KB_DOCUMENT_TITLE_MAX_LENGTH,
+  validateKnowledgeDocumentTitle,
+  KB_FOLDER_NAME_MAX_LENGTH,
+  validateKnowledgeFolderName,
+  blankDocumentFlagKey,
+} from "@/lib/validation";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
@@ -192,6 +204,25 @@ const DOCUMENT_TEMPLATES: DocumentTemplate[] = [
   },
 ];
 
+/**
+ * What the Size column shows for one row.
+ *
+ * A folder has no size of its own, so it describes its contents: the stored bytes of the files beneath
+ * it, and the number of documents (which are text rows, not files, and so carry no bytes to add). An
+ * empty folder says "Empty" rather than "0 B", which would imply it holds a zero-byte thing.
+ */
+function sizeLabel(item: KnowledgeItem): string {
+  if (item.type === "folder") {
+    const bytes = Number((item as { fileBytes?: number }).fileBytes || 0);
+    const docs = Number((item as { documentCount?: number }).documentCount || 0);
+    const parts: string[] = [];
+    if (bytes > 0) parts.push(formatFileSize(bytes));
+    if (docs > 0) parts.push(`${docs} doc${docs === 1 ? "" : "s"}`);
+    return parts.length ? parts.join(" · ") : "Empty";
+  }
+  return formatFileSize((item as { fileSize?: number }).fileSize);
+}
+
 function formatFileSize(bytes: number | null | undefined): string {
   if (bytes == null) return "—";
   if (bytes < 1024) return `${bytes} B`;
@@ -207,7 +238,7 @@ function formatDate(value: string): string {
 }
 
 function itemIcon(item: KnowledgeItem) {
-  if (item.type === "folder") return <IconFolder size={17} stroke={1.75} className="text-[var(--brand-primary)]" />;
+  if (item.type === "folder") return <IconFolder size={17} stroke={1.75} className="text-[var(--accent-light)]" />;
   if (item.type === "document") return <IconFileText size={17} stroke={1.75} className="text-[var(--info)]" />;
   return <IconFile size={17} stroke={1.75} className="text-[var(--muted)]" />;
 }
@@ -238,18 +269,40 @@ function CreateFolderModal({
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
+  const [nameError, setNameError] = useState("");
   useEffect(() => {
     if (open) {
       setName("");
       setDescription("");
+      setNameError("");
     }
   }, [open]);
+  function handleCreateClick() {
+    const trimmed = name.trim();
+    const error = validateKnowledgeFolderName(trimmed);
+    if (error) {
+      setNameError(error);
+      return;
+    }
+    onCreate(trimmed, description.trim());
+  }
   return (
     <Modal open={open} onClose={onClose} title="Create folder">
       <div className="space-y-4">
         <Field>
           <FieldLabel>Folder name</FieldLabel>
-          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus placeholder="e.g. Payment Module" />
+          <Input
+            value={name}
+            onChange={(e) => {
+              const value = e.target.value;
+              setName(value);
+              if (nameError && !validateKnowledgeFolderName(value)) setNameError("");
+            }}
+            autoFocus
+            placeholder="e.g. Payment Module"
+            maxLength={KB_FOLDER_NAME_MAX_LENGTH}
+          />
+          {nameError && <FieldError>{nameError}</FieldError>}
         </Field>
         <Field>
           <FieldLabel>Description (optional)</FieldLabel>
@@ -257,7 +310,7 @@ function CreateFolderModal({
         </Field>
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button disabled={!name.trim() || saving} onClick={() => onCreate(name.trim(), description.trim())}>
+          <Button disabled={!name.trim() || saving} onClick={handleCreateClick}>
             {saving ? "Creating…" : "Create folder"}
           </Button>
         </div>
@@ -280,19 +333,42 @@ function RenameFolderModal({
   saving: boolean;
 }) {
   const [name, setName] = useState(initialName);
+  const [nameError, setNameError] = useState("");
   useEffect(() => {
-    if (open) setName(initialName);
+    if (open) {
+      setName(initialName);
+      setNameError("");
+    }
   }, [open, initialName]);
+  function handleSaveClick() {
+    const trimmed = name.trim();
+    const error = validateKnowledgeFolderName(trimmed);
+    if (error) {
+      setNameError(error);
+      return;
+    }
+    onSave(trimmed);
+  }
   return (
     <Modal open={open} onClose={onClose} title="Rename folder">
       <div className="space-y-4">
         <Field>
           <FieldLabel>Folder name</FieldLabel>
-          <Input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+          <Input
+            value={name}
+            onChange={(e) => {
+              const value = e.target.value;
+              setName(value);
+              if (nameError && !validateKnowledgeFolderName(value)) setNameError("");
+            }}
+            autoFocus
+            maxLength={KB_FOLDER_NAME_MAX_LENGTH}
+          />
+          {nameError && <FieldError>{nameError}</FieldError>}
         </Field>
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button disabled={!name.trim() || saving} onClick={() => onSave(name.trim())}>{saving ? "Saving…" : "Save"}</Button>
+          <Button disabled={!name.trim() || saving} onClick={handleSaveClick}>{saving ? "Saving…" : "Save"}</Button>
         </div>
       </div>
     </Modal>
@@ -351,24 +427,53 @@ function CreateDocumentModal({
 }: {
   open: boolean;
   onClose: () => void;
-  onCreate: (title: string, template: DocumentTemplate) => void;
+  onCreate: (title: string, template: DocumentTemplate, blankContent?: string) => void;
   saving: boolean;
 }) {
   const [title, setTitle] = useState("");
+  const [titleError, setTitleError] = useState("");
   const [templateKey, setTemplateKey] = useState(DOCUMENT_TEMPLATES[0].key);
+  // Only the "Blank document" template starts with no content, so it's the only one that
+  // needs this field — the other templates already come with pre-filled starter content.
+  const [blankContent, setBlankContent] = useState("");
   useEffect(() => {
     if (open) {
       setTitle("");
+      setTitleError("");
       setTemplateKey(DOCUMENT_TEMPLATES[0].key);
+      setBlankContent("");
     }
   }, [open]);
   const template = DOCUMENT_TEMPLATES.find((t) => t.key === templateKey) || DOCUMENT_TEMPLATES[0];
+  const isBlankTemplate = template.key === "blank";
+  const canCreate = Boolean(title.trim()) && (!isBlankTemplate || Boolean(blankContent.trim()));
+  function handleCreateClick() {
+    const trimmed = title.trim();
+    if (!trimmed || (isBlankTemplate && !blankContent.trim())) return;
+    const error = validateKnowledgeDocumentTitle(trimmed);
+    if (error) {
+      setTitleError(error);
+      return;
+    }
+    onCreate(trimmed, template, isBlankTemplate ? blankContent.trim() : undefined);
+  }
   return (
     <Modal open={open} onClose={onClose} title="Create document" className="max-w-2xl">
       <div className="space-y-4">
         <Field>
           <FieldLabel>Document title</FieldLabel>
-          <Input value={title} onChange={(e) => setTitle(e.target.value)} autoFocus placeholder="e.g. Login Requirements" />
+          <Input
+            value={title}
+            onChange={(e) => {
+              const value = e.target.value;
+              setTitle(value);
+              if (titleError && !validateKnowledgeDocumentTitle(value)) setTitleError("");
+            }}
+            autoFocus
+            placeholder="e.g. Login Requirements"
+            maxLength={KB_DOCUMENT_TITLE_MAX_LENGTH}
+          />
+          {titleError && <FieldError>{titleError}</FieldError>}
         </Field>
         <Field>
           <FieldLabel>Template</FieldLabel>
@@ -390,9 +495,20 @@ function CreateDocumentModal({
             ))}
           </div>
         </Field>
+        {isBlankTemplate && (
+          <Field>
+            <FieldLabel>Content</FieldLabel>
+            <Textarea
+              value={blankContent}
+              onChange={(e) => setBlankContent(e.target.value)}
+              placeholder="Write something before creating this document…"
+              rows={5}
+            />
+          </Field>
+        )}
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button disabled={!title.trim() || saving} onClick={() => onCreate(title.trim(), template)}>
+          <Button disabled={!canCreate || saving} onClick={handleCreateClick}>
             {saving ? "Creating…" : "Create document"}
           </Button>
         </div>
@@ -416,10 +532,14 @@ function UploadModal({
 }) {
   const [files, setFiles] = useState<File[]>([]);
   const [dragOver, setDragOver] = useState(false);
+  const [rejectionMessage, setRejectionMessage] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const pickerOpenRef = useRef(false);
   useEffect(() => {
-    if (open) setFiles([]);
+    if (open) {
+      setFiles([]);
+      setRejectionMessage(null);
+    }
   }, [open]);
   useEffect(() => {
     if (!open) return;
@@ -434,6 +554,24 @@ function UploadModal({
     inputRef.current?.click();
   }
 
+  function addFiles(incoming: File[]) {
+    const reasons: string[] = [];
+    const valid: File[] = [];
+    for (const file of incoming) {
+      const reason = validateKnowledgeBaseFile(file);
+      if (reason) reasons.push(reason);
+      else valid.push(file);
+    }
+    setFiles((prev) => {
+      const room = KB_MAX_FILES_PER_UPLOAD - prev.length;
+      if (valid.length > room) {
+        reasons.push(`Only ${room} more file${room === 1 ? "" : "s"} can be added (max ${KB_MAX_FILES_PER_UPLOAD} per upload).`);
+      }
+      return [...prev, ...valid.slice(0, Math.max(0, room))];
+    });
+    setRejectionMessage(reasons.length > 0 ? reasons.join(" · ") : null);
+  }
+
   return (
     <Modal open={open} onClose={onClose} title="Upload files">
       <div className="space-y-4">
@@ -444,7 +582,7 @@ function UploadModal({
           onDrop={(e) => {
             e.preventDefault();
             setDragOver(false);
-            setFiles((prev) => [...prev, ...Array.from(e.dataTransfer.files)]);
+            addFiles(Array.from(e.dataTransfer.files));
           }}
           onClick={openFilePicker}
           role="button"
@@ -465,10 +603,18 @@ function UploadModal({
             ref={inputRef}
             type="file"
             multiple
+            accept={KB_ACCEPT_ATTR}
             className="hidden"
-            onChange={(e) => setFiles((prev) => [...prev, ...Array.from(e.target.files || [])])}
+            onChange={(e) => {
+              addFiles(Array.from(e.target.files || []));
+              e.target.value = "";
+            }}
           />
         </div>
+        <p className="text-[11px] text-[var(--muted-soft)]">{KB_UPLOAD_HINT}</p>
+        {rejectionMessage && (
+          <p className="rounded-md bg-[var(--error-soft)] px-2.5 py-1.5 text-[12.5px] text-[var(--error)]">{rejectionMessage}</p>
+        )}
         {files.length > 0 && (
           <ul className="max-h-40 space-y-1 overflow-y-auto text-[13px]">
             {files.map((f, i) => (
@@ -578,7 +724,7 @@ function KnowledgeBasePageInner() {
   );
 
   useEffect(() => {
-    const savedPanel = localStorage.getItem("tesbo_kb_tree_panel");
+    const savedPanel = readStoredValue("tesbo_kb_tree_panel");
     if (savedPanel === "closed") setTreePanelOpen(false);
     (async () => {
       const me = await authMe();
@@ -621,6 +767,15 @@ function KnowledgeBasePageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [folderParam, loading, tree]);
 
+  // Debounce typing into the search box instead of waiting for Enter/submit, so results
+  // update live as the user types (matches the search UX elsewhere in the app).
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setSearchQuery(searchInput.trim());
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [searchInput]);
+
   useEffect(() => {
     if (!searchQuery) {
       setSearchResults(null);
@@ -645,7 +800,7 @@ function KnowledgeBasePageInner() {
   function toggleTreePanel() {
     setTreePanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem("tesbo_kb_tree_panel", next ? "open" : "closed");
+      writeStoredValue("tesbo_kb_tree_panel", next ? "open" : "closed");
       return next;
     });
   }
@@ -692,6 +847,34 @@ function KnowledgeBasePageInner() {
     }
   }
 
+  /*
+   * Deleting a folder is destructive and cascades, so the confirmation has to describe what will
+   * actually happen to THIS folder.
+   *
+   * Both delete paths used to be wrong, in opposite directions: the folder tree claimed "this folder
+   * contains documents/files" unconditionally, so emptying a folder and deleting it still warned
+   * about contents that weren't there; and the item table's row menu said only "it will be moved to
+   * trash", so deleting a full folder never mentioned that everything inside went with it. Asking
+   * the API what is in the folder makes one truthful message serve both.
+   *
+   * A failed lookup falls back to the cautious wording rather than the reassuring one — if we can't
+   * tell, the user should be warned, not soothed.
+   */
+  async function confirmFolderDelete(folderId: string, label: string): Promise<boolean> {
+    let hasContents = true;
+    try {
+      const contents = await listKnowledgeFolderItems(projectId, folderId);
+      hasContents = (contents.total ?? contents.items?.length ?? 0) > 0;
+    } catch {
+      hasContents = true;
+    }
+    return window.confirm(
+      hasContents
+        ? `Deleting "${label}" will also move all its contents to trash. Continue?`
+        : `Delete "${label}"? It will be moved to trash.`,
+    );
+  }
+
   async function handleFolderAction(action: FolderAction, folder: KnowledgeFolderTreeNode) {
     if (action === "create-subfolder") {
       setCreateFolderParent(folder.id);
@@ -701,7 +884,7 @@ function KnowledgeBasePageInner() {
     } else if (action === "move") {
       setMoveTarget({ kind: "folder", id: folder.id, excludeId: folder.id });
     } else if (action === "delete") {
-      if (!window.confirm(`This folder contains documents/files. Deleting "${folder.name}" will also move all contents to trash. Continue?`)) return;
+      if (!(await confirmFolderDelete(folder.id, folder.name))) return;
       setError(null);
       try {
         await deleteKnowledgeFolder(projectId, folder.id);
@@ -734,19 +917,30 @@ function KnowledgeBasePageInner() {
     }
   }
 
-  async function handleCreateDocument(title: string, template: DocumentTemplate) {
+  async function handleCreateDocument(title: string, template: DocumentTemplate, blankContent?: string) {
     if (!selectedFolderId) return;
     setSaving(true);
     setError(null);
     try {
+      const content =
+        template.key === "blank" && blankContent
+          ? doc(...blankContent.split(/\n+/).map((line) => paragraph(line)).filter((p) => p.content))
+          : template.content;
       const created = await createKnowledgeDocument(projectId, {
         folderId: selectedFolderId,
         title,
         documentType: template.documentType,
-        contentJson: template.content || undefined,
-        contentHtml: template.content ? docNodeToHtml(template.content) : undefined,
-        contentText: template.content ? docNodeToText(template.content) : undefined,
+        contentJson: content || undefined,
+        contentHtml: content ? docNodeToHtml(content) : undefined,
+        contentText: content ? docNodeToText(content) : undefined,
       });
+      if (template.key === "blank") {
+        try {
+          window.localStorage.setItem(blankDocumentFlagKey(created.id), "1");
+        } catch {
+          // Private browsing / storage disabled — the stricter blank-doc validation just won't apply.
+        }
+      }
       setCreateDocOpen(false);
       router.push(`/projects/${projectId}/knowledge-base/documents/${created.id}`);
     } catch (err) {
@@ -789,7 +983,11 @@ function KnowledgeBasePageInner() {
 
   async function handleDeleteItem(item: KnowledgeItem) {
     const label = itemLabel(item);
-    if (!window.confirm(`Delete "${label}"? It will be moved to trash.`)) return;
+    const confirmed =
+      item.type === "folder"
+        ? await confirmFolderDelete(item.id, label)
+        : window.confirm(`Delete "${label}"? It will be moved to trash.`);
+    if (!confirmed) return;
     setError(null);
     try {
       if (item.type === "document") await deleteKnowledgeDocument(projectId, item.id);
@@ -820,7 +1018,12 @@ function KnowledgeBasePageInner() {
   const sortedItems = [...typeFilteredItems].sort((a, b) => {
     if (sortBy === "name") return itemLabel(a).localeCompare(itemLabel(b));
     if (sortBy === "size") {
-      const sizeOf = (item: KnowledgeItem) => (item.type === "file" ? Number((item as { fileSize?: number }).fileSize || 0) : -1);
+      // Folders sort by the bytes they contain now that they report them, instead of being pinned
+      // below every file by a -1 sentinel.
+      const sizeOf = (item: KnowledgeItem) =>
+        item.type === "folder"
+          ? Number((item as { fileBytes?: number }).fileBytes || 0)
+          : Number((item as { fileSize?: number }).fileSize || 0);
       return sizeOf(b) - sizeOf(a);
     }
     return new Date((b as { updatedAt: string }).updatedAt).getTime() - new Date((a as { updatedAt: string }).updatedAt).getTime();
@@ -844,14 +1047,14 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="font-medium text-[var(--brand-primary)]">Knowledge base</span>
+              <span className="font-medium text-[var(--accent-light)]">Knowledge base</span>
             </nav>,
             topBarStartEl
           )}
@@ -939,7 +1142,7 @@ function KnowledgeBasePageInner() {
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
-                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--brand-primary)]">{summary.folders}</div>
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--accent-light)]">{summary.folders}</div>
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Folders</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
@@ -955,7 +1158,7 @@ function KnowledgeBasePageInner() {
         </div>
 
         {error && (
-          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
+          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)]">
             <span>{error}</span>
             <button onClick={() => setError(null)}><IconX size={16} /></button>
           </div>
@@ -968,10 +1171,10 @@ function KnowledgeBasePageInner() {
               <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${treePanelOpen ? "justify-between" : "justify-center"}`}>
                 {treePanelOpen && (
                   <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                    <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                    <IconFolders size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                     Folders
                     {summary && (
-                      <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                      <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                         {summary.folders}
                       </span>
                     )}
@@ -983,7 +1186,7 @@ function KnowledgeBasePageInner() {
                       type="button"
                       title="New folder"
                       onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
-                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                      className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                     >
                       <IconPlus size={14} stroke={2.5} />
                     </button>
@@ -1018,7 +1221,7 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => { setCreateFolderParent(selectedFolderId); setCreateFolderOpen(true); }}
-                    className="mt-2 flex w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    className="mt-2 flex w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-3 py-1.5 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={13} stroke={2} /> New folder
                   </button>
@@ -1065,7 +1268,7 @@ function KnowledgeBasePageInner() {
                   <button
                     type="button"
                     onClick={() => { setSearchQuery(""); setSearchInput(""); }}
-                    className="shrink-0 text-[12px] text-[var(--brand-primary)] hover:underline"
+                    className="shrink-0 text-[12px] text-[var(--accent-light)] hover:underline"
                   >
                     Clear
                   </button>
@@ -1153,7 +1356,7 @@ function KnowledgeBasePageInner() {
                           <td className="px-4 py-2.5">
                             <button onClick={() => openItem(item)} className="flex items-center gap-2 text-left hover:underline">
                               {itemIcon(item)}
-                              <span className="truncate max-w-[280px] font-medium text-[var(--foreground)]">{itemLabel(item)}</span>
+                              <span className="truncate max-w-[280px] font-medium text-[var(--foreground)]" title={itemLabel(item)}>{itemLabel(item)}</span>
                             </button>
                           </td>
                           <td className="px-4 py-2.5">
@@ -1184,7 +1387,14 @@ function KnowledgeBasePageInner() {
                               : (item as { updatedByName?: string }).updatedByName || "—"}
                           </td>
                           <td className="px-4 py-2.5 text-[var(--muted)]">{formatDate((item as { updatedAt: string }).updatedAt)}</td>
-                          <td className="px-4 py-2.5 text-[var(--muted)]">{item.type === "file" ? formatFileSize((item as { fileSize?: number }).fileSize) : "—"}</td>
+                          {/*
+                            * Basecamp 10199231000 — folders (and documents) rendered a bare "—" here.
+                            * A folder now reports the total bytes of every file beneath it at any depth,
+                            * plus a document count, since documents are DB text with no file behind them
+                            * and cannot be folded into a byte total honestly. A document reports the
+                            * byte length of its own text.
+                            */}
+                          <td className="px-4 py-2.5 text-[var(--muted)]">{sizeLabel(item)}</td>
                           <td className="px-4 py-2.5 text-right">
                             <Menu
                               align="right"
@@ -1253,7 +1463,7 @@ function KnowledgeBasePageInner() {
                     type="button"
                     onClick={() => setPage((prev) => Math.max(1, prev - 1))}
                     disabled={safePage === 1}
-                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                   >
                     Previous
                   </button>
@@ -1261,7 +1471,7 @@ function KnowledgeBasePageInner() {
                     type="button"
                     onClick={() => setPage((prev) => (prev >= totalPages ? prev : prev + 1))}
                     disabled={safePage >= totalPages}
-                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                    className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                   >
                     Next
                   </button>

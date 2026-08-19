@@ -29,6 +29,7 @@ import { getWorkspace, logout } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
 import ThemeToggle from "@/components/ThemeToggle";
 import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
+import { removeStoredValue } from "@/lib/storage";
 
 type NavItemConfig = {
   href: string;
@@ -218,7 +219,7 @@ function SidebarContent() {
     setIsLoggingOut(true);
     try {
       await logout();
-      if (typeof window !== "undefined") localStorage.removeItem("token");
+      if (typeof window !== "undefined") removeStoredValue("token");
       router.replace("/login");
       router.refresh();
     } catch {
@@ -360,7 +361,7 @@ function SidebarContent() {
       <div className="space-y-1 border-t border-[var(--glass-border)] p-2.5">
         <NavLink
           href="/account"
-          label="Account"
+          label="My Account"
           icon="account"
           active={pathname === "/account"}
           collapsed={isCollapsed}
@@ -399,7 +400,7 @@ function SidebarContent() {
           </button>
         </div>
         {logoutError && !isCollapsed && (
-          <p className="mt-1 px-2 text-xs text-[var(--error)]">{logoutError}</p>
+          <p className="mt-1 px-2 text-xs text-[var(--error-foreground)]">{logoutError}</p>
         )}
       </div>
     </aside>

@@ -32,7 +32,12 @@ test.describe("full test-management scenario", () => {
       // ── Prerequisite: the project needs at least one test environment configured before
       // the "Create Test Run" UI will allow submitting the form at all.
       const project = await (await api.get(`/api/projects/${ctx.projectId}`)).json();
-      const settings = project.settings ? JSON.parse(project.settings) : {};
+      // settings is a jsonb column, so the driver hands it back already parsed — api/projects.spec.ts
+      // asserts on it as an object. Re-parsing threw ("[object Object]" is not valid JSON) as soon as
+      // the project had any settings at all, so this only bit from the second run onwards against the
+      // persistent volume, once this very test had written testRunEnvironments.
+      const settings =
+        typeof project.settings === "string" ? JSON.parse(project.settings) : (project.settings ?? {});
       const environments: Array<{ name: string; url: string }> = settings.testRunEnvironments || [];
       if (!environments.some((e) => e.name === ENV_NAME)) {
         await api.patch(`/api/projects/${ctx.projectId}`, {

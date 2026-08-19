@@ -9,6 +9,7 @@ import {
   type WorkspaceListItem,
 } from "@/lib/api";
 import { Button, Field, FieldError, FieldLabel, Input, Modal } from "@/components/ui";
+import { avatarColor } from "@/lib/avatarColors";
 
 function roleLabel(role?: string): string {
   const n = (role ?? "").trim().toLowerCase();
@@ -107,7 +108,11 @@ export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolea
         }`}
         aria-label="Switch workspace"
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[var(--cta-primary)] text-xs font-semibold text-white">
+        {/* Seeded on the workspace id so each workspace keeps its own mark — part of 10198836413. */}
+        <span
+          className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-xs font-semibold text-white"
+          style={{ backgroundColor: avatarColor(active.id || active.name) }}
+        >
           {active.name.slice(0, 1).toUpperCase()}
         </span>
         {!isCollapsed && (
@@ -124,7 +129,18 @@ export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolea
       </button>
 
       {isOpen && (
-        <div className="absolute left-2 top-full z-40 mt-1 w-64 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
+        /*
+         * Basecamp 10212564946 — "Workspace menu should have an independent scrollbar when multiple
+         * workspaces are added". The menu had no height bound, so it grew one row per workspace: at 11
+         * it ran past the bottom of the viewport and took "Create new workspace" with it, leaving the
+         * only way to add a workspace unreachable.
+         *
+         * The menu is capped to the viewport (max-h) and the WORKSPACE LIST scrolls inside it, so the
+         * separator and "Create new workspace" stay pinned and reachable at any number of workspaces.
+         * `flex` + `min-h-0` is what lets the list actually shrink rather than overflowing the box.
+         */
+        <div className="absolute left-2 top-full z-40 mt-1 flex max-h-[min(70vh,26rem)] w-64 flex-col rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
+        <div data-testid="workspace-switcher-list" className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
           {workspaces.map((w) => (
             <button
               key={w.id}
@@ -142,15 +158,17 @@ export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolea
               {w.isActive && <IconCheck className="h-[14px] w-[14px] shrink-0 text-[var(--denim)]" />}
             </button>
           ))}
+        </div>
           {error && <p className="px-3 py-1 text-[11px] text-[var(--status-fail-text)]">{error}</p>}
-          <div className="my-1 border-t border-[var(--border)]" />
+          <div className="my-1 shrink-0 border-t border-[var(--border)]" />
           <button
             type="button"
+            data-testid="create-workspace-action"
             onClick={() => {
               setIsOpen(false);
               setIsCreateOpen(true);
             }}
-            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
+            className="flex w-full shrink-0 items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
           >
             <IconPlus className="h-[14px] w-[14px] shrink-0" />
             Create new workspace

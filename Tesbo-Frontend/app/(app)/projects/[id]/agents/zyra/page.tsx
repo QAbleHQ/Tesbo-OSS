@@ -687,14 +687,14 @@ export default function ZyraChatPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="font-medium text-[var(--brand-primary)]">Zyra</span>
+              <span className="font-medium text-[var(--accent-light)]">Zyra</span>
             </nav>,
             topBarStartEl,
           )}
@@ -731,9 +731,9 @@ export default function ZyraChatPage() {
 
         {/* Error banner */}
         {error && (
-          <div className="ml-4 mb-3 shrink-0 rounded-xl border border-[var(--error)]/40 bg-[var(--error-soft)] px-4 py-3 text-sm text-[var(--error)] flex items-start justify-between gap-3">
+          <div className="ml-4 mb-3 shrink-0 rounded-xl border border-[var(--error)]/40 bg-[var(--error-soft)] px-4 py-3 text-sm text-[var(--error-foreground)] flex items-start justify-between gap-3">
             <span>{error}</span>
-            <button type="button" onClick={() => setError(null)} className="shrink-0 text-[var(--error)]/60 hover:text-[var(--error)]">✕</button>
+            <button type="button" onClick={() => setError(null)} className="shrink-0 text-[var(--error-foreground)]/60 hover:text-[var(--error-foreground)]">✕</button>
           </div>
         )}
 

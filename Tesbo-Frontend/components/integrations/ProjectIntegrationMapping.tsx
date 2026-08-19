@@ -142,7 +142,7 @@ export function ProjectIntegrationMapping({
   }
 
   const breadcrumb = (
-    <Link href={`/projects/${projectId}/settings?tab=integrations`} className="text-[var(--brand-primary)] hover:underline">
+    <Link href={`/projects/${projectId}/settings?tab=integrations`} className="text-[var(--accent-light)] hover:underline">
       &larr; Back to Project Settings
     </Link>
   );
@@ -161,7 +161,7 @@ export function ProjectIntegrationMapping({
     return (
       <StandardPageLayout header={<PageHeader title={`${label} Integration`} breadcrumb={breadcrumb} />}>
         {message && (
-          <div className="rounded-lg border border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] px-3 py-2 text-sm text-[var(--error)]">
+          <div className="rounded-lg border border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] px-3 py-2 text-sm text-[var(--error-foreground)]">
             {message.text}
           </div>
         )}
@@ -209,7 +209,7 @@ export function ProjectIntegrationMapping({
             status.siteUrl ? (
               <>
                 Connected to{" "}
-                <a href={status.siteUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--brand-primary)] hover:underline">
+                <a href={status.siteUrl} target="_blank" rel="noopener noreferrer" className="text-[var(--accent-light)] hover:underline">
                   {status.siteUrl}
                 </a>
               </>
@@ -223,8 +223,8 @@ export function ProjectIntegrationMapping({
         <div
           className={`rounded-lg border px-3 py-2 text-sm ${
             message.type === "success"
-              ? "border-[var(--success)]/30 bg-[color-mix(in_oklab,var(--success)_8%,white)] text-[var(--success)]"
-              : "border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] text-[var(--error)]"
+              ? "border-[var(--success)]/30 bg-[color-mix(in_oklab,var(--success)_8%,white)] text-[var(--success-foreground)]"
+              : "border-[var(--error)]/30 bg-[color-mix(in_oklab,var(--error)_8%,white)] text-[var(--error-foreground)]"
           }`}
         >
           {message.text}
@@ -262,7 +262,7 @@ export function ProjectIntegrationMapping({
                   name="remote-item"
                   checked={selectedId === item.id}
                   onChange={() => setSelectedId(item.id)}
-                  className="border-[var(--border)] text-[var(--brand-primary)] focus:ring-[var(--brand-soft)]"
+                  className="border-[var(--border)] text-[var(--accent-light)] focus:ring-[var(--brand-soft)]"
                 />
                 <div className="min-w-0 flex-1">
                   <span className="text-sm font-medium text-[var(--foreground)]">{item.name}</span>
@@ -300,11 +300,11 @@ export function ProjectIntegrationMapping({
             <Button variant="secondary" onClick={handleSync} disabled={starting || isSyncRunActive(run)}>
               {starting ? "Starting…" : isSyncRunActive(run) ? "Syncing…" : "Sync Now"}
             </Button>
-            <Link href={`/projects/${projectId}/knowledge-base`} className="text-sm text-[var(--brand-primary)] hover:underline">
+            <Link href={`/projects/${projectId}/knowledge-base`} className="text-sm text-[var(--accent-light)] hover:underline">
               View Knowledge Base →
             </Link>
           </div>
-          {syncError && <p className="mt-3 text-sm text-[var(--error)]">{syncError}</p>}
+          {syncError && <p className="mt-3 text-sm text-[var(--error-foreground)]">{syncError}</p>}
           <SyncStatusPanel run={run} label={label} className="mt-3" />
         </Card>
       )}

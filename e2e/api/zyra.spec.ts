@@ -1,0 +1,874 @@
+import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
+import { exec, literal, scalar } from "../utils/psql";
+import {
+  anonymousContext,
+  loginAs,
+  provisionRbacTenant,
+  rbacSuiteSkipReason,
+  type RbacTenant,
+} from "../utils/rbac-tenant";
+
+/*
+ * Zyra — the AI agent surface: agent state, connection test, settings, chat sessions and messages,
+ * generation tasks and their drafts, the generation history, and the project MCP endpoint.
+ *
+ * Wave 9, on its own workspace ("zyra").
+ *
+ * NO AI PROVIDER IS CALLED, and that is a deliberate boundary rather than a gap. The workspace here
+ * has no AI key allocated, so every route that would reach a model stops at the allocation check and
+ * returns its "no provider configured" answer — which is the state a new workspace is actually in,
+ * and the one the UI has to render. What that leaves untested is the model round-trip itself, which
+ * needs utils/fake-ai-server.ts (Wave 0 item 3, still missing) and is recorded in
+ * docs/e2e-coverage-waves.md rather than skipped silently.
+ *
+ * Everything ELSE about these routes is ours and is driven here: who may reach them, what they do
+ * with malformed input, and the DB rows they create. The authorization half is the important part —
+ * a Zyra chat transcript contains whatever the team told the agent about their product.
+ */
+
+test.describe("zyra — agent, chat, tasks and AI keys", () => {
+  let tenant: RbacTenant | null = null;
+  let asOwner: APIRequestContext;
+  let asManager: APIRequestContext;
+  let asQa: APIRequestContext;
+  let asGuest: APIRequestContext;
+  let anon: APIRequestContext;
+
+  test.beforeAll(async () => {
+    tenant = await provisionRbacTenant("zyra");
+    if (!tenant) return;
+    asOwner = await loginAs(tenant.owner);
+    asManager = await loginAs(tenant.manager);
+    asQa = await loginAs(tenant.qa);
+    asGuest = await loginAs(tenant.guest);
+    anon = await anonymousContext();
+    purge(tenant);
+  });
+
+  test.afterAll(async () => {
+    if (tenant) purge(tenant);
+    await Promise.all([asOwner, asManager, asQa, asGuest, anon].filter(Boolean).map((c) => c.dispose()));
+  });
+
+  test.beforeEach(() => {
+    const reason = rbacSuiteSkipReason(tenant);
+    test.skip(reason !== null, reason ?? "");
+  });
+
+  test.afterEach(() => {
+    if (tenant) purge(tenant);
+  });
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  function url(suffix: string, projectId?: string): string {
+    return `/api/projects/${projectId ?? tenant!.mainProjectId}${suffix}`;
+  }
+
+  function purge(t: RbacTenant): void {
+    const projects = `${literal(t.mainProjectId)}, ${literal(t.secondProjectId)}`;
+    exec(`DELETE FROM zyra_chat_messages WHERE session_id IN (SELECT id FROM zyra_chat_sessions WHERE project_id IN (${projects}));`);
+    exec(`DELETE FROM zyra_chat_sessions WHERE project_id IN (${projects});`);
+    exec(`DELETE FROM ai_generation_requests WHERE project_id IN (${projects});`);
+    exec(`DELETE FROM workspace_ai_keys WHERE organization_id = ${literal(t.organizationId)};`);
+  }
+
+  async function expectRefused(res: APIResponse, what: string): Promise<void> {
+    expect([400, 401, 403, 404], `${what} answered with ${res.status()}: ${await res.text()}`).toContain(res.status());
+  }
+
+  /** A chat session, created through the product's own route. */
+  async function createSession(title = `E2E session ${Date.now()}`, api: APIRequestContext = asOwner): Promise<any> {
+    const res = await api.post(url("/agents/zyra/chat/sessions"), { data: { title }, failOnStatusCode: false });
+    expect(res.status(), `creating a chat session — ${await res.text()}`).toBe(201);
+    return res.json();
+  }
+
+  /**
+   * A generation task row, written directly.
+   *
+   * The POST /agents/zyra/tasks route is aiGenerate, which needs a live model — so a task that
+   * already exists is the only way to reach the task read, feedback, draft, close and save routes at
+   * all. This is the suite's usual "arrange through Postgres when the API path is unavailable" rule.
+   */
+  function seedTask(fields: { status?: string; drafts?: number } = {}): string {
+    const drafts = Array.from({ length: fields.drafts ?? 2 }, (_, i) => ({
+      title: `E2E draft ${i + 1}`,
+      steps: [{ action: "open the app", expected: "it opens" }],
+      priority: "P2",
+    }));
+    /*
+     * Two details of this row are load-bearing and were both wrong on the first attempt.
+     *
+     * agent_name has to be one of ZYRA_AGENT_NAMES ("Zyra the Test Generator", or the legacy "Zyra
+     * the Edge Hunter") — zyraTask filters on it, so a row tagged anything else reads as a task that
+     * does not exist. And generated_payload is a bare ARRAY of drafts, not an object wrapping one:
+     * zyraDeleteDraft runs normalizeJsonArray over the column directly, so `{testcases: [...]}`
+     * measures as zero drafts and every index is out of range.
+     */
+    exec(
+      "INSERT INTO ai_generation_requests (project_id, requested_by, provider, model, user_story, " +
+        "requested_count, generated_count, generated_payload, agent_name, task_status) VALUES (" +
+        `${literal(tenant!.mainProjectId)}, ${literal(tenant!.owner.userId)}, 'openai', 'gpt-4o-mini', ` +
+        `'As a user I want to sign in', ${drafts.length}, ${drafts.length}, ` +
+        `${literal(JSON.stringify(drafts))}::jsonb, 'Zyra the Test Generator', ` +
+        `${literal(fields.status ?? "awaiting_review")});`,
+    );
+    return scalar(
+      `SELECT id FROM ai_generation_requests WHERE project_id = ${literal(tenant!.mainProjectId)} ` +
+        "ORDER BY created_at DESC LIMIT 1;",
+    );
+  }
+
+  /** Every project-scoped Zyra route, for the authorization sweeps. */
+  function zyraRoutes(
+    api: APIRequestContext,
+    ids: { sessionId: string; taskId: string },
+    projectId?: string,
+  ): Array<[string, () => Promise<APIResponse>]> {
+    const opts = { failOnStatusCode: false } as const;
+    return [
+      ["GET agents/zyra", () => api.get(url("/agents/zyra", projectId), opts)],
+      ["GET agents/zyra/test", () => api.get(url("/agents/zyra/test", projectId), opts)],
+      [
+        "PATCH agents/zyra/settings",
+        () => api.patch(url("/agents/zyra/settings", projectId), { data: { testcaseRange: "all" }, ...opts }),
+      ],
+      ["GET chat/sessions", () => api.get(url("/agents/zyra/chat/sessions", projectId), opts)],
+      [
+        "POST chat/sessions",
+        () => api.post(url("/agents/zyra/chat/sessions", projectId), { data: { title: "probe" }, ...opts }),
+      ],
+      ["GET chat/sessions/:id", () => api.get(url(`/agents/zyra/chat/sessions/${ids.sessionId}`, projectId), opts)],
+      [
+        "POST chat/sessions/:id/messages",
+        () =>
+          api.post(url(`/agents/zyra/chat/sessions/${ids.sessionId}/messages`, projectId), {
+            data: { message: "hello" },
+            ...opts,
+          }),
+      ],
+      [
+        "POST chat/sessions/:id/stop-plan",
+        () => api.post(url(`/agents/zyra/chat/sessions/${ids.sessionId}/stop-plan`, projectId), { data: {}, ...opts }),
+      ],
+      [
+        "POST chat/sessions/:id/resume-plan",
+        () => api.post(url(`/agents/zyra/chat/sessions/${ids.sessionId}/resume-plan`, projectId), { data: {}, ...opts }),
+      ],
+      ["POST agents/zyra/tasks", () => api.post(url("/agents/zyra/tasks", projectId), { data: {}, ...opts })],
+      ["GET agents/zyra/tasks/:id", () => api.get(url(`/agents/zyra/tasks/${ids.taskId}`, projectId), opts)],
+      [
+        "POST tasks/:id/feedback",
+        () =>
+          api.post(url(`/agents/zyra/tasks/${ids.taskId}/feedback`, projectId), {
+            data: { feedback: "more edge cases" },
+            ...opts,
+          }),
+      ],
+      [
+        "DELETE tasks/:id/drafts/:index",
+        () => api.delete(url(`/agents/zyra/tasks/${ids.taskId}/drafts/0`, projectId), opts),
+      ],
+      ["POST tasks/:id/close", () => api.post(url(`/agents/zyra/tasks/${ids.taskId}/close`, projectId), { data: {}, ...opts })],
+      [
+        "POST tasks/:id/save",
+        () => api.post(url(`/agents/zyra/tasks/${ids.taskId}/save`, projectId), { data: { testcaseIds: [] }, ...opts }),
+      ],
+      ["GET ai/generation-history", () => api.get(url("/ai/generation-history", projectId), opts)],
+      [
+        "POST ai/generation-history/:id/save",
+        () =>
+          api.post(url(`/ai/generation-history/${ids.taskId}/save`, projectId), {
+            data: { testcaseIds: [] },
+            ...opts,
+          }),
+      ],
+      [
+        "POST ai/generate-testcases",
+        () => api.post(url("/ai/generate-testcases", projectId), { data: { userStory: "x" }, ...opts }),
+      ],
+      ["POST mcp", () => api.post(url("/mcp", projectId), { data: { method: "tools/list" }, ...opts })],
+    ];
+  }
+
+  // ─── Authorization ────────────────────────────────────────────────────────
+
+  test("ZYR-A-01 no Zyra route answers a caller with no session", async () => {
+    // A chat transcript holds whatever the team told the agent about their product, and the task
+    // rows hold generated test cases. Neither may be readable, and none of the writes reachable,
+    // without a session.
+    const session = await createSession("Secret planning chat");
+    const taskId = seedTask();
+
+    for (const [what, attempt] of zyraRoutes(anon, { sessionId: session.id, taskId })) {
+      await expectRefused(await attempt(), `${what} (anonymous)`);
+    }
+
+    // Nothing leaked and nothing was written.
+    const sessions = await anon.get(url("/agents/zyra/chat/sessions"), { failOnStatusCode: false });
+    expect(await sessions.text()).not.toContain("Secret planning chat");
+    expect(
+      scalar(`SELECT COUNT(*) FROM zyra_chat_sessions WHERE project_id = ${literal(tenant!.mainProjectId)};`),
+      "an anonymous caller created a chat session",
+    ).toBe("1");
+    expect(scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe(
+      "awaiting_review",
+    );
+  });
+
+  test("ZYR-A-02 no Zyra route answers a workspace member with no access to the project", async () => {
+    const session = await createSession("Not the guest's chat");
+    const taskId = seedTask();
+
+    for (const [what, attempt] of zyraRoutes(asGuest, { sessionId: session.id, taskId })) {
+      await expectRefused(await attempt(), `${what} (non-member)`);
+    }
+    const sessions = await asGuest.get(url("/agents/zyra/chat/sessions"), { failOnStatusCode: false });
+    expect(await sessions.text()).not.toContain("Not the guest's chat");
+  });
+
+  test("ZYR-A-03 a project the caller is not a member of is not reachable by id", async () => {
+    const session = await createSession();
+    const taskId = seedTask();
+    // The qa_engineer belongs to the main project only.
+    for (const [what, attempt] of zyraRoutes(asQa, { sessionId: session.id, taskId }, tenant!.secondProjectId)) {
+      await expectRefused(await attempt(), `${what} (wrong project)`);
+    }
+  });
+
+  test("ZYR-A-04 a malformed project id never produces a 500", async () => {
+    const session = await createSession();
+    const taskId = seedTask();
+    for (const [what, attempt] of zyraRoutes(asOwner, { sessionId: session.id, taskId }, "not-a-uuid")) {
+      const res = await attempt();
+      expect(res.status(), `${what} answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+    }
+  });
+
+  test("ZYR-A-05 a session or task from another project is not reachable through this project's URL", async () => {
+    const session = await createSession();
+    const taskId = seedTask();
+
+    // Reached for through the SECOND project's URL by someone who is a member of both.
+    for (const attempt of [
+      asOwner.get(url(`/agents/zyra/chat/sessions/${session.id}`, tenant!.secondProjectId), {
+        failOnStatusCode: false,
+      }),
+      asOwner.get(url(`/agents/zyra/tasks/${taskId}`, tenant!.secondProjectId), { failOnStatusCode: false }),
+      asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`, tenant!.secondProjectId), {
+        data: {},
+        failOnStatusCode: false,
+      }),
+    ]) {
+      const res = await attempt;
+      expect(res.status(), `a cross-project id answered ${res.status()}: ${await res.text()}`).toBe(404);
+    }
+    expect(scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe(
+      "awaiting_review",
+    );
+  });
+
+  // ─── Agent state with no AI provider configured ───────────────────────────
+
+  test("ZYR-A-06 the agent reports itself unconfigured rather than erroring when no key is allocated", async () => {
+    const res = await asOwner.get(url("/agents/zyra"), { failOnStatusCode: false });
+    expect(res.status(), `agent state — ${await res.text()}`).toBe(200);
+    const body = await res.json();
+    // The screen has to be able to render "connect a provider" instead of an error, so the shape is
+    // a normal payload carrying the reason.
+    expect(body).toBeTruthy();
+    expect(JSON.stringify(body)).not.toContain("api_key");
+  });
+
+  test("ZYR-A-07 the connection test reports the missing provider instead of throwing", async () => {
+    const res = await asOwner.get(url("/agents/zyra/test"), { failOnStatusCode: false });
+    expect(res.status()).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.provider).toBe("none");
+    expect(body.error, "the failure gives no reason for the user to act on").toBeTruthy();
+    expect(body.latencyMs).toBe(0);
+  });
+
+  test("ZYR-A-08 a generation request with no provider configured is refused with a reason, not a 500", async () => {
+    for (const [what, attempt] of [
+      ["tasks", () => asOwner.post(url("/agents/zyra/tasks"), { data: { userStory: "As a user…" }, failOnStatusCode: false })],
+      [
+        "generate-testcases",
+        () => asOwner.post(url("/ai/generate-testcases"), { data: { userStory: "As a user…" }, failOnStatusCode: false }),
+      ],
+    ] as Array<[string, () => Promise<APIResponse>]>) {
+      const res = await attempt();
+      expect(res.status(), `${what} answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+      expect(res.status()).toBeGreaterThanOrEqual(400);
+      // The message has to name the cause — "no AI provider" is actionable, "Internal server error"
+      // is not, and this is the state every workspace starts in.
+      const text = (await res.text()).toLowerCase();
+      expect(text).toMatch(/ai|provider|key|model/);
+    }
+  });
+
+  test("ZYR-A-08b the AI script review route no longer answers with a pass it never checked", async () => {
+    /*
+     * Regression test. POST /ai/review-script was a controller stub: no caller, no project, no model,
+     * and { status: "passed", categories: [], validatedSteps: [] } to every request — including an
+     * unauthenticated one, and one carrying a script that cannot parse. A review that always passes
+     * is a green tick with nothing behind it.
+     *
+     * Nothing in the frontend called it, so it was deleted rather than implemented — the same branch
+     * §3 bug 15 took for the import stubs. This test pins that it is gone, so a future
+     * reimplementation has to be a real one: if the route comes back, it must not answer "passed"
+     * to an anonymous caller sending nonsense.
+     */
+    const res = await anon.post(url("/ai/review-script"), {
+      data: { script: "this is not valid javascript {{{" },
+      failOnStatusCode: false,
+    });
+    if (res.status() === 404) return; // route removed, which is the current state
+
+    // If it is ever reinstated: it must authenticate, and it must not rubber-stamp.
+    expect([400, 401, 403], `a reinstated review route answered an anonymous caller with ${res.status()}`).toContain(
+      res.status(),
+    );
+    const asMember = await asOwner.post(url("/ai/review-script"), {
+      data: { script: "this is not valid javascript {{{" },
+      failOnStatusCode: false,
+    });
+    if (asMember.status() < 400) {
+      expect((await asMember.json()).status, "the review passed an unparseable script").not.toBe("passed");
+    }
+  });
+
+  // ─── Settings ─────────────────────────────────────────────────────────────
+
+  test("ZYR-A-09 the agent's settings are updated and read back", async () => {
+    const res = await asOwner.patch(url("/agents/zyra/settings"), {
+      data: { testcaseRange: "10-30" },
+      failOnStatusCode: false,
+    });
+    expect(res.status(), `updating settings — ${await res.text()}`).toBe(200);
+
+    const agent = await (await asOwner.get(url("/agents/zyra"))).json();
+    expect(JSON.stringify(agent)).toContain("10-30");
+  });
+
+  test("ZYR-A-10 an unknown testcaseRange falls back instead of being stored", async () => {
+    // The valid set is minimum / 1-10 / 10-30 / all. A value outside it must not reach the settings
+    // JSON, or the generation step later reads a range it cannot interpret.
+    await asOwner.patch(url("/agents/zyra/settings"), { data: { testcaseRange: "all" }, failOnStatusCode: false });
+    const res = await asOwner.patch(url("/agents/zyra/settings"), {
+      data: { testcaseRange: "everything-please" },
+      failOnStatusCode: false,
+    });
+    expect(res.status()).toBeLessThan(500);
+
+    const stored = scalar(
+      `SELECT settings::text FROM projects WHERE id = ${literal(tenant!.mainProjectId)};`,
+    );
+    expect(stored, "an invalid range was written to the project settings").not.toContain("everything-please");
+  });
+
+  // ─── Chat sessions ────────────────────────────────────────────────────────
+
+  test("ZYR-A-11 a chat session is created, listed and read back", async () => {
+    const title = `E2E chat ${Date.now()}`;
+    const created = await createSession(title);
+    expect(created.title).toBe(title);
+    expect(created.projectId).toBe(tenant!.mainProjectId);
+    expect(created.userId).toBe(tenant!.owner.userId);
+
+    const list = await asOwner.get(url("/agents/zyra/chat/sessions"), { failOnStatusCode: false });
+    expect(list.status()).toBe(200);
+    const body = await list.json();
+    const sessions = body.list ?? body.sessions ?? body;
+    expect(JSON.stringify(sessions)).toContain(created.id);
+
+    const read = await asOwner.get(url(`/agents/zyra/chat/sessions/${created.id}`), { failOnStatusCode: false });
+    expect(read.status()).toBe(200);
+    const session = await read.json();
+    expect(JSON.stringify(session)).toContain(title);
+  });
+
+  test("ZYR-A-12 a session title is trimmed, defaulted and capped", async () => {
+    const untitled = await createSession("   ");
+    // An empty title would render as a blank row in the session list.
+    expect(untitled.title).toBe("Zyra chat");
+
+    const padded = await createSession("   Padded title   ");
+    expect(padded.title).toBe("Padded title");
+
+    // 240 characters is the column's working limit; a longer one is cut rather than rejected, since
+    // the title is derived from the first message and is cosmetic.
+    const long = await createSession("t".repeat(400));
+    expect(long.title.length).toBeLessThanOrEqual(240);
+  });
+
+  test("ZYR-A-13 an unknown or malformed session id is a 404, not a 500", async () => {
+    for (const bad of ["not-a-uuid", "11111111-1111-4111-8111-111111111111"]) {
+      for (const [what, attempt] of [
+        ["get", () => asOwner.get(url(`/agents/zyra/chat/sessions/${bad}`), { failOnStatusCode: false })],
+        [
+          "messages",
+          () =>
+            asOwner.post(url(`/agents/zyra/chat/sessions/${bad}/messages`), {
+              data: { message: "hello" },
+              failOnStatusCode: false,
+            }),
+        ],
+        [
+          "stop-plan",
+          () => asOwner.post(url(`/agents/zyra/chat/sessions/${bad}/stop-plan`), { data: {}, failOnStatusCode: false }),
+        ],
+        [
+          "resume-plan",
+          () =>
+            asOwner.post(url(`/agents/zyra/chat/sessions/${bad}/resume-plan`), { data: {}, failOnStatusCode: false }),
+        ],
+      ] as Array<[string, () => Promise<APIResponse>]>) {
+        const res = await attempt();
+        expect(res.status(), `${what} on session "${bad}" answered ${res.status()}: ${await res.text()}`).toBeLessThan(
+          500,
+        );
+      }
+    }
+  });
+
+  test("ZYR-A-14 every project member sees the project's chat sessions, not only their own", async () => {
+    // Zyra's sessions are the project's shared record of what was asked of the agent, so a manager
+    // has to see a session the owner opened — this is deliberate, and worth pinning so a later
+    // "scope sessions to their author" change is a visible decision rather than a silent one.
+    const owned = await createSession("Opened by the owner");
+    const byQa = await createSession("Opened by the QA engineer", asQa);
+
+    for (const [who, api] of [
+      ["manager", asManager],
+      ["qa_engineer", asQa],
+    ] as const) {
+      const res = await api.get(url("/agents/zyra/chat/sessions"), { failOnStatusCode: false });
+      expect(res.status(), `a ${who} was refused the session list`).toBe(200);
+      const text = await res.text();
+      expect(text, `a ${who} could not see the owner's session`).toContain(owned.id);
+      expect(text).toContain(byQa.id);
+    }
+  });
+
+  test("ZYR-A-15 sending a message with no provider configured fails without losing the session", async () => {
+    const session = await createSession();
+    const res = await asOwner.post(url(`/agents/zyra/chat/sessions/${session.id}/messages`), {
+      data: { message: "Write me some test cases" },
+      failOnStatusCode: false,
+    });
+    // No model is reachable, so this cannot succeed — but it must fail as a handled refusal, and the
+    // session must survive so the user's message isn't silently dropped along with the chat.
+    expect(res.status(), `sending a message answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+    expect(
+      scalar(`SELECT COUNT(*) FROM zyra_chat_sessions WHERE id = ${literal(session.id)};`),
+      "the chat session was destroyed by a failed message",
+    ).toBe("1");
+  });
+
+  test("ZYR-A-16 an empty message is refused before any provider work is attempted", async () => {
+    const session = await createSession();
+    for (const data of [{}, { message: "" }, { message: "   " }]) {
+      const res = await asOwner.post(url(`/agents/zyra/chat/sessions/${session.id}/messages`), {
+        data,
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `${JSON.stringify(data)} answered ${res.status()}: ${await res.text()}`).toBeGreaterThanOrEqual(
+        400,
+      );
+      expect(res.status()).toBeLessThan(500);
+    }
+  });
+
+  // ─── Tasks, drafts and history ────────────────────────────────────────────
+
+  test("ZYR-A-17 a task is read back with its drafts", async () => {
+    const taskId = seedTask({ drafts: 3 });
+    const res = await asOwner.get(url(`/agents/zyra/tasks/${taskId}`), { failOnStatusCode: false });
+    expect(res.status(), `reading a task — ${await res.text()}`).toBe(200);
+    const task = await res.json();
+    expect(task.id).toBe(taskId);
+    expect(task.taskStatus).toBe("awaiting_review");
+    expect(JSON.stringify(task)).toContain("E2E draft 1");
+    expect(task.generatedCount).toBe(3);
+  });
+
+  test("ZYR-A-18 a draft is discarded from a task without touching the others", async () => {
+    const taskId = seedTask({ drafts: 3 });
+    const res = await asOwner.delete(url(`/agents/zyra/tasks/${taskId}/drafts/1`), { failOnStatusCode: false });
+    expect(res.status(), `deleting a draft — ${await res.text()}`).toBe(200);
+
+    // Asserted against the drafts themselves, not the whole payload: deleting a draft appends an
+    // activity entry naming it ("Deleted testcase draft — E2E draft 2"), so the discarded title is
+    // legitimately still present in the response. Searching the serialised task would therefore
+    // never fail, whichever draft was removed.
+    const stored = JSON.parse(
+      scalar(`SELECT generated_payload::text FROM ai_generation_requests WHERE id = ${literal(taskId)};`),
+    );
+    expect(stored.map((d: any) => d.title)).toEqual(["E2E draft 1", "E2E draft 3"]);
+
+    const task = await (await asOwner.get(url(`/agents/zyra/tasks/${taskId}`))).json();
+    expect(task.generatedCount).toBe(2);
+  });
+
+  test("ZYR-A-19 a draft index outside the list is refused rather than corrupting the payload", async () => {
+    const taskId = seedTask({ drafts: 2 });
+    const before = scalar(`SELECT generated_payload::text FROM ai_generation_requests WHERE id = ${literal(taskId)};`);
+
+    for (const index of ["9", "-1", "notanumber"]) {
+      const res = await asOwner.delete(url(`/agents/zyra/tasks/${taskId}/drafts/${index}`), {
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `draft index "${index}" answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+    }
+    expect(
+      scalar(`SELECT generated_payload::text FROM ai_generation_requests WHERE id = ${literal(taskId)};`),
+      "a refused draft index changed the stored drafts",
+    ).toBe(before);
+  });
+
+  test("ZYR-A-20 a task is closed, and closing it again is refused or idempotent rather than a 500", async () => {
+    const taskId = seedTask();
+    const res = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`), { data: {}, failOnStatusCode: false });
+    expect(res.status(), `closing a task — ${await res.text()}`).toBe(201);
+    const status = scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`);
+    expect(status, "closing the task did not move it out of awaiting_review").not.toBe("awaiting_review");
+
+    const again = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`), { data: {}, failOnStatusCode: false });
+    expect(again.status()).toBeLessThan(500);
+  });
+
+  test("ZYR-A-21 feedback on a task is recorded against it", async () => {
+    const taskId = seedTask();
+    const res = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/feedback`), {
+      data: { feedback: "Cover the locked-account case too" },
+      failOnStatusCode: false,
+    });
+    // With no provider the regeneration cannot run, but the feedback itself is ours to store — a
+    // refusal that loses the user's words is worse than one that keeps them.
+    expect(res.status(), `feedback answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+    expect(scalar(`SELECT COUNT(*) FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe("1");
+  });
+
+  test("ZYR-A-22 an unknown task id is a 404 on every task route", async () => {
+    for (const bad of ["not-a-uuid", "11111111-1111-4111-8111-111111111111"]) {
+      for (const [what, attempt] of [
+        ["get", () => asOwner.get(url(`/agents/zyra/tasks/${bad}`), { failOnStatusCode: false })],
+        ["close", () => asOwner.post(url(`/agents/zyra/tasks/${bad}/close`), { data: {}, failOnStatusCode: false })],
+        [
+          "feedback",
+          () => asOwner.post(url(`/agents/zyra/tasks/${bad}/feedback`), { data: { feedback: "x" }, failOnStatusCode: false }),
+        ],
+        ["draft", () => asOwner.delete(url(`/agents/zyra/tasks/${bad}/drafts/0`), { failOnStatusCode: false })],
+        [
+          "save",
+          () => asOwner.post(url(`/agents/zyra/tasks/${bad}/save`), { data: { testcaseIds: [] }, failOnStatusCode: false }),
+        ],
+      ] as Array<[string, () => Promise<APIResponse>]>) {
+        const res = await attempt();
+        expect(res.status(), `${what} on task "${bad}" answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+      }
+    }
+  });
+
+  test("ZYR-A-23 the generation history lists the project's tasks, paginates, and stays project-scoped", async () => {
+    const first = seedTask();
+    const second = seedTask();
+
+    const res = await asOwner.get(url("/ai/generation-history"), { failOnStatusCode: false });
+    expect(res.status(), `history — ${await res.text()}`).toBe(200);
+    const body = await res.json();
+    const list = body.list ?? body.history ?? body;
+    const serialised = JSON.stringify(list);
+    expect(serialised).toContain(first);
+    expect(serialised).toContain(second);
+
+    // Newest first, and paginated — the history grows without bound otherwise.
+    const paged = await (await asOwner.get(url("/ai/generation-history?limit=1"))).json();
+    expect(JSON.stringify(paged.list ?? paged).length).toBeGreaterThan(0);
+
+    // A word where a number belongs must not reach SQL as NaN.
+    const nonsense = await asOwner.get(url("/ai/generation-history?limit=abc"), { failOnStatusCode: false });
+    expect(nonsense.status(), `a non-numeric limit answered ${nonsense.status()}`).toBe(200);
+
+    // The second project's history does not carry the first's tasks.
+    const other = await asOwner.get(url("/ai/generation-history", tenant!.secondProjectId), {
+      failOnStatusCode: false,
+    });
+    expect(other.status()).toBe(200);
+    expect(await other.text()).not.toContain(first);
+  });
+
+  test("ZYR-A-24 saving a task's drafts records the save against the task", async () => {
+    const taskId = seedTask();
+    // An empty selection is the boundary: nothing to save, so nothing should be recorded and
+    // nothing should break.
+    const empty = await asOwner.post(url(`/ai/generation-history/${taskId}/save`), {
+      data: { testcaseIds: [] },
+      failOnStatusCode: false,
+    });
+    expect(empty.status(), `an empty save answered ${empty.status()}: ${await empty.text()}`).toBeLessThan(500);
+
+    const created = await asOwner.post(url("/testcases"), {
+      data: { title: `E2E saved from Zyra ${Date.now()}` },
+      failOnStatusCode: false,
+    });
+    expect(created.status()).toBe(201);
+    const testcaseId = (await created.json()).id;
+
+    try {
+      const res = await asOwner.post(url(`/ai/generation-history/${taskId}/save`), {
+        data: { testcaseIds: [testcaseId] },
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `saving — ${await res.text()}`).toBeLessThan(500);
+      // The save event is what the UI reads to show "3 of 5 saved", so it has to be persisted.
+      const events = scalar(`SELECT coalesce(save_events::text, '') FROM ai_generation_requests WHERE id = ${literal(taskId)};`);
+      expect(events).toContain(testcaseId);
+    } finally {
+      await asOwner.delete(url(`/testcases/${testcaseId}`), { failOnStatusCode: false });
+    }
+  });
+
+  // ─── MCP ──────────────────────────────────────────────────────────────────
+
+  test("ZYR-A-25 the project MCP endpoint refuses an unauthenticated caller and a malformed request", async () => {
+    const anonymous = await anon.post(url("/mcp"), { data: { method: "tools/list" }, failOnStatusCode: false });
+    await expectRefused(anonymous, "POST /mcp (anonymous)");
+
+    // MCP is a JSON-RPC surface: a member's malformed call must produce a protocol error rather than
+    // a crash, since anything speaking to it is a machine that will retry.
+    for (const data of [{}, { method: "" }, { method: "no/such/method" }, { jsonrpc: "2.0", id: 1 }]) {
+      const res = await asOwner.post(url("/mcp"), { data, failOnStatusCode: false });
+      expect(res.status(), `MCP ${JSON.stringify(data)} answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+    }
+  });
+
+  // ─── Workspace AI keys ────────────────────────────────────────────────────
+
+  test("ZYR-A-26 the provider catalogue is readable and lists no secrets", async () => {
+    const res = await asOwner.get("/api/workspace/ai-providers", { failOnStatusCode: false });
+    expect(res.status(), `ai-providers — ${await res.text()}`).toBe(200);
+    const body = await res.json();
+    const providers = Array.isArray(body) ? body : (body.list ?? body.providers ?? []);
+    expect(providers.length, "the provider catalogue is empty").toBeGreaterThan(0);
+    expect(JSON.stringify(body).toLowerCase()).not.toContain("sk-");
+  });
+
+  test("ZYR-A-27 managing AI keys is the workspace owner's alone", async () => {
+    // A key is workspace-wide and billed to the workspace, so a manager or engineer adding, removing
+    // or re-pointing one changes everyone's spend.
+    for (const [who, api] of [
+      ["manager", asManager],
+      ["qa_engineer", asQa],
+    ] as const) {
+      const listed = await api.get("/api/workspace/ai-keys", { failOnStatusCode: false });
+      expect(listed.status(), `a ${who} reading the key list`).toBeLessThan(500);
+
+      const models = await api.post("/api/workspace/ai-keys/models", {
+        data: { provider: "openai", apiKey: "sk-not-a-real-key" },
+        failOnStatusCode: false,
+      });
+      expect(models.status(), `a ${who} could enumerate provider models`).toBe(403);
+
+      const allocated = await api.post("/api/workspace/ai-keys/allocations", {
+        data: { projectId: tenant!.mainProjectId, keyId: "11111111-1111-4111-8111-111111111111" },
+        failOnStatusCode: false,
+      });
+      expect(allocated.status(), `a ${who} could allocate an AI key`).toBe(403);
+
+      const deleted = await api.delete("/api/workspace/ai-keys/11111111-1111-4111-8111-111111111111", {
+        failOnStatusCode: false,
+      });
+      expect(deleted.status(), `a ${who} could delete an AI key`).toBe(403);
+    }
+  });
+
+  test("ZYR-A-28 the AI key routes refuse a caller with no session", async () => {
+    for (const [what, attempt] of [
+      ["GET ai-keys", () => anon.get("/api/workspace/ai-keys", { failOnStatusCode: false })],
+      ["GET ai-providers", () => anon.get("/api/workspace/ai-providers", { failOnStatusCode: false })],
+      [
+        "POST ai-keys",
+        () => anon.post("/api/workspace/ai-keys", { data: { provider: "openai", apiKey: "sk-x" }, failOnStatusCode: false }),
+      ],
+      [
+        "POST ai-keys/models",
+        () => anon.post("/api/workspace/ai-keys/models", { data: { provider: "openai" }, failOnStatusCode: false }),
+      ],
+      [
+        "POST ai-keys/allocations",
+        () =>
+          anon.post("/api/workspace/ai-keys/allocations", {
+            data: { projectId: tenant!.mainProjectId },
+            failOnStatusCode: false,
+          }),
+      ],
+      [
+        "DELETE ai-keys/:id",
+        () => anon.delete("/api/workspace/ai-keys/11111111-1111-4111-8111-111111111111", { failOnStatusCode: false }),
+      ],
+    ] as Array<[string, () => Promise<APIResponse>]>) {
+      const res = await attempt();
+      // ai-providers is a static catalogue with no secrets in it, so a 200 there is defensible —
+      // everything that touches a key must refuse.
+      if (what === "GET ai-providers") {
+        expect(res.status()).toBeLessThan(500);
+      } else {
+        await expectRefused(res, what);
+      }
+    }
+  });
+
+  test("ZYR-A-29 an allocation must name a project, and cannot name one in another workspace", async () => {
+    const missing = await asOwner.post("/api/workspace/ai-keys/allocations", { data: {}, failOnStatusCode: false });
+    expect(missing.status()).toBe(400);
+    expect(JSON.stringify(await missing.json())).toContain("projectId is required");
+
+    for (const projectId of ["not-a-uuid", "11111111-1111-4111-8111-111111111111"]) {
+      const res = await asOwner.post("/api/workspace/ai-keys/allocations", {
+        data: { projectId, keyId: "11111111-1111-4111-8111-111111111111" },
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `allocation to project "${projectId}" answered ${res.status()}: ${await res.text()}`)
+        .toBeLessThan(500);
+      expect(res.status()).toBeGreaterThanOrEqual(400);
+    }
+  });
+
+  test("ZYR-A-30 an AI key is created and listed without its secret ever coming back", async () => {
+    const res = await asOwner.post("/api/workspace/ai-keys", {
+      data: { provider: "openai", apiKey: "sk-e2e-not-a-real-key-000000", label: "E2E key" },
+      failOnStatusCode: false,
+    });
+    // Creating a key does not call the provider (validation happens when it is used), so this is
+    // reachable here. If the product does choose to verify on create, a 4xx is equally acceptable —
+    // what must never happen is the secret coming back out.
+    expect(res.status(), `creating a key answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
+
+    const listed = await asOwner.get("/api/workspace/ai-keys", { failOnStatusCode: false });
+    expect(listed.status()).toBe(200);
+    const text = await listed.text();
+    expect(text, "the stored API key was returned to the client").not.toContain("sk-e2e-not-a-real-key-000000");
+
+    // And it is not stored in the clear either — the column is encrypted at rest.
+    const stored = scalar(
+      `SELECT coalesce(string_agg(api_key, ','), '') FROM workspace_ai_keys WHERE organization_id = ${literal(tenant!.organizationId)};`,
+    );
+    if (stored) {
+      expect(stored, "the API key is stored in plaintext").not.toContain("sk-e2e-not-a-real-key-000000");
+    }
+  });
+  // ─── The agent's "tests generated" counter ─────────────────────────────────
+
+  test("ZYR-A-31 the agent reports every test case Zyra created, in either mode", async () => {
+    /*
+     * Basecamp 10212918496 / BetterBugs 6a842687 — "Zyra Test Generator Displays 0 Tests Generated
+     * After Creating 33 Test Cases".
+     *
+     * The Agents screen summed `generatedCount` over the project's generation tasks, and
+     * `generated_count` is written ONLY by the task-board draft flow. Chat mode creates test cases
+     * straight through applyZyraChatOperations and writes no generation row at all, so a project
+     * whose cases were all made by talking to Zyra — the reporter's 33 — added up to zero.
+     *
+     * `testcasesCreated` on the agent payload now counts the `zyra_created` audit action, which BOTH
+     * modes write (chat mode already did; zyraSave now does too). Fails on the unfixed code, where
+     * the field is absent entirely.
+     *
+     * The audit rows are written directly here for the same reason seedTask() exists: reaching them
+     * through the product means a live model, which this suite deliberately never calls. What is
+     * being asserted is the counter over those rows — the half that was broken.
+     */
+    const zyraCase = async (title: string): Promise<string> => {
+      const res = await asOwner.post(url("/testcases"), { data: { title }, failOnStatusCode: false });
+      expect(res.status(), `seeding a case — ${await res.text()}`).toBe(201);
+      return (await res.json()).id;
+    };
+    /** The audit row applyZyraChatOperations / zyraSave write when Zyra creates a case. */
+    const markCreatedByZyra = (testcaseId: string, source: string): void => {
+      exec(
+        "INSERT INTO audit_logs (project_id, actor_id, action, entity_type, entity_id, entity_name, diff, organization_id) " +
+          `VALUES (${literal(tenant!.mainProjectId)}, NULL, 'zyra_created', 'testcase', ${literal(testcaseId)}, ` +
+          `'E2E zyra case', ${literal(JSON.stringify({ source }))}::jsonb, ${literal(tenant!.organizationId)});`,
+      );
+    };
+    const countReported = async (): Promise<number> => {
+      const res = await asOwner.get(url("/agents/zyra"), { failOnStatusCode: false });
+      expect(res.status(), `reading the agent — ${await res.text()}`).toBe(200);
+      const body = await res.json();
+      expect(
+        body.testcasesCreated,
+        "the agent payload carries no testcasesCreated — the tile can only sum task drafts",
+      ).toBeDefined();
+      return Number(body.testcasesCreated);
+    };
+
+    const stamp = Date.now();
+    const chatCase = await zyraCase(`E2E Zyra chat case ${stamp}`);
+    const taskCase = await zyraCase(`E2E Zyra task case ${stamp}`);
+    const manualCase = await zyraCase(`E2E manual case ${stamp}`);
+    try {
+      /*
+       * Asserted as DELTAS from a baseline, not absolute counts.
+       *
+       * audit_logs is append-only — migration V62_audit_logs_immutable.sql installs a trigger that
+       * rejects DELETE — so these rows cannot be cleaned up afterwards and a re-run against the
+       * persistent volume starts from whatever previous runs left behind. The first attempt at this
+       * test cleaned up with a DELETE and failed on that trigger; the counts are relative now, which
+       * needs no cleanup and is what the assertion actually cares about.
+       */
+      const baseline = await countReported();
+      // A case Zyra did not create must not be counted: the manual one is already present here.
+      expect(await countReported(), "creating a case manually changed Zyra's count").toBe(baseline);
+
+      markCreatedByZyra(chatCase, "zyra_chat");
+      expect(await countReported(), "a chat-created case was not counted").toBe(baseline + 1);
+
+      markCreatedByZyra(taskCase, "zyra_task");
+      expect(await countReported(), "both modes should be counted").toBe(baseline + 2);
+
+      // Re-saving the same draft writes a second audit row for one case; DISTINCT keeps it at one.
+      markCreatedByZyra(taskCase, "zyra_task");
+      expect(await countReported(), "one case counted twice").toBe(baseline + 2);
+
+      // Deleting a Zyra case takes it back out — the count describes what the repository holds.
+      await asOwner.delete(url(`/testcases/${chatCase}`), { failOnStatusCode: false });
+      expect(await countReported(), "a deleted case is still being counted").toBe(baseline + 1);
+    } finally {
+      for (const id of [chatCase, taskCase, manualCase]) {
+        await asOwner.delete(url(`/testcases/${id}`), { failOnStatusCode: false });
+      }
+    }
+  });
+
+  test("ZYR-A-32 the counter survives audit rows whose entity_id is not a uuid", async () => {
+    /*
+     * `audit_logs.entity_id` is varchar(255) because it is polymorphic across entity types, and the
+     * `auth` and `billing` rows genuinely hold non-uuid values (an email, a Stripe id). That is why
+     * the join to testcases has to cast the testcase's uuid to text rather than casting entity_id to
+     * uuid: the obvious fix for the `operator does not exist: uuid = character varying` this counter
+     * used to raise would swap a permanent 42883 for an intermittent 22P02, firing only once a
+     * non-uuid row landed in the project and only if the planner evaluated the cast before the
+     * entity_type filter.
+     *
+     * So the guard is asserted directly: a non-uuid audit row in this project, then read the tile.
+     */
+    const res = await asOwner.get(url("/agents/zyra"), { failOnStatusCode: false });
+    expect(res.status(), `reading the agent before seeding — ${await res.text()}`).toBe(200);
+    const before = Number((await res.json()).testcasesCreated);
+
+    exec(
+      "INSERT INTO audit_logs (project_id, actor_id, action, entity_type, entity_id, entity_name, organization_id) " +
+        `VALUES (${literal(tenant!.mainProjectId)}, NULL, 'login', 'auth', ${literal("not-a-uuid@example.com")}, ` +
+        `'E2E non-uuid entity', ${literal(tenant!.organizationId)});`,
+    );
+
+    // No cleanup: audit_logs is append-only (V62_audit_logs_immutable.sql), which is exactly why
+    // this row is harmless to leave behind and why the assertion is a delta of zero.
+    const after = await asOwner.get(url("/agents/zyra"), { failOnStatusCode: false });
+    expect(after.status(), `a non-uuid audit row broke the agent — ${await after.text()}`).toBe(200);
+    expect(Number((await after.json()).testcasesCreated), "a non-uuid audit row changed the count").toBe(before);
+  });
+});

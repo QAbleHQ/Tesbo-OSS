@@ -99,7 +99,7 @@ export default function FileViewerModal({ projectId, file, onClose }: FileViewer
             {kind === "text" && (
               <div className="h-full overflow-auto p-4">
                 {textLoading && <p className="text-[13px] text-[var(--muted)]">Loading preview…</p>}
-                {textError && <p className="text-[13px] text-[var(--error)]">{textError}</p>}
+                {textError && <p className="text-[13px] text-[var(--error-foreground)]">{textError}</p>}
                 {textContent !== null && (
                   <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.5] text-[var(--foreground)]">
                     {textContent}

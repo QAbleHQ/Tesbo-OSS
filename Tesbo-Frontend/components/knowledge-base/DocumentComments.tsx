@@ -10,6 +10,7 @@ import {
   type KnowledgeDocumentComment,
 } from "@/lib/api";
 import { Button } from "@/components/ui";
+import { avatarColor } from "@/lib/avatarColors";
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -31,9 +32,17 @@ function timeAgo(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+/*
+ * Seeded per author, so two commenters are told apart at a glance and one person keeps the same
+ * colour they have on cycles, plan cards and the top bar. Was a flat --brand-soft for everyone —
+ * part of Basecamp 10198836413.
+ */
 function Avatar({ name }: { name: string }) {
   return (
-    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--brand-soft)] text-[10px] font-semibold text-[var(--brand-primary)]">
+    <span
+      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white"
+      style={{ backgroundColor: avatarColor(name || "?") }}
+    >
       {initials(name)}
     </span>
   );
@@ -163,24 +172,44 @@ export function DocumentComments({
           <IconMessage size={17} stroke={1.75} />
           Comments
           {openCount > 0 && (
-            <span className="rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[11px] font-semibold text-[var(--brand-primary)]">
+            <span className="rounded-full bg-[var(--brand-soft)] px-2 py-0.5 text-[11px] font-semibold text-[var(--accent-light)]">
               {openCount} open
             </span>
           )}
         </h2>
+        {/*
+          * Basecamp 10199290648 — reported as "resolving a comment deletes the comment and its
+          * replies". Nothing is deleted: resolve sets is_resolved, the list endpoint still returns the
+          * thread, and it can be reopened. But resolving HIDES it from the default view, and this
+          * control used to be a 12px grey underlined link in the far corner — so when the resolved
+          * thread was the last open one, the entire list emptied at once with only a faint link to say
+          * where it went. That reads as destruction.
+          *
+          * Same behaviour, unmissable affordance: a real chip carrying the count, styled like the
+          * "N open" chip beside it so the two read as two buckets rather than one disappearance.
+          */}
         {resolvedCount > 0 && (
           <button
             type="button"
+            data-testid="toggle-resolved-comments"
+            aria-pressed={showResolved}
+            title={showResolved ? "Hide resolved threads" : "Resolved threads are kept, not deleted — show them"}
             onClick={() => setShowResolved((v) => !v)}
-            className="text-[12px] text-[var(--muted)] underline hover:text-[var(--foreground)]"
+            className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] font-medium transition-colors ${
+              showResolved
+                ? "border-[var(--brand-primary)] bg-[var(--brand-soft)] text-[var(--accent-light)]"
+                : "border-[var(--border)] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
+            }`}
           >
-            {showResolved ? "Hide" : "Show"} {resolvedCount} resolved
+            <IconCheck size={12} stroke={2} />
+            {resolvedCount} resolved
+            <span className="text-[var(--muted-soft)]">{showResolved ? "· hide" : "· show"}</span>
           </button>
         )}
       </div>
 
       {error && (
-        <div className="mb-3 rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-[13px] text-[var(--error)]">{error}</div>
+        <div className="mb-3 rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-3 py-2 text-[13px] text-[var(--error-foreground)]">{error}</div>
       )}
 
       <div className="mb-5 rounded-[10px] border border-[var(--border)] bg-[var(--surface-secondary)] p-3">
@@ -211,7 +240,9 @@ export function DocumentComments({
         <p className="text-[13px] text-[var(--muted)]">Loading comments…</p>
       ) : visible.length === 0 ? (
         <p className="text-[13px] text-[var(--muted)]">
-          {threads.length === 0 ? "No comments yet." : "No open comments. Everything here is resolved."}
+          {threads.length === 0
+            ? "No comments yet."
+            : `No open comments — all ${resolvedCount} ${resolvedCount === 1 ? "thread is" : "threads are"} resolved. Nothing was deleted; use "${resolvedCount} resolved" above to see or reopen them.`}
         </p>
       ) : (
         <ul className="space-y-3">
@@ -240,7 +271,7 @@ export function DocumentComments({
                     <span className="text-[13px] font-semibold text-[var(--foreground)]">{thread.authorName}</span>
                     <span className="text-[11px] text-[var(--muted-soft)]">{timeAgo(thread.createdAt)}</span>
                     {thread.isResolved && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--success)]">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-[var(--success-soft)] px-2 py-0.5 text-[10px] font-semibold text-[var(--success-foreground)]">
                         <IconCheck size={10} /> Resolved{thread.resolvedByName ? ` by ${thread.resolvedByName}` : ""}
                       </span>
                     )}
@@ -270,7 +301,7 @@ export function DocumentComments({
                         <button
                           type="button"
                           onClick={() => remove(thread, true)}
-                          className="inline-flex items-center gap-1 text-[12px] text-[var(--muted)] hover:text-[var(--error)]"
+                          className="inline-flex items-center gap-1 text-[12px] text-[var(--muted)] hover:text-[var(--error-foreground)]"
                         >
                           <IconTrash size={12} /> Delete
                         </button>
@@ -295,7 +326,7 @@ export function DocumentComments({
                           <button
                             type="button"
                             onClick={() => remove(reply, false)}
-                            className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-[var(--error)]"
+                            className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--muted)] hover:text-[var(--error-foreground)]"
                           >
                             <IconTrash size={11} /> Delete
                           </button>

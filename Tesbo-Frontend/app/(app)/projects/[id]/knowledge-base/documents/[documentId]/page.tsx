@@ -34,6 +34,7 @@ import {
 import { Button, Input, Modal, StatusChip } from "@/components/ui";
 import RichTextEditor from "@/components/knowledge-base/RichTextEditor";
 import { DocumentComments } from "@/components/knowledge-base/DocumentComments";
+import { blankDocumentFlagKey } from "@/lib/validation";
 
 type SaveStatus = "saved" | "saving" | "unsaved";
 
@@ -193,6 +194,9 @@ export default function KnowledgeDocumentPage() {
   const [pendingAnchor, setPendingAnchor] = useState<{ text: string; start: number; end: number } | null>(null);
   const [selectionBubble, setSelectionBubble] = useState<{ top: number; left: number } | null>(null);
   const [anchorMissMessage, setAnchorMissMessage] = useState<string | null>(null);
+  // Documents created from the "Blank document" template require both a title and content to
+  // be saved, rather than the usual title-or-content rule (see knowledge-base/page.tsx).
+  const [requireContentAndTitle, setRequireContentAndTitle] = useState(false);
 
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestContent = useRef<{ contentJson: JSONContent; contentHtml: string; contentText: string } | null>(null);
@@ -210,6 +214,11 @@ export default function KnowledgeDocumentPage() {
         setDoc(data);
         setBreadcrumb(data.breadcrumb);
         setTitle(data.title);
+        try {
+          setRequireContentAndTitle(window.localStorage.getItem(blankDocumentFlagKey(documentId)) === "1");
+        } catch {
+          // Private browsing / storage disabled — fall back to the default title-or-content rule.
+        }
         const members = await listProjectMembers(projectId).catch(() => []);
         const role = normalizeRole(members.find((m) => m.userId === me.userId)?.role ?? "qa_engineer");
         setCanApprove(role === "owner" || role === "manager");
@@ -299,6 +308,16 @@ export default function KnowledgeDocumentPage() {
           setSaveStatus("unsaved");
           return;
         }
+        // Blank (no title, no content) is left "unsaved" rather than errored here — the user
+        // may just be mid-edit (e.g. selected all and deleted before pasting something new).
+        // handleManualSave surfaces a real error if they explicitly try to save while blank.
+        const missingTitle = !nextTitle.trim();
+        const missingContent = !(payload?.contentText ?? "").trim();
+        const incomplete = requireContentAndTitle ? missingTitle || missingContent : missingTitle && missingContent;
+        if (incomplete) {
+          setSaveStatus("unsaved");
+          return;
+        }
         setSaveStatus("saving");
         try {
           const updated = await updateKnowledgeDocument(projectId, documentId, {
@@ -309,13 +328,14 @@ export default function KnowledgeDocumentPage() {
           });
           setDoc(updated);
           setSaveStatus("saved");
+          setError(null);
         } catch (err) {
           setError(err instanceof Error ? err.message : "Failed to save document.");
           setSaveStatus("unsaved");
         }
       }, 1200);
     },
-    [projectId, documentId]
+    [projectId, documentId, requireContentAndTitle]
   );
 
   function handleEditorUpdate(payload: { json: JSONContent; html: string; text: string }) {
@@ -339,6 +359,17 @@ export default function KnowledgeDocumentPage() {
       setSaveStatus("unsaved");
       return;
     }
+    const missingTitle = !title.trim();
+    const missingContent = !(payload?.contentText ?? "").trim();
+    if (requireContentAndTitle ? missingTitle || missingContent : missingTitle && missingContent) {
+      setError(
+        requireContentAndTitle
+          ? "This document needs both a title and content before it can be saved."
+          : "A document needs a title or some content — it can't be saved blank."
+      );
+      setSaveStatus("unsaved");
+      return;
+    }
     setSaveStatus("saving");
     try {
       const updated = await updateKnowledgeDocument(projectId, documentId, {
@@ -349,6 +380,7 @@ export default function KnowledgeDocumentPage() {
       });
       setDoc(updated);
       setSaveStatus("saved");
+      setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save document.");
       setSaveStatus("unsaved");
@@ -471,7 +503,7 @@ export default function KnowledgeDocumentPage() {
       </div>
 
       {error && (
-        <div className="mb-4 flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error)]">
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)]">
           <span>{error}</span>
           <button onClick={() => setError(null)}><IconX size={16} /></button>
         </div>
@@ -523,7 +555,7 @@ export default function KnowledgeDocumentPage() {
                 <button onClick={handleCopyLink} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-[var(--surface-secondary)]">
                   <IconLink size={14} /> {linkCopied ? "Copied!" : "Copy link"}
                 </button>
-                <button onClick={handleDelete} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-[var(--error)] hover:bg-[var(--error-soft)]">
+                <button onClick={handleDelete} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] text-[var(--error-foreground)] hover:bg-[var(--error-soft)]">
                   <IconTrash size={14} /> Delete
                 </button>
               </div>
@@ -550,7 +582,7 @@ export default function KnowledgeDocumentPage() {
             <button
               type="button"
               onClick={() => document.getElementById("kb-comments")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-              className="text-[var(--brand-primary)] underline hover:no-underline"
+              className="text-[var(--accent-light)] underline hover:no-underline"
             >
               add a comment below
             </button>
@@ -561,7 +593,7 @@ export default function KnowledgeDocumentPage() {
               href={doc.sourceUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-2 inline-flex items-center gap-1 text-[12px] font-medium text-[var(--brand-primary)] hover:underline"
+              className="mt-2 inline-flex items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] hover:underline"
             >
               Open in {providerLabel} <IconArrowRight size={13} />
             </a>
@@ -580,7 +612,7 @@ export default function KnowledgeDocumentPage() {
       )}
 
       {anchorMissMessage && (
-        <div className="mb-3 flex items-center justify-between rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-soft)] px-4 py-2.5 text-[13px] text-[var(--warning)]">
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-[var(--warning)]/30 bg-[var(--warning-soft)] px-4 py-2.5 text-[13px] text-[var(--warning-foreground)]">
           <span>{anchorMissMessage}</span>
           <button onClick={() => setAnchorMissMessage(null)}><IconX size={15} /></button>
         </div>

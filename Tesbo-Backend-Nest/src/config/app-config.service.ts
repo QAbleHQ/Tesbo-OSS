@@ -11,14 +11,49 @@ export class AppConfigService {
   readonly databaseUrl = this.normalizeDatabaseUrl(this.string("DATABASE_URL", "postgresql://localhost:5432/tesbo"));
   readonly databaseUser = this.optionalString("DATABASE_USER");
   readonly databasePassword = this.optionalString("DATABASE_PASSWORD");
+  // Connections this instance may hold. Budget it as poolMax x instances against the server's
+  // max_connections (100 by default) — the ceiling is shared, not per process.
+  readonly databasePoolMax = this.integer("DB_POOL_MAX", 20);
+  // Server-side cap on a single statement. Without it one pathological query (an unbounded report on
+  // a large workspace) holds its connection indefinitely, and enough of them stall the whole instance
+  // because nothing fails fast enough to shed load. Postgres cancels the query and the client sees an
+  // error, so the connection returns to the pool either way. 0 disables it.
+  readonly databaseStatementTimeoutMs = this.integer("DB_STATEMENT_TIMEOUT_MS", 30_000);
+  // How long a caller waits for a free connection before erroring rather than queueing forever.
+  readonly databaseConnectionTimeoutMs = this.integer("DB_CONNECTION_TIMEOUT_MS", 10_000);
+  readonly databaseIdleTimeoutMs = this.integer("DB_IDLE_TIMEOUT_MS", 30_000);
+  // Guards the transaction() helper: if its callback hangs between BEGIN and COMMIT, the connection
+  // is held with an open transaction, which also pins vacuum. 0 disables it.
+  readonly databaseIdleInTransactionTimeoutMs = this.integer("DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", 60_000);
+  /*
+   * How long an idle keep-alive connection is held open, and how long headers may take to arrive.
+   *
+   * Node defaults these to 5s and 60s. 5s is shorter than any keep-alive client upstream of us
+   * holds a pooled socket for — nginx (deploy/nginx) reuses upstream connections for 60s by
+   * default, and so does every server-side HTTP agent that talks to this API — so the server would
+   * send FIN on a socket the client still believed was good, and a request written into that socket
+   * came back as ECONNRESET / "socket hang up" rather than as any HTTP status. It surfaces as an
+   * intermittent transport fault on whichever request happened to follow a pause, which reads like a
+   * network problem and is not one.
+   *
+   * The rule is that this must exceed the idle timeout of everything that connects to us, and that
+   * headersTimeout must in turn exceed this one (Node enforces the ordering: a headersTimeout below
+   * keepAliveTimeout closes connections mid-request).
+   */
+  readonly httpKeepAliveTimeoutMs = this.integer("HTTP_KEEP_ALIVE_TIMEOUT_MS", 65_000);
+  readonly httpHeadersTimeoutMs = this.integer("HTTP_HEADERS_TIMEOUT_MS", 70_000);
   readonly redisUrl = this.string("REDIS_URL", "redis://localhost:6379");
   readonly postmarkApiToken = this.string("POSTMARK_API_TOKEN", "");
   readonly postmarkFromEmail = this.string("POSTMARK_FROM_EMAIL", "noreply@example.com");
+  // "live" delivers mail for real and is what PRODUCTION must set. Anything else — including an
+  // unset or misspelled value — means "log", which never emails an OTP and only posts the remaining
+  // communication emails when Postmark confirms the token belongs to a non-delivering Sandbox
+  // server. The default is the safe one on purpose: a forgotten setting has to fail towards "no mail
+  // sent", never towards "the e2e suite emailed a thousand invented addresses". See
+  // config/email-delivery.policy.ts for the full decision table.
+  readonly emailDeliveryMode: "live" | "log" =
+    this.string("EMAIL_DELIVERY_MODE", "log").trim().toLowerCase() === "live" ? "live" : "log";
   readonly otpExpiryMinutes = this.integer("OTP_EXPIRY_MINUTES", 10);
-  readonly otpMaxAttempts = this.integer("OTP_MAX_ATTEMPTS", 5);
-  readonly otpRateLimitWindowMinutes = this.integer("OTP_RATE_LIMIT_WINDOW_MINUTES", 15);
-  readonly passwordLoginMaxAttempts = this.integer("PASSWORD_LOGIN_MAX_ATTEMPTS", 5);
-  readonly passwordLoginLockoutMinutes = this.integer("PASSWORD_LOGIN_LOCKOUT_MINUTES", 15);
   readonly sessionDays = this.integer("SESSION_DAYS", 30);
   readonly sessionCookieName = "tesbo_session";
   readonly corsAllowedOrigins = this.parseCorsAllowedOrigins();

@@ -8,6 +8,8 @@ import {
   IconChevronRight,
   IconDownload,
   IconFileText,
+  IconArchive,
+  IconFolderOff,
   IconFolders,
   IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand,
@@ -38,6 +40,7 @@ import {
   listCustomFieldDefinitions,
   getCustomFieldValues,
   buildCustomFieldFiltersQueryParam,
+  UNASSIGNED_SUITE_ID,
   type TestCaseListItem,
   type SuiteNode,
   type RepositorySummary,
@@ -62,8 +65,15 @@ import ImportTestCasesModal from "@/components/ImportTestCasesModal";
 import CustomFieldsSection from "@/components/customFields/CustomFieldsSection";
 import CustomFieldFilterPopover from "@/components/customFields/CustomFieldFilterPopover";
 import { getConfiguredDefaultValue, validateCustomFieldValues } from "@/components/customFields/customFieldTypes";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
-const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
+// 500 is the server's per-request ceiling (listTestCases clamps `limit`), so it is the largest
+// page we can offer. Paired with "select all matching" below, a 500-case suite no longer has to
+// be bulk-edited in five separate passes.
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100, 250, 500] as const;
+const MAX_PAGE_SIZE = 500;
+/* The bulk-edit selects' "don't touch this field" value. Empty so the API reads it as omitted. */
+const BULK_NO_CHANGE = "";
 const DEFAULT_PAGE_SIZE = 25;
 const TESTCASE_STATUSES = ["Draft", "In Review", "Approved", "Deprecated", "Archived"];
 const TESTCASE_PRIORITIES = ["P0", "P1", "P2", "P3"];
@@ -119,6 +129,16 @@ export default function TestCasesPage() {
   const searchParams = useSearchParams();
   const projectId = params.id as string;
   const activeSuiteId = searchParams.get("suiteId");
+  /*
+   * "?suiteId=none" is the "No suites" node — the cases that belong to no suite.
+   *
+   * It rides the same query parameter as a real suite id so the list request, the filter chips and the
+   * pagination reset all keep working unchanged. `formSuiteId` is the value the create/edit form may
+   * pre-select from it: the sentinel is not a suite, so it must resolve to "no suite chosen" there
+   * rather than being written to a testcase's suite_id.
+   */
+  const isUnfiledView = activeSuiteId === UNASSIGNED_SUITE_ID;
+  const formSuiteId = isUnfiledView ? null : activeSuiteId;
   const activeJiraIssueKey = searchParams.get("jiraIssueKey") || "";
   const activeLinearIssueKey = searchParams.get("linearIssueKey") || "";
 
@@ -188,6 +208,7 @@ export default function TestCasesPage() {
   const [customFieldErrors, setCustomFieldErrors] = useState<Record<string, string>>({});
 
   const [selectedCaseIds, setSelectedCaseIds] = useState<string[]>([]);
+  const [selectAllMatchingLoading, setSelectAllMatchingLoading] = useState(false);
   const [bulkAction, setBulkAction] = useState<BulkAction>("");
   const [isBulkActionModalOpen, setIsBulkActionModalOpen] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
@@ -241,7 +262,7 @@ export default function TestCasesPage() {
   }, [projectId]);
 
   useEffect(() => {
-    const saved = localStorage.getItem("tesbo_tc_suite_panel");
+    const saved = readStoredValue("tesbo_tc_suite_panel");
     if (saved === "closed") setSuitePanelOpen(false);
     authMe().then((me) => {
       if (!me) {
@@ -255,7 +276,7 @@ export default function TestCasesPage() {
   function toggleSuitePanel() {
     setSuitePanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem("tesbo_tc_suite_panel", next ? "open" : "closed");
+      writeStoredValue("tesbo_tc_suite_panel", next ? "open" : "closed");
       return next;
     });
   }
@@ -293,7 +314,14 @@ export default function TestCasesPage() {
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const areAllCasesSelected =
     selectedSuiteCases.length > 0 && selectedSuiteCases.every((tc) => selectedCaseIdSet.has(tc.id));
-  const repositoryCaseCount = useMemo(
+  /*
+   * The sum of the suite counts, which is NOT the size of the repository.
+   *
+   * listSuites counts cases through `t.suite_id = s.id`, so a case with no suite (the create form's
+   * default, and what import produces when no suite column is mapped) is counted by no suite row at
+   * all. Only ever a fallback for before the summary lands — see repositoryTotalCount.
+   */
+  const suiteCaseCountSum = useMemo(
     () => suites.reduce((sum, suite) => sum + suite.testCaseCount, 0),
     [suites]
   );
@@ -321,6 +349,36 @@ export default function TestCasesPage() {
         deprecated: statusCount("Deprecated") + statusCount("Archived"),
       }
     : null;
+
+  /*
+   * The repository's true size, for every counter that claims to describe the whole repository.
+   *
+   * repositorySummary counts `testcases_active` for the project, so it includes cases that belong to
+   * no suite; suiteCaseCountSum cannot see those at all. Basecamp 10194323432 was reported against a
+   * project where the two disagreed on screen — the sidebar said 1 while the tiles said 50 with 24
+   * Draft — so the Draft tile read as invented.
+   */
+  const repositoryTotalCount = repoStats?.total ?? suiteCaseCountSum;
+  /*
+   * How many cases belong to no suite, from repositorySummary's bySuite bucket — it groups on
+   * COALESCE(s.name, 'Unassigned'), so the unfiled cases are already counted there and this needs no
+   * extra request. Falls back to the arithmetic when the summary has not landed yet.
+   */
+  /*
+   * Archived cases are excluded from the list by default (see listTestCases), so the screen has to say
+   * so — the DEPRECATED tile still counts them, and "33 test cases" above "30 results" with no
+   * explanation is exactly the count-mismatch confusion this screen has already been reported for.
+   */
+  const archivedCaseCount = useMemo(
+    () => repoSummary?.byStatus.find((s) => s.name === "Archived")?.count ?? 0,
+    [repoSummary]
+  );
+  const archivedHidden = archivedCaseCount > 0 && suiteStatusFilter !== "Archived";
+  const unfiledCaseCount = useMemo(() => {
+    const bucket = repoSummary?.bySuite.find((s) => s.name === "Unassigned");
+    if (bucket) return bucket.count;
+    return Math.max(0, repositoryTotalCount - suiteCaseCountSum);
+  }, [repoSummary, repositoryTotalCount, suiteCaseCountSum]);
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -428,7 +486,7 @@ export default function TestCasesPage() {
     setPriority((data.priority as string) ?? "P2");
     setStatus((data.status as string) ?? "Draft");
     setAutomationStatus((data.automationStatus as string) ?? "Not Automated");
-    setSuiteId((data.suiteId as string) ?? activeSuiteId ?? "");
+    setSuiteId((data.suiteId as string) ?? formSuiteId ?? "");
     setPanelJiraIssueKey((data.jiraIssueKey as string) ?? "");
     setPanelJiraUrl((data.jiraUrl as string) ?? "");
   }
@@ -445,7 +503,7 @@ export default function TestCasesPage() {
     setPriority("P2");
     setStatus("Draft");
     setAutomationStatus("Not Automated");
-    setSuiteId(defaultSuiteId ?? activeSuiteId ?? "");
+    setSuiteId(defaultSuiteId ?? formSuiteId ?? "");
     setTestcaseIdPrefix(defaultTestcaseIdPrefix);
     setPanelJiraIssueKey("");
     setPanelJiraUrl("");
@@ -464,7 +522,7 @@ export default function TestCasesPage() {
     setPanelTestcaseId(null);
     setPanelMode("create");
     setPanelTab("overview");
-    resetForm(activeSuiteId);
+    resetForm(formSuiteId);
   }
 
   async function openCreatePanelForSuite(targetSuiteId: string) {
@@ -547,14 +605,60 @@ export default function TestCasesPage() {
     setSelectedCaseIds(selectedSuiteCases.map((tc) => tc.id));
   }
 
+  // Selects every case matching the current filters, not just the ones on screen. The header
+  // checkbox can only reach the loaded page, which is why bulk-editing a large suite used to
+  // mean repeating the operation once per page.
+  async function selectAllMatchingCases() {
+    if (selectAllMatchingLoading) return;
+    setSelectAllMatchingLoading(true);
+    setSuiteCasesError(null);
+    try {
+      const ids: string[] = [];
+      for (let offset = 0; offset < suiteCasesTotal; offset += MAX_PAGE_SIZE) {
+        const { list } = await listTestCases(projectId, {
+          limit: MAX_PAGE_SIZE,
+          offset,
+          suiteId: activeSuiteId ?? undefined,
+          status: suiteStatusFilter === "all" ? undefined : suiteStatusFilter,
+          priority: suitePriorityFilter === "all" ? undefined : suitePriorityFilter,
+          type: suiteTypeFilter === "all" ? undefined : suiteTypeFilter,
+          automationStatus: suiteAutomationFilter === "all" ? undefined : suiteAutomationFilter,
+          jiraIssueKey: activeJiraIssueKey || undefined,
+          linearIssueKey: activeLinearIssueKey || undefined,
+          search: debouncedSuiteSearch || undefined,
+          customFieldFilters: buildCustomFieldFiltersQueryParam(customFieldFilters),
+        });
+        if (!list.length) break;
+        ids.push(...list.map((tc) => tc.id));
+      }
+      setSelectedCaseIds(ids);
+    } catch (err) {
+      setSuiteCasesError(err instanceof Error ? err.message : "Failed to select all matching test cases.");
+    } finally {
+      setSelectAllMatchingLoading(false);
+    }
+  }
+
   function openBulkActionModal() {
     if (selectedCaseIds.length === 0) return;
     setBulkAction("");
     setBulkError(null);
     setBulkTargetSuiteId("");
-    setBulkStatus("Draft");
-    setBulkPriority("P2");
-    setBulkAutomationStatus("Not Automated");
+    /*
+     * "Leave unchanged", not concrete defaults.
+     *
+     * Basecamp 10194318194 asked "can we move Priority and Automation Type separately". Underneath the
+     * ask was data loss: these three opened pre-set to Draft / P2 / Not Automated and ALL THREE were
+     * always sent, so a user who only wanted to change Priority also silently reset every selected
+     * case's Status to Draft and its Automation to Not Automated. On a 25-case selection that is 50
+     * fields overwritten to answer one question.
+     *
+     * The backend already tolerates this: bulkUpdateTestCases uses COALESCE($n, column) with
+     * `body.status || null`, so an empty value leaves that column alone.
+     */
+    setBulkStatus(BULK_NO_CHANGE);
+    setBulkPriority(BULK_NO_CHANGE);
+    setBulkAutomationStatus(BULK_NO_CHANGE);
     setIsBulkActionModalOpen(true);
   }
 
@@ -576,16 +680,21 @@ export default function TestCasesPage() {
       } else if (bulkAction === "archive") {
         await bulkUpdateTestCases(projectId, { testcaseIds: selectedCaseIds, status: "Archived" });
       } else if (bulkAction === "update") {
+        // Only the fields actually chosen. Omitted keys hit COALESCE server-side and leave the column
+        // as it was — see openBulkActionModal for why this matters.
         await bulkUpdateTestCases(projectId, {
           testcaseIds: selectedCaseIds,
-          status: bulkStatus,
-          priority: bulkPriority,
-          automationStatus: bulkAutomationStatus,
+          ...(bulkStatus !== BULK_NO_CHANGE ? { status: bulkStatus } : {}),
+          ...(bulkPriority !== BULK_NO_CHANGE ? { priority: bulkPriority } : {}),
+          ...(bulkAutomationStatus !== BULK_NO_CHANGE ? { automationStatus: bulkAutomationStatus } : {}),
         });
       } else if (bulkAction === "move") {
+        // An empty target used to become `undefined`, which the API COALESCE'd back to each case's
+        // existing suite — so "Unassigned (no suite)" reported success and moved nothing (Basecamp
+        // 10194174342). UNASSIGNED_SUITE_ID is the explicit "clear it" value the API now understands.
         await bulkUpdateTestCases(projectId, {
           testcaseIds: selectedCaseIds,
-          suiteId: bulkTargetSuiteId || undefined,
+          suiteId: bulkTargetSuiteId || UNASSIGNED_SUITE_ID,
         });
       }
       const refreshPanelTestcaseId = panelTestcaseId && selectedCaseIdSet.has(panelTestcaseId) ? panelTestcaseId : null;
@@ -825,14 +934,14 @@ export default function TestCasesPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
                   <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
                 </>
               )}
-              <span className="font-medium text-[var(--brand-primary)]">Test cases</span>
+              <span className="font-medium text-[var(--accent-light)]">Test cases</span>
             </nav>,
             topBarStartEl,
           )}
@@ -920,7 +1029,8 @@ export default function TestCasesPage() {
               Test case repository
             </h1>
             <p className="mt-[3px] text-[13px] text-[var(--muted-soft)]">
-              {repoStats?.total ?? repositoryCaseCount} test case{(repoStats?.total ?? repositoryCaseCount) === 1 ? "" : "s"} across {rootSuites.length} suite{rootSuites.length === 1 ? "" : "s"}
+              {/* Counts every suite, not just the top-level ones, to agree with the "Total Suites" badge below. */}
+              {repositoryTotalCount} test case{repositoryTotalCount === 1 ? "" : "s"} across {suites.length} suite{suites.length === 1 ? "" : "s"}
             </p>
           </div>
           {!loading && repoStats && (
@@ -932,6 +1042,10 @@ export default function TestCasesPage() {
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
                 <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-draft-text)]">{repoStats.draft}</div>
                 <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Draft</div>
+              </div>
+              <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
+                <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--warning-foreground)]">{repoStats.inReview}</div>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">In Review</div>
               </div>
               <div className="rounded-[7px] border border-[var(--border)] bg-[var(--surface)] px-3.5 py-1.5 text-center">
                 <div className="text-[16px] font-semibold leading-tight tracking-tight text-[var(--status-pass-text)]">{repoStats.approved}</div>
@@ -958,11 +1072,11 @@ export default function TestCasesPage() {
                 <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${suitePanelOpen ? "justify-between" : "justify-center"}`}>
                   {suitePanelOpen && (
                     <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                      <IconFolders size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
-                      Suites
-                      {rootSuites.length > 0 && (
-                        <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
-                          {rootSuites.length}
+                      <IconFolders size={14} stroke={1.75} className="text-[var(--accent-light)]" />
+                      Total Suites
+                      {suites.length > 0 && (
+                        <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
+                          {suites.length}
                         </span>
                       )}
                     </p>
@@ -973,7 +1087,7 @@ export default function TestCasesPage() {
                         type="button"
                         title="Add suite"
                         onClick={() => openAddSuiteModal()}
-                        className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                        className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                       >
                         <IconPlus size={14} stroke={2.5} />
                       </button>
@@ -1008,8 +1122,8 @@ export default function TestCasesPage() {
                     }`}
                   >
                     <span>All test cases</span>
-                    <span className={`font-mono text-[11px] ${!activeSuiteId ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
-                      {repositoryCaseCount}
+                    <span className={`font-mono text-[11px] ${!activeSuiteId ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
+                      {repositoryTotalCount}
                     </span>
                   </button>
 
@@ -1020,7 +1134,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => openAddSuiteModal()}
-                        className="mt-2 text-xs text-[var(--brand-primary)] hover:underline"
+                        className="mt-2 text-xs text-[var(--accent-light)] hover:underline"
                       >
                         Create your first suite
                       </button>
@@ -1061,7 +1175,7 @@ export default function TestCasesPage() {
                             <IconFolders
                               size={14}
                               stroke={1.75}
-                              className={`shrink-0 ${isActive ? "text-[var(--brand-primary)]" : "text-[var(--muted)]"}`}
+                              className={`shrink-0 ${isActive ? "text-[var(--accent-light)]" : "text-[var(--muted)]"}`}
                             />
                             <button
                               type="button"
@@ -1075,7 +1189,7 @@ export default function TestCasesPage() {
                               {suite.name}
                             </button>
                             {/* Count → hidden on hover, replaced by actions */}
-                            <span className={`mx-1 shrink-0 font-mono text-[11px] group-hover:hidden ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                            <span className={`mx-1 shrink-0 font-mono text-[11px] group-hover:hidden ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                               {rollupCount}
                             </span>
                             {/* Actions — shown on hover instead of count */}
@@ -1087,7 +1201,7 @@ export default function TestCasesPage() {
                                   e.stopPropagation();
                                   openAddSuiteModal(suite.id);
                                 }}
-                                className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--brand-primary)]"
+                                className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--accent-light)]"
                               >
                                 <IconPlus size={12} stroke={2.5} />
                               </button>
@@ -1109,7 +1223,7 @@ export default function TestCasesPage() {
                                   e.stopPropagation();
                                   setDeleteSuiteId(suite.id);
                                 }}
-                                className="mr-1 flex h-5 w-5 items-center justify-center rounded text-[var(--error)] hover:bg-[var(--surface)] hover:opacity-80"
+                                className="mr-1 flex h-5 w-5 items-center justify-center rounded text-[var(--error-foreground)] hover:bg-[var(--surface)] hover:opacity-80"
                               >
                                 <IconTrash size={12} stroke={1.75} />
                               </button>
@@ -1130,7 +1244,7 @@ export default function TestCasesPage() {
                                     <IconFileText
                                       size={13}
                                       stroke={1.75}
-                                      className={`shrink-0 ${childActive ? "text-[var(--brand-primary)]" : "text-[var(--muted)]"}`}
+                                      className={`shrink-0 ${childActive ? "text-[var(--accent-light)]" : "text-[var(--muted)]"}`}
                                     />
                                     <button
                                       type="button"
@@ -1143,7 +1257,7 @@ export default function TestCasesPage() {
                                     >
                                       {child.name}
                                     </button>
-                                    <span className={`shrink-0 font-mono text-[10px] group-hover:hidden ${childActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                                    <span className={`shrink-0 font-mono text-[10px] group-hover:hidden ${childActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                                       {child.testCaseCount}
                                     </span>
                                     <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
@@ -1154,7 +1268,7 @@ export default function TestCasesPage() {
                                           e.stopPropagation();
                                           void openCreatePanelForSuite(child.id);
                                         }}
-                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--brand-primary)]"
+                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--accent-light)]"
                                       >
                                         <IconPlus size={11} stroke={2.5} />
                                       </button>
@@ -1176,7 +1290,7 @@ export default function TestCasesPage() {
                                           e.stopPropagation();
                                           setDeleteSuiteId(child.id);
                                         }}
-                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--error)] hover:bg-[var(--surface)] hover:opacity-80"
+                                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--error-foreground)] hover:bg-[var(--surface)] hover:opacity-80"
                                       >
                                         <IconTrash size={11} stroke={1.75} />
                                       </button>
@@ -1191,10 +1305,41 @@ export default function TestCasesPage() {
                     })
                   )}
 
+                  {/*
+                    * The cases that belong to no suite.
+                    *
+                    * Basecamp 10212879823 / 10212867874: cases with a null suite_id were counted by no
+                    * suite row and reachable from no node, so the suite tree said 26 for a repository
+                    * holding 33 and the 7 unfiled ones — Zyra had created them without naming a suite —
+                    * were invisible here. Cases land unfiled routinely: the create form defaults to no
+                    * suite and an import with no suite column mapped leaves it null.
+                    *
+                    * Rendered only when there are some, so a tidy project gains no empty node.
+                    */}
+                  {unfiledCaseCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => router.push(`/projects/${projectId}/testcases?suiteId=${UNASSIGNED_SUITE_ID}`)}
+                      className={`mt-0.5 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] transition-colors ${
+                        isUnfiledView
+                          ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
+                          : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)]"
+                      }`}
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <IconFolderOff size={13} stroke={1.75} className="shrink-0 opacity-70" />
+                        <span className="truncate">No suites</span>
+                      </span>
+                      <span className={`font-mono text-[11px] ${isUnfiledView ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
+                        {unfiledCaseCount}
+                      </span>
+                    </button>
+                  )}
+
                   <button
                     type="button"
                     onClick={() => openAddSuiteModal()}
-                    className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                    className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={13} stroke={1.75} />
                     New suite
@@ -1218,18 +1363,41 @@ export default function TestCasesPage() {
                       placeholder="Search by ID, title, or type"
                       className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
                     />
+                    {suiteSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setSuiteSearch("")}
+                        aria-label="Clear search"
+                        className="shrink-0 rounded-full p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                      >
+                        <IconX size={12} stroke={2} />
+                      </button>
+                    )}
                   </label>
                   {activeSuiteId && (
-                    <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--brand-primary)]">
-                      {selectedSuite?.name ?? "Suite"}
+                    <span className="rounded-full bg-[var(--brand-soft)] px-2.5 py-0.5 text-[11.5px] font-medium text-[var(--accent-light)]">
+                      {/* The unfiled view has no suite row to take a name from, so it names itself. */}
+                      {isUnfiledView ? "No suites" : selectedSuite?.name ?? "Suite"}
                     </span>
                   )}
                   <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                    {archivedHidden && (
+                      <button
+                        type="button"
+                        data-testid="archived-hidden-chip"
+                        title="Archived test cases are not shown in this list"
+                        onClick={() => setSuiteStatusFilter("Archived")}
+                        className="flex items-center gap-1 rounded-full border border-[var(--border)] px-2.5 py-0.5 text-[11.5px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
+                      >
+                        <IconArchive size={11} stroke={1.75} />
+                        {archivedCaseCount} archived hidden
+                      </button>
+                    )}
                     {suiteStatusFilter !== "all" && (
                       <button
                         type="button"
                         onClick={() => setSuiteStatusFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Status:</span> {suiteStatusFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1239,7 +1407,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => setSuitePriorityFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Priority:</span> {suitePriorityFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1249,7 +1417,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => setSuiteTypeFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Type:</span> {suiteTypeFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1259,7 +1427,7 @@ export default function TestCasesPage() {
                       <button
                         type="button"
                         onClick={() => setSuiteAutomationFilter("all")}
-                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--brand-primary)] hover:opacity-80"
+                        className="inline-flex items-center gap-1 rounded-full bg-[var(--brand-soft)] py-[3px] pl-2 pr-2.5 text-[11.5px] font-medium text-[var(--accent-light)] hover:opacity-80"
                       >
                         <span className="text-[var(--muted)]">Automation:</span> {suiteAutomationFilter}
                         <IconX size={11} stroke={2.5} />
@@ -1347,17 +1515,33 @@ export default function TestCasesPage() {
                 {/* Bulk action bar (when rows selected) */}
                 {selectedCaseIds.length > 0 && (
                   <div className="flex h-10 shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--brand-soft)] px-4 text-[12px]">
-                    <span className="font-medium text-[var(--brand-primary)]">
+                    <span className="font-medium text-[var(--accent-light)]">
                       {selectedCaseIds.length} selected
                     </span>
                     <div className="h-4 w-px bg-[var(--border-strong)]" />
                     <button
                       type="button"
                       onClick={openBulkActionModal}
-                      className="font-medium text-[var(--brand-primary)] hover:underline"
+                      className="font-medium text-[var(--accent-light)] hover:underline"
                     >
                       Bulk actions
                     </button>
+                    {selectedCaseIds.length < suiteCasesTotal && (
+                      <>
+                        <div className="h-4 w-px bg-[var(--border-strong)]" />
+                        <button
+                          type="button"
+                          data-testid="select-all-matching"
+                          onClick={selectAllMatchingCases}
+                          disabled={selectAllMatchingLoading}
+                          className="font-medium text-[var(--brand-primary)] hover:underline disabled:opacity-60"
+                        >
+                          {selectAllMatchingLoading
+                            ? "Selecting…"
+                            : `Select all ${suiteCasesTotal} matching`}
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
                       onClick={() => setSelectedCaseIds([])}
@@ -1384,9 +1568,11 @@ export default function TestCasesPage() {
                     <p className="mt-2 text-[13px] text-[var(--muted)]">
                       {activeFilterCount > 0
                         ? "No test cases match your current filters."
-                        : activeSuiteId
-                          ? "This suite has no test cases yet."
-                          : "No test cases in this project yet."}
+                        : isUnfiledView
+                          ? "Every test case is assigned to a suite."
+                          : activeSuiteId
+                            ? "This suite has no test cases yet."
+                            : "No test cases in this project yet."}
                     </p>
                     <button
                       type="button"
@@ -1449,7 +1635,7 @@ export default function TestCasesPage() {
                           type="button"
                           onClick={() => setSuiteCasesPage((prev) => Math.max(1, prev - 1))}
                           disabled={suiteCasesPage === 1 || suiteCasesLoading}
-                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                         >
                           Previous
                         </button>
@@ -1459,7 +1645,7 @@ export default function TestCasesPage() {
                             setSuiteCasesPage((prev) => (prev >= totalPages ? prev : prev + 1))
                           }
                           disabled={suiteCasesPage >= totalPages || suiteCasesLoading}
-                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)] disabled:pointer-events-none disabled:opacity-50"
+                          className="rounded-[5px] border border-[var(--border)] px-3 py-1 text-[12px] text-[var(--muted)] hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)] disabled:pointer-events-none disabled:opacity-50"
                         >
                           Next
                         </button>
@@ -1533,7 +1719,7 @@ export default function TestCasesPage() {
                     onClick={() => setPanelTab(tab)}
                     className={`-mb-px border-b-2 px-4 py-3 text-sm font-medium transition-colors ${
                       panelTab === tab
-                        ? "border-[var(--brand-primary)] text-[var(--brand-primary)]"
+                        ? "border-[var(--brand-primary)] text-[var(--accent-light)]"
                         : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
                     }`}
                   >
@@ -1551,12 +1737,12 @@ export default function TestCasesPage() {
             {(panelError || panelSuccess) && (
               <div className="shrink-0 px-6 pt-3">
                 {panelError && (
-                  <p className="rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error)]">
+                  <p className="rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error-foreground)]">
                     {panelError}
                   </p>
                 )}
                 {panelSuccess && (
-                  <p className="rounded-lg border border-[var(--success)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--success)]">
+                  <p className="rounded-lg border border-[var(--success)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--success-foreground)]">
                     {panelSuccess}
                   </p>
                 )}
@@ -1578,7 +1764,7 @@ export default function TestCasesPage() {
                   {panelMode === "create" && (
                     <div className="space-y-5 px-6 py-5">
                       <Field>
-                        <FieldLabel>Title <span className="text-[var(--error)]">*</span></FieldLabel>
+                        <FieldLabel>Title <span className="text-[var(--error-foreground)]">*</span></FieldLabel>
                         <Input type="text" value={title} onChange={(e) => setTitle(e.target.value)} required placeholder="Describe what this test case validates" />
                       </Field>
                       <Field>
@@ -1647,7 +1833,7 @@ export default function TestCasesPage() {
                       <div>
                         <div className="mb-3 flex items-center justify-between">
                           <FieldLabel>Test Steps</FieldLabel>
-                          <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">+ Add step</Button>
+                          <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--accent-light)]">+ Add step</Button>
                         </div>
                         <div className="space-y-3">
                           {steps.map((step, index) => (
@@ -1658,7 +1844,7 @@ export default function TestCasesPage() {
                                   <p className="text-sm font-medium text-[var(--foreground)]">Step {index + 1}</p>
                                 </div>
                                 {steps.length > 1 && (
-                                  <button type="button" onClick={() => removeStep(index)} className="rounded px-2 py-1 text-xs text-[var(--error)] hover:bg-[var(--surface-secondary)]">Remove</button>
+                                  <button type="button" onClick={() => removeStep(index)} className="rounded px-2 py-1 text-xs text-[var(--error-foreground)] hover:bg-[var(--surface-secondary)]">Remove</button>
                                 )}
                               </div>
                               <div className="grid gap-2">
@@ -1701,7 +1887,7 @@ export default function TestCasesPage() {
                       {panelTab === "overview" && (
                         <div className="space-y-5 px-6 py-5">
                           <Field>
-                            <FieldLabel>Title <span className="text-[var(--error)]">*</span></FieldLabel>
+                            <FieldLabel>Title <span className="text-[var(--error-foreground)]">*</span></FieldLabel>
                             <Input type="text" value={title} onChange={(e) => setTitle(e.target.value)} required />
                           </Field>
                           <Field>
@@ -1763,7 +1949,7 @@ export default function TestCasesPage() {
                         <div className="px-6 py-5">
                           <div className="mb-4 flex items-center justify-between">
                             <p className="text-sm font-medium text-[var(--foreground)]">{steps.length} step{steps.length === 1 ? "" : "s"}</p>
-                            <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">+ Add step</Button>
+                            <Button variant="secondary" size="sm" onClick={addStep} className="border-[var(--brand-primary)] text-[var(--accent-light)]">+ Add step</Button>
                           </div>
                           {steps.length === 0 ? (
                             <EmptyStateBlock title="No steps yet" description="Add your first step above." />
@@ -1777,7 +1963,7 @@ export default function TestCasesPage() {
                                       <p className="text-sm font-semibold text-[var(--foreground)]">Step {index + 1}</p>
                                     </div>
                                     {steps.length > 1 && (
-                                      <button type="button" onClick={() => removeStep(index)} className="rounded-lg px-2 py-1 text-xs text-[var(--error)] hover:bg-[var(--surface-secondary)]">Remove</button>
+                                      <button type="button" onClick={() => removeStep(index)} className="rounded-lg px-2 py-1 text-xs text-[var(--error-foreground)] hover:bg-[var(--surface-secondary)]">Remove</button>
                                     )}
                                   </div>
                                   <div className="grid gap-3">
@@ -1821,7 +2007,7 @@ export default function TestCasesPage() {
                       {panelSaving ? "Saving..." : panelMode === "create" ? "Create" : "Save changes"}
                     </Button>
                     {panelMode === "create" && (
-                      <Button type="submit" form="panel-form-global" variant="secondary" onClick={() => setSubmitAction("create-next")} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">
+                      <Button type="submit" form="panel-form-global" variant="secondary" onClick={() => setSubmitAction("create-next")} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--accent-light)]">
                         {panelSaving ? "Saving..." : "Create & Add Next"}
                       </Button>
                     )}
@@ -1830,9 +2016,9 @@ export default function TestCasesPage() {
                   {panelMode === "edit" && panelTestcaseId && (
                     <div className="flex items-center gap-2">
                       {status === "Archived" ? (
-                        <Button variant="secondary" size="sm" onClick={() => void handleUnarchivePanelTestCase()} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--brand-primary)]">Unarchive</Button>
+                        <Button variant="secondary" size="sm" onClick={() => void handleUnarchivePanelTestCase()} disabled={panelSaving} className="border-[var(--brand-primary)] text-[var(--accent-light)]">Unarchive</Button>
                       ) : (
-                        <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning)]">Archive</Button>
+                        <Button variant="secondary" size="sm" onClick={() => void handleArchivePanelTestCase()} disabled={panelSaving} className="border-[var(--warning)] text-[var(--warning-foreground)]">Archive</Button>
                       )}
                       <Button variant="destructive" size="sm" onClick={() => void handleDeletePanelTestCase()} disabled={panelSaving}>Delete</Button>
                     </div>
@@ -1908,7 +2094,7 @@ export default function TestCasesPage() {
           This suite contains test cases. What would you like to do with them?
         </p>
         {deleteSuiteId && (childrenBySuiteId.get(deleteSuiteId)?.length ?? 0) > 0 && (
-          <p className="mt-2 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--warning)]">
+          <p className="mt-2 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-xs text-[var(--warning-foreground)]">
             This suite has {childrenBySuiteId.get(deleteSuiteId)?.length} sub-suite
             {childrenBySuiteId.get(deleteSuiteId)?.length === 1 ? "" : "s"}. Deleting it may affect those too.
           </p>
@@ -1929,7 +2115,7 @@ export default function TestCasesPage() {
             onClick={() => void handleDeleteSuiteConfirm("deleteTestcases")}
             className="w-full rounded-lg border border-[var(--error)] px-4 py-3 text-left hover:bg-[var(--surface-secondary)] disabled:opacity-50"
           >
-            <span className="block text-sm font-medium text-[var(--error)]">Delete suite and all test cases</span>
+            <span className="block text-sm font-medium text-[var(--error-foreground)]">Delete suite and all test cases</span>
             <span className="mt-0.5 block text-xs text-[var(--muted)]">Permanently delete the suite and all its test cases</span>
           </button>
         </div>
@@ -1988,42 +2174,51 @@ export default function TestCasesPage() {
         )}
 
         {bulkAction === "update" && (
+          <>
           <div className="mt-4 grid grid-cols-2 gap-3">
             <Field>
               <FieldLabel>Status</FieldLabel>
               <Select value={bulkStatus} onChange={(e) => setBulkStatus(e.target.value)}>
+                <option value={BULK_NO_CHANGE}>Leave unchanged</option>
                 {TESTCASE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
               </Select>
             </Field>
             <Field>
               <FieldLabel>Priority</FieldLabel>
               <Select value={bulkPriority} onChange={(e) => setBulkPriority(e.target.value)}>
+                <option value={BULK_NO_CHANGE}>Leave unchanged</option>
                 {TESTCASE_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
               </Select>
             </Field>
             <Field>
               <FieldLabel>Automation Type</FieldLabel>
               <Select value={bulkAutomationStatus} onChange={(e) => setBulkAutomationStatus(e.target.value)}>
+                <option value={BULK_NO_CHANGE}>Leave unchanged</option>
                 {TESTCASE_AUTOMATION_TYPES.map((a) => <option key={a} value={a}>{a}</option>)}
               </Select>
             </Field>
           </div>
+          <p className="mt-2 text-[12px] text-[var(--muted)]">
+            Only the fields you change are applied — anything left on &ldquo;Leave unchanged&rdquo; keeps its
+            current value on every selected test case.
+          </p>
+          </>
         )}
 
         {bulkAction === "archive" && (
-          <p className="mt-4 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--warning)]">
+          <p className="mt-4 rounded-lg border border-[var(--warning)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--warning-foreground)]">
             All selected test cases will be archived.
           </p>
         )}
 
         {bulkAction === "delete" && (
-          <p className="mt-4 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error)]">
+          <p className="mt-4 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error-foreground)]">
             This permanently deletes the selected test cases. This action cannot be undone.
           </p>
         )}
 
         {bulkError && (
-          <p className="mt-3 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error)]">
+          <p className="mt-3 rounded-lg border border-[var(--error)] bg-[var(--surface)] px-3 py-2 text-sm text-[var(--error-foreground)]">
             {bulkError}
           </p>
         )}
@@ -2092,7 +2287,7 @@ export default function TestCasesPage() {
         projectId={projectId}
         open={isImportModalOpen}
         onClose={() => setIsImportModalOpen(false)}
-        defaultSuiteId={activeSuiteId ?? undefined}
+        defaultSuiteId={formSuiteId || undefined}
         onImported={(result) => {
           if (result.imported > 0) {
             void loadData();
@@ -2110,7 +2305,7 @@ export default function TestCasesPage() {
       />
 
       {importToast && (
-        <div className="fixed bottom-5 right-5 z-[60] rounded-[var(--radius-control)] bg-[var(--ink-800)] px-4 py-2.5 text-sm text-white shadow-lg">
+        <div className="fixed bottom-5 right-5 z-[60] rounded-[var(--radius-control)] bg-[var(--toast-surface)] px-4 py-2.5 text-sm text-[var(--toast-foreground)] shadow-lg">
           {importToast}
         </div>
       )}

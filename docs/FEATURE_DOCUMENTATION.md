@@ -51,7 +51,7 @@ this document, so the roadmap owner doesn't have to re-mine nine long sections t
 
 Scope covered: login/session/OTP/API-token auth, self-serve and invite-based signup, first-workspace onboarding, multi-workspace switching, team members & roles, invitations, project access control, and workspace AI provider keys.
 
-Config defaults referenced below (from `Tesbo-Backend-Nest/src/config/app-config.service.ts`): `OTP_EXPIRY_MINUTES=10`, `OTP_MAX_ATTEMPTS=5`, `OTP_RATE_LIMIT_WINDOW_MINUTES=15`, `SESSION_DAYS=30`, session cookie name `tesbo_session`, invite token TTL is hardcoded at 7 days (not env-configurable).
+Config defaults referenced below (from `Tesbo-Backend-Nest/src/config/app-config.service.ts`): `OTP_EXPIRY_MINUTES=10`, `SESSION_DAYS=30`, session cookie name `tesbo_session`, invite token TTL is hardcoded at 7 days (not env-configurable).
 
 ---
 
@@ -76,7 +76,7 @@ Config defaults referenced below (from `Tesbo-Backend-Nest/src/config/app-config
 - **OTP request** — `POST /api/auth/otp/request` (204 no body) (`AuthService.requestOtp` → `OtpService.requestOtp`)
   - Requires `email`; 400 if missing.
   - Generates a 6-digit numeric code (`randomInt(0,1_000_000)` zero-padded), hashes with SHA-256/base64url, stores in `otp_codes` with an expiry (`OTP_EXPIRY_MINUTES`).
-  - Rate-limited per email AND per source IP independently (`otp_rate_limit` table): after `OTP_MAX_ATTEMPTS` (default 5) request/verify attempts within `OTP_RATE_LIMIT_WINDOW_MINUTES` (default 15), further attempts return 429 `rate_limited_or_invalid` until the lock window passes. A successful verify clears the rate-limit counters for both keys.
+  - No rate limiting on requests or verification attempts (removed 2026-08-18).
   - Email delivery: real send via Postmark when `POSTMARK_API_TOKEN` is configured; otherwise the code is `console.log`'d (dev/test fallback) — delivery failures raise 503 `otp_delivery_failed`.
   - Emits audit log `otp_requested`.
 - **OTP verify (login)** — `POST /api/auth/otp/verify` (`AuthService.verifyOtp` → `OtpService.verifyOtp`)
@@ -124,7 +124,7 @@ Config defaults referenced below (from `Tesbo-Backend-Nest/src/config/app-config
   - Validates: email format (regex), non-empty name, password ≥ 8 characters.
   - 400 `An account with this email already exists...` if `users.email` already taken.
   - Hashes password immediately (PBKDF2 via `PasswordService`) and stores name/hash/expiry in `pending_signups` (no `users` row yet).
-  - Sends OTP to the email; 503 `otp_delivery_failed` if the mail send throws, 400 `rate_limited_or_invalid` if OTP request itself was rate-limited.
+  - Sends OTP to the email; 503 `otp_delivery_failed` if the mail send throws, 400 `email required` if the email is empty/whitespace-only.
   - Audit-logs `signup_started`.
 - **Self-serve verify** — `POST /api/auth/signup/verify` (`SignupService.verifySelfServeSignup`)
   - Requires `email` + `code`; validates email format again.

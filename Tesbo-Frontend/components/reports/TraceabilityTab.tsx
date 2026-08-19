@@ -171,7 +171,7 @@ export function TraceabilityTab({
                         <td className={`px-3 py-2 text-[13px] ${ri > 0 ? "border-t border-dashed border-[var(--border-subtle)]" : ""}`}>
                           {row.bugTitle ? (
                             row.bugUrl ? (
-                              <a href={row.bugUrl} target="_blank" rel="noreferrer" className="break-words text-[12px] text-[var(--brand-primary)] hover:underline">{row.bugTitle}</a>
+                              <a href={row.bugUrl} target="_blank" rel="noreferrer" className="break-words text-[12px] text-[var(--accent-light)] hover:underline">{row.bugTitle}</a>
                             ) : (
                               <span className="break-words text-[12px] text-[var(--muted)]">{row.bugTitle}</span>
                             )

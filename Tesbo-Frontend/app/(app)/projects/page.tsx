@@ -12,9 +12,8 @@ import {
   IconPlus,
   IconSearch,
 } from "@tabler/icons-react";
-import { authMe, listProjects, listTestCases, listSuites, createProject, getWorkspace, listActivity, listProjectMembers, listTestRuns } from "@/lib/api";
+import { authMe, listProjects, listProjectsOverview, createProject, getWorkspace } from "@/lib/api";
 import type { ProjectSummary, ProjectType } from "@/lib/api";
-import type { SuiteNode } from "@/lib/api";
 import {
   Button,
   Card,
@@ -28,19 +27,30 @@ import {
   Textarea,
 } from "@/components/ui";
 import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 import {
   PROJECT_DESCRIPTION_MAX_LENGTH,
   PROJECT_NAME_MAX_LENGTH,
   validateProjectDescription,
   validateProjectName,
 } from "@/lib/validation";
+import { avatarColor } from "@/lib/avatarColors";
 
 type RunCounts = { passed: number; failed: number; blocked: number; total: number };
 type ProjectStatus = "active" | "configured" | "setup_required";
 
+/*
+ * A card before its stats have arrived, and after.
+ *
+ * The list paints from `/api/projects` alone, so every stat is optional until the overview call
+ * lands. `statsLoaded` is what the card reads to tell "no runs yet" apart from "not counted yet" —
+ * without it an unloaded card is indistinguishable from an empty project and would flash the
+ * setup-required badge and a 0% pass rate at every user on every load.
+ */
 type ProjectWithStats = ProjectSummary & {
+  statsLoaded: boolean;
   testCaseCount: number;
-  suites: SuiteNode[];
+  suiteCount: number;
   teamMembers: { userId: string; name: string }[];
   lastActivityAt: string | null;
   status: ProjectStatus;
@@ -50,7 +60,14 @@ type ProjectWithStats = ProjectSummary & {
 
 const VIEW_STORAGE_KEY = "tesbo_projects_view";
 
-const PROJECT_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+/*
+ * Avatar fills come from lib/avatarColors.ts.
+ *
+ * This module used to hold its own copy of the palette and its own hashSeed — byte-identical to the
+ * shared ones, which is exactly how they drift apart. Basecamp 10198836413 ("Display picture initials
+ * show different colours across the website") was that drift: one person's initials were painted five
+ * different ways across the app.
+ */
 
 type SortOption = "updated" | "name_asc" | "name_desc" | "created";
 
@@ -80,14 +97,8 @@ function sortProjects(projects: ProjectWithStats[], sortBy: SortOption): Project
   }
 }
 
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
 function projectColor(seed: string): string {
-  return PROJECT_COLORS[hashSeed(seed) % PROJECT_COLORS.length];
+  return avatarColor(seed);
 }
 
 const STATUS_META: Record<ProjectStatus, { label: string; text: string; dot: string; fill: string }> = {
@@ -96,11 +107,15 @@ const STATUS_META: Record<ProjectStatus, { label: string; text: string; dot: str
   setup_required: { label: "Setup required", text: "var(--status-blocked-text)", dot: "var(--status-blocked-dot)", fill: "var(--status-blocked-fill)" },
 };
 
+/*
+ * The -foreground tokens, not the raw --success/--warning/--error fills: those are tuned to carry
+ * white text as a background, and read at 3.1–4.0:1 when used as text on a light surface.
+ */
 function passRateTextColor(rate: number | null): string {
   if (rate === null) return "var(--muted-soft)";
-  if (rate >= 90) return "var(--success)";
-  if (rate >= 70) return "var(--warning)";
-  return "var(--error)";
+  if (rate >= 90) return "var(--success-foreground)";
+  if (rate >= 70) return "var(--warning-foreground)";
+  return "var(--error-foreground)";
 }
 
 function formatRelativeTime(iso: string): string {
@@ -114,11 +129,6 @@ function formatRelativeTime(iso: string): string {
   if (diffMs < hour) return `${Math.floor(diffMs / minute)}m ago`;
   if (diffMs < day) return `${Math.floor(diffMs / hour)}h ago`;
   return `${Math.floor(diffMs / day)}d ago`;
-}
-
-// "Total Suites" on a project card counts every suite — top-level and nested sub-suites alike.
-function totalSuiteCount(suites: SuiteNode[]): number {
-  return suites.length;
 }
 
 function getInitials(name: string): string {
@@ -159,7 +169,10 @@ function PassRateBar({ counts }: { counts: RunCounts }) {
   );
 }
 
-function TeamAvatars({ team }: { team: { userId: string; name: string }[] }) {
+function TeamAvatars({ team, pending }: { team: { userId: string; name: string }[]; pending?: boolean }) {
+  // Before the overview lands the roster is empty because it is unknown, not because there is
+  // nobody on it — saying "No members assigned" here would be a claim the page cannot yet make.
+  if (pending) return <span className="text-xs text-[var(--muted-soft)]">—</span>;
   if (team.length === 0) return <span className="text-xs text-[var(--muted)]">No members assigned</span>;
   return (
     <div className="flex items-center">
@@ -182,7 +195,10 @@ function TeamAvatars({ team }: { team: { userId: string; name: string }[] }) {
   );
 }
 
-function StatusBadge({ status }: { status: ProjectStatus }) {
+function StatusBadge({ status, pending }: { status: ProjectStatus; pending?: boolean }) {
+  // Same reasoning as TeamAvatars: the badge is derived from counts that have not arrived, and
+  // "Setup required" on a project that is fully set up is worse than no badge for a moment.
+  if (pending) return null;
   const meta = STATUS_META[status];
   return (
     <span
@@ -320,13 +336,13 @@ function ProjectsPageContent() {
   const canCreateProject = workspaceRole === "owner" || workspaceRole === "admin" || workspaceRole === "manager";
 
   useEffect(() => {
-    const saved = localStorage.getItem(VIEW_STORAGE_KEY);
+    const saved = readStoredValue(VIEW_STORAGE_KEY);
     if (saved === "grid" || saved === "list") setViewMode(saved);
   }, []);
 
   function handleViewModeChange(next: "grid" | "list") {
     setViewMode(next);
-    localStorage.setItem(VIEW_STORAGE_KEY, next);
+    writeStoredValue(VIEW_STORAGE_KEY, next);
   }
 
   useEffect(() => {
@@ -336,61 +352,88 @@ function ProjectsPageContent() {
   }, [canCreateProject, searchParams]);
 
   useEffect(() => {
+    let cancelled = false;
     authMe().then((me) => {
+      if (cancelled) return;
       if (!me) {
         router.replace("/login");
         return;
       }
-      Promise.all([getWorkspace(), listProjects()])
-        .then(async ([workspace, list]) => {
-          setWorkspaceRole((workspace.role || "").toLowerCase());
-          const withStats = await Promise.all(
-            list.map(async (p) => {
-              const [tcRes, suites, activity, members, runs] = await Promise.all([
-                listTestCases(p.id, { limit: 1 }),
-                listSuites(p.id),
-                listActivity(p.id, { limit: 1 }),
-                listProjectMembers(p.id),
-                listTestRuns(p.id).catch(() => []),
-              ]);
-              const lastActivityAt = activity.list[0]?.createdAt ?? null;
-              const status: ProjectWithStats["status"] =
-                tcRes.total === 0 ? "setup_required" : (lastActivityAt ? "active" : "configured");
-
-              const completedRuns = [...runs]
-                .filter((r) => r.totalCases > 0)
-                .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-              const latestRun = completedRuns[completedRuns.length - 1];
-              const runCounts: RunCounts | null = latestRun
-                ? {
-                    passed: latestRun.passed,
-                    failed: latestRun.failed,
-                    blocked: Math.max(0, latestRun.totalCases - latestRun.passed - latestRun.failed),
-                    total: latestRun.totalCases,
-                  }
-                : null;
-              const currentPassRate = latestRun
-                ? Math.round((latestRun.passed / latestRun.totalCases) * 100)
-                : null;
-
-              return {
-                ...p,
-                projectType: (p.projectType || "tesbox") as ProjectType,
-                testCaseCount: tcRes.total,
-                suites,
-                teamMembers: members.map((m) => ({ userId: m.userId, name: m.name || m.email || "Unknown User" })),
-                lastActivityAt,
-                status,
-                runCounts,
-                currentPassRate,
-              };
-            })
+      /*
+       * First paint depends on these two calls and nothing else.
+       *
+       * It used to depend on seventy-eight: the list, then five stat calls per project, all awaited
+       * before `setLoading(false)` ran in the outer chain's `finally`. The per-call `.catch()`
+       * guards below survive from that version and are still worth having, but a catch protects
+       * against a rejection, not against latency — one slow call held the spinner and the page
+       * showed nothing at all until the slowest of seventy-five returned.
+       *
+       * So the cards render from `/api/projects` as soon as it lands, and the stats arrive
+       * afterwards from a single `/api/projects/overview`. A slow or failed overview now costs the
+       * numbers on the cards, not the list.
+       */
+      Promise.all([getWorkspace().catch(() => null), listProjects()])
+        .then(([workspace, list]) => {
+          if (cancelled) return;
+          setWorkspaceRole((workspace?.role || "").toLowerCase());
+          setProjects(
+            list.map((p) => ({
+              ...p,
+              projectType: (p.projectType || "tesbox") as ProjectType,
+              statsLoaded: false,
+              testCaseCount: 0,
+              suiteCount: 0,
+              teamMembers: [],
+              lastActivityAt: null,
+              status: "configured" as ProjectStatus,
+              runCounts: null,
+              currentPassRate: null,
+            })),
           );
-          setProjects(withStats);
+          setLoading(false);
+
+          return listProjectsOverview()
+            .then((overview) => {
+              if (cancelled) return;
+              const stats = new Map(overview.map((o) => [o.id, o]));
+              setProjects((current) =>
+                current.map((p) => {
+                  const s = stats.get(p.id);
+                  return s ? { ...p, ...s, projectType: p.projectType, statsLoaded: true } : p;
+                }),
+              );
+            })
+            // A failed overview leaves the cards on the list's own fields rather than blanking
+            // them — the same "degrade one thing, not the whole list" rule the old per-call
+            // catches enforced, applied to the call that replaced them.
+            .catch(() => undefined);
         })
-        .finally(() => setLoading(false));
+        .catch(() => {
+          if (!cancelled) setLoading(false);
+        });
     });
+    return () => {
+      cancelled = true;
+    };
   }, [router]);
+
+  /*
+   * Closing discards the draft. Leaving it behind meant reopening the modal showed the abandoned
+   * name — so a fresh key could be typed against a stale name and submitted without the user ever
+   * seeing what they were actually creating.
+   */
+  function closeCreate() {
+    if (createLoading) return;
+    setCreateOpen(false);
+    setCreateName("");
+    setCreateKey("");
+    setCreateDescription("");
+    setCreateError("");
+    // Field-level validation errors have to go too, or reopening the modal shows a complaint about
+    // input the user can no longer see.
+    setCreateNameError("");
+    setCreateDescriptionError("");
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -421,6 +464,7 @@ function ProjectsPageContent() {
       setCreateName("");
       setCreateKey("");
       setCreateDescription("");
+      setCreateError("");
       setCreateNameError("");
       setCreateDescriptionError("");
       router.push(`/projects/${created.id}/dashboard`);
@@ -503,16 +547,7 @@ function ProjectsPageContent() {
         />
       ) : null}
 
-      <Modal
-        open={createOpen}
-        onClose={() => {
-          if (createLoading) return;
-          setCreateOpen(false);
-          setCreateNameError("");
-          setCreateDescriptionError("");
-        }}
-        title="Create project"
-      >
+      <Modal open={createOpen} onClose={closeCreate} title="Create project">
         <form onSubmit={handleCreate} className="space-y-5">
           <Field>
             <FieldLabel htmlFor="create-name">Name *</FieldLabel>
@@ -563,16 +598,7 @@ function ProjectsPageContent() {
           </Field>
           {createError && <p className="text-sm text-red-600">{createError}</p>}
           <div className="flex justify-end gap-2">
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => {
-                if (createLoading) return;
-                setCreateOpen(false);
-                setCreateNameError("");
-                setCreateDescriptionError("");
-              }}
-            >
+            <Button type="button" variant="secondary" onClick={closeCreate}>
               Cancel
             </Button>
             <Button type="submit" disabled={createLoading}>
@@ -606,14 +632,14 @@ function ProjectsPageContent() {
                             {p.name.trim().charAt(0).toUpperCase() || "P"}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <h2 className="truncate text-[15px] font-medium leading-5 text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">
+                            <h2 className="truncate text-[15px] font-medium leading-5 text-[var(--foreground)] group-hover:text-[var(--accent-light)]">
                               {p.name}
                             </h2>
                             <span className="mt-0.5 block font-mono text-[11px] uppercase tracking-wide text-[var(--muted-soft)]">
                               {p.key}
                             </span>
                           </div>
-                          <StatusBadge status={p.status} />
+                          <StatusBadge status={p.status} pending={!p.statsLoaded} />
                         </div>
                         <p className="line-clamp-2 text-[13px] leading-6 text-[var(--muted)]">
                           {p.description || "Add project context to guide test case planning and execution."}
@@ -623,11 +649,11 @@ function ProjectsPageContent() {
                       <div className="border-b border-[var(--border-subtle)] p-5">
                         <div className="grid grid-cols-3 gap-2">
                           <div className="border-r border-[var(--border-subtle)] pr-2 text-center">
-                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{p.testCaseCount}</div>
+                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{p.statsLoaded ? p.testCaseCount : "—"}</div>
                             <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Test cases</div>
                           </div>
                           <div className="border-r border-[var(--border-subtle)] px-2 text-center">
-                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{totalSuiteCount(p.suites)}</div>
+                            <div className="text-xl font-semibold tracking-tight text-[var(--foreground)]">{p.statsLoaded ? p.suiteCount : "—"}</div>
                             <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total Suites</div>
                           </div>
                           <div className="pl-2 text-center">
@@ -641,7 +667,7 @@ function ProjectsPageContent() {
                       </div>
 
                       <div className="flex items-center justify-between gap-3 p-5">
-                        <TeamAvatars team={p.teamMembers} />
+                        <TeamAvatars team={p.teamMembers} pending={!p.statsLoaded} />
                         <span className="whitespace-nowrap font-mono text-[11px] text-[var(--muted-soft)]">
                           {p.lastActivityAt ? formatRelativeTime(p.lastActivityAt) : `Created ${formatRelativeTime(p.createdAt)}`}
                         </span>
@@ -677,12 +703,12 @@ function ProjectsPageContent() {
                           {p.name.trim().charAt(0).toUpperCase() || "P"}
                         </div>
                         <div className="min-w-0">
-                          <div className="truncate text-[13px] font-medium text-[var(--foreground)] group-hover:text-[var(--brand-primary)]">{p.name}</div>
+                          <div className="truncate text-[13px] font-medium text-[var(--foreground)] group-hover:text-[var(--accent-light)]">{p.name}</div>
                           <div className="font-mono text-[11px] uppercase text-[var(--muted-soft)]">{p.key}</div>
                         </div>
                       </div>
-                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.testCaseCount}</div>
-                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{totalSuiteCount(p.suites)}</div>
+                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.statsLoaded ? p.testCaseCount : "—"}</div>
+                      <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.statsLoaded ? p.suiteCount : "—"}</div>
                       <div>
                         {p.currentPassRate !== null ? (
                           <div className="flex items-center gap-2">
@@ -692,10 +718,10 @@ function ProjectsPageContent() {
                             <span className="text-xs font-medium" style={{ color: passRateTextColor(p.currentPassRate) }}>{p.currentPassRate}%</span>
                           </div>
                         ) : (
-                          <span className="text-xs text-[var(--muted-soft)]">No runs yet</span>
+                          <span className="text-xs text-[var(--muted-soft)]">{p.statsLoaded ? "No runs yet" : "—"}</span>
                         )}
                       </div>
-                      <TeamAvatars team={p.teamMembers} />
+                      <TeamAvatars team={p.teamMembers} pending={!p.statsLoaded} />
                       <div className="text-right font-mono text-[11px] text-[var(--muted-soft)]">
                         {p.lastActivityAt ? formatRelativeTime(p.lastActivityAt) : formatRelativeTime(p.createdAt)}
                       </div>

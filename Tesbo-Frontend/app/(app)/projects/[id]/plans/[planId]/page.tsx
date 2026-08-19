@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import {
@@ -52,6 +52,7 @@ import { Button, StatusChip, StatusBadge, PriorityBadge, Input, Select, type Tes
 import Modal from "@/components/ui/Modal";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import { planStatus, formatLastRun, OwnerAvatar, PlanStatusBadge } from "@/components/testplans/PlanCard";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 const PANEL_STORAGE_KEY = "tesbo_plan_switcher_panel";
 
@@ -91,13 +92,27 @@ function pctColor(pct: number): string {
 
 /* ───── Shared UI pieces ───── */
 
-function SegmentedBar({ passed, failed, blocked, skipped, total }: { passed: number; failed: number; blocked: number; skipped: number; total: number }) {
+/*
+ * Untested is a segment like any other, not the leftover track.
+ *
+ * Basecamp 10213200614 ("Untested mark color not match on bar"): this screen showed three different
+ * colours for one status — the UNTESTED stat tile in --status-notrun-*, the legend dot in
+ * --muted-soft, and the bar in whatever --surface-tertiary happened to be, because untested was
+ * never passed in and simply went unpainted. --status-notrun-dot is the app's untested colour
+ * everywhere else (components/reports/charts.tsx, StatusChip, StatusBadge), so it is the one used
+ * here for both the segment and the dot.
+ *
+ * Consequence, accepted deliberately: the bar now always totals 100%, so its fill length no longer
+ * doubles as the progress reading. The percentage beside it is the progress reading.
+ */
+function SegmentedBar({ passed, failed, blocked, skipped, untested, total }: { passed: number; failed: number; blocked: number; skipped: number; untested: number; total: number }) {
   if (total === 0) return <div className="h-2 rounded-full bg-[var(--surface-tertiary)] w-full" />;
   const segments = [
     { value: passed, color: "var(--status-pass-dot)" },
     { value: failed, color: "var(--status-fail-dot)" },
     { value: blocked, color: "var(--status-blocked-dot)" },
     { value: skipped, color: "var(--status-skipped-dot)" },
+    { value: untested, color: "var(--status-notrun-dot)" },
   ];
   return (
     <div className="flex h-2 w-full overflow-hidden rounded-full bg-[var(--surface-tertiary)]">
@@ -141,6 +156,19 @@ export default function PlanDetailPage() {
   const [plan, setPlan] = useState<Record<string, unknown> | null>(null);
   const [items, setItems] = useState<PlanItem[]>([]);
   const [runs, setRuns] = useState<PlanRunItem[]>([]);
+  /*
+   * The header is DERIVED from the runs below it, not fetched separately.
+   *
+   * Basecamp 10213208002 — "Test plan: Overall progress percentage not matching", reported as the
+   * header disagreeing with the run listed beneath it. The two numbers were two independent reads of
+   * the same rows: getPlanProgress aggregates `cycles WHERE plan_id = $1` and listPlanRuns groups the
+   * very same join per cycle, so the header was only ever the sum of the rows — but nothing enforced
+   * that, and two round trips against a live database can land either side of a status change.
+   *
+   * Summing the rows the screen is already showing makes the agreement structural instead of
+   * coincidental, and drops a request. Same arithmetic the run rows use for their own percentage
+   * (passed + failed + blocked + skipped), so a run's figure and the plan's cannot diverge.
+   */
   const [progress, setProgress] = useState<PlanProgress | null>(null);
   const [projectName, setProjectName] = useState("");
   const [allPlans, setAllPlans] = useState<PlanListItem[]>([]);
@@ -228,7 +256,7 @@ export default function PlanDetailPage() {
   }, [planId, projectId, router]);
 
   useEffect(() => {
-    const saved = localStorage.getItem(PANEL_STORAGE_KEY);
+    const saved = readStoredValue(PANEL_STORAGE_KEY);
     if (saved === "closed") setPlanPanelOpen(false);
     authMe().then((me) => {
       if (!me) {
@@ -242,7 +270,7 @@ export default function PlanDetailPage() {
   function togglePlanPanel() {
     setPlanPanelOpen((prev) => {
       const next = !prev;
-      localStorage.setItem(PANEL_STORAGE_KEY, next ? "open" : "closed");
+      writeStoredValue(PANEL_STORAGE_KEY, next ? "open" : "closed");
       return next;
     });
   }
@@ -329,8 +357,38 @@ export default function PlanDetailPage() {
     );
   }
 
-  const total = progress?.totalCases || 0;
-  const visibleRuns = runs.filter((run) => run.status === "In Progress" || run.status === "Completed");
+  const derivedProgress = useMemo<PlanProgress | null>(() => {
+    if (!runs.length) return progress;
+    const sum = (pick: (r: (typeof runs)[number]) => number) => runs.reduce((acc, r) => acc + (pick(r) || 0), 0);
+    const totalCases = sum((r) => r.totalCases);
+    const passed = sum((r) => r.passed);
+    const failed = sum((r) => r.failed);
+    const blocked = sum((r) => r.blocked);
+    const skipped = sum((r) => r.skipped);
+    const untested = sum((r) => r.untested);
+    const executed = passed + failed + blocked + skipped;
+    return {
+      ...(progress ?? ({} as PlanProgress)),
+      runCount: runs.length,
+      totalCases,
+      passed,
+      failed,
+      blocked,
+      skipped,
+      untested,
+      completionPercent: totalCases > 0 ? Math.round((executed / totalCases) * 100) : 0,
+    };
+  }, [runs, progress]);
+
+  const total = derivedProgress?.totalCases || 0;
+  /*
+   * Every run linked to the plan, whatever its status. The list used to drop anything that was not
+   * "In Progress" or "Completed" while the Overall progress header above it kept aggregating all of
+   * them, so the two disagreed by exactly the runs that were hidden. "Planning" is the status every
+   * run is created with — including the ones this page's own Create test run button makes — so the
+   * filter hid a run the moment it was created and then counted its cases in the header anyway.
+   */
+  const visibleRuns = runs;
   const planName = typeof plan.name === "string" ? plan.name : "";
   const planDescription = typeof plan.description === "string" ? plan.description : "";
   const planTargetRelease = typeof plan.targetRelease === "string" ? plan.targetRelease : "";
@@ -354,7 +412,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
@@ -364,12 +422,12 @@ export default function PlanDetailPage() {
               <button
                 type="button"
                 onClick={() => router.push(`/projects/${projectId}/plans`)}
-                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--brand-primary)]"
+                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
               >
                 Test plans
               </button>
               <IconChevronRight size={12} stroke={1.75} className="shrink-0 text-[var(--muted-soft)]" />
-              <span className="truncate font-medium text-[var(--brand-primary)]">{planName}</span>
+              <span className="truncate font-medium text-[var(--accent-light)]">{planName}</span>
             </nav>,
             topBarStartEl,
           )}
@@ -389,7 +447,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={handleDelete}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error)]"
+                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
                   >
                     <IconTrash size={13} stroke={1.75} />
                     Delete
@@ -458,9 +516,9 @@ export default function PlanDetailPage() {
             <div className={`flex h-10 shrink-0 items-center border-b border-[var(--border)] px-3 ${planPanelOpen ? "justify-between" : "justify-center"}`}>
               {planPanelOpen && (
                 <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.07em] text-[var(--ink-600)]">
-                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--brand-primary)]" />
+                  <IconLayoutGrid size={14} stroke={1.75} className="text-[var(--accent-light)]" />
                   Plans
-                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--brand-primary)]">
+                  <span className="rounded-full bg-[var(--brand-soft)] px-1.5 py-px font-mono text-[10px] font-normal normal-case text-[var(--accent-light)]">
                     {allPlans.length}
                   </span>
                 </p>
@@ -471,7 +529,7 @@ export default function PlanDetailPage() {
                     type="button"
                     title="New test plan"
                     onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--brand-primary)]"
+                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={14} stroke={2.5} />
                   </button>
@@ -514,7 +572,7 @@ export default function PlanDetailPage() {
                       <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
                         {p.name}
                       </span>
-                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--brand-primary)] opacity-70" : "text-[var(--muted)]"}`}>
+                      <span className={`shrink-0 font-mono text-[11px] ${isActive ? "text-[var(--accent-light)] opacity-70" : "text-[var(--muted)]"}`}>
                         {p.runCount}
                       </span>
                     </button>
@@ -524,7 +582,7 @@ export default function PlanDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                 >
                   <IconPlus size={13} stroke={1.75} />
                   New test plan
@@ -560,22 +618,22 @@ export default function PlanDetailPage() {
             {/* Scrollable content */}
             <div className="min-h-0 flex-1 overflow-y-auto p-6">
               {/* Overall progress */}
-              {progress && total > 0 && (
+              {derivedProgress && total > 0 && (
                 <section className="mb-5 rounded-[10px] border border-[var(--border)] p-5">
                   <div className="mb-3 flex items-center justify-between">
                     <span className="text-[13px] font-medium text-[var(--muted)]">Overall progress</span>
-                    <span className="font-mono text-[24px] font-bold tracking-tight" style={{ color: pctColor(progress.completionPercent) }}>
-                      {progress.completionPercent}%
+                    <span className="font-mono text-[24px] font-bold tracking-tight" style={{ color: pctColor(derivedProgress.completionPercent) }}>
+                      {derivedProgress.completionPercent}%
                     </span>
                   </div>
-                  <SegmentedBar passed={progress.passed} failed={progress.failed} blocked={progress.blocked} skipped={progress.skipped} total={total} />
+                  <SegmentedBar passed={derivedProgress.passed} failed={derivedProgress.failed} blocked={derivedProgress.blocked} skipped={derivedProgress.skipped} untested={derivedProgress.untested} total={total} />
                   <div className="mt-4 grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
                     <StatTile label="Total" value={total} textVar="--foreground" fillVar="--surface-tertiary" icon={<IconClipboardList size={12} stroke={1.75} />} />
-                    <StatTile label="Passed" value={progress.passed} textVar="--status-pass-text" fillVar="--status-pass-fill" icon={<IconCircleCheck size={12} stroke={1.75} />} />
-                    <StatTile label="Failed" value={progress.failed} textVar="--status-fail-text" fillVar="--status-fail-fill" icon={<IconCircleX size={12} stroke={1.75} />} />
-                    <StatTile label="Blocked" value={progress.blocked} textVar="--status-blocked-text" fillVar="--status-blocked-fill" icon={<IconAlertTriangle size={12} stroke={1.75} />} />
-                    <StatTile label="Skipped" value={progress.skipped} textVar="--status-skipped-text" fillVar="--status-skipped-fill" icon={<IconPlayerSkipForward size={12} stroke={1.75} />} />
-                    <StatTile label="Untested" value={progress.untested} textVar="--status-notrun-text" fillVar="--status-notrun-fill" icon={<IconClock size={12} stroke={1.75} />} />
+                    <StatTile label="Passed" value={derivedProgress.passed} textVar="--status-pass-text" fillVar="--status-pass-fill" icon={<IconCircleCheck size={12} stroke={1.75} />} />
+                    <StatTile label="Failed" value={derivedProgress.failed} textVar="--status-fail-text" fillVar="--status-fail-fill" icon={<IconCircleX size={12} stroke={1.75} />} />
+                    <StatTile label="Blocked" value={derivedProgress.blocked} textVar="--status-blocked-text" fillVar="--status-blocked-fill" icon={<IconAlertTriangle size={12} stroke={1.75} />} />
+                    <StatTile label="Skipped" value={derivedProgress.skipped} textVar="--status-skipped-text" fillVar="--status-skipped-fill" icon={<IconPlayerSkipForward size={12} stroke={1.75} />} />
+                    <StatTile label="Untested" value={derivedProgress.untested} textVar="--status-notrun-text" fillVar="--status-notrun-fill" icon={<IconClock size={12} stroke={1.75} />} />
                   </div>
                 </section>
               )}
@@ -609,7 +667,7 @@ export default function PlanDetailPage() {
                       </div>
                       <div>
                         <label className="mb-1 block text-xs font-medium text-[var(--muted)]">
-                          Environment <span className="text-[var(--error)]">*</span>
+                          Environment <span className="text-[var(--error-foreground)]">*</span>
                         </label>
                         <Select value={selectedEnvironment} onChange={(e) => setSelectedEnvironment(e.target.value)} required>
                           <option value="">Select environment</option>
@@ -672,14 +730,17 @@ export default function PlanDetailPage() {
                     <div className="flex flex-col gap-3">
                       {visibleRuns.map((run) => {
                         const runTotal = run.totalCases;
-                        const runExecuted = runTotal - run.untested;
+                        // Executed is spelled out the same way the header's completionPercent is
+                        // (passed + failed + blocked + skipped), rather than total - untested, so a
+                        // run's percentage and the plan's are the same arithmetic on the same rows.
+                        const runExecuted = run.passed + run.failed + run.blocked + run.skipped;
                         const runPercent = runTotal > 0 ? Math.round((runExecuted / runTotal) * 100) : 0;
                         return (
                           <div key={run.id} className="rounded-[10px] border border-[var(--border)] bg-[var(--background)] p-4 transition-colors hover:border-[var(--brand-primary)]">
                             <div className="flex items-start justify-between gap-3">
                               <Link href={`/projects/${projectId}/cycles/${run.id}`} className="group min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <h4 className="truncate text-[14px] font-semibold text-[var(--foreground)] transition-colors group-hover:text-[var(--brand-primary)]">{run.name}</h4>
+                                  <h4 className="truncate text-[14px] font-semibold text-[var(--foreground)] transition-colors group-hover:text-[var(--accent-light)]">{run.name}</h4>
                                   <StatusChip tone={runStatusToTone(run.status)}>{run.status}</StatusChip>
                                 </div>
                                 <div className="mt-1 flex flex-wrap items-center gap-3 text-[12px] text-[var(--muted)]">
@@ -697,7 +758,7 @@ export default function PlanDetailPage() {
                                 <button
                                   onClick={() => handleDissociate(run.id)}
                                   title="Unlink from plan"
-                                  className="rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error)]"
+                                  className="rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error-foreground)]"
                                 >
                                   <IconX size={15} stroke={1.75} />
                                 </button>
@@ -706,14 +767,14 @@ export default function PlanDetailPage() {
 
                             {runTotal > 0 && (
                               <div className="mt-3">
-                                <SegmentedBar passed={run.passed} failed={run.failed} blocked={run.blocked} skipped={run.skipped} total={runTotal} />
+                                <SegmentedBar passed={run.passed} failed={run.failed} blocked={run.blocked} skipped={run.skipped} untested={run.untested} total={runTotal} />
                                 <div className="mt-1.5 flex flex-wrap items-center gap-3">
                                   <span className="font-mono text-[11px] text-[var(--muted)]">{runTotal} cases</span>
                                   {run.passed > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-pass-dot)" />{run.passed} passed</span>}
                                   {run.failed > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-fail-dot)" />{run.failed} failed</span>}
                                   {run.blocked > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-blocked-dot)" />{run.blocked} blocked</span>}
                                   {run.skipped > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-skipped-dot)" />{run.skipped} skipped</span>}
-                                  {run.untested > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--muted-soft)" />{run.untested} untested</span>}
+                                  {run.untested > 0 && <span className="flex items-center gap-1 text-[11px] text-[var(--muted)]"><StatusDot color="var(--status-notrun-dot)" />{run.untested} untested</span>}
                                 </div>
                               </div>
                             )}
@@ -764,7 +825,7 @@ export default function PlanDetailPage() {
                                     onClick={() => handleRemoveItem(item.id)}
                                     disabled={removingItemId === item.id}
                                     title="Remove from plan"
-                                    className="rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error)] disabled:opacity-50"
+                                    className="rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error-foreground)] disabled:opacity-50"
                                   >
                                     <IconX size={14} stroke={1.75} />
                                   </button>

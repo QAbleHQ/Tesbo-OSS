@@ -78,8 +78,16 @@ function formatRelativeTime(iso: string): string {
   return `${Math.floor(diffMs / day)}d ago`;
 }
 
-function deriveZyraStats(tasks: ZyraTask[]) {
-  const testsGenerated = tasks.reduce((sum, t) => sum + t.generatedCount, 0);
+/*
+ * `testcasesCreated` comes from the API rather than being summed here.
+ *
+ * Basecamp 10212918496: this summed task.generatedCount, a number only the task-board draft flow
+ * produces. Chat mode creates test cases directly and records no generation row, so a project whose
+ * 33 cases were all made through the chat reported "0 tests generated". The backend now counts the
+ * `zyra_created` audit action, which both modes write.
+ */
+function deriveZyraStats(tasks: ZyraTask[], testcasesCreated: number) {
+  const testsGenerated = testcasesCreated;
   const activeTasks = tasks.filter((t) => ACTIVE_TASK_STATUSES.has(t.taskStatus)).length;
   const decided = tasks.filter((t) => t.taskStatus === "accepted" || t.taskStatus === "rejected");
   const approvalRate =
@@ -121,7 +129,7 @@ export default function AgentsPage() {
     });
   }, [loadData, router]);
 
-  const stats = useMemo(() => (state ? deriveZyraStats(state.tasks) : null), [state]);
+  const stats = useMemo(() => (state ? deriveZyraStats(state.tasks, state.testcasesCreated ?? 0) : null), [state]);
   const capabilityChips = useMemo(() => {
     if (!state) return [];
     return (Object.keys(CAPABILITY_META) as Array<keyof ZyraCapabilities>)
@@ -149,7 +157,7 @@ export default function AgentsPage() {
       }
     >
       {error && (
-        <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error)]">{error}</p>
+        <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">{error}</p>
       )}
 
       <div className="mb-4 flex items-center gap-2">
@@ -199,7 +207,7 @@ export default function AgentsPage() {
                 <IconClock size={13} stroke={1.75} />
                 {stats.lastActivityAt ? `Used ${formatRelativeTime(stats.lastActivityAt)}` : "Not used yet"}
               </span>
-              <span className="inline-flex items-center gap-1 text-[12px] font-medium text-[var(--brand-primary)] group-hover:text-[var(--accent-light)]">
+              <span className="inline-flex items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] group-hover:text-[var(--accent-light)]">
                 Open agent
                 <IconArrowRight size={13} stroke={1.75} />
               </span>
@@ -290,26 +298,26 @@ export default function AgentsPage() {
               className="group flex items-center justify-between rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-secondary)] px-4 py-3 transition hover:border-[var(--brand-primary)]"
             >
               <div className="flex items-center gap-3">
-                <IconMessage2Bolt size={20} stroke={1.75} className="text-[var(--brand-primary)]" />
+                <IconMessage2Bolt size={20} stroke={1.75} className="text-[var(--accent-light)]" />
                 <div>
                   <div className="text-[13px] font-medium text-[var(--foreground)]">Agent workspace</div>
                   <div className="text-[12px] text-[var(--muted)]">Chat with {state.agent.name} and manage pending tasks</div>
                 </div>
               </div>
-              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--brand-primary)]" />
+              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--accent-light)]" />
             </Link>
             <Link
               href={`/projects/${projectId}/agents/tasks`}
               className="group flex items-center justify-between rounded-lg border border-[var(--border-subtle)] bg-[var(--surface-secondary)] px-4 py-3 transition hover:border-[var(--brand-primary)]"
             >
               <div className="flex items-center gap-3">
-                <IconClipboardCheck size={20} stroke={1.75} className="text-[var(--brand-primary)]" />
+                <IconClipboardCheck size={20} stroke={1.75} className="text-[var(--accent-light)]" />
                 <div>
                   <div className="text-[13px] font-medium text-[var(--foreground)]">Task board</div>
                   <div className="text-[12px] text-[var(--muted)]">Review and approve generated test cases</div>
                 </div>
               </div>
-              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--brand-primary)]" />
+              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--accent-light)]" />
             </Link>
             <Link
               href={`/projects/${projectId}/agents/zyra/settings`}
@@ -322,7 +330,7 @@ export default function AgentsPage() {
                   <div className="text-[12px] text-[var(--muted)]">Configure sources, memory, and behaviour</div>
                 </div>
               </div>
-              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--brand-primary)]" />
+              <IconArrowRight size={16} stroke={1.75} className="text-[var(--muted-soft)] transition-colors group-hover:text-[var(--accent-light)]" />
             </Link>
           </div>
         </div>

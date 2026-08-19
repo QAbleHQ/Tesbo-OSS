@@ -1,21 +1,36 @@
 import { Injectable } from "@nestjs/common";
 import { AppConfigService } from "../config/app-config.service";
+import { EmailDeliveryPolicy, EmailKind } from "../config/email-delivery.policy";
 
 @Injectable()
 export class EmailService {
-  constructor(private readonly config: AppConfigService) {}
+  constructor(
+    private readonly config: AppConfigService,
+    private readonly delivery: EmailDeliveryPolicy
+  ) {}
 
   /**
-   * Posts one email to Postmark, or logs it when no token is configured (local dev).
+   * Posts one email to Postmark — but only when EmailDeliveryPolicy allows it.
    *
-   * `logLabel` is what gets printed instead of sending; the e2e setup scrapes OTP codes out of
-   * container logs, so that path has to stay.
+   * In log mode (the default, and what every local and CI stack runs) `logLabel` is written to
+   * stdout: the e2e setup scrapes OTP codes and invite links out of container logs, so that path has
+   * to stay, and it is the only way to read a code when nothing was emailed. See
+   * config/email-delivery.policy.ts for which emails are still posted to the sandbox server.
    */
-  private async send(to: string, subject: string, textBody: string, htmlBody: string | undefined, logLabel: string): Promise<void> {
-    if (!this.config.postmarkApiToken) {
+  private async send(
+    to: string,
+    subject: string,
+    textBody: string,
+    htmlBody: string | undefined,
+    logLabel: string,
+    kind: EmailKind = "communication"
+  ): Promise<void> {
+    const decision = await this.delivery.decide(kind);
+    if (!decision.post || this.delivery.logsEveryEmail) {
       console.log(logLabel);
-      return;
     }
+    if (!decision.post) return;
+
     const response = await fetch("https://api.postmarkapp.com/email", {
       method: "POST",
       headers: {
@@ -207,7 +222,11 @@ ${this.button(resetUrl, "Reset password")}
       `Your Tesbo Test Manager verification code is ${code}. It expires in ${this.config.otpExpiryMinutes} minutes.`,
       undefined,
       // Format kept verbatim: e2e/global-setup.ts scrapes this line out of container logs.
-      `OTP for ${to}: ${code}`
+      `OTP for ${to}: ${code}`,
+      // Never posted to Postmark outside live mode, not even to a sandbox server: signup and login
+      // are by far the highest-volume sends, they're the ones aimed at freshly invented addresses,
+      // and nothing downstream needs the real send to have happened — the code is read from the log.
+      "otp"
     );
   }
 }

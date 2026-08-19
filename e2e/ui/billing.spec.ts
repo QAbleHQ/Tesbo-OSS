@@ -55,6 +55,17 @@ function currencySymbol(currency: string): string {
   return currency === "inr" ? "₹" : "$";
 }
 
+/**
+ * Whether the running config asks for video at all — `playwright.headed.config.ts` turns it on,
+ * the default config leaves it off. Read from the project's own options so this suite records
+ * exactly when the rest of the suite does, instead of hard-coding a second opinion.
+ */
+function videoWanted(): boolean {
+  const video = test.info().project.use.video;
+  const mode = typeof video === "string" ? video : video?.mode;
+  return !!mode && mode !== "off";
+}
+
 test.describe("billing settings", () => {
   test.skip(!!skipReason, skipReason ?? undefined);
 
@@ -66,15 +77,7 @@ test.describe("billing settings", () => {
   let snapshot: BillingState;
   let unavailableReason: string | null = null;
 
-  test.beforeAll(async ({ browser }) => {
-    // The `page` fixture would carry the shared smoke account's session from playwright.config.ts;
-    // this suite needs the disposable billing tenant's instead. Its session cookie is host-scoped to
-    // localhost, so the state saved against the API origin is sent to the frontend origin too.
-    context = await browser.newContext({
-      baseURL: env.webBaseUrl,
-      storageState: tenant!.storageStatePath,
-    });
-    page = await context.newPage();
+  test.beforeAll(async () => {
     api = await pwRequest.newContext({
       baseURL: env.apiBaseUrl,
       storageState: tenant!.storageStatePath,
@@ -84,14 +87,37 @@ test.describe("billing settings", () => {
     snapshot = readBillingState(orgId);
   });
 
-  test.beforeEach(() => {
+  test.beforeEach(async ({ browser }) => {
     test.skip(!!unavailableReason, unavailableReason ?? undefined);
+    // The `page` fixture would carry the shared smoke account's session from playwright.config.ts;
+    // this suite needs the disposable billing tenant's instead. Its session cookie is host-scoped to
+    // localhost, so the state saved against the API origin is sent to the frontend origin too.
+    //
+    // A context per test rather than one shared across the file: a hand-made context does NOT pick
+    // up `use.video` from the config the way the `page` fixture does, so it has to opt in below —
+    // and a file-wide context could only ever yield one video for all of these tests.
+    context = await browser.newContext({
+      baseURL: env.webBaseUrl,
+      storageState: tenant!.storageStatePath,
+      ...(videoWanted() ? { recordVideo: { dir: test.info().outputPath("video") } } : {}),
+    });
+    page = await context.newPage();
+  });
+
+  test.afterEach(async () => {
+    // The recording is only finalised on close, so grab the handle first and resolve its path after.
+    const video = page?.video();
+    await context?.close();
+    if (video) {
+      await test
+        .info()
+        .attach("video", { path: await video.path(), contentType: "video/webm" });
+    }
   });
 
   test.afterAll(async () => {
     if (!unavailableReason) setBillingState(orgId, snapshot);
     await api.dispose();
-    await context.close();
   });
 
   /** The PricingModal panel — Modal renders into a body portal with no dialog role. */
@@ -359,6 +385,60 @@ test.describe("billing settings", () => {
       } finally {
         setProPlan(orgId);
         for (const id of created) await api.delete(`/api/projects/${id}`, { failOnStatusCode: false });
+      }
+    });
+  });
+  test.describe("Pro-only integrations read the same on every screen", () => {
+    test("the project settings Linear card shows the Pro lock a Launch workspace is under", async () => {
+      /*
+       * Basecamp 10191178824 — "Linear is restricted behind a Pro upgrade in Workspace Settings, but the
+       * same integration is available in Project Settings → Integrations".
+       *
+       * Workspace Settings → Integrations locks its Linear card with `proOnly && !isPro && !connected`.
+       * Project Settings → Integrations had no plan awareness at all, so the same Launch workspace was
+       * told "Connect in Workspace Settings" on one screen and "Requires Pro" on the other.
+       *
+       * NOT an entitlement bypass, and this test says so explicitly: integrationCallback calls
+       * assertIntegrationAllowed, so the connection itself was always refused server-side. What was
+       * wrong is that the user only found out after following the button.
+       */
+      resetToLaunch(orgId);
+
+      const suffix = `${Date.now().toString(36)}`.slice(-8).toUpperCase();
+      const created = await api.post("/api/projects", {
+        data: { name: `E2E Linear Gate ${suffix}`, key: `LGT${suffix}` },
+        failOnStatusCode: false,
+      });
+      expect(created.ok(), `seeding a project — ${await created.text()}`).toBeTruthy();
+      const projectId = (await created.json()).id;
+
+      try {
+        await page.goto(`/projects/${projectId}/settings?tab=integrations`);
+        await expect(page.getByRole("heading", { name: "Linear" })).toBeVisible();
+
+        // The card states the restriction rather than implying the integration is available.
+        await expect(
+          page.getByText(/Linear is a Pro plan integration/i),
+          "the project screen does not mention the Pro restriction the workspace is under",
+        ).toBeVisible();
+
+        // And its call to action leads to the upgrade, not to a connect flow that must fail.
+        const cta = page.getByTestId("linear-project-cta");
+        await expect(cta).toHaveText(/Upgrade to Pro/i);
+        await expect(cta).toHaveAttribute("href", /tab=billing/);
+
+        // Jira is on Launch, so it must NOT have acquired a lock from this change.
+        await expect(page.getByRole("heading", { name: "Jira" })).toBeVisible();
+        await expect(page.getByText(/Jira is a Pro plan integration/i)).toHaveCount(0);
+
+        // On Pro the same card offers the connect flow again.
+        setProPlan(orgId);
+        await page.goto(`/projects/${projectId}/settings?tab=integrations`);
+        await expect(page.getByText(/Linear is a Pro plan integration/i)).toHaveCount(0);
+        await expect(page.getByTestId("linear-project-cta")).toHaveText(/Connect in Workspace Settings/i);
+      } finally {
+        await api.delete(`/api/projects/${projectId}`, { failOnStatusCode: false });
+        resetToLaunch(orgId);
       }
     });
   });

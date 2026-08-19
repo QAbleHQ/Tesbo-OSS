@@ -207,7 +207,7 @@ export default function ApiTokensPage() {
         </div>
       )}
 
-      {listError && <p className="text-sm text-[var(--error)]">{listError}</p>}
+      {listError && <p className="text-sm text-[var(--error-foreground)]">{listError}</p>}
 
       <Card className="overflow-hidden">
         <div className="overflow-x-auto">
@@ -240,7 +240,7 @@ export default function ApiTokensPage() {
                         type="button"
                         onClick={() => handleRevoke(token.id)}
                         disabled={revokingId === token.id}
-                        className="text-[var(--error)] hover:underline disabled:opacity-50"
+                        className="text-[var(--error-foreground)] hover:underline disabled:opacity-50"
                       >
                         {revokingId === token.id ? "Revoking…" : "Revoke"}
                       </button>
@@ -400,7 +400,7 @@ export default function ApiTokensPage() {
                 </div>
               </label>
             </div>
-            {createError && <p className="text-sm text-[var(--error)]">{createError}</p>}
+            {createError && <p className="text-sm text-[var(--error-foreground)]">{createError}</p>}
             <div className="flex justify-end gap-2">
               <Button type="button" variant="secondary" onClick={closeCreateModal} disabled={creating}>
                 Cancel

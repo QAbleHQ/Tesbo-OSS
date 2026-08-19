@@ -2,6 +2,7 @@ import { Controller, Get, Req, UnauthorizedException } from "@nestjs/common";
 import { AuthenticatedRequest } from "../common/request.types";
 import { DatabaseService } from "../database/database.service";
 import { AppConfigService } from "../config/app-config.service";
+import { EmailDeliveryPolicy } from "../config/email-delivery.policy";
 import { SuperAdminService } from "./super-admin.service";
 
 @Controller("/api/admin/system")
@@ -9,6 +10,7 @@ export class AdminHealthController {
   constructor(
     private readonly db: DatabaseService,
     private readonly config: AppConfigService,
+    private readonly emailDelivery: EmailDeliveryPolicy,
     private readonly superAdmin: SuperAdminService
   ) {}
 
@@ -31,9 +33,15 @@ export class AdminHealthController {
     } catch (error) {
       services.database = { status: "error", error: error instanceof Error ? error.message : String(error) };
     }
+    // reach is the operational question this endpoint exists to answer: "can this stack email a real
+    // person?" — "recipients" on anything that isn't production is the alarm.
+    const delivery = await this.emailDelivery.describe();
     services.email = {
       status: this.config.postmarkApiToken ? "configured" : "not_configured",
-      provider: "postmark"
+      provider: "postmark",
+      mode: delivery.mode,
+      server: delivery.server,
+      reach: delivery.reach
     };
     return {
       status: Object.values(services).some((service) => service.status === "error") ? "degraded" : "ok",

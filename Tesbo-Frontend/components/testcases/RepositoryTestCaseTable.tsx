@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import { IconColumns } from "@tabler/icons-react";
 import { StatusChip } from "@/components/ui";
 import type { TestCaseListItem } from "@/lib/api";
+import { readStoredValue, writeStoredValue } from "@/lib/storage";
 
 export type RepoTcColumnId =
   | "select"
@@ -68,6 +69,11 @@ const DEFAULT_DATA_ORDER: RepoDataColumnId[] = [
   "status",
   "updated",
 ];
+
+// Always shown, can't be hidden via the "Show fields" menu — a test case is illegible
+// without an ID, a title, and a priority to triage by.
+const LOCKED_COLUMN_IDS: RepoDataColumnId[] = ["id", "title", "priority"];
+const LOCKED_COLUMN_SET = new Set(LOCKED_COLUMN_IDS);
 
 const DEFAULT_VISIBLE: Record<RepoDataColumnId, boolean> = {
   id: true,
@@ -166,6 +172,8 @@ function normalizeVisible(raw: unknown): Record<RepoDataColumnId, boolean> {
       if (typeof v === "boolean") next[id] = v;
     }
   }
+  // Force locked columns back on, in case a preference saved before they were locked had them hidden.
+  for (const id of LOCKED_COLUMN_IDS) next[id] = true;
   return next;
 }
 
@@ -174,7 +182,7 @@ function loadPrefs(projectId: string): Omit<TablePrefs, "widths"> & { widths: Re
   let dataOrder = DEFAULT_DATA_ORDER;
   let visible = DEFAULT_VISIBLE;
   try {
-    const raw = localStorage.getItem(storageKey(projectId));
+    const raw = readStoredValue(storageKey(projectId));
     if (!raw) return { dataOrder, visible, widths };
     const parsed = JSON.parse(raw) as Partial<TablePrefs>;
     dataOrder = normalizeDataOrder(parsed.dataOrder);
@@ -255,7 +263,7 @@ export function RepositoryTestCaseTable({
     if (!prefsReady) return;
     try {
       const payload: TablePrefs = { dataOrder, visible, widths };
-      localStorage.setItem(storageKey(projectId), JSON.stringify(payload));
+      writeStoredValue(storageKey(projectId), JSON.stringify(payload));
     } catch {
       /* ignore */
     }
@@ -330,6 +338,7 @@ export function RepositoryTestCaseTable({
   }, []);
 
   const toggleColumnVisible = useCallback((id: RepoDataColumnId) => {
+    if (LOCKED_COLUMN_SET.has(id)) return;
     setVisible((prev) => ({ ...prev, [id]: !prev[id] }));
   }, []);
 
@@ -506,7 +515,7 @@ export function RepositoryTestCaseTable({
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}
-                className={`${innerTruncate} inline-flex items-center gap-1 font-mono text-xs text-[var(--brand-primary)] hover:underline`}
+                className={`${innerTruncate} inline-flex items-center gap-1 font-mono text-xs text-[var(--accent-light)] hover:underline`}
               >
                 <svg viewBox="0 0 24 24" className="h-3 w-3 shrink-0" fill="currentColor" aria-hidden="true">
                   <path d="M11.53 2c0 2.4 1.97 4.35 4.35 4.35h1.78v1.7c0 2.4 1.94 4.34 4.34 4.35V2.84a.84.84 0 0 0-.84-.84H11.53ZM6.77 6.8a4.362 4.362 0 0 0 4.34 4.34h1.8v1.72a4.362 4.362 0 0 0 4.34 4.34V7.63a.84.84 0 0 0-.84-.84H6.77ZM2 11.6c0 2.4 1.95 4.34 4.35 4.35h1.78v1.71c0 2.4 1.95 4.35 4.35 4.35V12.44a.84.84 0 0 0-.84-.84H2Z" />
@@ -575,7 +584,7 @@ export function RepositoryTestCaseTable({
       <button
         type="button"
         onClick={() => setColumnsMenuOpen((o) => !o)}
-        className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+        className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--background)] px-2.5 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
       >
         <IconColumns size={13} stroke={1.75} />
         Columns
@@ -585,23 +594,31 @@ export function RepositoryTestCaseTable({
           <p className="px-3 pb-2 text-xs font-medium uppercase tracking-wide text-[var(--muted-soft)]">
             Show fields · {visibleDataColumns.length} of {DATA_COLUMN_IDS.length}
           </p>
-          {DATA_COLUMN_IDS.map((id) => (
+          {DATA_COLUMN_IDS.map((id) => {
+            const locked = LOCKED_COLUMN_SET.has(id);
+            return (
             <label
               key={id}
-              className="flex cursor-pointer items-start gap-2 px-3 py-1.5 text-sm hover:bg-[var(--surface-secondary)]"
+              title={locked ? "Always shown" : undefined}
+              className={`flex items-start gap-2 px-3 py-1.5 text-sm ${locked ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-[var(--surface-secondary)]"}`}
             >
               <input
                 type="checkbox"
                 className="mt-0.5"
                 checked={visible[id]}
+                disabled={locked}
                 onChange={() => toggleColumnVisible(id)}
               />
               <span className="min-w-0 flex-1">
-                <span className="text-[var(--foreground)]">{COLUMN_LABELS[id]}</span>
+                <span className="text-[var(--foreground)]">
+                  {COLUMN_LABELS[id]}
+                  {locked && <span className="ml-1.5 text-[11px] font-normal text-[var(--muted-soft)]">(always shown)</span>}
+                </span>
                 <span className="mt-0.5 block font-mono text-[11px] text-[var(--muted)]">{FIELD_IDS[id]}</span>
               </span>
             </label>
-          ))}
+            );
+          })}
           <p className="mt-2 border-t border-[var(--border-subtle)] px-3 pt-2 text-[11px] text-[var(--muted)]">
             {
               "The selection column stays first. Drag headers to reorder data fields, and drag header edges to resize columns."
@@ -649,9 +666,19 @@ export function RepositoryTestCaseTable({
               <tr
                 key={tc.id}
                 onClick={() => void onOpenRow(tc.id)}
+                /*
+                 * An archived case reads differently from a live one.
+                 *
+                 * Basecamp 10212766570: archived cases were indistinguishable from working ones in the
+                 * table, so a user who had just archived three of them could not tell they had been
+                 * acted on. They are excluded from the list by default now, but they still appear when
+                 * the Archived status filter is on, and there they must not look like live rows.
+                 * Muted and struck through, not hidden — the row still opens.
+                 */
+                data-archived={tc.status === "Archived" ? "true" : undefined}
                 className={`cursor-pointer transition-colors hover:bg-[var(--surface-secondary)] ${
                   rowHighlightId === tc.id ? "bg-[var(--brand-soft)]" : ""
-                }`}
+                } ${tc.status === "Archived" ? "opacity-55 [&_td]:line-through [&_td:has(input)]:no-underline" : ""}`}
               >
                 {orderedColumns.map((col) => renderBodyCell(col, tc))}
               </tr>

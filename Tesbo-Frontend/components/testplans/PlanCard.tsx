@@ -1,6 +1,5 @@
 import Link from "next/link";
 import {
-  IconFileDescription,
   IconPencil,
   IconPlayerPlay,
   IconClock,
@@ -16,7 +15,7 @@ const STATUS_META: Record<PlanStatus, { label: string; text: string; dot: string
   draft: { label: "Draft", text: "var(--muted)", dot: "var(--muted-soft)", fill: "var(--surface-tertiary)" },
 };
 
-const AVATAR_COLORS = ["#7C5FCC", "#4C5FD5", "#2D9A52", "#1D7FA8", "#D97C0A", "#D83A3A"];
+import { AVATAR_COLORS } from "@/lib/avatarColors";
 
 function hashSeed(seed: string): number {
   let h = 0;
@@ -135,7 +134,7 @@ export function PlanCard({ plan, projectId, ownerName, canManage, onDelete }: Pl
       <div className="mb-3.5 flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <Link href={detailHref} className="truncate text-[14px] font-semibold text-[var(--foreground)] hover:text-[var(--brand-primary)]">
+            <Link href={detailHref} className="truncate text-[14px] font-semibold text-[var(--foreground)] hover:text-[var(--accent-light)]">
               {plan.name}
             </Link>
             <PlanStatusBadge status={status} />
@@ -154,14 +153,14 @@ export function PlanCard({ plan, projectId, ownerName, canManage, onDelete }: Pl
           <Link
             href={detailHref}
             title="Open plan"
-            className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+            className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
           >
             <IconPlayerPlay size={13} stroke={1.75} />
           </Link>
           <Link
             href={detailHref}
             title="Edit plan"
-            className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--brand-primary)]"
+            className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
           >
             <IconPencil size={13} stroke={1.75} />
           </Link>
@@ -170,7 +169,7 @@ export function PlanCard({ plan, projectId, ownerName, canManage, onDelete }: Pl
               type="button"
               title="Delete plan"
               onClick={() => onDelete(plan)}
-              className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--error)] hover:text-[var(--error)]"
+              className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
             >
               <IconTrash size={13} stroke={1.75} />
             </button>
@@ -183,10 +182,6 @@ export function PlanCard({ plan, projectId, ownerName, canManage, onDelete }: Pl
       </div>
 
       <div className="mt-auto flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-[var(--border-subtle)] pt-3">
-        <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
-          <IconFileDescription size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
-          <span className="font-mono text-[var(--foreground)]">{plan.caseCount}</span> cases
-        </span>
         <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
           <IconPlayerPlay size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
           <span className="font-mono text-[var(--foreground)]">{plan.runCount}</span> runs

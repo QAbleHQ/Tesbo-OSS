@@ -30,7 +30,7 @@ export function FolderTreeNodeRow({
     <div>
       <div
         className={`group flex items-center gap-1 rounded-[6px] py-1.5 pr-1.5 text-[13px] cursor-pointer ${
-          selectedId === node.id ? "bg-[var(--brand-soft)] text-[var(--brand-primary)] font-medium" : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
+          selectedId === node.id ? "bg-[var(--brand-soft)] text-[var(--accent-light)] font-medium" : "text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
         }`}
         style={{ paddingLeft: `${depth * 14 + 6}px` }}
         role="button"
@@ -58,7 +58,7 @@ export function FolderTreeNodeRow({
           <span className="w-[14px] shrink-0" />
         )}
         <IconFolder size={15} stroke={1.75} className="shrink-0 text-[var(--muted)]" />
-        <span className="truncate flex-1">{node.name}</span>
+        <span className="truncate flex-1" title={node.name}>{node.name}</span>
         {!node.isRoot && (
           <Menu
             align="right"

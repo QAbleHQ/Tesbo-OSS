@@ -37,9 +37,15 @@ function DonutChart({
     <svg width={size} height={size} viewBox="0 0 36 36" className="drop-shadow-sm">
       {data.map((d) => {
         const pct = d.value / total;
-        const dashArray = `${pct * circumference} ${circumference}`;
+        // dash + gap must sum to the circumference: the dash pattern period has to equal C for
+        // the `C - cumulative` offset below to place the segment at `cumulative`. Pairing a
+        // `pct*C C` array with that offset makes the period C*(1+pct), which shifts every segment
+        // forward by its own length (ring opens at 12 o'clock, slices overlap, last one vanishes).
+        const dashArray = `${pct * circumference} ${circumference - pct * circumference}`;
         const dashOffset = circumference - cumulative * circumference;
         cumulative += pct;
+        // strokeLinecap is butt, not round: a round cap adds strokeWidth/2 at each end, so on a
+        // 100-unit circumference a 7% slice paints ~11% wide and bleeds into its neighbour.
         return (
           <circle
             key={d.label}
@@ -51,7 +57,7 @@ function DonutChart({
             strokeWidth="3.5"
             strokeDasharray={dashArray}
             strokeDashoffset={dashOffset}
-            strokeLinecap="round"
+            strokeLinecap="butt"
             transform="rotate(-90 18 18)"
           />
         );
@@ -252,7 +258,7 @@ export default function PublicSharedRunPage() {
             <MetricCard
               label="Total Cases"
               value={stats.total}
-              color="bg-[var(--brand-surface)] text-[var(--brand-primary)]"
+              color="bg-[var(--brand-surface)] text-[var(--accent-light)]"
               icon={
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
