@@ -1565,7 +1565,9 @@ test.describe("knowledge base v2 — folders and documents", () => {
         `SELECT coalesce(f.is_root::text, 'no-folder') FROM knowledge_documents d ` +
           `LEFT JOIN knowledge_folders f ON f.id = d.folder_id WHERE d.id = ${literal(memory.id)};`,
       );
-      expect(parent, "Zyra's memory was left pointing at a deleted folder").toBe("t");
+      // "true", not "t": the query casts with `is_root::text`, and boolean::text renders as
+      // true/false. "t" is only psql's display form for an *uncast* boolean column.
+      expect(parent, "Zyra's memory was left pointing at a deleted folder").toBe("true");
 
       // And Zyra can still find it, which is the whole point: it is looked up by title.
       const listed = await asOwner.get(kbUrl("/documents"), { failOnStatusCode: false });

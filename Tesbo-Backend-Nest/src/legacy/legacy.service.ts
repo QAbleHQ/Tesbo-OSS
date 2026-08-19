@@ -341,6 +341,24 @@ function validateProjectFields(name: string | undefined, description: string | u
   }
 }
 
+// Matches the organizations.name VARCHAR(255) column. Same reasoning as PROJECT_NAME_MAX_LENGTH:
+// past this the INSERT fails with 22001 `value too long for type character varying(255)`, which
+// surfaces to the caller as a 500 on what is really a bad request.
+const WORKSPACE_NAME_MAX_LENGTH = 255;
+
+/**
+ * Shared by createWorkspace, createOrgAndProject and updateWorkspace, so every path that writes
+ * organizations.name is bounded by the column it writes to rather than only the rename path.
+ */
+function validateWorkspaceName(name: string, field: "orgName" | "name"): string {
+  const trimmed = name.trim();
+  if (!trimmed) throw new BadRequestException({ error: `${field} is required` });
+  if (trimmed.length > WORKSPACE_NAME_MAX_LENGTH) {
+    throw new BadRequestException({ error: `Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters` });
+  }
+  return trimmed;
+}
+
 function maskSecret(value: string): string {
   if (!value) return "********";
   const suffix = value.slice(-4);
@@ -983,8 +1001,7 @@ export class LegacyService implements OnModuleInit {
 
   async createWorkspace(userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
-    const name = String(body.orgName || body.name || "").trim();
-    if (!name) throw new BadRequestException({ error: "orgName is required" });
+    const name = validateWorkspaceName(String(body.orgName || body.name || ""), "orgName");
     const res = await this.db.transaction(async (client) => {
       const organizationId = await insertOrganization(client, name, normalizeCountryCode(body.country));
       await client.query(
@@ -1005,6 +1022,7 @@ export class LegacyService implements OnModuleInit {
     const orgName = String(body.orgName || "").trim();
     const name = String(body.projectName || body.name || "").trim();
     if (!orgName || !name) throw new BadRequestException({ error: "orgName and projectName are required" });
+    validateWorkspaceName(orgName, "orgName");
     const key = projectKey(String(body.projectKey || name));
     return this.db.transaction(async (client) => {
       const organizationId = await insertOrganization(client, orgName, normalizeCountryCode(body.country));
@@ -1101,9 +1119,7 @@ export class LegacyService implements OnModuleInit {
     if (callerRole === "qa_engineer")
       throw new ForbiddenException({ error: "Only workspace owners and managers can rename the workspace" });
 
-    const name = String(body.name || "").trim();
-    if (!name) throw new BadRequestException({ error: "name is required" });
-    if (name.length > 255) throw new BadRequestException({ error: "name must be 255 characters or fewer" });
+    const name = validateWorkspaceName(String(body.name || ""), "name");
 
     // `country` is optional here so a plain rename doesn't clear it; passing "" clears it explicitly.
     const country = body.country === undefined ? undefined : normalizeCountryCode(body.country);
@@ -1901,6 +1917,134 @@ export class LegacyService implements OnModuleInit {
     return res.rows.map(toCamel);
   }
 
+  /**
+   * Every projects-list card's stats, for all the caller's projects, in one response.
+   *
+   * The screen used to assemble this client-side: `listProjects()` and then, per project, five
+   * concurrent calls (test cases, suites, activity, members, runs). At fifteen projects that is
+   * seventy-five requests, and the page held its spinner until the slowest of them returned —
+   * `setLoading(false)` sat in the `finally` of the outer chain, so one slow call blocked first
+   * paint entirely. Against a managed Postgres where a round trip costs far more than the scan,
+   * that was also the single largest source of connection demand in the product.
+   *
+   * Five statements here, each grouped over the whole project set, replace those seventy-five
+   * requests — the cost stops scaling with the number of projects. Each one reproduces the
+   * semantics of the endpoint it displaces exactly, because the card's numbers have to keep
+   * agreeing with the screens those endpoints back:
+   *
+   *  - test case count excludes deleted AND Archived, matching listTestCases' default filters
+   *  - suite count is every suite, nested ones included, matching listSuites' flat list
+   *  - the run is the most recently created one with at least one executed case, and the pass rate
+   *    divides by executed cases rather than total — the same rule the project dashboard uses
+   *  - last activity is the newest row of the same union listActivity reads
+   */
+  async projectsOverview(userId: string | null | undefined) {
+    const uid = this.requireUser(userId);
+    const projects = await this.listProjects(uid);
+    if (!projects.length) return [];
+    const ids = projects.map((p: Record<string, any>) => String(p.id));
+
+    const [cases, suites, members, runs, activity] = await Promise.all([
+      // Mirrors listTestCases' default filters: live rows only, and Archived is not part of the
+      // working repository (see the comment on listTestCases).
+      this.db.query<{ project_id: string; count: number }>(
+        `SELECT project_id, COUNT(*)::int AS count
+           FROM testcases
+          WHERE project_id = ANY($1::uuid[]) AND deleted_at IS NULL AND status IS DISTINCT FROM 'Archived'
+          GROUP BY project_id`,
+        [ids]
+      ),
+      this.db.query<{ project_id: string; count: number }>(
+        `SELECT project_id, COUNT(*)::int AS count FROM suites WHERE project_id = ANY($1::uuid[]) GROUP BY project_id`,
+        [ids]
+      ),
+      this.db.query<{ project_id: string; user_id: string; name: string }>(
+        `SELECT pm.project_id, pm.user_id, COALESCE(NULLIF(u.name, ''), u.email, 'Unknown User') AS name
+           FROM project_members pm JOIN users u ON u.id = pm.user_id
+          WHERE pm.project_id = ANY($1::uuid[])
+          ORDER BY pm.project_id, name`,
+        [ids]
+      ),
+      // DISTINCT ON picks one row per project — the newest run that has actually been executed.
+      // Ranking by creation date alone is what let scheduling an empty run replace a finished
+      // 100% run with an unstarted one, so the executed filter is part of the definition, not a
+      // refinement of it.
+      this.db.query<{
+        project_id: string;
+        total_cases: number;
+        passed: number;
+        failed: number;
+        blocked: number;
+        untested: number;
+      }>(
+        `SELECT DISTINCT ON (c.project_id) c.project_id, ${LegacyService.EXECUTION_BUCKET_COUNTS}, c.created_at
+           FROM cycles c
+           LEFT JOIN cycle_items ci ON ci.cycle_id = c.id
+           LEFT JOIN executions e ON e.cycle_item_id = ci.id AND e.deleted_at IS NULL
+          WHERE c.project_id = ANY($1::uuid[])
+          GROUP BY c.id
+         HAVING COUNT(e.id) FILTER (WHERE e.status NOT IN ('Untested', 'Retest')) > 0
+          ORDER BY c.project_id, c.created_at DESC`,
+        [ids]
+      ),
+      // The same union listActivity reads, reduced to its newest timestamp per project. The outer
+      // query there additionally drops a testcase_* row when a zyra_* sibling exists within five
+      // seconds; that sibling is itself in this union, so the presence of activity is identical and
+      // only the timestamp can differ, by less than the five seconds that rule spans.
+      this.db.query<{ project_id: string; last_activity_at: string }>(
+        `SELECT project_id, MAX(created_at) AS last_activity_at FROM (
+           SELECT project_id, created_at FROM suites WHERE project_id = ANY($1::uuid[])
+           UNION ALL SELECT project_id, updated_at FROM suites
+             WHERE project_id = ANY($1::uuid[]) AND updated_at > created_at + interval '1 second'
+           UNION ALL SELECT project_id, created_at FROM plans WHERE project_id = ANY($1::uuid[])
+           UNION ALL SELECT project_id, updated_at FROM plans
+             WHERE project_id = ANY($1::uuid[]) AND updated_at > created_at + interval '1 second'
+           UNION ALL SELECT project_id, created_at FROM cycles WHERE project_id = ANY($1::uuid[])
+           UNION ALL SELECT project_id, updated_at FROM cycles
+             WHERE project_id = ANY($1::uuid[]) AND updated_at > created_at + interval '1 second'
+           UNION ALL SELECT project_id, created_at FROM bugs WHERE project_id = ANY($1::uuid[])
+           UNION ALL SELECT project_id, updated_at FROM bugs
+             WHERE project_id = ANY($1::uuid[]) AND updated_at > created_at + interval '1 second'
+           UNION ALL SELECT project_id, created_at FROM audit_logs WHERE project_id = ANY($1::uuid[])
+         ) events GROUP BY project_id`,
+        [ids]
+      )
+    ]);
+
+    const caseCounts = new Map(cases.rows.map((r) => [r.project_id, r.count]));
+    const suiteCounts = new Map(suites.rows.map((r) => [r.project_id, r.count]));
+    const lastActivity = new Map(activity.rows.map((r) => [r.project_id, r.last_activity_at]));
+    const runByProject = new Map(runs.rows.map((r) => [r.project_id, r]));
+    const membersByProject = new Map<string, { userId: string; name: string }[]>();
+    for (const row of members.rows) {
+      const list = membersByProject.get(row.project_id) ?? [];
+      list.push({ userId: row.user_id, name: row.name });
+      membersByProject.set(row.project_id, list);
+    }
+
+    return projects.map((project: Record<string, any>) => {
+      const id = String(project.id);
+      const testCaseCount = caseCounts.get(id) ?? 0;
+      const lastActivityAt = lastActivity.get(id) ?? null;
+      const run = runByProject.get(id);
+      const executed = run ? Math.max(0, run.total_cases - run.untested) : 0;
+      return {
+        ...project,
+        testCaseCount,
+        suiteCount: suiteCounts.get(id) ?? 0,
+        teamMembers: membersByProject.get(id) ?? [],
+        lastActivityAt,
+        // An empty project needs setting up; one with cases but no activity is configured but idle.
+        status: testCaseCount === 0 ? "setup_required" : lastActivityAt ? "active" : "configured",
+        runCounts:
+          run && executed > 0
+            ? { passed: run.passed, failed: run.failed, blocked: run.blocked, total: run.total_cases }
+            : null,
+        currentPassRate: run && executed > 0 ? Math.round((run.passed / executed) * 100) : null
+      };
+    });
+  }
+
   async createProject(userId: string | null | undefined, body: Body) {
     const uid = this.requireUser(userId);
     const name = String(body.name || "").trim();
@@ -2256,6 +2400,15 @@ export class LegacyService implements OnModuleInit {
     const suiteFilter = String(query.suiteId ?? "");
     const wantsUnfiled = suiteFilter.toLowerCase() === UNASSIGNED_SUITE_ID;
     if (wantsUnfiled) filters.push("suite_id IS NULL");
+    /*
+     * Anything else in `suiteId` has to be a uuid before it reaches the column. `suite_id` is uuid,
+     * so a malformed value (a stale id pasted from a URL, a truncated copy/paste) came back as
+     * Postgres 22P02 `invalid input syntax for type uuid` surfacing as a 500 — an unfiltered list
+     * request reading to the caller as a server fault rather than a bad parameter.
+     */
+    if (suiteFilter && !wantsUnfiled && !isUuid(suiteFilter)) {
+      throw new BadRequestException({ error: "suiteId must be a valid id" });
+    }
     /*
      * Archived cases are out of the working list unless they are asked for.
      *
@@ -4958,31 +5111,66 @@ export class LegacyService implements OnModuleInit {
     return this.activitySummary(projectId);
   }
 
-  async listActivity(projectId: string, query: Body) {
-    const limit = pageNumber(query.limit, 30, 0, 100);
-    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+  /**
+   * The filters shared by the per-project feed and the workspace-wide rollup.
+   *
+   * Every column is qualified with the `ae.` alias. The outer select of activityEventsSql is
+   * `FROM activity_events ae LEFT JOIN projects pr`, and `projects` also has a `created_at`, so an
+   * unqualified `created_at >= $n` — which is what `?since=` built — raised Postgres 42702
+   * `column reference "created_at" is ambiguous` and surfaced as a 500. The two summary callers
+   * already qualified their predicates; these two did not.
+   *
+   * `since` and the two id filters are also validated here rather than being handed to Postgres:
+   * an unparseable timestamp reached `$n::timestamptz` as 22007 and a malformed id reached a uuid
+   * column as 22P02, both 500s on what is really a bad query parameter.
+   */
+  private activityFeedFilters(
+    query: Body,
+    values: any[],
+    filters: string[],
+    { withProject }: { withProject: boolean }
+  ): void {
     const entityType = String(query.entityType || "").trim();
     const actorId = String(query.actorId || "").trim();
+    const projectId = String(query.projectId || "").trim();
     const search = String(query.search || "").trim();
     const since = String(query.since || "").trim();
-    const values: any[] = [projectId];
-    const filters = ["project_id = $1"];
+
     if (entityType) {
       values.push(entityType.split(",").map((t) => t.trim()).filter(Boolean));
-      filters.push(`entity_type = ANY($${values.length}::text[])`);
+      filters.push(`ae.entity_type = ANY($${values.length}::text[])`);
     }
     if (actorId) {
+      if (!isUuid(actorId)) throw new BadRequestException({ error: "actorId must be a valid id" });
       values.push(actorId);
-      filters.push(`actor_id = $${values.length}`);
+      filters.push(`ae.actor_id = $${values.length}`);
+    }
+    if (withProject && projectId) {
+      if (!isUuid(projectId)) throw new BadRequestException({ error: "projectId must be a valid id" });
+      values.push(projectId);
+      filters.push(`ae.project_id = $${values.length}`);
     }
     if (since) {
-      values.push(since);
-      filters.push(`created_at >= $${values.length}::timestamptz`);
+      if (Number.isNaN(Date.parse(since))) {
+        throw new BadRequestException({ error: "since must be a valid ISO 8601 timestamp" });
+      }
+      values.push(new Date(since).toISOString());
+      filters.push(`ae.created_at >= $${values.length}::timestamptz`);
     }
     if (search) {
       values.push(`%${search.toLowerCase()}%`);
-      filters.push(`(lower(coalesce(entity_name,'')) LIKE $${values.length} OR lower(coalesce(actor_name,'')) LIKE $${values.length} OR lower(action) LIKE $${values.length})`);
+      filters.push(
+        `(lower(coalesce(ae.entity_name,'')) LIKE $${values.length} OR lower(coalesce(ae.actor_name,'')) LIKE $${values.length} OR lower(ae.action) LIKE $${values.length})`
+      );
     }
+  }
+
+  async listActivity(projectId: string, query: Body) {
+    const limit = pageNumber(query.limit, 30, 0, 100);
+    const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+    const values: any[] = [projectId];
+    const filters = ["ae.project_id = $1"];
+    this.activityFeedFilters(query, values, filters, { withProject: false });
     const where = filters.join(" AND ");
 
     const eventsSql = this.activityEventsSql(where);
@@ -5217,33 +5405,9 @@ export class LegacyService implements OnModuleInit {
   private async listWorkspaceActivity(organizationId: string, query: Body) {
     const limit = pageNumber(query.limit, 30, 0, 100);
     const offset = pageNumber(query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-    const entityType = String(query.entityType || "").trim();
-    const actorId = String(query.actorId || "").trim();
-    const projectId = String(query.projectId || "").trim();
-    const search = String(query.search || "").trim();
-    const since = String(query.since || "").trim();
     const values: any[] = [organizationId];
     const filters = ["true"];
-    if (entityType) {
-      values.push(entityType.split(",").map((t) => t.trim()).filter(Boolean));
-      filters.push(`entity_type = ANY($${values.length}::text[])`);
-    }
-    if (actorId) {
-      values.push(actorId);
-      filters.push(`actor_id = $${values.length}`);
-    }
-    if (projectId) {
-      values.push(projectId);
-      filters.push(`project_id = $${values.length}`);
-    }
-    if (since) {
-      values.push(since);
-      filters.push(`created_at >= $${values.length}::timestamptz`);
-    }
-    if (search) {
-      values.push(`%${search.toLowerCase()}%`);
-      filters.push(`(lower(coalesce(entity_name,'')) LIKE $${values.length} OR lower(coalesce(actor_name,'')) LIKE $${values.length} OR lower(action) LIKE $${values.length})`);
-    }
+    this.activityFeedFilters(query, values, filters, { withProject: true });
     const where = filters.join(" AND ");
 
     const eventsSql = this.activityEventsSql(
@@ -7904,10 +8068,22 @@ export class LegacyService implements OnModuleInit {
    */
   private async zyraCreatedTestcaseCount(projectId: string): Promise<number> {
     const res = await this.db.query<{ count: string }>(
-      `SELECT COUNT(DISTINCT a.entity_id) AS count
-         FROM audit_logs a
-         JOIN testcases_active t ON t.id = a.entity_id
-        WHERE a.project_id = $1 AND a.action = 'zyra_created' AND a.entity_type = 'testcase'`,
+      // The join is `t.id::text = a.entity_id`, not `a.entity_id::uuid = t.id`, and the direction
+      // matters. `audit_logs.entity_id` is varchar(255) because it is polymorphic across entity
+      // types, and rows written for `auth` and `billing` hold non-uuid values. Casting that column
+      // to uuid would let Postgres evaluate the cast on those rows before the `entity_type` filter
+      // narrows them away — trading today's 42883 (`operator does not exist: uuid = character
+      // varying`) for an intermittent 22P02. Casting the testcase uuid to text instead can never
+      // raise. Scoping testcases to the project as well keeps this on idx_testcases_active rather
+      // than seq-scanning every test case in the database.
+      `SELECT COUNT(DISTINCT t.id) AS count
+         FROM testcases_active t
+         JOIN audit_logs a
+           ON a.entity_id = t.id::text
+          AND a.entity_type = 'testcase'
+          AND a.action = 'zyra_created'
+          AND a.project_id = $1
+        WHERE t.project_id = $1`,
       [projectId]
     );
     return Number(res.rows[0]?.count || 0);
