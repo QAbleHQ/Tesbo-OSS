@@ -23,6 +23,30 @@ export default function Modal({ open, onClose, title, children, className }: Mod
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [open, onClose]);
 
+  /*
+   * The app shell scrolls `main`, not `body`. A portaled overlay does not sit inside that
+   * element, so wheel events over the dialog chained to the bugs list behind it. Lock every
+   * scroller for the open duration and put overflow on the dialog itself.
+   */
+  useEffect(() => {
+    if (!open) return;
+    const html = document.documentElement;
+    const main = document.querySelector("main");
+    const prev = {
+      html: html.style.overflow,
+      body: document.body.style.overflow,
+      main: main instanceof HTMLElement ? main.style.overflow : "",
+    };
+    html.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+    if (main instanceof HTMLElement) main.style.overflow = "hidden";
+    return () => {
+      html.style.overflow = prev.html;
+      document.body.style.overflow = prev.body;
+      if (main instanceof HTMLElement) main.style.overflow = prev.main;
+    };
+  }, [open]);
+
   if (!open || typeof document === "undefined") return null;
 
   return createPortal(
@@ -34,15 +58,17 @@ export default function Modal({ open, onClose, title, children, className }: Mod
       <div
         role="presentation"
         className={cx(
-          "w-full rounded-[10px] border border-[var(--border)] bg-[var(--surface-overlay)] p-6 shadow-[var(--shadow-elevated)]",
+          "flex max-h-[calc(100dvh-2rem)] w-full flex-col overflow-hidden rounded-[10px] border border-[var(--border)] bg-[var(--surface-overlay)] shadow-[var(--shadow-elevated)]",
           className === undefined ? "max-w-[560px]" : className,
         )}
         onClick={(event) => event.stopPropagation()}
       >
         {title ? (
-          <h2 className="mb-4 shrink-0 text-[24px] font-semibold leading-[1.2] tracking-[-0.02em] text-[var(--ink-800)]">{title}</h2>
+          <h2 className="mb-0 shrink-0 px-6 pt-6 text-[24px] font-semibold leading-[1.2] tracking-[-0.02em] text-[var(--ink-800)]">{title}</h2>
         ) : null}
-        {children}
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pb-6 pt-4">
+          {children}
+        </div>
       </div>
     </div>,
     document.body

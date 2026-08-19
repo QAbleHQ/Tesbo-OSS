@@ -137,10 +137,20 @@ export default function AgentsPage() {
       .map((key) => CAPABILITY_META[key]);
   }, [state]);
 
-  if (loading || !state || !stats) {
+  if (loading) {
     return (
       <ListWorkspaceLayout header={<PageHeader title="Agents" />}>
         <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">Loading agents…</div>
+      </ListWorkspaceLayout>
+    );
+  }
+
+  if (!state || !stats) {
+    return (
+      <ListWorkspaceLayout header={<PageHeader title="Agents" />}>
+        <p className="rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
+          {error ?? "Failed to load agents."}
+        </p>
       </ListWorkspaceLayout>
     );
   }

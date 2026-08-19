@@ -8068,22 +8068,10 @@ export class LegacyService implements OnModuleInit {
    */
   private async zyraCreatedTestcaseCount(projectId: string): Promise<number> {
     const res = await this.db.query<{ count: string }>(
-      // The join is `t.id::text = a.entity_id`, not `a.entity_id::uuid = t.id`, and the direction
-      // matters. `audit_logs.entity_id` is varchar(255) because it is polymorphic across entity
-      // types, and rows written for `auth` and `billing` hold non-uuid values. Casting that column
-      // to uuid would let Postgres evaluate the cast on those rows before the `entity_type` filter
-      // narrows them away — trading today's 42883 (`operator does not exist: uuid = character
-      // varying`) for an intermittent 22P02. Casting the testcase uuid to text instead can never
-      // raise. Scoping testcases to the project as well keeps this on idx_testcases_active rather
-      // than seq-scanning every test case in the database.
-      `SELECT COUNT(DISTINCT t.id) AS count
-         FROM testcases_active t
-         JOIN audit_logs a
-           ON a.entity_id = t.id::text
-          AND a.entity_type = 'testcase'
-          AND a.action = 'zyra_created'
-          AND a.project_id = $1
-        WHERE t.project_id = $1`,
+      `SELECT COUNT(DISTINCT a.entity_id) AS count
+         FROM audit_logs a
+         JOIN testcases_active t ON t.id::text = a.entity_id
+        WHERE a.project_id = $1 AND a.action = 'zyra_created' AND a.entity_type = 'testcase'`,
       [projectId]
     );
     return Number(res.rows[0]?.count || 0);

@@ -12,6 +12,11 @@
 --
 -- Adding the constraint makes the retry idempotent, which is what the calling code has assumed all
 -- along.
+--
+-- Idempotent for merge into prod: main already shipped V79 with the same unique key. Stage already
+-- applied this file (checksum fork is ignored by migrate.ts). Prod will run this version for the
+-- first time after merge — the DELETE is a no-op if V79 already cleaned the table, and the
+-- constraint is created only when missing.
 
 -- Existing duplicates have to go before the constraint can be created.
 --
@@ -45,5 +50,15 @@ WITH ranked AS (
 DELETE FROM cycle_items
  WHERE id IN (SELECT id FROM ranked WHERE rn > 1);
 
-ALTER TABLE cycle_items
-    ADD CONSTRAINT cycle_items_cycle_id_testcase_id_key UNIQUE (cycle_id, testcase_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'cycle_items_cycle_id_testcase_id_key'
+      AND conrelid = 'public.cycle_items'::regclass
+  ) THEN
+    ALTER TABLE cycle_items
+      ADD CONSTRAINT cycle_items_cycle_id_testcase_id_key UNIQUE (cycle_id, testcase_id);
+  END IF;
+END $$;
