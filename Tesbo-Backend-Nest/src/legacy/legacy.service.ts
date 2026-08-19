@@ -7906,7 +7906,7 @@ export class LegacyService implements OnModuleInit {
     const res = await this.db.query<{ count: string }>(
       `SELECT COUNT(DISTINCT a.entity_id) AS count
          FROM audit_logs a
-         JOIN testcases_active t ON t.id = a.entity_id
+         JOIN testcases_active t ON t.id::text = a.entity_id
         WHERE a.project_id = $1 AND a.action = 'zyra_created' AND a.entity_type = 'testcase'`,
       [projectId]
     );
