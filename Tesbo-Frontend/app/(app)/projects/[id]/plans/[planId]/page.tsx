@@ -346,17 +346,6 @@ export default function PlanDetailPage() {
     }
   }
 
-  if (loading || !plan) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
-          <p className="text-sm text-[var(--muted)]">Loading plan…</p>
-        </div>
-      </div>
-    );
-  }
-
   const derivedProgress = useMemo<PlanProgress | null>(() => {
     if (!runs.length) return progress;
     const sum = (pick: (r: (typeof runs)[number]) => number) => runs.reduce((acc, r) => acc + (pick(r) || 0), 0);
@@ -379,6 +368,17 @@ export default function PlanDetailPage() {
       completionPercent: totalCases > 0 ? Math.round((executed / totalCases) * 100) : 0,
     };
   }, [runs, progress]);
+
+  if (loading || !plan) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
+          <p className="text-sm text-[var(--muted)]">Loading plan…</p>
+        </div>
+      </div>
+    );
+  }
 
   const total = derivedProgress?.totalCases || 0;
   /*
