@@ -25,6 +25,23 @@ export class AppConfigService {
   // Guards the transaction() helper: if its callback hangs between BEGIN and COMMIT, the connection
   // is held with an open transaction, which also pins vacuum. 0 disables it.
   readonly databaseIdleInTransactionTimeoutMs = this.integer("DB_IDLE_IN_TRANSACTION_TIMEOUT_MS", 60_000);
+  /*
+   * How long an idle keep-alive connection is held open, and how long headers may take to arrive.
+   *
+   * Node defaults these to 5s and 60s. 5s is shorter than any keep-alive client upstream of us
+   * holds a pooled socket for — nginx (deploy/nginx) reuses upstream connections for 60s by
+   * default, and so does every server-side HTTP agent that talks to this API — so the server would
+   * send FIN on a socket the client still believed was good, and a request written into that socket
+   * came back as ECONNRESET / "socket hang up" rather than as any HTTP status. It surfaces as an
+   * intermittent transport fault on whichever request happened to follow a pause, which reads like a
+   * network problem and is not one.
+   *
+   * The rule is that this must exceed the idle timeout of everything that connects to us, and that
+   * headersTimeout must in turn exceed this one (Node enforces the ordering: a headersTimeout below
+   * keepAliveTimeout closes connections mid-request).
+   */
+  readonly httpKeepAliveTimeoutMs = this.integer("HTTP_KEEP_ALIVE_TIMEOUT_MS", 65_000);
+  readonly httpHeadersTimeoutMs = this.integer("HTTP_HEADERS_TIMEOUT_MS", 70_000);
   readonly redisUrl = this.string("REDIS_URL", "redis://localhost:6379");
   readonly postmarkApiToken = this.string("POSTMARK_API_TOKEN", "");
   readonly postmarkFromEmail = this.string("POSTMARK_FROM_EMAIL", "noreply@example.com");

@@ -3,6 +3,7 @@ import path from "node:path";
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import * as XLSX from "xlsx";
 import { parseCsv } from "../utils/csv";
+import { env } from "../utils/env";
 import { anonymousContext } from "../utils/rbac-tenant";
 import { pngFile } from "../utils/uploads";
 import { readZipEntries } from "../utils/zip";
@@ -356,6 +357,87 @@ test.describe("connection pool under load", () => {
       expect((await res.json()).title).toBe(title);
     } finally {
       await deleteCase(request, testcase.id);
+    }
+  });
+});
+
+/*
+ * How long the server holds a connection open between requests.
+ *
+ * Node defaults `server.keepAliveTimeout` to 5 seconds. Every keep-alive client above this API
+ * holds a pooled socket for far longer than that — nginx reuses upstream connections for 60s by
+ * default, and so does Playwright's own request context — so the server would send FIN on a socket
+ * the client still believed was good. A request written into that socket in the race comes back as
+ * ECONNRESET, which surfaces as "socket hang up": no status, no body, nothing to diagnose from,
+ * and indistinguishable from a network fault. It lands on whichever request happens to follow a
+ * pause, which is why it reads as random.
+ *
+ * These are transport-level facts about the server, so they are asserted with a raw socket rather
+ * than through the request context — the point is what the server does with an idle connection, not
+ * what any particular client makes of it.
+ */
+test.describe("connection keep-alive", () => {
+  /** The longest idle any upstream keep-alive client here holds a pooled socket. */
+  const UPSTREAM_IDLE_SECONDS = 60;
+
+  test("the server advertises a keep-alive window longer than its clients hold sockets for", async ({
+    request,
+  }) => {
+    const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, { params: { limit: 1 } });
+    expect(res.status()).toBe(200);
+    const keepAlive = res.headers()["keep-alive"] ?? "";
+    const timeout = Number(/timeout=(\d+)/.exec(keepAlive)?.[1] ?? 0);
+    // Node's 5s default is the value this assertion exists to catch.
+    expect(timeout, `the server advertised "${keepAlive}" — Node's 5s default is not survivable`).toBeGreaterThan(
+      UPSTREAM_IDLE_SECONDS,
+    );
+  });
+
+  test("an idle connection is still usable after longer than the old 5s default", async () => {
+    const net = await import("node:net");
+    const url = new URL(env.apiBaseUrl);
+    const socket = net.createConnection({
+      host: url.hostname,
+      port: Number(url.port || (url.protocol === "https:" ? 443 : 80)),
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", () => resolve());
+        socket.once("error", reject);
+      });
+
+      const readResponse = () =>
+        new Promise<string>((resolve, reject) => {
+          let buffer = "";
+          const onData = (chunk: Buffer) => {
+            buffer += chunk.toString("utf-8");
+            // Headers are all this test reads; the status line is what it asserts on.
+            if (buffer.includes("\r\n\r\n")) {
+              socket.off("data", onData);
+              resolve(buffer);
+            }
+          };
+          socket.on("data", onData);
+          socket.once("error", reject);
+          socket.once("close", () => reject(new Error("the server closed the idle connection")));
+        });
+
+      const send = () =>
+        socket.write(`GET /api/health HTTP/1.1\r\nHost: ${url.host}\r\nConnection: keep-alive\r\n\r\n`);
+
+      send();
+      expect(await readResponse(), "the first request on a fresh connection failed").toContain("200");
+
+      // Idle past Node's 5s default, then reuse the same socket. Before keepAliveTimeout was raised
+      // the server had already sent FIN by now and this write produced the "socket hang up" the
+      // suite kept reporting as a network problem.
+      await new Promise((resolve) => setTimeout(resolve, 8_000));
+      expect(socket.destroyed, "the server dropped the connection while it was idle").toBe(false);
+
+      send();
+      expect(await readResponse(), "reusing an idle keep-alive connection failed").toContain("200");
+    } finally {
+      socket.destroy();
     }
   });
 });

@@ -17,7 +17,10 @@ import { anonymousContext, detachUserByEmail, loginAs, seedFixtureUser } from ".
  * Postgres, and `organizations.name` is VARCHAR(255) (V1_init_schema.sql) — so an over-long name is
  * a failed insert surfacing raw, which is the same defect shape as the custom-field name that used
  * to 500 past VARCHAR(160) and the `NaN` that used to reach a LIMIT clause. ONB-A-04 is the test for
- * it and is expected RED until `createWorkspace` refuses the length itself with a 400.
+ * it. The bound now lives in one shared validator (validateWorkspaceName) used by all three paths
+ * that write organizations.name — this route, /api/onboarding/org-and-project, and the rename —
+ * because only the rename had ever checked it, and the two create paths are the ones a new account
+ * actually goes through.
  *
  * The suite seeds its own workspace-less users rather than driving signup/start, deliberately:
  * signup/start is IP rate-limited and every worker looks like the same caller, so spending the
@@ -190,6 +193,31 @@ test.describe("onboarding — naming the first workspace", () => {
       // The boundary itself is legal and must still work.
       const atLimit = await api.post("/api/onboarding/workspace", {
         data: { orgName: "W".repeat(255) },
+        failOnStatusCode: false,
+      });
+      expect(atLimit.status(), `255-character name — ${await atLimit.text()}`).toBeLessThan(300);
+    } finally {
+      await api.dispose();
+    }
+  });
+
+  test("ONB-A-04b the org-and-project path bounds the workspace name too", async () => {
+    /*
+     * The same VARCHAR(255) column, reached through the other create route. Only the rename path
+     * had ever checked the length, so both create paths — the two a new account actually goes
+     * through — could still 500 on it.
+     */
+    const { email, api } = await freshUser("orgproject");
+    try {
+      const res = await api.post("/api/onboarding/org-and-project", {
+        data: { orgName: "W".repeat(256), projectName: "E2E Onboarding Project" },
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `256-character workspace name — ${await res.text()}`).toBe(400);
+      expect(orgCountFor(email), "a refused name must not half-create a workspace").toBe(0);
+
+      const atLimit = await api.post("/api/onboarding/org-and-project", {
+        data: { orgName: "W".repeat(255), projectName: "E2E Onboarding Project" },
         failOnStatusCode: false,
       });
       expect(atLimit.status(), `255-character name — ${await atLimit.text()}`).toBeLessThan(300);

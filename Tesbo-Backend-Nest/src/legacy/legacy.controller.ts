@@ -231,6 +231,13 @@ export class LegacyController {
     return this.legacy.createProject(req.userId, body);
   }
 
+  // Declared above `/api/projects/:id` on purpose — Nest matches in declaration order, so the
+  // parameterised route would otherwise capture "overview" as a project id and 404.
+  @Get("/api/projects/overview")
+  projectsOverview(@Req() req: AuthenticatedRequest) {
+    return this.legacy.projectsOverview(req.userId);
+  }
+
   @Get("/api/projects/:id")
   getProject(@Req() req: AuthenticatedRequest, @Param("id") id: string) {
     return this.legacy.getProjectForUser(req.userId, id);

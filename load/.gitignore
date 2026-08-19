@@ -1,0 +1,3 @@
+# Run artefacts and credentials — never committed.
+.run-logs/
+.env

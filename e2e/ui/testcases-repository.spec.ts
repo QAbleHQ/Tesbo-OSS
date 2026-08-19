@@ -298,7 +298,9 @@ test.describe("test case repository (UI)", () => {
     await seedCase(stamp("ColumnsCase"));
     const page = await openRepository(browser);
 
-    await page.getByRole("button", { name: "Columns" }).click();
+    // `exact` matters: getByRole name matching is a substring match, and a seeded case titled
+    // "E2E ColumnsCase …" makes the row match "Columns" alongside the toolbar control.
+    await page.getByRole("button", { name: "Columns", exact: true }).click();
 
     // The reporter's note names these three: without an ID or a title a row cannot be identified at
     // all, and the screenshot shows a table of bare checkboxes once they are all off.
@@ -315,7 +317,9 @@ test.describe("test case repository (UI)", () => {
     await seedCase(title);
     const page = await openRepository(browser);
 
-    await page.getByRole("button", { name: "Columns" }).click();
+    // `exact` matters: getByRole name matching is a substring match, and a seeded case titled
+    // "E2E ColumnsCase …" makes the row match "Columns" alongside the toolbar control.
+    await page.getByRole("button", { name: "Columns", exact: true }).click();
 
     // Turn off everything the picker will let us turn off.
     const checkboxes = page.getByRole("checkbox", { disabled: false });

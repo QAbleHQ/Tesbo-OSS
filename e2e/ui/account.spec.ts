@@ -192,7 +192,10 @@ test.describe("account screen and password reset (UI)", () => {
     // Too weak for validatePasswordValue (no uppercase, no digit, under 8).
     await page.reload();
     await fillChangePassword(page, FIXTURE_PASSWORD, "short");
-    await expect(page.getByText(/at least 8 characters/i)).toBeVisible();
+    // The full error text, not /at least 8 characters/i: PASSWORD_RULES_HINT ("At least 8
+    // characters, with an uppercase letter, …") is rendered under the field at all times, so the
+    // loose pattern matched the permanent hint as well as the error and strict mode refused both.
+    await expect(page.getByText("Password must be at least 8 characters", { exact: true })).toBeVisible();
 
     // Through all three refusals the stored password is untouched.
     expect(await passwordWorks(FIXTURE_PASSWORD)).toBe(true);
@@ -307,7 +310,7 @@ test.describe("account screen and password reset (UI)", () => {
     await page.locator("#password").fill("short");
     await page.locator("#confirmPassword").fill("short");
     await page.getByRole("button", { name: /^Reset password$/i }).click();
-    await expect(page.getByText(/at least 8 characters/i)).toBeVisible();
+    await expect(page.getByText("Password must be at least 8 characters", { exact: true })).toBeVisible();
 
     // Long enough but no uppercase and no digit.
     await page.locator("#password").fill("alllowercase");

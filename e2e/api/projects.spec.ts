@@ -1,6 +1,7 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { env } from "../utils/env";
 import { dbControlAvailable } from "../utils/psql";
+import { anonymousContext } from "../utils/rbac-tenant";
 import {
   backdate,
   createBug,
@@ -554,6 +555,257 @@ test.describe("project dashboard summary", () => {
       expect(listed.untested).toBe(0);
     } finally {
       await deleteProjects(api, [project.id]);
+    }
+  });
+});
+
+/*
+ * GET /api/projects/overview — the projects-list cards' stats, in one response.
+ *
+ * The screen used to build these client-side from five calls per project, and held its spinner
+ * until all of them returned; at fifteen projects that was seventy-eight requests gating first
+ * paint, and it is what made ui/projects-list time out wholesale. The endpoint that replaced the
+ * fan-out has to keep agreeing with the endpoints it displaced — a card that disagrees with the
+ * screen it links to is worse than a slow card — so each test here pins one field against the
+ * endpoint the card used to read it from, rather than against a hardcoded number.
+ */
+test.describe("projects overview", () => {
+  const tenant = screensTenant();
+  const skipReason = screensSuiteSkipReason(tenant);
+
+  test.skip(!!skipReason, skipReason ?? "");
+
+  let api: APIRequestContext;
+
+  test.beforeAll(async () => {
+    api = await screensApi();
+  });
+
+  test.afterAll(async () => {
+    await api?.dispose();
+  });
+
+  type Overview = {
+    id: string;
+    name: string;
+    testCaseCount: number;
+    suiteCount: number;
+    teamMembers: { userId: string; name: string }[];
+    lastActivityAt: string | null;
+    status: "setup_required" | "configured" | "active";
+    runCounts: { passed: number; failed: number; blocked: number; total: number } | null;
+    currentPassRate: number | null;
+  };
+
+  async function overviewFor(projectId: string): Promise<Overview> {
+    const res = await api.get("/api/projects/overview", { failOnStatusCode: false });
+    expect(res.status(), `overview — ${await res.text()}`).toBe(200);
+    const list: Overview[] = await res.json();
+    const entry = list.find((p) => p.id === projectId);
+    expect(entry, `the overview omitted project ${projectId}`).toBeTruthy();
+    return entry!;
+  }
+
+  test("PVW-A-01 the route is not swallowed as a project id", async () => {
+    // `/api/projects/:id` is declared right beside this route, and Nest matches in declaration
+    // order — get that ordering wrong and "overview" is read as a project id and 404s. This is the
+    // cheapest possible regression test for a mistake that is invisible in review.
+    const res = await api.get("/api/projects/overview", { failOnStatusCode: false });
+    expect(res.status()).toBe(200);
+    expect(Array.isArray(await res.json())).toBe(true);
+  });
+
+  test("PVW-A-02 an anonymous caller is refused", async () => {
+    const anon = await anonymousContext();
+    try {
+      const res = await anon.get("/api/projects/overview", { failOnStatusCode: false });
+      expect(res.status(), "the overview answered an unauthenticated caller").toBeGreaterThanOrEqual(401);
+      expect(res.status()).toBeLessThan(500);
+    } finally {
+      await anon.dispose();
+    }
+  });
+
+  test("PVW-A-03 a brand-new project needs setup and claims no run it has not had", async () => {
+    const project = await createProject(api);
+    try {
+      const entry = await overviewFor(project.id);
+      expect(entry.testCaseCount).toBe(0);
+      expect(entry.suiteCount).toBe(0);
+      expect(entry.status, "an empty project is not 'setup required'").toBe("setup_required");
+      // The distinction the card exists to make: no run at all is not a 0% run. Reporting 0 here is
+      // what made a project with an unexecuted run read as a total failure on the list.
+      expect(entry.runCounts).toBeNull();
+      expect(entry.currentPassRate).toBeNull();
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-04 the test case count matches the repository, and excludes archived and deleted cases", async () => {
+    const project = await createProject(api);
+    try {
+      const live = await createTestCase(api, project.id, { title: `E2E Overview Live ${uniqueSuffix()}` });
+      const archived = await createTestCase(api, project.id, { title: `E2E Overview Archived ${uniqueSuffix()}` });
+      const removed = await createTestCase(api, project.id, { title: `E2E Overview Deleted ${uniqueSuffix()}` });
+      await api.patch(`/api/projects/${project.id}/testcases/${archived.id}`, { data: { status: "Archived" } });
+      await api.delete(`/api/projects/${project.id}/testcases/${removed.id}`);
+
+      // Pinned against listTestCases' own total rather than against "1": that endpoint backs the
+      // repository table, and the card's number has to be the same number the table reports.
+      const listed = await (
+        await api.get(`/api/projects/${project.id}/testcases`, { params: { limit: 1 } })
+      ).json();
+      const entry = await overviewFor(project.id);
+      expect(entry.testCaseCount).toBe(listed.total);
+      expect(entry.testCaseCount, "archived or deleted cases are being counted").toBe(1);
+      expect(live.id).toBeTruthy();
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-05 the suite count includes nested suites, matching the suite tree", async () => {
+    const project = await createProject(api);
+    try {
+      const parent = await createSuite(api, project.id, `E2E Overview Parent ${uniqueSuffix()}`);
+      // Posted directly rather than through the helper: createSuite takes a name only, and a nested
+      // suite is the whole point of this test.
+      const child = await api.post(`/api/projects/${project.id}/suites`, {
+        data: { name: `E2E Overview Child ${uniqueSuffix()}`, parentId: parent.id },
+        failOnStatusCode: false,
+      });
+      expect(child.status(), `nesting a suite — ${await child.text()}`).toBeLessThan(300);
+
+      // "Total Suites" on the card counts every suite, nested ones included — listSuites returns
+      // them as one flat list, so its length is the contract the card's number has to meet.
+      const suites = await (await api.get(`/api/projects/${project.id}/suites`)).json();
+      const entry = await overviewFor(project.id);
+      expect(entry.suiteCount).toBe(suites.length);
+      expect(entry.suiteCount, "a nested suite is not being counted").toBe(2);
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-06 the members match the project's own member list", async () => {
+    const project = await createProject(api);
+    try {
+      const members = await (await api.get(`/api/projects/${project.id}/members`)).json();
+      const entry = await overviewFor(project.id);
+      expect(entry.teamMembers.map((m) => m.userId).sort()).toEqual(
+        members.map((m: { userId: string }) => m.userId).sort(),
+      );
+      // The card renders initials from this, so an empty name would draw a blank avatar.
+      for (const member of entry.teamMembers) expect(member.name.trim()).not.toBe("");
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-07 the pass rate divides by executed cases, not by the run's total", async () => {
+    const project = await createProject(api);
+    try {
+      // Two passed, one failed, one never executed: 2/3 executed = 67%, not 2/4 = 50%.
+      await seedRun(api, project.id, { statuses: ["Passed", "Passed", "Failed", "Untested"] });
+
+      const entry = await overviewFor(project.id);
+      expect(entry.runCounts).not.toBeNull();
+      expect(entry.runCounts!.total).toBe(4);
+      expect(entry.runCounts!.passed).toBe(2);
+      expect(entry.runCounts!.failed).toBe(1);
+      // Dividing by totalCases is what made a project read 100% on its dashboard and a lower number
+      // on the list card for the same run.
+      expect(entry.currentPassRate).toBe(67);
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-08 a newer unexecuted run does not displace the last executed one", async () => {
+    const project = await createProject(api);
+    try {
+      await seedRun(api, project.id, { statuses: ["Passed", "Passed"] });
+      // Scheduling an empty run is routine, and ranking by creation date alone let it replace a
+      // finished 100% run with an unstarted one — the card then read 0% or "—" for a project whose
+      // last real run passed everything.
+      await seedRun(api, project.id, { statuses: ["Untested", "Untested"] });
+
+      const entry = await overviewFor(project.id);
+      expect(entry.currentPassRate, "an unexecuted run displaced the last executed one").toBe(100);
+      expect(entry.runCounts!.total).toBe(2);
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-09 a project with cases but no activity is configured, and activity makes it active", async () => {
+    const project = await createProject(api);
+    try {
+      await createTestCase(api, project.id, { title: `E2E Overview Status ${uniqueSuffix()}` });
+      const entry = await overviewFor(project.id);
+      // Creating a test case is itself logged, so this project has activity — the point of the
+      // assertion is that the three states are derived, not that they are constant.
+      expect(["configured", "active"]).toContain(entry.status);
+      expect(entry.status, "a project with cases still reads as needing setup").not.toBe("setup_required");
+
+      // Whatever lastActivityAt reports has to agree with the feed the Activity screen renders.
+      const feed = await (
+        await api.get(`/api/projects/${project.id}/activity`, { params: { limit: 1 } })
+      ).json();
+      if (feed.list.length === 0) {
+        expect(entry.lastActivityAt).toBeNull();
+      } else {
+        expect(entry.lastActivityAt, "the card claims no activity while the feed shows some").not.toBeNull();
+        // The feed's outer query drops a testcase_* row when a zyra_* sibling exists within five
+        // seconds, so the two timestamps can differ by less than that window but no more.
+        const drift = Math.abs(
+          new Date(entry.lastActivityAt!).getTime() - new Date(feed.list[0].createdAt).getTime(),
+        );
+        expect(drift, "last activity disagrees with the feed by more than the dedup window").toBeLessThan(5000);
+      }
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-10 an archived project drops out of the overview, as it does from the list", async () => {
+    const project = await createProject(api);
+    let archived = false;
+    try {
+      expect((await overviewFor(project.id)).id).toBe(project.id);
+
+      // Whatever the list hides, the overview must hide too — otherwise the page would carry stats
+      // for a card it never draws.
+      const res = await api.delete(`/api/projects/${project.id}`, { failOnStatusCode: false });
+      expect(res.status(), `archiving the project — ${await res.text()}`).toBeLessThan(400);
+      archived = true;
+
+      const list: Overview[] = await (await api.get("/api/projects/overview")).json();
+      expect(list.some((p) => p.id === project.id), "an archived project is still in the overview").toBe(false);
+      const projects = await (await api.get("/api/projects")).json();
+      expect(projects.some((p: { id: string }) => p.id === project.id)).toBe(false);
+    } finally {
+      if (!archived) await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PVW-A-11 one response covers every project the caller can see", async () => {
+    const first = await createProject(api);
+    const second = await createProject(api);
+    try {
+      await createTestCase(api, first.id, { title: `E2E Overview Multi ${uniqueSuffix()}` });
+
+      const list: Overview[] = await (await api.get("/api/projects/overview")).json();
+      const projects = await (await api.get("/api/projects")).json();
+      // The whole point of the endpoint: one call, every card. If it ever returned a subset the
+      // page would silently show stale zeros for the rest.
+      expect(list.length).toBe(projects.length);
+      expect(list.map((p) => p.id).sort()).toEqual(projects.map((p: { id: string }) => p.id).sort());
+      expect(list.find((p) => p.id === first.id)!.testCaseCount).toBe(1);
+      expect(list.find((p) => p.id === second.id)!.testCaseCount).toBe(0);
+    } finally {
+      await deleteProjects(api, [first.id, second.id]);
     }
   });
 });

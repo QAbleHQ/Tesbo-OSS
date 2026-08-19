@@ -635,6 +635,25 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return api<ProjectSummary[]>("/api/projects");
 }
 
+/**
+ * Every projects-list card's stats in one response, replacing the five per-project calls the
+ * screen used to fan out (test cases, suites, activity, members, runs). See
+ * LegacyService.projectsOverview for why the fan-out had to go.
+ */
+export interface ProjectOverview extends ProjectSummary {
+  testCaseCount: number;
+  suiteCount: number;
+  teamMembers: { userId: string; name: string }[];
+  lastActivityAt: string | null;
+  status: "setup_required" | "configured" | "active";
+  runCounts: { passed: number; failed: number; blocked: number; total: number } | null;
+  currentPassRate: number | null;
+}
+
+export async function listProjectsOverview(): Promise<ProjectOverview[]> {
+  return api<ProjectOverview[]>("/api/projects/overview");
+}
+
 export interface CreateProjectResponse {
   id: string;
   key: string;

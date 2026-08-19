@@ -964,12 +964,32 @@ test.describe("pagination", () => {
       expect(unassigned, "the summary reports no Unassigned bucket").toBeTruthy();
       expect(unassigned.count).toBeGreaterThanOrEqual(unfiled.length);
 
-      // "none" is a sentinel, not a uuid — it must not reach the column as one and 500.
+      // "none" is a sentinel, not a uuid — it must not reach the column as one and 500. `suite_id`
+      // is a uuid column, so anything else that is not the sentinel raised 22P02 (`invalid input
+      // syntax for type uuid`) and answered 500 on what is a malformed query parameter: a stale id
+      // pasted from a URL, or a truncated copy/paste, reading to the caller as a server fault.
+      for (const bad of ["not-a-uuid", "123", " "]) {
+        const bogus = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+          params: { search: marker, suiteId: bad },
+          failOnStatusCode: false,
+        });
+        expect(bogus.status(), `suiteId=${JSON.stringify(bad)} — ${await bogus.text()}`).toBeLessThan(500);
+      }
+      // A non-empty malformed value is a bad request, stated as one.
       const bogus = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
         params: { search: marker, suiteId: "not-a-uuid" },
         failOnStatusCode: false,
       });
-      expect(bogus.status(), `a malformed suiteId answered ${bogus.status()}`).toBeLessThan(500);
+      expect(bogus.status(), `a malformed suiteId answered ${bogus.status()}`).toBe(400);
+
+      // An id that is well-formed but belongs to nothing is not malformed — it is a filter that
+      // matches no rows, and must still answer 200 with an empty list rather than 400.
+      const unknown = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+        params: { search: marker, suiteId: "00000000-0000-4000-8000-000000000000" },
+        failOnStatusCode: false,
+      });
+      expect(unknown.status(), `an unknown but well-formed suiteId — ${await unknown.text()}`).toBe(200);
+      expect((await unknown.json()).list).toEqual([]);
     } finally {
       for (const id of [...filed, ...unfiled]) await deleteCase(request, id);
       await deleteSuite(request, suite.id);

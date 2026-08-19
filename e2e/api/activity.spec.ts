@@ -200,7 +200,10 @@ test.describe("activity feed", () => {
     // An update as well as a create: the synthetic *-updated- branches drop the actor even where the
     // create branch keeps it, so a create-only assertion would miss half the defect.
     const renamed = `${suiteName} renamed`;
-    const updated = await asOwner.put(`/api/projects/${tenant!.mainProjectId}/suites/${suiteId}`, {
+    // PATCH /api/suites/:suiteId, not PUT /api/projects/:projectId/suites/:suiteId — suite update
+    // and delete are addressed by suite id alone (LegacyController), so the project-scoped PUT this
+    // spec used answered "Cannot PUT …" and read as a failure to rename.
+    const updated = await asOwner.patch(`/api/suites/${suiteId}`, {
       data: { name: renamed },
       failOnStatusCode: false,
     });
@@ -367,7 +370,8 @@ test.describe("activity feed", () => {
     const suiteId = await createSuite(suiteName);
     expect(entryFor((await feed({ limit: 100 })).list, suiteName)).toBeTruthy();
 
-    const deleted = await asOwner.delete(`/api/projects/${tenant!.mainProjectId}/suites/${suiteId}`, {
+    // Addressed by suite id alone, as above.
+    const deleted = await asOwner.delete(`/api/suites/${suiteId}`, {
       failOnStatusCode: false,
     });
     expect(deleted.ok(), `deleting the suite — ${await deleted.text()}`).toBeTruthy();
@@ -442,6 +446,48 @@ test.describe("activity feed", () => {
       });
       expect(res.status(), `${JSON.stringify(params)} — ${await res.text()}`).toBeLessThan(500);
     }
+  });
+
+  test("ACT-A-14b a malformed since or actorId is refused as a bad request, not swallowed", async () => {
+    /*
+     * These two used to reach Postgres unchecked — `since` as `$n::timestamptz` (22007) and
+     * `actorId` against a uuid column (22P02) — and both answered 500. "Not a 500" is the floor;
+     * the contract is that a bad query parameter says so, because the screen's date picker and
+     * actor filter are what put these values on the wire and it has to know which one it got wrong.
+     */
+    const malformed: Record<string, string>[] = [
+      { since: "not-a-date" },
+      { since: "2026-13-45" },
+      { actorId: "not-a-uuid" },
+    ];
+    for (const params of malformed) {
+      const res = await asOwner.get(`/api/projects/${tenant!.mainProjectId}/activity`, {
+        params,
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `${JSON.stringify(params)} — ${await res.text()}`).toBe(400);
+    }
+
+    // A well-formed value on the same parameters still works, so the guard rejects the input rather
+    // than the feature.
+    const ok = await feed({ since: "1970-01-01T00:00:00.000Z", limit: 5 });
+    expect(Array.isArray(ok.list)).toBe(true);
+  });
+
+  test("ACT-A-14c the since filter resolves against a feed that joins projects", async () => {
+    /*
+     * Regression for Postgres 42702. The feed's outer query is
+     * `FROM activity_events ae LEFT JOIN projects pr`, and `projects` has a `created_at` of its own,
+     * so the unqualified `created_at >= $n` that `?since=` built was ambiguous and every filtered
+     * request answered 500. A plain 200 with the entry present is the whole assertion — the bug was
+     * that the query would not run at all.
+     */
+    const name = stamp("SinceResolves");
+    await createSuite(name);
+
+    const since = new Date(Date.now() - 60 * 60_000).toISOString();
+    const { list } = await feed({ since, limit: 100 });
+    expect(entryFor(list, name), "an entry from the last hour is missing from a since-filtered feed").toBeTruthy();
   });
 
   test("ACT-A-15 the summary agrees with the feed it summarises", async () => {

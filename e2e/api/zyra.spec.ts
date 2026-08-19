@@ -842,4 +842,33 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
       }
     }
   });
+
+  test("ZYR-A-32 the counter survives audit rows whose entity_id is not a uuid", async () => {
+    /*
+     * `audit_logs.entity_id` is varchar(255) because it is polymorphic across entity types, and the
+     * `auth` and `billing` rows genuinely hold non-uuid values (an email, a Stripe id). That is why
+     * the join to testcases has to cast the testcase's uuid to text rather than casting entity_id to
+     * uuid: the obvious fix for the `operator does not exist: uuid = character varying` this counter
+     * used to raise would swap a permanent 42883 for an intermittent 22P02, firing only once a
+     * non-uuid row landed in the project and only if the planner evaluated the cast before the
+     * entity_type filter.
+     *
+     * So the guard is asserted directly: a non-uuid audit row in this project, then read the tile.
+     */
+    const res = await asOwner.get(url("/agents/zyra"), { failOnStatusCode: false });
+    expect(res.status(), `reading the agent before seeding — ${await res.text()}`).toBe(200);
+    const before = Number((await res.json()).testcasesCreated);
+
+    exec(
+      "INSERT INTO audit_logs (project_id, actor_id, action, entity_type, entity_id, entity_name, organization_id) " +
+        `VALUES (${literal(tenant!.mainProjectId)}, NULL, 'login', 'auth', ${literal("not-a-uuid@example.com")}, ` +
+        `'E2E non-uuid entity', ${literal(tenant!.organizationId)});`,
+    );
+
+    // No cleanup: audit_logs is append-only (V62_audit_logs_immutable.sql), which is exactly why
+    // this row is harmless to leave behind and why the assertion is a delta of zero.
+    const after = await asOwner.get(url("/agents/zyra"), { failOnStatusCode: false });
+    expect(after.status(), `a non-uuid audit row broke the agent — ${await after.text()}`).toBe(200);
+    expect(Number((await after.json()).testcasesCreated), "a non-uuid audit row changed the count").toBe(before);
+  });
 });

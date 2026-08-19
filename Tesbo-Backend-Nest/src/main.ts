@@ -86,6 +86,13 @@ async function bootstrap() {
 
   app.useGlobalFilters(new HttpExceptionFilter(config.maxUploadSize));
   await app.listen(config.port, "0.0.0.0");
+
+  // Set after listen(), which is when the underlying http.Server exists. See
+  // AppConfigService.httpKeepAliveTimeoutMs for why Node's 5s default is not survivable behind a
+  // keep-alive client.
+  const httpServer = app.getHttpServer() as import("http").Server;
+  httpServer.keepAliveTimeout = config.httpKeepAliveTimeoutMs;
+  httpServer.headersTimeout = config.httpHeadersTimeoutMs;
   console.log(`Nest backend running on http://localhost:${config.port}`);
 
   // Announced on every boot so "will this stack email real people?" is answerable from the logs
