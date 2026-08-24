@@ -2135,6 +2135,13 @@ export interface BugAttachment {
 
 export type BugSeverity = "Critical" | "High" | "Medium" | "Low";
 
+/*
+ * Priority is nullable and separate from severity: severity is how bad the defect is, priority is
+ * how soon it gets worked on (Basecamp 10226247009). null means untriaged — a real state, distinct
+ * from any of P0..P3.
+ */
+export type BugPriority = "P0" | "P1" | "P2" | "P3";
+
 export interface BugItem {
   id: string;
   title: string;
@@ -2142,6 +2149,7 @@ export interface BugItem {
   externalUrl: string;
   status: string;
   severity: BugSeverity;
+  priority: BugPriority | null;
   executionId: string | null;
   testcaseId: string | null;
   cycleId: string | null;
@@ -2174,6 +2182,7 @@ export async function createBug(projectId: string, data: {
   description?: string;
   externalUrl?: string;
   severity?: BugSeverity;
+  priority?: BugPriority | null;
   integrationProvider?: "JIRA" | "LINEAR" | null;
   integrationIssueKey?: string | null;
   betterbugsUrl?: string | null;
@@ -2188,6 +2197,8 @@ export async function updateBug(bugId: string, data: {
   externalUrl?: string;
   status?: string;
   severity?: BugSeverity;
+  // null clears it back to untriaged; omitted leaves the stored value alone.
+  priority?: BugPriority | null;
   integrationProvider?: "JIRA" | "LINEAR" | null;
   integrationIssueKey?: string | null;
   betterbugsUrl?: string | null;

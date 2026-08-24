@@ -126,3 +126,79 @@ test.describe("test execution updates", () => {
     }
   });
 });
+
+/*
+ * Defect references belong to failures — Basecamp 10221790207 ("Only failed test case should show
+ * defect key and Defect URL").
+ *
+ * The two fields were offered on every status, so a case could pass while still carrying a defect
+ * key. That value is not cosmetic: it travels into the run's CSV export and the traceability matrix,
+ * where it reads as a bug against a case that passed. The screens hide the inputs unless the status
+ * is Failed, and the service clears the stored values when any other status is recorded — hiding
+ * alone would have left the stale reference in the database and in every export that reads it.
+ */
+test.describe("defect fields follow the result", () => {
+  test("a defect recorded on a failure is kept while it is still failing", async ({ request }) => {
+    const fixture = await makeExecutionFixture(request);
+    try {
+      await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
+        data: { status: "Failed", defectKey: "PROJ-123", defectUrl: "https://tracker.example/PROJ-123" },
+      });
+      const [failed] = await (await request.get(`/api/cycles/${fixture.cycle.id}/executions`)).json();
+      expect(failed.status).toBe("Failed");
+      expect(failed.defectKey).toBe("PROJ-123");
+      expect(failed.defectUrl).toBe("https://tracker.example/PROJ-123");
+
+      // Editing the failure without resending them leaves them alone.
+      await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
+        data: { status: "Failed", actualResult: "still broken" },
+      });
+      const [stillFailed] = await (await request.get(`/api/cycles/${fixture.cycle.id}/executions`)).json();
+      expect(stillFailed.defectKey).toBe("PROJ-123");
+    } finally {
+      await cleanupExecutionFixture(request, fixture);
+    }
+  });
+
+  test("passing the case afterwards clears the defect it used to carry", async ({ request }) => {
+    const fixture = await makeExecutionFixture(request);
+    try {
+      await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
+        data: { status: "Failed", defectKey: "PROJ-456", defectUrl: "https://tracker.example/PROJ-456" },
+      });
+      await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
+        data: { status: "Passed" },
+      });
+
+      const [passed] = await (await request.get(`/api/cycles/${fixture.cycle.id}/executions`)).json();
+      expect(passed.status).toBe("Passed");
+      expect(passed.defectKey ?? null, "a passing case must not still point at a defect").toBeNull();
+      expect(passed.defectUrl ?? null).toBeNull();
+    } finally {
+      await cleanupExecutionFixture(request, fixture);
+    }
+  });
+
+  test("the same clearing applies to blocked and skipped, and the export follows", async ({ request }) => {
+    const fixture = await makeExecutionFixture(request);
+    try {
+      for (const status of ["Blocked", "Skipped", "Retest", "Untested"]) {
+        await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
+          data: { status: "Failed", defectKey: "PROJ-789" },
+        });
+        await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
+          data: { status },
+        });
+        const [row] = await (await request.get(`/api/cycles/${fixture.cycle.id}/executions`)).json();
+        expect(row.status).toBe(status);
+        expect(row.defectKey ?? null, `${status} should not keep a defect key`).toBeNull();
+      }
+
+      // The export reads the same column, which is where a stale key did the real damage.
+      const csv = await (await request.get(`/api/cycles/${fixture.cycle.id}/export/csv`)).text();
+      expect(csv).not.toContain("PROJ-789");
+    } finally {
+      await cleanupExecutionFixture(request, fixture);
+    }
+  });
+});

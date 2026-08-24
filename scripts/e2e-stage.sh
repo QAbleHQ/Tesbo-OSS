@@ -37,10 +37,25 @@ unset DATABASE_URL STRIPE_WEBHOOK_SECRET STRIPE_SECRET_KEY \
       STRIPE_PRICE_ID_PRO_MONTHLY STRIPE_PRICE_ID_PRO_ANNUAL \
       STRIPE_PRICE_ID_PRO_MONTHLY_INR STRIPE_PRICE_ID_PRO_ANNUAL_INR || true
 
-set -a
-# shellcheck disable=SC1090
-source "$STAGE_ENV"
-set +a
+# Parsed, not sourced. `source` runs the file as shell, so an unquoted value with a space in it
+# ("Testing Stagging 105070") is read as a command — and a stray backtick in a password would be
+# executed. This reads KEY=VALUE the way a .env file is actually written, and strips one layer of
+# surrounding quotes if present.
+declare -a STAGE_KEYS=()
+while IFS= read -r line || [ -n "$line" ]; do
+  case "$line" in ''|'#'*) continue ;; esac
+  [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+  key="${BASH_REMATCH[1]}"
+  val="${BASH_REMATCH[2]}"
+  val="${val%"${val##*[![:space:]]}"}"                       # trim trailing whitespace
+  if [ "${#val}" -ge 2 ]; then
+    case "$val" in
+      \"*\"|\'*\') val="${val:1:${#val}-2}" ;;
+    esac
+  fi
+  export "$key=$val"
+  STAGE_KEYS+=("$key")
+done < "$STAGE_ENV"
 
 : "${API_BASE_URL:?set API_BASE_URL in e2e/stage.env}"
 : "${WEB_BASE_URL:?set WEB_BASE_URL in e2e/stage.env}"
@@ -113,13 +128,9 @@ LAUNCHER="$E2E/.run-logs/$STAMP.command"
   echo "echo 'specs:  $*'"
   echo "echo 'log:    $LOG'"
   echo "echo"
-  while IFS= read -r line; do
-    case "$line" in
-      ''|'#'*) continue ;;
-    esac
-    key="${line%%=*}"
+  for key in "${STAGE_KEYS[@]}"; do
     printf 'export %s=%q\n' "$key" "${!key:-}"
-  done < "$STAGE_ENV"
+  done
   echo "export E2E_AUTO_PROVISION=false"
   printf 'npx playwright test'
   for a in "$@"; do printf ' %q' "$a"; done

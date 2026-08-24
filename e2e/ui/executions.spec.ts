@@ -183,3 +183,95 @@ test.describe("removing cases from a run", () => {
     }
   });
 });
+
+/*
+ * The run detail screen's progress bar, its defect fields and its Log Bug modal.
+ *
+ * Three cards: 10221778177 ("Progress not showing correct colours or progress" — blocked, skipped
+ * and pending were summed into one amber segment, so a run with 100 of 109 still pending was 92%
+ * "blocked"), 10221790207 ("Only failed test case should show defect key and Defect URL") and
+ * 10226268634 ("The Log Bug UI should be consistent across both Test Run → Log Bug and Bug Page →
+ * Log Bug" — the run's modal collected no severity at all, so every bug filed from a run took the
+ * column default).
+ */
+test.describe("run detail — progress, defects and the bug modal", () => {
+  test("EXE-U-30 every status gets its own colour in the run progress bar", async ({ page }) => {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    const cycle = await (
+      await api.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `UI Progress Run ${Date.now()}` } })
+    ).json();
+    const cases: string[] = [];
+    try {
+      // One case per status, so every segment has to be painted and none can hide behind another.
+      for (const label of ["pass", "fail", "block", "skip", "pending"]) {
+        const tc = await (
+          await api.post(`/api/projects/${ctx.projectId}/testcases`, {
+            data: { title: `UI Progress ${label} ${Date.now()}` },
+          })
+        ).json();
+        cases.push(tc.id);
+      }
+      await api.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds: cases } });
+      const executions = await (await api.get(`/api/cycles/${cycle.id}/executions`)).json();
+      const statuses = ["Passed", "Failed", "Blocked", "Skipped"];
+      for (let i = 0; i < statuses.length; i++) {
+        await api.patch(`/api/cycles/${cycle.id}/executions/${executions[i].id}`, { data: { status: statuses[i] } });
+      }
+
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+      await expect(page.getByText("Progress", { exact: true })).toBeVisible();
+
+      const segments = page.locator("div.flex.h-2 > div");
+      await expect(segments, "one segment per status present in the run").toHaveCount(5);
+      const colors = await segments.evaluateAll((els) =>
+        els.map((el) => getComputedStyle(el).backgroundColor),
+      );
+      // Five distinct colours: the defect was three statuses sharing the blocked amber.
+      expect(new Set(colors).size, `segments repeated a colour: ${colors.join(", ")}`).toBe(5);
+    } finally {
+      await api.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+      for (const id of cases) {
+        await api.delete(`/api/projects/${ctx.projectId}/testcases/${id}`, { failOnStatusCode: false });
+      }
+      await api.dispose();
+    }
+  });
+
+  test("EXE-U-31 defect fields appear only once the case is marked Failed", async ({ page }) => {
+    const { cycle, testcase } = await setUpCycleWithOneCase(`UI Defect Visibility ${Date.now()}`);
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+      await page.getByText(testcase.title).first().click();
+
+      // The side panel opens on Untested: no defect inputs.
+      await expect(page.getByLabel("Defect Key")).toBeHidden();
+
+      await page.getByRole("button", { name: "Failed", exact: true }).first().click();
+      await expect(page.getByText("Defect Key")).toBeVisible();
+
+      await page.getByRole("button", { name: "Passed", exact: true }).first().click();
+      await expect(page.getByText("Defect Key")).toBeHidden();
+    } finally {
+      await cleanUp(cycle.id, testcase.id);
+    }
+  });
+
+  test("EXE-U-32 the run's Log Bug modal asks for severity and priority, like the Bugs page", async ({ page }) => {
+    const { cycle, testcase } = await setUpCycleWithOneCase(`UI Log Bug Fields ${Date.now()}`);
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+      await page.getByText(testcase.title).first().click();
+      await page.getByRole("button", { name: "Failed", exact: true }).first().click();
+
+      // Marking Failed is what opens this modal.
+      await expect(page.getByText("Report a Bug", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Severity")).toBeVisible();
+      await expect(page.getByLabel("Bug priority")).toBeVisible();
+      // Same defaults as the Bugs page: severity Medium, priority untriaged.
+      await expect(page.getByLabel("Severity")).toHaveValue("Medium");
+      await expect(page.getByLabel("Bug priority")).toHaveValue("");
+    } finally {
+      await cleanUp(cycle.id, testcase.id);
+    }
+  });
+});

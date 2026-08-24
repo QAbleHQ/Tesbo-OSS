@@ -60,6 +60,8 @@ import {
   type TestCaseListItem,
   type SuiteNode,
   type BugItem,
+  type BugSeverity,
+  type BugPriority,
   type IssueSearchResult,
   type TestRunListItem,
 } from "@/lib/api";
@@ -77,6 +79,15 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 /* ───── Constants ───── */
 const EXEC_STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"] as const;
 const RUN_TABS = ["All", "Passed", "Failed", "Blocked", "Skipped", "Pending"] as const;
+/*
+ * Basecamp 10226268634 ("The Log Bug UI should be consistent across both Test Run → Log Bug and Bug
+ * Page → Log Bug"). This modal collected only a title, a description and evidence, so every bug
+ * filed from a run landed on the severity column's 'Medium' default with no way to say otherwise —
+ * while the same action from the Bugs page asked for severity (and now priority). Same fields, same
+ * order, same wording as projects/[id]/bugs/page.tsx.
+ */
+const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
+const BUG_PRIORITIES: BugPriority[] = ["P0", "P1", "P2", "P3"];
 type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
 import { AVATAR_COLORS } from "@/lib/avatarColors";
@@ -300,13 +311,49 @@ function tabBadgeStyle(tab: RunTab): { bg: string; color: string } {
 }
 
 /* ───── Segmented progress bar ───── */
-function RunProgressBar({ passed, failed, other, total }: { passed: number; failed: number; other: number; total: number }) {
+/*
+ * Basecamp 10221778177 ("Progress not showing correct colours or progress").
+ *
+ * Blocked, skipped and pending used to be summed into one `other` segment painted --warning, which
+ * is the BLOCKED colour. On a run of 109 cases with 100 still pending, the bar was ~92% amber and
+ * read as "everything is blocked" — and because the segments filled the whole track regardless, the
+ * fill length said nothing about progress either.
+ *
+ * Each status is now its own segment in the colour the rest of the app uses for it, including
+ * --status-notrun-dot for untested. This is the same fix 7f9b59a applied to the plan detail screen
+ * for Basecamp 10213200614; the run screen had the identical defect and was missed.
+ *
+ * Consequence, accepted deliberately and shared with that screen: the bar always totals 100%, so
+ * the percentage beside it — not the fill length — is the progress reading.
+ */
+function RunProgressBar({
+  passed,
+  failed,
+  blocked,
+  skipped,
+  pending,
+  total,
+}: {
+  passed: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  pending: number;
+  total: number;
+}) {
   const pct = (n: number) => (total ? `${(n / total) * 100}%` : "0%");
+  const segments: [number, string][] = [
+    [passed, "var(--status-pass-dot)"],
+    [failed, "var(--status-fail-dot)"],
+    [blocked, "var(--status-blocked-dot)"],
+    [skipped, "var(--status-skipped-dot)"],
+    [pending, "var(--status-notrun-dot)"],
+  ];
   return (
     <div className="flex h-2 gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
-      {passed > 0 && <div style={{ width: pct(passed), background: "var(--success)" }} />}
-      {failed > 0 && <div style={{ width: pct(failed), background: "var(--error)" }} />}
-      {other > 0 && <div style={{ width: pct(other), background: "var(--warning)" }} />}
+      {segments.map(([value, color], index) =>
+        value > 0 ? <div key={index} style={{ width: pct(value), background: color }} /> : null
+      )}
     </div>
   );
 }
@@ -421,6 +468,8 @@ export default function TestRunDetailPage() {
   const [showBugDialog, setShowBugDialog] = useState(false);
   const [bugExecution, setBugExecution] = useState<ExecutionItem | null>(null);
   const [bugTitle, setBugTitle] = useState("");
+  const [bugSeverity, setBugSeverity] = useState<BugSeverity>("Medium");
+  const [bugPriority, setBugPriority] = useState<BugPriority | "">("");
   const [bugDesc, setBugDesc] = useState("");
   const [bugAlreadyLogged, setBugAlreadyLogged] = useState(false);
   const [bugExistingChoice, setBugExistingChoice] = useState<"JIRA" | "LINEAR" | "TESBO">("TESBO");
@@ -670,6 +719,8 @@ export default function TestRunDetailPage() {
     setShowBugDialog(false);
     setBugExecution(null);
     setBugTitle("");
+    setBugSeverity("Medium");
+    setBugPriority("");
     setBugDesc("");
     setBugAlreadyLogged(false);
     setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
@@ -692,6 +743,8 @@ export default function TestRunDetailPage() {
       const bug = await createBug(projectId, {
         title: bugTitle.trim(),
         description: bugDesc.trim(),
+        severity: bugSeverity,
+        priority: bugPriority || null,
         externalUrl: selfLogged ? bugUrl.trim() : undefined,
         integrationProvider: selfLogged && bugSelfSystem !== "OTHER" ? bugSelfSystem : null,
         integrationIssueKey: null,
@@ -1113,7 +1166,14 @@ export default function TestRunDetailPage() {
                       {passRate}% pass rate
                     </span>
                   </div>
-                  <RunProgressBar passed={stats.passed} failed={stats.failed} other={stats.blocked + stats.skipped + stats.pending} total={stats.total} />
+                  <RunProgressBar
+                    passed={stats.passed}
+                    failed={stats.failed}
+                    blocked={stats.blocked}
+                    skipped={stats.skipped}
+                    pending={stats.pending}
+                    total={stats.total}
+                  />
                 </div>
               </div>
             </section>
@@ -1572,13 +1632,16 @@ export default function TestRunDetailPage() {
         title="Report a Bug"
       >
         <div className="space-y-4">
-          <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 p-3">
-            <svg className="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          {/* Themed rather than the literal red-50/red-200 these carried: in dark mode that pale
+              block stayed light while its text followed the theme, which is the same mismatch the
+              danger Button variant was fixed for. */}
+          <div className="flex items-start gap-2 rounded-lg border border-[var(--error-border)] bg-[var(--error-soft)] p-3">
+            <svg className="w-5 h-5 text-[var(--status-fail-text)] mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
             </svg>
             <div>
-              <p className="text-sm font-medium text-red-800">Test case marked as Failed</p>
-              <p className="text-xs text-red-600 mt-0.5">
+              <p className="text-sm font-medium text-[var(--status-fail-text)]">Test case marked as Failed</p>
+              <p className="text-xs text-[var(--status-fail-text)] opacity-80 mt-0.5">
                 {bugExecution?.externalId && <span className="font-mono mr-1">{bugExecution.externalId}</span>}
                 {bugExecution?.title || bugExecution?.snapshotTitle || "Untitled test case"}
               </p>
@@ -1680,6 +1743,37 @@ export default function TestRunDetailPage() {
                   rows={3}
                   placeholder="Steps to reproduce, expected vs actual behavior…"
                 />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-[var(--muted)] mb-1">Severity</label>
+                  <Select
+                    value={bugSeverity}
+                    onChange={(e) => setBugSeverity(e.target.value as BugSeverity)}
+                    aria-label="Severity"
+                  >
+                    {BUG_SEVERITIES.map((severity) => (
+                      <option key={severity} value={severity}>
+                        {severity}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[var(--muted)] mb-1">Priority</label>
+                  <Select
+                    value={bugPriority}
+                    onChange={(e) => setBugPriority(e.target.value as BugPriority | "")}
+                    aria-label="Bug priority"
+                  >
+                    <option value="">Not set</option>
+                    {BUG_PRIORITIES.map((priority) => (
+                      <option key={priority} value={priority}>
+                        {priority}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
               </div>
               <BugEvidenceField
                 mode={bugEvidenceMode}
@@ -1994,8 +2088,10 @@ export default function TestRunDetailPage() {
                 />
               </div>
 
-              {/* Defect key/url */}
-              <div className="space-y-3">
+              {/* Defect key/url — Failed only (Basecamp 10221790207). Same rule as the full-page
+                  execute screen: a defect reference on a passing case ends up in the export and the
+                  traceability matrix, so the backend clears it when a non-Failed status is saved. */}
+              <div className="space-y-3" hidden={panelStatus !== "Failed"}>
                 <div>
                   <label className="mb-1 block text-[12.5px] font-medium text-[var(--muted)]">Defect Key</label>
                   <Input type="text" value={panelDefectKey} onChange={(e) => setPanelDefectKey(e.target.value)} placeholder="e.g. PROJ-123" />

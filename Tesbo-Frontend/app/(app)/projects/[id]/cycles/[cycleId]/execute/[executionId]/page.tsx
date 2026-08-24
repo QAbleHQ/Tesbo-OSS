@@ -221,7 +221,14 @@ export default function ExecutionDetailPage() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          {/*
+            * Basecamp 10221790207 — "Only failed test case should show defect key and Defect URL".
+            * A defect reference on a passing case is not just clutter: it flows into the CSV export
+            * and the traceability matrix, where it reads as a bug against a case that passed. The
+            * backend clears the stored values when a status other than Failed is saved, so hiding
+            * the inputs here does not leave data behind invisibly.
+            */}
+          <div className="grid grid-cols-2 gap-3" hidden={status !== "Failed"}>
             <div>
               <label className="block text-sm font-medium text-[var(--muted)] mb-1">
                 Defect Key

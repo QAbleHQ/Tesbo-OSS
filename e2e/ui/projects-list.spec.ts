@@ -1121,3 +1121,41 @@ test.describe("projects list — search and sort", () => {
     expect(inGrid).toEqual([names.alpha, names.beta, names.gamma]);
   });
 });
+
+/*
+ * Basecamp 10221710841 ("[Projects] List view not showing failed pass rate").
+ *
+ * The grid card has always carried the full breakdown — a segmented bar plus "N passed · N failed".
+ * The list row drew a single green bar filled to the pass rate, so a project at 67% looked like a
+ * third of its work was missing rather than failed. Same data, same colours, counts in a tooltip
+ * because the row has no space for a legend.
+ */
+test.describe("projects list — the list view reports failures", () => {
+  test("PRJ-U-30 a project with failures shows a failed segment and count in the list row", async ({ page }) => {
+    const api: APIRequestContext = await screensApi();
+    const project = await createProject(api);
+    try {
+      // Two passes and one failure: a pass rate that is neither 0 nor 100, so a bar that only ever
+      // paints the passing share is visibly wrong.
+      await seedRun(api, project.id, { statuses: ["Passed", "Passed", "Failed"], status: "Completed" });
+
+      await page.goto("/projects");
+      await page.getByRole("button", { name: /list view/i }).click();
+
+      const row = page.locator("a").filter({ hasText: project.name }).first();
+      await expect(row).toBeVisible();
+      await expect(row, "the failure count has to be readable without opening the project").toContainText(
+        /1 failed/,
+      );
+
+      // And the bar itself carries a fail-coloured segment, not just green.
+      const segments = row.locator("div[title] > div");
+      const colors = await segments.evaluateAll((els) => els.map((el) => getComputedStyle(el).backgroundColor));
+      expect(colors.length, "the compact bar should paint one segment per outcome").toBeGreaterThanOrEqual(2);
+      expect(new Set(colors).size, "passed and failed must not be the same colour").toBeGreaterThan(1);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
+    }
+  });
+});

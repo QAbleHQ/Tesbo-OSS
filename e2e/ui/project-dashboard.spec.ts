@@ -338,14 +338,58 @@ test.describe("project dashboard — the stat cards", () => {
   });
 
   /*
-   * The workspace dashboard at /dashboard carries the same four count cards, and had the same
-   * "Plans" label. Covered here rather than in a new file because it is the same defect and the same
-   * one-word fix; there is no other spec that owns those tiles.
+   * The workspace dashboard at /dashboard carries the same count cards and had the same problem,
+   * reported separately as Basecamp 10226480729 ("[workspace Dashboard] need to update lables").
+   *
+   * The card asked for "Total Suites", "Test Plans" and "Test Runs". The tiles read Test cases /
+   * Test suites / Test plans / Test runs instead: no other tile is prefixed with "Total", and this
+   * way the four read as one family in the product's own sentence case. "Cycles" was the real
+   * offender — internal vocabulary on screen, when every other surface calls them runs.
    */
-  test("DSH-U-15 the workspace dashboard names it Test plans too", async ({ page }) => {
+  test("DSH-U-15 the workspace dashboard tiles read as one Test … family", async ({ page }) => {
     await page.goto("/dashboard");
-    await expect(page.getByText("Test plans", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText(/^Plans$/)).toHaveCount(0);
+    for (const label of ["Test cases", "Test suites", "Test plans", "Test runs"]) {
+      await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+    }
+    // None of the pre-fix wording survives anywhere on the screen.
+    for (const stale of [/^Plans$/, /^Suites$/, /^Cycles$/]) {
+      await expect(page.getByText(stale)).toHaveCount(0);
+    }
+  });
+
+  /*
+   * Basecamp 10221720616 ("[Dashboard] Executaion progress bar colours are not visible").
+   *
+   * The workspace dashboard's execution breakdown painted each bar with the same class it used for
+   * the status badge — a hardcoded Tailwind 100-level pastel (bg-emerald-100 and friends) on a
+   * --surface-tertiary track. The bar was rendered; it simply could not be seen, and in dark mode
+   * the pastels did not follow the theme at all. The fill is the solid status dot colour now.
+   */
+  test("DSH-U-17 the workspace execution bars are painted in a visible status colour", async ({ page }) => {
+    const project = await createProject(api);
+    try {
+      await seedRun(api, project.id, { statuses: ["Passed", "Failed", "Blocked"], status: "Completed" });
+
+      await page.goto("/dashboard");
+      await expect(page.getByText("Execution status")).toBeVisible();
+
+      const fills = page.locator("div.h-2.overflow-hidden.rounded-full > div");
+      const count = await fills.count();
+      expect(count, "one bar per execution status").toBeGreaterThan(0);
+
+      for (let i = 0; i < count; i++) {
+        const background = await fills.nth(i).evaluate((el) => getComputedStyle(el).backgroundColor);
+        // A transparent or unset fill is the original defect; so is a bar that inherits the track.
+        expect(background, `bar ${i} has no colour of its own`).not.toBe("rgba(0, 0, 0, 0)");
+        expect(background).not.toBe("transparent");
+      }
+
+      // The four bars must not all be the same colour either — that was the other half of it.
+      const colors = await fills.evaluateAll((els) => els.map((el) => getComputedStyle(el).backgroundColor));
+      expect(new Set(colors).size, `every bar shares one colour: ${colors.join(", ")}`).toBeGreaterThan(1);
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
   });
 
   test("DSH-U-16 a large count doesn't break the card layout", async ({ page }) => {
