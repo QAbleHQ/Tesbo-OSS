@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authMe, changePassword } from "@/lib/api";
-import { Button, Card, Field, FieldError, FieldHint, FieldLabel, PasswordInput } from "@/components/ui";
+import { Button, Card, Field, FieldError, FieldHint, FieldLabel, PageLoader, PasswordInput } from "@/components/ui";
 import { PASSWORD_MAX_LENGTH, PASSWORD_RULES_HINT, validatePasswordValue } from "@/lib/validation";
 
 export default function AccountPage() {
@@ -121,11 +121,7 @@ export default function AccountPage() {
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[200px] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   return (

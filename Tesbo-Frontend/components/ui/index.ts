@@ -13,6 +13,8 @@ export { default as CopyButton } from "@/components/ui/CopyButton";
 export type { CopyButtonProps } from "@/components/ui/CopyButton";
 export { default as Drawer } from "@/components/ui/Drawer";
 export { default as EmptyStateBlock } from "@/components/ui/EmptyStateBlock";
+export { PageLoader } from "@/components/ui/PageLoader";
+export type { PageLoaderProps } from "@/components/ui/PageLoader";
 
 export { Field, FieldLabel, FieldHint, FieldError } from "@/components/ui/Field";
 export { default as Input } from "@/components/ui/Input";

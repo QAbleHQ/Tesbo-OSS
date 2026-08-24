@@ -12,15 +12,8 @@ import {
 } from "@/lib/redirect";
 import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { AuthModeToggle } from "@/components/auth/AuthModeToggle";
+import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
-
-function AuthLoadingScreen() {
-  return (
-    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
-      <p className="text-sm text-white/40">Loading...</p>
-    </div>
-  );
-}
 
 function unreachableDestinationMessage(target: string): string {
   return `Signed in, but we could not open ${target}. Sign in again to continue.`;

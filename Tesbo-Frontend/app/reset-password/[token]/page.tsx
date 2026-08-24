@@ -7,16 +7,9 @@ import Link from "next/link";
 import { IconCircleCheck } from "@tabler/icons-react";
 import { checkPasswordResetToken, resetPassword } from "@/lib/api";
 import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
+import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { Button, Field, FieldError, FieldHint, FieldLabel, PasswordInput } from "@/components/ui";
 import { PASSWORD_MAX_LENGTH, PASSWORD_RULES_HINT, validatePasswordValue } from "@/lib/validation";
-
-function AuthLoadingScreen() {
-  return (
-    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
-      <p className="text-sm text-white/40">Loading...</p>
-    </div>
-  );
-}
 
 export default function ResetPasswordPage() {
   const params = useParams();

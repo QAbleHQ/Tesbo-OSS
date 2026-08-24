@@ -27,6 +27,7 @@ import {
   FieldError,
   Card,
   Modal,
+  PageLoader,
 } from "@/components/ui";
 
 // ─── Role helpers ─────────────────────────────────────────────────────────────
@@ -317,11 +318,7 @@ export default function MembersTab() {
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[200px] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader />;
   }
 
   const pendingInvites = invitations.filter((i) => i.status === "pending" || i.status === "expired");

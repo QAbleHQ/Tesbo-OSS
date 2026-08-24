@@ -34,6 +34,7 @@ import {
   Field,
   FieldError,
   FieldLabel,
+  PageLoader,
 } from "@/components/ui";
 import {
   PROJECT_DESCRIPTION_MAX_LENGTH,
@@ -428,14 +429,7 @@ export default function ProjectSettingsPage() {
   }
 
   if (!project) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
-          <p className="text-sm text-[var(--muted)]">Loading project settings…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading project settings…" />;
   }
 
   const projectName = typeof project.name === "string" ? project.name : "";

@@ -22,7 +22,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { authMe, getZyraAgent, type ZyraAgentState, type ZyraCapabilities, type ZyraTask } from "@/lib/api";
-import { Modal, StatusChip } from "@/components/ui";
+import { Modal, PageLoader, StatusChip } from "@/components/ui";
 import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
 
 type ChipIcon = ComponentType<{ size?: number; stroke?: number; className?: string }>;
@@ -140,7 +140,7 @@ export default function AgentsPage() {
   if (loading) {
     return (
       <ListWorkspaceLayout header={<PageHeader title="Agents" />}>
-        <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">Loading agents…</div>
+        <PageLoader label="Loading agents…" />
       </ListWorkspaceLayout>
     );
   }

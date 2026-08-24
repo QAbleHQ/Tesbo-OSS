@@ -24,6 +24,7 @@ import {
   FieldLabel,
   Input,
   Modal,
+  PageLoader,
   Textarea,
 } from "@/components/ui";
 import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
@@ -486,14 +487,7 @@ function ProjectsPageContent() {
   }, [projects, searchQuery, sortBy]);
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--ink-200)] border-t-[var(--denim)]" />
-          <p className="text-[13px] text-[var(--ink-400)]">Loading projects…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading projects…" />;
   }
 
   return (
@@ -739,13 +733,7 @@ function ProjectsPageContent() {
 
 export default function ProjectsPage() {
   return (
-    <Suspense
-      fallback={
-        <div className="min-h-screen flex items-center justify-center">
-          <p className="text-[var(--muted)]">Loading…</p>
-        </div>
-      }
-    >
+    <Suspense fallback={<PageLoader variant="screen" />}>
       <ProjectsPageContent />
     </Suspense>
   );

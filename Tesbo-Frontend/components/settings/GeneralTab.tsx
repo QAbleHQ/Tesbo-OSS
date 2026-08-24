@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { getWorkspace, updateWorkspace } from "@/lib/api";
 import { countryOptions } from "@/lib/countries";
-import { Button, Card, Field, FieldError, FieldHint, FieldLabel, Input, Select } from "@/components/ui";
+import { Button, Card, Field, FieldError, FieldHint, FieldLabel, Input, PageLoader, Select } from "@/components/ui";
 
 export default function GeneralTab() {
   const [name, setName] = useState("");
@@ -66,11 +66,7 @@ export default function GeneralTab() {
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[200px] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader />;
   }
 
   return (

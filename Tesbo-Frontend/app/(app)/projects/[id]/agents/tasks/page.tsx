@@ -16,7 +16,7 @@ import {
   type ZyraAgentState,
   type ZyraTask,
 } from "@/lib/api";
-import { Button, Field, FieldLabel, Modal, Select, StatusChip, Textarea } from "@/components/ui";
+import { Button, Field, FieldLabel, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 import TaskQuickViewPanel, { JIRA_BADGE_CLASS, normalizeTaskStatus as normalizeStatus, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
 
@@ -150,7 +150,7 @@ export default function ZyraTasksPage() {
   if (loading || !state) {
     return (
       <StandardPageLayout header={<PageHeader title="Agent tasks" />}>
-        <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">Loading tasks...</div>
+        <PageLoader label="Loading tasks…" />
       </StandardPageLayout>
     );
   }

@@ -19,7 +19,7 @@ import {
   type RequirementsSummary,
   type TicketSourceStats,
 } from "@/lib/api";
-import { Button, Input, StatusChip } from "@/components/ui";
+import { Button, Input, PageLoader, StatusChip } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 import { SyncStatusPanel, useSyncRun } from "@/components/integrations/SyncStatusPanel";
 
@@ -404,11 +404,7 @@ export default function RequirementsPage() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   if (loading) {
-    return (
-      <div className="py-12 text-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   return (
