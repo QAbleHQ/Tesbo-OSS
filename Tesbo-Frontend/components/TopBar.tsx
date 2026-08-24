@@ -3,8 +3,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { IconBell, IconSearch } from "@tabler/icons-react";
-import { authMe, listProjects, type ProjectSummary } from "@/lib/api";
+import type { ProjectSummary } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { useAppData } from "@/components/app/AppDataProvider";
 
 const MAX_RESULTS = 8;
 
@@ -19,29 +20,14 @@ function getInitials(name: string): string {
 
 export default function TopBar() {
   const router = useRouter();
-  const [user, setUser] = useState<{ name: string | null; email: string | null } | null>(null);
+  const { currentUser: user, projects } = useAppData();
   const { bindStart, bindEnd, filled } = useTopBarSlots();
 
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const searchBoxRef = useRef<HTMLLabelElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    let active = true;
-    authMe().then((me) => {
-      if (active && me) setUser({ name: me.name, email: me.email });
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    listProjects().then(setProjects).catch(() => undefined);
-  }, []);
 
   // ⌘K / Ctrl+K focuses the search box from anywhere, matching the shortcut hint shown in it.
   useEffect(() => {

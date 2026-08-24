@@ -315,7 +315,10 @@ test.describe("team members", () => {
     try {
       await page.goto(WORKSPACE_MEMBERS_URL);
       await rowFor(membersTable(page), tenant!.guest.email).getByTitle("Remove from team").click();
+      await page.getByRole("button", { name: "Remove member" }).click();
 
+      // Exactly one success toast — getByText resolves to a single node under Playwright's
+      // strict mode, so a duplicate toast would fail this assertion rather than pass silently.
       await expect(page.getByText("Team member removed")).toBeVisible();
       await expect(rowFor(membersTable(page), tenant!.guest.email)).toHaveCount(0);
       expect(storedOrgRole(tenant!, tenant!.guest.userId)).toBe("");
@@ -373,6 +376,10 @@ test.describe("team members", () => {
       expect(storedProjectRole(tenant!.mainProjectId, tenant!.guest.userId)).toBe("qa_engineer");
 
       await rowFor(projectTable, tenant!.guest.email).getByRole("button", { name: "Remove" }).click();
+      await page.getByRole("button", { name: "Remove member" }).click();
+
+      // Exactly one success toast — same guarantee as the workspace-level removal above.
+      await expect(page.getByText("Member removed from project")).toBeVisible();
       await expect(rowFor(projectTable, tenant!.guest.email)).toHaveCount(0);
       expect(storedProjectRole(tenant!.mainProjectId, tenant!.guest.userId)).toBe("");
     } finally {

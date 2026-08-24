@@ -4,7 +4,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
-import { IconChevronRight, IconKey, IconSettings, IconStack2 } from "@tabler/icons-react";
+import { IconChevronRight, IconKey, IconSettings, IconStack2, IconTrash } from "@tabler/icons-react";
 import {
   authMe,
   getProject,
@@ -29,6 +29,7 @@ import {
   Input,
   Card,
   Modal,
+  ConfirmModal,
   Select,
   Textarea,
   Field,
@@ -120,6 +121,7 @@ export default function ProjectSettingsPage() {
   const [addRole, setAddRole] = useState<string>("qa_engineer");
   const [addingMember, setAddingMember] = useState(false);
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
+  const [pendingMemberRemoval, setPendingMemberRemoval] = useState<{ userId: string; label: string } | null>(null);
   const [changingRoleId, setChangingRoleId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [apiTokenCount, setApiTokenCount] = useState<number | null>(null);
@@ -127,6 +129,7 @@ export default function ProjectSettingsPage() {
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteProjectModalOpen, setDeleteProjectModalOpen] = useState(false);
   const [deleteProjectTypedName, setDeleteProjectTypedName] = useState("");
+  const [toast, setToast] = useState("");
   const { startEl: topBarStartEl, setFilled: setTopBarFilled } = useTopBarSlots();
   // Hoisted above visibleTabs (rather than computed further down with the rest of the
   // members logic) because the Custom Fields tab needs the role check to decide whether
@@ -410,16 +413,23 @@ export default function ProjectSettingsPage() {
     }
   }
 
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(""), 3500);
+  }
+
   async function handleRemoveMember(userId: string) {
     setRemovingMemberId(userId);
     setMemberError(null);
     try {
       await removeProjectMember(projectId, userId);
       setProjectMembers((prev) => prev.filter((member) => member.userId !== userId));
+      showToast("Member removed from project");
     } catch {
       setMemberError("Failed to remove project member.");
     } finally {
       setRemovingMemberId(null);
+      setPendingMemberRemoval(null);
     }
   }
 
@@ -507,7 +517,12 @@ export default function ProjectSettingsPage() {
                   </p>
                 </div>
                 <Field>
-                  <FieldLabel>Name</FieldLabel>
+                  <div className="flex items-baseline justify-between">
+                    <FieldLabel>Name</FieldLabel>
+                    <span className="text-[12px] text-[var(--muted)]">
+                      {name.length}/{PROJECT_NAME_MAX_LENGTH}
+                    </span>
+                  </div>
                   <Input
                     type="text"
                     value={name}
@@ -521,7 +536,12 @@ export default function ProjectSettingsPage() {
                   {nameError && <FieldError>{nameError}</FieldError>}
                 </Field>
                 <Field>
-                  <FieldLabel>Description</FieldLabel>
+                  <div className="flex items-baseline justify-between">
+                    <FieldLabel>Description</FieldLabel>
+                    <span className="text-[12px] text-[var(--muted)]">
+                      {description.length}/{PROJECT_DESCRIPTION_MAX_LENGTH}
+                    </span>
+                  </div>
                   <Textarea
                     value={description}
                     onChange={(e) => {
@@ -761,11 +781,12 @@ export default function ProjectSettingsPage() {
                         {canManageMembers && member.userId !== currentUserId && normalizeRole(member.role) !== "owner" && (
                           <button
                             type="button"
-                            onClick={() => handleRemoveMember(member.userId)}
+                            onClick={() => setPendingMemberRemoval({ userId: member.userId, label: member.name || member.email })}
                             disabled={removingMemberId === member.userId}
-                            className="text-[var(--error-foreground)] hover:underline disabled:opacity-50"
+                            title="Remove from project"
+                            className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--error-foreground)] transition-colors hover:bg-[var(--error-soft)] disabled:opacity-50"
                           >
-                            {removingMemberId === member.userId ? "Removing…" : "Remove"}
+                            <IconTrash size={15} />
                           </button>
                         )}
                       </td>
@@ -1051,6 +1072,26 @@ export default function ProjectSettingsPage() {
           </div>
         </div>
       </Modal>
+
+      <ConfirmModal
+        open={pendingMemberRemoval !== null}
+        title="Remove project member"
+        message={
+          pendingMemberRemoval
+            ? `Remove ${pendingMemberRemoval.label} from this project? They will lose access to it.`
+            : ""
+        }
+        confirmLabel="Remove member"
+        loading={pendingMemberRemoval !== null && removingMemberId === pendingMemberRemoval.userId}
+        onConfirm={() => pendingMemberRemoval && handleRemoveMember(pendingMemberRemoval.userId)}
+        onCancel={() => setPendingMemberRemoval(null)}
+      />
+
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--toast-surface)] px-4 py-2.5 text-sm text-[var(--toast-foreground)] shadow-lg">
+          {toast}
+        </div>
+      )}
     </main>
   );
 }

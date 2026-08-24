@@ -33,34 +33,40 @@ export default function SignupPage() {
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [firstNameError, setFirstNameError] = useState("");
+  const [lastNameError, setLastNameError] = useState("");
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+
+  function clearFieldErrors() {
+    setFirstNameError("");
+    setLastNameError("");
+    setEmailError("");
+    setPasswordError("");
+  }
 
   function switchMode(next: AuthMode) {
     setMode(next);
     setStep("form");
     setError("");
+    clearFieldErrors();
   }
 
   async function handlePasswordFormSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
-    const firstNameError = validateName(firstName, "First name");
-    if (firstNameError) {
-      setError(firstNameError);
-      return;
-    }
-    const lastNameError = validateName(lastName, "Last name");
-    if (lastNameError) {
-      setError(lastNameError);
-      return;
-    }
-    const emailError = validateEmailValue(email);
-    if (emailError) {
-      setError(emailError);
-      return;
-    }
-    const passwordError = validatePasswordValue(password);
-    if (passwordError) {
-      setError(passwordError);
+    clearFieldErrors();
+    // All four are checked together (not stopping at the first) so the user sees every field that
+    // needs fixing in one pass instead of one error at a time.
+    const firstNameValidationError = validateName(firstName, "First name") || "";
+    const lastNameValidationError = validateName(lastName, "Last name") || "";
+    const emailValidationError = validateEmailValue(email) || "";
+    const passwordValidationError = validatePasswordValue(password) || "";
+    if (firstNameValidationError || lastNameValidationError || emailValidationError || passwordValidationError) {
+      setFirstNameError(firstNameValidationError);
+      setLastNameError(lastNameValidationError);
+      setEmailError(emailValidationError);
+      setPasswordError(passwordValidationError);
       return;
     }
     setSubmitting(true);
@@ -100,10 +106,11 @@ export default function SignupPage() {
   async function handleOtpSubmit(e: FormEvent) {
     e.preventDefault();
     setError("");
+    setEmailError("");
     const emailToUse = email.trim().toLowerCase();
-    const emailError = validateEmailValue(emailToUse);
-    if (emailError) {
-      setError(emailError);
+    const emailValidationError = validateEmailValue(emailToUse) || "";
+    if (emailValidationError) {
+      setEmailError(emailValidationError);
       return;
     }
     setSubmitting(true);
@@ -149,59 +156,82 @@ export default function SignupPage() {
         {step === "form" && <AuthModeToggle mode={mode} onChange={switchMode} disabled={submitting} />}
 
         {mode === "password" && step === "form" && (
-          <form onSubmit={handlePasswordFormSubmit} className="space-y-4">
+          /* noValidate: without it, the browser's own "not a valid email" bubble intercepts
+             submit on type="email" before onSubmit ever runs, so our inline messages below each
+             field never get a chance to show. */
+          <form onSubmit={handlePasswordFormSubmit} className="space-y-4" noValidate>
             <div className="flex gap-3">
               <Field className="flex-1">
-                <FieldLabel htmlFor="signup-first-name">First name</FieldLabel>
+                <FieldLabel htmlFor="signup-first-name">First name *</FieldLabel>
                 <Input
                   id="signup-first-name"
                   type="text"
                   value={firstName}
-                  onChange={(e) => setFirstName(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setFirstName(value);
+                    if (firstNameError && !validateName(value, "First name")) setFirstNameError("");
+                  }}
                   placeholder="Jane"
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
                   autoFocus
                 />
+                {firstNameError && <FieldError>{firstNameError}</FieldError>}
               </Field>
               <Field className="flex-1">
-                <FieldLabel htmlFor="signup-last-name">Last name</FieldLabel>
+                <FieldLabel htmlFor="signup-last-name">Last name *</FieldLabel>
                 <Input
                   id="signup-last-name"
                   type="text"
                   value={lastName}
-                  onChange={(e) => setLastName(e.target.value)}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setLastName(value);
+                    if (lastNameError && !validateName(value, "Last name")) setLastNameError("");
+                  }}
                   placeholder="Smith"
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
                 />
+                {lastNameError && <FieldError>{lastNameError}</FieldError>}
               </Field>
             </div>
             <Field>
-              <FieldLabel htmlFor="signup-email">Work email</FieldLabel>
+              <FieldLabel htmlFor="signup-email">Work email *</FieldLabel>
               <Input
                 id="signup-email"
                 type="email"
                 autoComplete="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setEmail(value);
+                  if (emailError && !validateEmailValue(value)) setEmailError("");
+                }}
                 placeholder="you@company.com"
                 disabled={submitting}
                 maxLength={EMAIL_MAX_LENGTH}
               />
+              {emailError && <FieldError>{emailError}</FieldError>}
             </Field>
             <Field>
-              <FieldLabel htmlFor="signup-password">Password</FieldLabel>
+              <FieldLabel htmlFor="signup-password">Password *</FieldLabel>
               <PasswordInput
                 id="signup-password"
                 autoComplete="new-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setPassword(value);
+                  if (passwordError && !validatePasswordValue(value)) setPasswordError("");
+                }}
                 placeholder="At least 8 characters"
                 disabled={submitting}
                 maxLength={PASSWORD_MAX_LENGTH}
               />
               <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
+              {passwordError && <FieldError>{passwordError}</FieldError>}
             </Field>
             {error && <FieldError>{error}</FieldError>}
             <Button type="submit" disabled={submitting} fullWidth style={gradientCta}>
@@ -231,21 +261,26 @@ export default function SignupPage() {
         )}
 
         {mode === "otp" && (
-          <form onSubmit={handleOtpSubmit} className="space-y-4">
+          <form onSubmit={handleOtpSubmit} className="space-y-4" noValidate>
             <Field>
-              <FieldLabel htmlFor="signup-otp-email">Email</FieldLabel>
+              <FieldLabel htmlFor="signup-otp-email">Email *</FieldLabel>
               <Input
                 id="signup-otp-email"
                 type="email"
                 autoComplete="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setEmail(value);
+                  if (emailError && !validateEmailValue(value)) setEmailError("");
+                }}
                 placeholder="you@company.com"
                 disabled={submitting}
                 maxLength={EMAIL_MAX_LENGTH}
                 autoFocus
               />
               <FieldHint>We will send a one-time code to your email. No password needed.</FieldHint>
+              {emailError && <FieldError>{emailError}</FieldError>}
             </Field>
             {error && <FieldError>{error}</FieldError>}
             <Button type="submit" disabled={submitting} fullWidth style={gradientCta}>

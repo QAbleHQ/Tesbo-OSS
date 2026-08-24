@@ -56,8 +56,14 @@ export class AuthService {
     if (!email || !password) throw new BadRequestException({ error: "email and password required" });
     const normalizedEmail = email.trim().toLowerCase();
 
-    const userId = await this.password.verifyLogin(email, password);
-    if (!userId) throw new UnauthorizedException({ error: "invalid_email_or_password" });
+    const result = await this.password.verifyLogin(email, password);
+    if (result.outcome === "not_found") {
+      throw new UnauthorizedException({ error: "No account found with that email address" });
+    }
+    if (result.outcome === "invalid_password") {
+      throw new UnauthorizedException({ error: "invalid_email_or_password" });
+    }
+    const userId = result.userId;
 
     const token = await this.otp.createSession(userId, this.ip(req), req.get("user-agent"));
     await this.audit.log(userId, "login", "auth", normalizedEmail, "{}", this.ip(req), req.get("user-agent"));

@@ -64,6 +64,27 @@ test.describe("project CRUD", () => {
     expect((await res.json()).error).toMatch(/name/i);
   });
 
+  test("rejects creating a project with a name over the 30 character max", async ({ request }) => {
+    const suffix = Date.now().toString().slice(-8);
+    const res = await request.post("/api/projects", {
+      data: { name: "x".repeat(31), key: `E2ELONG${suffix}` },
+      failOnStatusCode: false,
+    });
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toMatch(/30 characters/);
+  });
+
+  test("allows creating a project with a name at exactly the 30 character max", async ({ request }) => {
+    const suffix = Date.now().toString().slice(-8);
+    const name = "y".repeat(30);
+    const createRes = await request.post("/api/projects", { data: { name, key: `E2EMAX${suffix}` } });
+    expect(createRes.ok()).toBeTruthy();
+    const created = await createRes.json();
+    expect(created.name).toBe(name);
+
+    await request.delete(`/api/projects/${created.id}`);
+  });
+
   test("rejects creating a project whose key collides with an existing one", async ({ request }) => {
     const suffix = Date.now().toString().slice(-8);
     const key = `DUPE${suffix}`;
@@ -150,7 +171,7 @@ test.describe("project CRUD", () => {
       }
 
       const tooLongName = await request.patch(`/api/projects/${created.id}`, {
-        data: { name: "x".repeat(256) },
+        data: { name: "x".repeat(31) },
         failOnStatusCode: false,
       });
       expect(tooLongName.status()).toBe(400);
@@ -161,8 +182,8 @@ test.describe("project CRUD", () => {
       });
       expect(tooLongDescription.status()).toBe(400);
 
-      // The max-length boundary itself is allowed — 255 passes, 256 (above) does not.
-      const atMaxName = `${"y".repeat(255)}`;
+      // The max-length boundary itself is allowed — 30 passes, 31 (above) does not.
+      const atMaxName = `${"y".repeat(30)}`;
       const okRes = await request.patch(`/api/projects/${created.id}`, { data: { name: atMaxName } });
       expect(okRes.ok()).toBeTruthy();
       const afterOk = await request.get(`/api/projects/${created.id}`);
