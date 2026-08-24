@@ -253,9 +253,9 @@ test.describe("projects list — creating a project", () => {
     await expect(key).toHaveValue("MYPROJECTKEY1");
   });
 
-  test("PRJ-C-13 a 255-character name is accepted and a 256-character one is refused", async ({ page }) => {
+  test("PRJ-C-13 a 30-character name is accepted and a 31-character one is refused", async ({ page }) => {
     const suffix = uniqueSuffix();
-    const atLimit = `E2E${suffix}`.padEnd(255, "x");
+    const atLimit = `E2E${suffix}`.padEnd(30, "x");
     let projectId: string | undefined;
     try {
       await page.goto("/projects");
@@ -266,10 +266,12 @@ test.describe("projects list — creating a project", () => {
       await form.getByRole("button", { name: "Create project", exact: true }).click();
       await page.waitForURL(/\/dashboard$/);
       projectId = page.url().split("/projects/")[1].split("/")[0];
-      expect((await (await api.get(`/api/projects/${projectId}`)).json()).name).toHaveLength(255);
+      expect((await (await api.get(`/api/projects/${projectId}`)).json()).name).toHaveLength(30);
 
-      // One character past the column width must be a refusal, not a silent truncation.
-      const overLimit = `E2E${uniqueSuffix()}`.padEnd(256, "y");
+      // One character past the product-chosen cap must be a refusal, not a silent truncation.
+      // Fill bypasses the input's maxLength attribute (unlike real typing), so this still reaches
+      // the server and exercises its own validation rather than only the client-side guard.
+      const overLimit = `E2E${uniqueSuffix()}`.padEnd(31, "y");
       await page.goto("/projects");
       await openCreateModal(page);
       form = createForm(page);

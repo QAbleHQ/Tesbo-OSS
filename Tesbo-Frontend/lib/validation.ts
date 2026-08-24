@@ -40,10 +40,10 @@ export function validateEmailValue(value: string): string | null {
 }
 
 // Mirrors Tesbo-Backend-Nest/src/legacy/legacy.service.ts (createProject / updateProject).
-// PROJECT_NAME_MAX_LENGTH matches the projects.name VARCHAR(255) column — going over that
-// isn't just a policy choice, the insert/update would otherwise fail outright.
+// PROJECT_NAME_MAX_LENGTH is a product-chosen cap, well under the projects.name VARCHAR(255)
+// column — keep in sync with the backend constant, not the column limit.
 export const PROJECT_NAME_MIN_LENGTH = 3;
-export const PROJECT_NAME_MAX_LENGTH = 255;
+export const PROJECT_NAME_MAX_LENGTH = 30;
 export const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
 
 export function validateProjectName(value: string): string {
@@ -58,6 +58,21 @@ export function validateProjectDescription(value: string): string {
   if (value.trim().length > PROJECT_DESCRIPTION_MAX_LENGTH) {
     return `Description must be at most ${PROJECT_DESCRIPTION_MAX_LENGTH} characters`;
   }
+  return "";
+}
+
+// Mirrors Tesbo-Backend-Nest/src/legacy/legacy.service.ts — product-chosen cap (matches
+// PROJECT_NAME_MAX_LENGTH), well under the projects.key VARCHAR(32) column. An explicitly typed
+// key is validated against this, not silently truncated. (The shorter auto-derived-from-name key
+// is a backend-only UX choice and has nothing to validate here — the user never typed it.)
+export const PROJECT_KEY_MAX_LENGTH = 30;
+
+export function validateProjectKey(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return ""; // blank is fine — the backend derives a key from the name
+  const sanitized = trimmed.toUpperCase().replace(/[^A-Z0-9]+/g, "");
+  if (!sanitized) return "Project key must contain at least one letter or number";
+  if (sanitized.length > PROJECT_KEY_MAX_LENGTH) return `Project key must be at most ${PROJECT_KEY_MAX_LENGTH} characters`;
   return "";
 }
 

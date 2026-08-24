@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useState } from "react";
 import {
   IconHome,
   IconSparkles,
@@ -25,11 +25,12 @@ import {
   IconFolders,
   IconUserCircle,
 } from "@tabler/icons-react";
-import { getWorkspace, logout } from "@/lib/api";
+import { logout } from "@/lib/api";
 import { BrandLogo } from "@/components/BrandLogo";
 import ThemeToggle from "@/components/ThemeToggle";
 import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
 import { removeStoredValue } from "@/lib/storage";
+import { useAppData } from "@/components/app/AppDataProvider";
 
 type NavItemConfig = {
   href: string;
@@ -186,15 +187,8 @@ function SidebarContent() {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState<string | null>(null);
-  const [isWorkspaceOwner, setIsWorkspaceOwner] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    getWorkspace().then((ws) => {
-      if (active && (ws.role ?? "").trim().toLowerCase() === "owner") setIsWorkspaceOwner(true);
-    }).catch(() => undefined);
-    return () => { active = false; };
-  }, []);
+  const { workspace } = useAppData();
+  const isWorkspaceOwner = (workspace?.role ?? "").trim().toLowerCase() === "owner";
 
   const isInSettings = Boolean(pathname?.startsWith("/settings"));
 

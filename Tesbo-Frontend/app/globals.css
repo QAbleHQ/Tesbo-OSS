@@ -442,6 +442,23 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   backdrop-filter: blur(18px) saturate(150%);
 }
 
+/*
+ * A clickable card's hover state, written as plain CSS rather than Tailwind's `hover:border-[...]`
+ * / `hover:shadow-[...]` arbitrary-value utilities: those two silently failed to generate any rule
+ * at all here (confirmed via the compiled stylesheet — no matching selector existed), while the
+ * identical `var(...)` arbitrary-value syntax works fine on `hover:bg-[...]` elsewhere. Whatever
+ * the cause, a plain rule targeting the wrapping `<a class="group">` sidesteps it entirely and is
+ * the same approach .tesbo-card-elevated already uses for its own box-shadow.
+ */
+a.group:hover > .tesbo-card {
+  /* Same --surface-secondary tint the list row uses on hover — the card's base
+     --glass-surface-strong is near-opaque white/black, so without this the card was the only
+     clickable surface in the two views whose background didn't actually change on hover. */
+  background: var(--surface-secondary);
+  border-color: var(--border-strong);
+  box-shadow: var(--glass-shadow);
+}
+
 .tesbo-card-elevated {
   background: var(--glass-surface-strong);
   border: 1px solid var(--glass-border);

@@ -307,21 +307,42 @@ export function isUuid(value: unknown): boolean {
   return UUID_RE.test(String(value ?? ""));
 }
 
-/** projects.key is varchar(32); derived keys use 16 and leave the rest for a uniqueness suffix. */
-const PROJECT_KEY_MAX_LENGTH = 32;
+// Product-chosen cap (matches PROJECT_NAME_MAX_LENGTH), well under the projects.key VARCHAR(32)
+// column. Derived keys use a shorter 16 and leave the rest of that budget for a uniqueness suffix.
+const PROJECT_KEY_MAX_LENGTH = 30;
 
+function sanitizeKey(value: string): string {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "");
+}
+
+// Only for a key derived from the project name (body.key omitted) — auto-derived keys are kept
+// short for readability, unlike a key the user typed on purpose (see validateProjectKey).
 function projectKey(value: string): string {
-  return value
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "")
-    .slice(0, 16) || "TESBO";
+  return sanitizeKey(value).slice(0, 16) || "TESBO";
+}
+
+/**
+ * An explicitly supplied key used to be silently uppercased, stripped of non-alphanumerics, and
+ * cut to 16 characters via projectKey() — so typing a 40-character key succeeded but stored only
+ * the first 16 sanitized characters with no indication anything was dropped. A key the caller
+ * chose on purpose is validated against the real column width instead of silently truncated;
+ * only the name-derived fallback keeps the shorter 16-character UX budget.
+ */
+function validateProjectKey(rawKey: string | undefined): void {
+  if (rawKey === undefined || rawKey === null) return;
+  const trimmed = String(rawKey).trim();
+  if (!trimmed) return; // blank/omitted key falls back to deriving one from the name
+  const sanitized = sanitizeKey(trimmed);
+  if (!sanitized) throw new BadRequestException({ error: "Project key must contain at least one letter or number" });
+  if (sanitized.length > PROJECT_KEY_MAX_LENGTH) {
+    throw new BadRequestException({ error: `Project key must be at most ${PROJECT_KEY_MAX_LENGTH} characters` });
+  }
 }
 
 const PROJECT_NAME_MIN_LENGTH = 3;
-// Matches the projects.name VARCHAR(255) column — going over that isn't just a policy
-// choice, the insert/update would otherwise fail outright.
-const PROJECT_NAME_MAX_LENGTH = 255;
+// Product-chosen cap, well under the projects.name VARCHAR(255) column — this is a UX/display
+// limit, not the column limit.
+const PROJECT_NAME_MAX_LENGTH = 30;
 const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
 
 /** Shared by createProject/updateProject. `name`/`description` undefined means "not being changed". */
@@ -2049,6 +2070,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
     const name = String(body.name || "").trim();
     validateProjectFields(name, body.description != null ? String(body.description) : undefined);
+    validateProjectKey(body.key != null ? String(body.key) : undefined);
     const workspace = await this.workspace(uid);
     // Creating a project is an administrative act, not part of authoring or executing tests. The
     // projects list hides the button from a QA Engineer, but that is presentation — the rule has to
@@ -2075,8 +2097,14 @@ export class LegacyService implements OnModuleInit {
    * than fail the second caller, re-derive and try again.
    */
   private async insertProjectWithUniqueKey(organizationId: string, uid: string, name: string, body: Body) {
+    // An explicit key was already validated (validateProjectKey) against the real 32-character
+    // column width — sanitize it the same way but do NOT also run it through projectKey()'s
+    // 16-character UX slice, or a caller-chosen key gets silently shortened just like the bug
+    // this validation exists to catch. Only the name-derived fallback keeps that shorter budget.
+    const explicitKey = body.key != null ? sanitizeKey(String(body.key)) : "";
+    const requestedBase = explicitKey || projectKey(name);
     for (let attempt = 1; ; attempt++) {
-      const key = await this.nextFreeProjectKey(organizationId, String(body.key || name));
+      const key = await this.nextFreeProjectKey(organizationId, requestedBase);
       try {
         return await this.db.transaction(async (client) => {
           const project = await client.query(
@@ -2100,8 +2128,7 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
-  private async nextFreeProjectKey(organizationId: string, requested: string): Promise<string> {
-    const base = projectKey(requested);
+  private async nextFreeProjectKey(organizationId: string, base: string): Promise<string> {
     const res = await this.db.query<{ key: string }>("SELECT key FROM projects WHERE organization_id = $1", [
       organizationId
     ]);
