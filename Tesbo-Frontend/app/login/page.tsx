@@ -40,6 +40,8 @@ function LoginForm() {
   const [checkingSetup, setCheckingSetup] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
 
   /*
    * One decision per mount. React re-invokes effects in development, and without this the second
@@ -124,18 +126,22 @@ function LoginForm() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    setEmailError("");
+    setPasswordError("");
     // A deliberate sign-in starts the redirect budget over: the user is asking to be sent onward
     // again, and a marker left by an earlier bounce must not pre-empt that.
     clearRedirectAttempts();
     const emailToUse = (isInviteEmailLocked ? inviteEmail : email).trim().toLowerCase();
+    let valid = true;
     if (!emailToUse) {
-      setError("Email is required");
-      return;
+      setEmailError("Email is required");
+      valid = false;
     }
     if (!otpMode && !password) {
-      setError("Password is required");
-      return;
+      setPasswordError("Password is required");
+      valid = false;
     }
+    if (!valid) return;
 
     setLoading(true);
     try {
@@ -188,10 +194,15 @@ function LoginForm() {
               type="email"
               autoComplete="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (emailError) setEmailError("");
+              }}
               placeholder="you@company.com"
               disabled={loading || isInviteEmailLocked}
+              aria-invalid={Boolean(emailError)}
             />
+            {emailError && <FieldError>{emailError}</FieldError>}
             {isInviteEmailLocked && (
               <FieldHint>This invitation can only be accepted with this email address.</FieldHint>
             )}
@@ -209,10 +220,15 @@ function LoginForm() {
                 id="password"
                 autoComplete="current-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (passwordError) setPasswordError("");
+                }}
                 placeholder="Your password"
                 disabled={loading}
+                aria-invalid={Boolean(passwordError)}
               />
+              {passwordError && <FieldError>{passwordError}</FieldError>}
               <FieldHint>Use the password created during initial setup.</FieldHint>
             </Field>
           )}

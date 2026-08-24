@@ -33,36 +33,54 @@ export default function SignupPage() {
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [firstNameError, setFirstNameError] = useState("");
+  const [lastNameError, setLastNameError] = useState("");
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [formError, setFormError] = useState("");
+
+  function clearFormErrors() {
+    setFirstNameError("");
+    setLastNameError("");
+    setEmailError("");
+    setPasswordError("");
+    setFormError("");
+  }
 
   function switchMode(next: AuthMode) {
     setMode(next);
     setStep("form");
     setError("");
+    clearFormErrors();
   }
 
   async function handlePasswordFormSubmit(e: FormEvent) {
     e.preventDefault();
-    setError("");
-    const firstNameError = validateName(firstName, "First name");
-    if (firstNameError) {
-      setError(firstNameError);
-      return;
+    clearFormErrors();
+
+    let valid = true;
+    const firstNameMsg = validateName(firstName, "First name");
+    if (firstNameMsg) {
+      setFirstNameError(firstNameMsg);
+      valid = false;
     }
-    const lastNameError = validateName(lastName, "Last name");
-    if (lastNameError) {
-      setError(lastNameError);
-      return;
+    const lastNameMsg = validateName(lastName, "Last name");
+    if (lastNameMsg) {
+      setLastNameError(lastNameMsg);
+      valid = false;
     }
-    const emailError = validateEmailValue(email);
-    if (emailError) {
-      setError(emailError);
-      return;
+    const emailMsg = validateEmailValue(email);
+    if (emailMsg) {
+      setEmailError(emailMsg);
+      valid = false;
     }
-    const passwordError = validatePasswordValue(password);
-    if (passwordError) {
-      setError(passwordError);
-      return;
+    const passwordMsg = validatePasswordValue(password);
+    if (passwordMsg) {
+      setPasswordError(passwordMsg);
+      valid = false;
     }
+    if (!valid) return;
+
     setSubmitting(true);
     try {
       await startSignup({
@@ -72,7 +90,7 @@ export default function SignupPage() {
       });
       setStep("code");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start signup");
+      setFormError(err instanceof Error ? err.message : "Failed to start signup");
     } finally {
       setSubmitting(false);
     }
@@ -101,9 +119,9 @@ export default function SignupPage() {
     e.preventDefault();
     setError("");
     const emailToUse = email.trim().toLowerCase();
-    const emailError = validateEmailValue(emailToUse);
-    if (emailError) {
-      setError(emailError);
+    const emailValidationError = validateEmailValue(emailToUse);
+    if (emailValidationError) {
+      setError(emailValidationError);
       return;
     }
     setSubmitting(true);
@@ -157,12 +175,17 @@ export default function SignupPage() {
                   id="signup-first-name"
                   type="text"
                   value={firstName}
-                  onChange={(e) => setFirstName(e.target.value)}
+                  onChange={(e) => {
+                    setFirstName(e.target.value);
+                    if (firstNameError) setFirstNameError("");
+                  }}
                   placeholder="Jane"
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
                   autoFocus
+                  aria-invalid={Boolean(firstNameError)}
                 />
+                {firstNameError && <FieldError>{firstNameError}</FieldError>}
               </Field>
               <Field className="flex-1">
                 <FieldLabel htmlFor="signup-last-name">Last name</FieldLabel>
@@ -170,11 +193,16 @@ export default function SignupPage() {
                   id="signup-last-name"
                   type="text"
                   value={lastName}
-                  onChange={(e) => setLastName(e.target.value)}
+                  onChange={(e) => {
+                    setLastName(e.target.value);
+                    if (lastNameError) setLastNameError("");
+                  }}
                   placeholder="Smith"
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
+                  aria-invalid={Boolean(lastNameError)}
                 />
+                {lastNameError && <FieldError>{lastNameError}</FieldError>}
               </Field>
             </div>
             <Field>
@@ -184,11 +212,16 @@ export default function SignupPage() {
                 type="email"
                 autoComplete="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (emailError) setEmailError("");
+                }}
                 placeholder="you@company.com"
                 disabled={submitting}
                 maxLength={EMAIL_MAX_LENGTH}
+                aria-invalid={Boolean(emailError)}
               />
+              {emailError && <FieldError>{emailError}</FieldError>}
             </Field>
             <Field>
               <FieldLabel htmlFor="signup-password">Password</FieldLabel>
@@ -196,14 +229,19 @@ export default function SignupPage() {
                 id="signup-password"
                 autoComplete="new-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (passwordError) setPasswordError("");
+                }}
                 placeholder="At least 8 characters"
                 disabled={submitting}
                 maxLength={PASSWORD_MAX_LENGTH}
+                aria-invalid={Boolean(passwordError)}
               />
+              {passwordError && <FieldError>{passwordError}</FieldError>}
               <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
             </Field>
-            {error && <FieldError>{error}</FieldError>}
+            {formError && <FieldError>{formError}</FieldError>}
             <Button type="submit" disabled={submitting} fullWidth style={gradientCta}>
               {submitting ? "Sending code..." : "Create account"}
             </Button>

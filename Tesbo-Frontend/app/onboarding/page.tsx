@@ -27,6 +27,7 @@ export default function OnboardingPage() {
   const [teamEmails, setTeamEmails] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [orgNameError, setOrgNameError] = useState("");
   const countries = useMemo(() => countryOptions(), []);
 
   useEffect(() => {
@@ -55,8 +56,9 @@ export default function OnboardingPage() {
   async function handleCreateWorkspace(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    setOrgNameError("");
     if (!orgName.trim()) {
-      setError("Workspace name is required");
+      setOrgNameError("Workspace name is required");
       return;
     }
 
@@ -135,10 +137,15 @@ export default function OnboardingPage() {
                 id="orgName"
                 type="text"
                 value={orgName}
-                onChange={(e) => setOrgName(e.target.value)}
+                onChange={(e) => {
+                  setOrgName(e.target.value);
+                  if (orgNameError) setOrgNameError("");
+                }}
                 placeholder="My Team"
                 disabled={loading}
+                aria-invalid={Boolean(orgNameError)}
               />
+              {orgNameError && <FieldError>{orgNameError}</FieldError>}
             </Field>
             <Field>
               <FieldLabel htmlFor="country">Country</FieldLabel>

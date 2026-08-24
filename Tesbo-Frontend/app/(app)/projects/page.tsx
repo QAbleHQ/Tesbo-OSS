@@ -596,7 +596,7 @@ function ProjectsPageContent() {
                 />
             {createDescriptionError && <FieldError>{createDescriptionError}</FieldError>}
           </Field>
-          {createError && <p className="text-sm text-red-600">{createError}</p>}
+          {createError && <FieldError>{createError}</FieldError>}
           <div className="flex justify-end gap-2">
             <Button type="button" variant="secondary" onClick={closeCreate}>
               Cancel

@@ -75,14 +75,16 @@ function InviteModal({ open, onClose, onInvited, callerRole, projects }: InviteM
   const [role, setRole] = useState<string>("qa_engineer");
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
+  const [emailError, setEmailError] = useState("");
+  const [formError, setFormError] = useState("");
 
   useEffect(() => {
     if (open) {
       setEmail("");
       setRole("qa_engineer");
       setSelectedProjectIds([]);
-      setError("");
+      setEmailError("");
+      setFormError("");
     }
   }, [open]);
 
@@ -102,9 +104,10 @@ function InviteModal({ open, onClose, onInvited, callerRole, projects }: InviteM
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
+    setEmailError("");
+    setFormError("");
     if (!email.trim()) {
-      setError("Email is required");
+      setEmailError("Email is required");
       return;
     }
     setSubmitting(true);
@@ -117,7 +120,7 @@ function InviteModal({ open, onClose, onInvited, callerRole, projects }: InviteM
       onInvited();
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to send invite");
+      setFormError(err instanceof Error ? err.message : "Failed to send invite");
     } finally {
       setSubmitting(false);
     }
@@ -133,10 +136,15 @@ function InviteModal({ open, onClose, onInvited, callerRole, projects }: InviteM
             type="email"
             autoFocus
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              if (emailError) setEmailError("");
+            }}
             placeholder="teammate@example.com"
             disabled={submitting}
+            aria-invalid={Boolean(emailError)}
           />
+          {emailError && <FieldError>{emailError}</FieldError>}
         </Field>
 
         <Field>
@@ -189,7 +197,7 @@ function InviteModal({ open, onClose, onInvited, callerRole, projects }: InviteM
           </Field>
         )}
 
-        {error && <FieldError>{error}</FieldError>}
+        {formError && <FieldError>{formError}</FieldError>}
 
         <div className="flex justify-end gap-2 pt-1">
           <Button type="button" variant="secondary" onClick={onClose} disabled={submitting}>

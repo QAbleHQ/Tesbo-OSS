@@ -13,7 +13,8 @@ export default function GeneralTab() {
   const countries = useMemo(() => countryOptions(), []);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [nameError, setNameError] = useState("");
+  const [formError, setFormError] = useState("");
   const [toast, setToast] = useState("");
 
   const load = useCallback(async () => {
@@ -24,7 +25,7 @@ export default function GeneralTab() {
       setCountry(workspace.country || "");
       setSavedCountry(workspace.country || "");
     } catch (e) {
-      setError((e as Error).message || "Failed to load workspace");
+      setFormError((e as Error).message || "Failed to load workspace");
     } finally {
       setLoading(false);
     }
@@ -39,10 +40,11 @@ export default function GeneralTab() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
+    setNameError("");
+    setFormError("");
     const trimmed = name.trim();
     if (!trimmed) {
-      setError("Workspace name is required");
+      setNameError("Workspace name is required");
       return;
     }
     if (trimmed === savedName && country === savedCountry) return;
@@ -58,7 +60,7 @@ export default function GeneralTab() {
       // 10212550781. Short enough that the header still updates promptly.
       setTimeout(() => window.location.reload(), 1200);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update workspace");
+      setFormError(err instanceof Error ? err.message : "Failed to update workspace");
       setSaving(false);
     }
   }
@@ -94,11 +96,16 @@ export default function GeneralTab() {
               id="workspace-name"
               type="text"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                if (nameError) setNameError("");
+              }}
               placeholder="My Team"
               disabled={saving}
               maxLength={255}
+              aria-invalid={Boolean(nameError)}
             />
+            {nameError && <FieldError>{nameError}</FieldError>}
           </Field>
 
           <Field>
@@ -117,7 +124,7 @@ export default function GeneralTab() {
             </FieldHint>
           </Field>
 
-          {error && <FieldError>{error}</FieldError>}
+          {formError && <FieldError>{formError}</FieldError>}
 
           <div className="flex justify-end">
             <Button

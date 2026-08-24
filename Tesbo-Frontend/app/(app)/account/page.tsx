@@ -17,7 +17,10 @@ export default function AccountPage() {
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+  const [currentPasswordError, setCurrentPasswordError] = useState("");
+  const [newPasswordError, setNewPasswordError] = useState("");
+  const [confirmPasswordError, setConfirmPasswordError] = useState("");
+  const [formError, setFormError] = useState("");
   const [toast, setToast] = useState("");
 
   const load = useCallback(async () => {
@@ -39,22 +42,69 @@ export default function AccountPage() {
     setTimeout(() => setToast(""), 4000);
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
-    if (hasPassword && !currentPassword) {
-      setError("Current password is required");
+  function clearErrors() {
+    setCurrentPasswordError("");
+    setNewPasswordError("");
+    setConfirmPasswordError("");
+    setFormError("");
+  }
+
+  // Maps server-side rejections (auth.service.ts changePassword) back to the field they concern,
+  // so the message lands next to the input it's about instead of as a generic form error.
+  function applyServerError(message: string) {
+    if (message === "invalid_current_password") {
+      setCurrentPasswordError("Current password is incorrect");
       return;
     }
+    if (message === "current password required") {
+      setCurrentPasswordError("Current password is required");
+      return;
+    }
+    if (message === "new password required" || /^Password must/.test(message)) {
+      setNewPasswordError(message === "new password required" ? "New password is required" : message);
+      return;
+    }
+    if (message === "New password must be different from your current password") {
+      setNewPasswordError(message);
+      return;
+    }
+    setFormError(message);
+  }
+
+  function validate(): boolean {
+    let valid = true;
+    const trimmedCurrent = currentPassword.trim();
+
+    if (hasPassword && !trimmedCurrent) {
+      setCurrentPasswordError("Current password is required");
+      valid = false;
+    }
+
     const passwordError = validatePasswordValue(newPassword);
     if (passwordError) {
-      setError(passwordError);
-      return;
+      setNewPasswordError(passwordError);
+      valid = false;
+    } else if (hasPassword && trimmedCurrent && newPassword === currentPassword) {
+      setNewPasswordError("New password must be different from your current password");
+      valid = false;
     }
-    if (newPassword !== confirmPassword) {
-      setError("New passwords do not match");
-      return;
+
+    if (!confirmPassword) {
+      setConfirmPasswordError("Confirm your new password");
+      valid = false;
+    } else if (newPassword !== confirmPassword) {
+      setConfirmPasswordError("New passwords do not match");
+      valid = false;
     }
+
+    return valid;
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    clearErrors();
+    if (!validate()) return;
+
     setSaving(true);
     try {
       await changePassword(hasPassword ? currentPassword : null, newPassword);
@@ -64,7 +114,7 @@ export default function AccountPage() {
       setHasPassword(true);
       showToast("Password changed. You've been signed out of all other sessions.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to change password");
+      applyServerError(err instanceof Error ? err.message : "Failed to change password");
     } finally {
       setSaving(false);
     }
@@ -138,11 +188,17 @@ export default function AccountPage() {
                 id="current-password"
                 autoComplete="current-password"
                 value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
+                onChange={(e) => {
+                  setCurrentPassword(e.target.value);
+                  if (currentPasswordError) setCurrentPasswordError("");
+                }}
                 placeholder="Your current password"
                 disabled={saving}
                 maxLength={PASSWORD_MAX_LENGTH}
+                aria-invalid={Boolean(currentPasswordError)}
+                aria-describedby={currentPasswordError ? "current-password-error" : undefined}
               />
+              {currentPasswordError && <FieldError id="current-password-error">{currentPasswordError}</FieldError>}
             </Field>
           )}
 
@@ -152,12 +208,18 @@ export default function AccountPage() {
               id="new-password"
               autoComplete="new-password"
               value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
+              onChange={(e) => {
+                setNewPassword(e.target.value);
+                if (newPasswordError) setNewPasswordError("");
+              }}
               placeholder="At least 8 characters"
               disabled={saving}
               maxLength={PASSWORD_MAX_LENGTH}
+              aria-invalid={Boolean(newPasswordError)}
+              aria-describedby={newPasswordError ? "new-password-error" : "new-password-hint"}
             />
-            <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
+            {newPasswordError && <FieldError id="new-password-error">{newPasswordError}</FieldError>}
+            <FieldHint id="new-password-hint">{PASSWORD_RULES_HINT}</FieldHint>
           </Field>
 
           <Field>
@@ -166,14 +228,20 @@ export default function AccountPage() {
               id="confirm-new-password"
               autoComplete="new-password"
               value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
+              onChange={(e) => {
+                setConfirmPassword(e.target.value);
+                if (confirmPasswordError) setConfirmPasswordError("");
+              }}
               placeholder="Re-enter your new password"
               disabled={saving}
               maxLength={PASSWORD_MAX_LENGTH}
+              aria-invalid={Boolean(confirmPasswordError)}
+              aria-describedby={confirmPasswordError ? "confirm-password-error" : undefined}
             />
+            {confirmPasswordError && <FieldError id="confirm-password-error">{confirmPasswordError}</FieldError>}
           </Field>
 
-          {error && <FieldError>{error}</FieldError>}
+          {formError && <FieldError>{formError}</FieldError>}
 
           <div className="flex justify-end">
             <Button type="submit" disabled={saving}>

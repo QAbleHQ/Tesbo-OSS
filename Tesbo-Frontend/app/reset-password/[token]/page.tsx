@@ -28,7 +28,9 @@ export default function ResetPasswordPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [confirmPasswordError, setConfirmPasswordError] = useState("");
+  const [formError, setFormError] = useState("");
   const [done, setDone] = useState(false);
 
   useEffect(() => {
@@ -40,22 +42,30 @@ export default function ResetPasswordPage() {
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    setError("");
-    const passwordError = validatePasswordValue(password);
-    if (passwordError) {
-      setError(passwordError);
-      return;
+    setPasswordError("");
+    setConfirmPasswordError("");
+    setFormError("");
+
+    let valid = true;
+    const passwordMsg = validatePasswordValue(password);
+    if (passwordMsg) {
+      setPasswordError(passwordMsg);
+      valid = false;
+    } else if (!confirmPassword) {
+      setConfirmPasswordError("Confirm your new password");
+      valid = false;
+    } else if (password !== confirmPassword) {
+      setConfirmPasswordError("Passwords do not match");
+      valid = false;
     }
-    if (password !== confirmPassword) {
-      setError("Passwords do not match");
-      return;
-    }
+    if (!valid) return;
+
     setLoading(true);
     try {
       await resetPassword(token, password);
       setDone(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to reset password");
+      setFormError(err instanceof Error ? err.message : "Failed to reset password");
     } finally {
       setLoading(false);
     }
@@ -119,11 +129,16 @@ export default function ResetPasswordPage() {
               autoComplete="new-password"
               autoFocus
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                if (passwordError) setPasswordError("");
+              }}
               placeholder="At least 8 characters"
               disabled={loading}
               maxLength={PASSWORD_MAX_LENGTH}
+              aria-invalid={Boolean(passwordError)}
             />
+            {passwordError && <FieldError>{passwordError}</FieldError>}
             <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
           </Field>
 
@@ -133,14 +148,19 @@ export default function ResetPasswordPage() {
               id="confirmPassword"
               autoComplete="new-password"
               value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
+              onChange={(e) => {
+                setConfirmPassword(e.target.value);
+                if (confirmPasswordError) setConfirmPasswordError("");
+              }}
               placeholder="Re-enter your new password"
               disabled={loading}
               maxLength={PASSWORD_MAX_LENGTH}
+              aria-invalid={Boolean(confirmPasswordError)}
             />
+            {confirmPasswordError && <FieldError>{confirmPasswordError}</FieldError>}
           </Field>
 
-          {error && <FieldError>{error}</FieldError>}
+          {formError && <FieldError>{formError}</FieldError>}
 
           <Button
             type="submit"
