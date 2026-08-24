@@ -1,8 +1,15 @@
 "use client";
 
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Button, Field, FieldLabel, Input } from "@/components/ui";
 import type { BugAttachment } from "@/lib/api";
+import {
+  EVIDENCE_ACCEPT_ATTRIBUTE,
+  EVIDENCE_ALLOWED_EXTENSIONS,
+  EVIDENCE_MAX_FILE_SIZE,
+  formatFileSizeShort,
+  validateEvidenceFile,
+} from "@/lib/validation";
 
 export type EvidenceMode = "FILES" | "BETTERBUGS";
 
@@ -38,13 +45,32 @@ export default function BugEvidenceField({
   onBetterbugsUrlChange,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [rejections, setRejections] = useState<string[]>([]);
 
+  /*
+   * Files are checked as they are picked, not on submit.
+   *
+   * Basecamp 10226296533: an unsupported or oversized file was staged silently, uploaded in full,
+   * and rejected by the server with nothing shown — the save button just sat on "Saving…". Naming
+   * the offending file here means the person never gets that far. Valid files in the same selection
+   * are still staged; only the rejects are dropped, so picking five files and getting one wrong
+   * doesn't discard the other four.
+   */
   function addFiles(files: FileList | null) {
     if (!files || !files.length) return;
-    onStagedFilesChange([...stagedFiles, ...Array.from(files)]);
+    const accepted: File[] = [];
+    const rejected: string[] = [];
+    for (const file of Array.from(files)) {
+      const problem = validateEvidenceFile(file);
+      if (problem) rejected.push(problem);
+      else accepted.push(file);
+    }
+    setRejections(rejected);
+    if (accepted.length) onStagedFilesChange([...stagedFiles, ...accepted]);
   }
 
   function removeStagedFile(index: number) {
+    setRejections([]);
     onStagedFilesChange(stagedFiles.filter((_, i) => i !== index));
   }
 
@@ -106,19 +132,37 @@ export default function BugEvidenceField({
               ))}
             </ul>
           )}
+          {rejections.length > 0 && (
+            <ul data-testid="evidence-rejections" className="space-y-1">
+              {rejections.map((message) => (
+                <li
+                  key={message}
+                  className="rounded-[var(--radius-control)] border border-[var(--error)] bg-[var(--error)]/10 px-3 py-1.5 text-[13px] text-[var(--error-foreground)]"
+                >
+                  {message}
+                </li>
+              ))}
+            </ul>
+          )}
           <input
             ref={fileInputRef}
             type="file"
             multiple
+            accept={EVIDENCE_ACCEPT_ATTRIBUTE}
             className="hidden"
             onChange={(e) => {
               addFiles(e.target.files);
               e.target.value = "";
             }}
           />
-          <Button type="button" variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
-            + Add files
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+              + Add files
+            </Button>
+            <span className="text-[12px] text-[var(--muted)]">
+              Up to {formatFileSizeShort(EVIDENCE_MAX_FILE_SIZE)} per file · {EVIDENCE_ALLOWED_EXTENSIONS.length} supported types
+            </span>
+          </div>
         </div>
       ) : (
         <Input

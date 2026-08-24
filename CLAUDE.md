@@ -36,6 +36,32 @@ authentication bug and is not one.
 
 ---
 
+## MANDATORY: bug-fix work follows the Basecamp flow
+
+Any work that starts from a Basecamp card follows [docs/basecamp-bugfix-flow.md](docs/basecamp-bugfix-flow.md).
+Read it before picking a card. The essentials, because skipping them has cost real time:
+
+- **Claim first.** Cards in To Do default to Nikunj. Assign to **Viral** (`44943233`) *before* reading or
+  investigating, then move to **In progress**, so two people never work the same card.
+- **A card is a claim, not a specification.** Read the BetterBugs report — `getBugDetails`,
+  `getBugLogs`, `getScreenshot` — never the card title alone. Titles drift from the defect: one card
+  blamed a `TEXT` description when the screenshot showed the overflow was in a `VARCHAR(512)` title.
+- **Categorise before coding.** Every card is exactly one of: bug · already fixed · duplicate ·
+  not a bug · unbuilt feature · suggestion. Roughly a third are not the fix they ask for — features
+  misread as bugs (a password change deliberately keeps the current session) and unbuilt UI read as
+  broken (a "Coming soon" button with no `onClick`) are the two that recur.
+- **Reproduce before naming a mechanism**, and say so explicitly when you cannot.
+- **Get approval before fixing.** State the intended change and wait. The right scope is often wider
+  than the card (14 unvalidated columns, not one), narrower (the feature does not exist), a removal, or
+  a behaviour decision that is not yours to make.
+- **Then the e2e mandate below applies**, and the card moves to **Writing Tests** with a comment giving
+  the root cause, what changed, what proves it, and what is still unverified.
+
+Board ids, the six verdicts, and the traps that have actually bitten (stale images, the `:1011` vs
+`:1021` port confusion, `audit_logs` being append-only, hooks below an early return) are all in the doc.
+
+---
+
 ## MANDATORY: every feature or file change ships with end-to-end coverage
 
 A change to product behaviour is **not done** until it is proven by automated end-to-end tests in

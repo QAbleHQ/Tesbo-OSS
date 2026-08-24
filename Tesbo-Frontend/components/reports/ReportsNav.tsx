@@ -59,10 +59,15 @@ export function ReportsNav({
   activeView,
   onViewChange,
   flakyCount,
+  csvHref,
+  xlsxHref,
 }: {
   activeView: ReportView;
   onViewChange: (v: ReportView) => void;
   flakyCount: number;
+  /* Export hrefs for the view currently on screen — see the Export section at the foot of the nav. */
+  csvHref: string;
+  xlsxHref: string;
 }) {
   return (
     <aside className="flex w-[220px] shrink-0 flex-col overflow-hidden border-r border-[var(--border)] bg-[var(--surface)]">
@@ -96,15 +101,36 @@ export function ReportsNav({
 
         <div className="my-2 mx-1 h-px bg-[var(--border)]" />
 
+        {/*
+          * Basecamp 10218723531 — "Reports & Insights > Export buttons are not working" (plural: the
+          * top bar's Export and these two). Both of these were divs with title="Coming soon" and no
+          * handler; they export the view currently on screen now.
+          *
+          * "Export PDF" is gone rather than wired. There is no PDF pipeline anywhere in the product,
+          * and a menu entry that advertises one is the defect the card reported — not something a
+          * href can fix. Recorded for whoever picks the feature up, not quietly disabled.
+          */}
         <div className="px-1.5 pb-1 text-[10px] font-semibold uppercase tracking-[0.07em] text-[var(--muted-soft)]">Export</div>
-        <div className="mb-0.5 flex w-full cursor-not-allowed items-center gap-2 rounded-[6px] px-2 py-1.5 text-[var(--muted-soft)]" title="Coming soon">
-          <IconFileExport size={14} stroke={1.75} />
-          <span className="text-[12.5px]">Export PDF</span>
-        </div>
-        <div className="flex w-full cursor-not-allowed items-center gap-2 rounded-[6px] px-2 py-1.5 text-[var(--muted-soft)]" title="Coming soon">
+        <a
+          href={csvHref}
+          target="_blank"
+          rel="noreferrer"
+          data-testid="reports-nav-export-csv"
+          className="mb-0.5 flex w-full items-center gap-2 rounded-[6px] px-2 py-1.5 text-[var(--ink-600)] transition-colors hover:bg-[var(--surface-secondary)]"
+        >
           <IconTableExport size={14} stroke={1.75} />
           <span className="text-[12.5px]">Export CSV</span>
-        </div>
+        </a>
+        <a
+          href={xlsxHref}
+          target="_blank"
+          rel="noreferrer"
+          data-testid="reports-nav-export-xlsx"
+          className="flex w-full items-center gap-2 rounded-[6px] px-2 py-1.5 text-[var(--ink-600)] transition-colors hover:bg-[var(--surface-secondary)]"
+        >
+          <IconFileExport size={14} stroke={1.75} />
+          <span className="text-[12.5px]">Export Excel</span>
+        </a>
       </div>
     </aside>
   );

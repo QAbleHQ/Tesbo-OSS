@@ -379,7 +379,7 @@ export default function ProjectDashboardPage() {
           iconBg="var(--brand-soft)"
           iconColor="var(--brand-primary)"
           value={summary.plans}
-          label="Plans"
+          label="Test plans"
         />
 
         <StatCard

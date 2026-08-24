@@ -106,7 +106,7 @@ export default function DashboardPage() {
           </Card>
           <Card className="p-4">
             <p className="text-2xl font-semibold text-[var(--foreground)]">{analytics.planCount}</p>
-            <p className="text-sm text-[var(--muted)]">Plans</p>
+            <p className="text-sm text-[var(--muted)]">Test plans</p>
           </Card>
           <Card className="p-4">
             <p className="text-2xl font-semibold text-[var(--foreground)]">{analytics.cycleCount}</p>

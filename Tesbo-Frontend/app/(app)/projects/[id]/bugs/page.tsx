@@ -395,6 +395,15 @@ export default function BugsPage() {
   const [editBetterbugsUrl, setEditBetterbugsUrl] = useState("");
   const [editStatus, setEditStatus] = useState("");
   const [saving, setSaving] = useState(false);
+  /*
+   * Basecamp 10226296533: createBug/updateBug succeeded, uploadBugAttachments then threw, and the
+   * throw went nowhere — `finally` cleared the spinner but the modal stayed open unchanged with no
+   * reason shown, which is what "stuck on Saving" looked like from the outside. The server's
+   * message (unsupported type, over the size limit, storage allowance exhausted) is worth showing
+   * verbatim: it names the file.
+   */
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   /* detail view modal */
   const [viewBug, setViewBug] = useState<BugItem | null>(null);
@@ -472,6 +481,7 @@ export default function BugsPage() {
   /* reset create modal state */
   function resetCreate() {
     setShowCreate(false);
+    setCreateError(null);
     setCreateTitle("");
     setCreateDesc("");
     setCreateSeverity("Medium");
@@ -489,6 +499,7 @@ export default function BugsPage() {
     if (!createTitle.trim() || (hasTestRuns && !createLinks.length)) return;
     const selfLogged = (jiraConnected || linearConnected) && createDestination === "SELF";
     setCreating(true);
+    setCreateError(null);
     try {
       const bug = await createBug(projectId, {
         title: createTitle.trim(),
@@ -509,6 +520,11 @@ export default function BugsPage() {
       }
       resetCreate();
       load();
+    } catch (err) {
+      // The bug itself may already have been created — the evidence upload is the step that fails.
+      // Reloading keeps the list truthful about that, so the person doesn't report it twice.
+      load();
+      setCreateError(err instanceof Error ? err.message : "Something went wrong while reporting this bug.");
     } finally {
       setCreating(false);
     }
@@ -550,6 +566,7 @@ export default function BugsPage() {
     if (!editBug || !editTitle.trim() || (hasTestRuns && !editLinks.length)) return;
     const selfLogged = (jiraConnected || linearConnected) && editDestination === "SELF";
     setSaving(true);
+    setEditError(null);
     try {
       await updateBug(editBug.id, {
         title: editTitle.trim(),
@@ -571,6 +588,9 @@ export default function BugsPage() {
       }
       setEditBug(null);
       load();
+    } catch (err) {
+      load();
+      setEditError(err instanceof Error ? err.message : "Something went wrong while saving this bug.");
     } finally {
       setSaving(false);
     }
@@ -1050,6 +1070,14 @@ export default function BugsPage() {
         title="Report a Bug"
       >
         <div className="space-y-4">
+          {createError && (
+            <p
+              data-testid="create-bug-error"
+              className="rounded-[var(--radius-control)] border border-[var(--error)] bg-[var(--error)]/10 px-3 py-2 text-[13px] text-[var(--error-foreground)]"
+            >
+              {createError}
+            </p>
+          )}
           <Field>
             <FieldLabel>
               Bug Title <span className="text-[var(--error-foreground)]">*</span>
@@ -1133,10 +1161,21 @@ export default function BugsPage() {
       {/* ───── Edit Bug Modal ───── */}
       <Modal
         open={!!editBug}
-        onClose={() => setEditBug(null)}
+        onClose={() => {
+          setEditError(null);
+          setEditBug(null);
+        }}
         title="Edit Bug"
       >
         <div className="space-y-4">
+          {editError && (
+            <p
+              data-testid="edit-bug-error"
+              className="rounded-[var(--radius-control)] border border-[var(--error)] bg-[var(--error)]/10 px-3 py-2 text-[13px] text-[var(--error-foreground)]"
+            >
+              {editError}
+            </p>
+          )}
           <Field>
             <FieldLabel>
               Bug Title <span className="text-[var(--error-foreground)]">*</span>

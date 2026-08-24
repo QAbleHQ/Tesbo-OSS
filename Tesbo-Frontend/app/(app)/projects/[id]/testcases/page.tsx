@@ -1819,7 +1819,7 @@ export default function TestCasesPage() {
                         </Field>
                         <Field>
                           <FieldLabel>Estimated Duration</FieldLabel>
-                          <Input type="text" value={estimatedDuration} onChange={(e) => setEstimatedDuration(e.target.value)} placeholder="e.g. 10 min" />
+                          <Input type="text" value={estimatedDuration} onChange={(e) => setEstimatedDuration(e.target.value)} placeholder="e.g. 90, 45 min, or 2h 30m" />
                         </Field>
                       </div>
                       <Field>
@@ -1936,7 +1936,7 @@ export default function TestCasesPage() {
                             </Field>
                             <Field>
                               <FieldLabel>Estimated Duration</FieldLabel>
-                              <Input type="text" value={estimatedDuration} onChange={(e) => setEstimatedDuration(e.target.value)} placeholder="e.g. 10 min" />
+                              <Input type="text" value={estimatedDuration} onChange={(e) => setEstimatedDuration(e.target.value)} placeholder="e.g. 90, 45 min, or 2h 30m" />
                             </Field>
                           </div>
                           <Field>

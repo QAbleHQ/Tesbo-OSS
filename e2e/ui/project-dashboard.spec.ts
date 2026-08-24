@@ -263,7 +263,7 @@ test.describe("project dashboard — the stat cards", () => {
       const summary = await getDashboard(api, project.id);
 
       await page.goto(`/projects/${project.id}/dashboard`);
-      expect(await statValue(statCard(page, "Plans"))).toBe(String(summary.plans));
+      expect(await statValue(statCard(page, "Test plans"))).toBe(String(summary.plans));
       expect(await statValue(statCard(page, "Suites"))).toBe(String(summary.suites));
 
       const activeRuns = statCard(page, "Active runs");
@@ -298,7 +298,7 @@ test.describe("project dashboard — the stat cards", () => {
         ["Pass rate", "/reports"],
         ["Open bugs", "/bugs"],
         ["Test coverage", "/requirements"],
-        ["Plans", "/plans"],
+        ["Test plans", "/plans"],
         ["Suites", "/testcases"],
         ["Active runs", "/cycles"],
       ];
@@ -308,6 +308,44 @@ test.describe("project dashboard — the stat cards", () => {
     } finally {
       await deleteProjects(api, [project.id]);
     }
+  });
+
+  /*
+   * Basecamp 10226337869 — "[Project Home] Label should be 'Test Plans' not plans".
+   *
+   * The feature is called Test plans everywhere it is named — the sidebar entry, the /plans screen
+   * heading, the activity type filter — and only these two dashboard tiles called it "Plans". The
+   * assertion is on the tile's own <p>, exact: hasText matching is case-insensitive substring, so
+   * "Test plans" satisfies a filter written for "Plans" and a revert would otherwise pass here.
+   *
+   * Sentence case, matching the sidebar and the page heading, rather than the card's literal "Test
+   * Plans" — the tile sits between "Suites" and "Active runs" and Title Case would be the odd one.
+   */
+  test("DSH-U-15 the plans tile is labelled Test plans, exactly as the sidebar names it", async ({ page }) => {
+    const project = await createProject(api);
+    try {
+      await page.goto(`/projects/${project.id}/dashboard`);
+
+      const card = statCard(page, "Test plans");
+      await expect(card.locator("p", { hasText: /^Test plans$/ })).toHaveCount(1);
+      // No tile is left calling it just "Plans".
+      await expect(page.locator('a[href*="/projects/"] p', { hasText: /^Plans$/ })).toHaveCount(0);
+      // Same words as the navigation entry that leads to the same screen.
+      await expect(page.getByRole("link", { name: "Test plans" }).first()).toBeVisible();
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  /*
+   * The workspace dashboard at /dashboard carries the same four count cards, and had the same
+   * "Plans" label. Covered here rather than in a new file because it is the same defect and the same
+   * one-word fix; there is no other spec that owns those tiles.
+   */
+  test("DSH-U-15 the workspace dashboard names it Test plans too", async ({ page }) => {
+    await page.goto("/dashboard");
+    await expect(page.getByText("Test plans", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(/^Plans$/)).toHaveCount(0);
   });
 
   test("DSH-U-16 a large count doesn't break the card layout", async ({ page }) => {

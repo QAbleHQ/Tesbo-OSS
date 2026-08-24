@@ -2408,6 +2408,25 @@ export async function getReportsTrends(projectId: string): Promise<ReportsTrends
   return api<ReportsTrends>(`/api/projects/${projectId}/reports/trends`);
 }
 
+// ── Report: export ──
+// One file per report view, mirroring what the screen is showing — including the Execution Report
+// tab's active filter, so exporting while looking at one plan doesn't hand back every plan.
+// Downloaded through a plain <a href> like the test case export, which keeps the session cookie on
+// the request and lets the browser name the file from Content-Disposition.
+export type ReportExportView = "overview" | "execution" | "matrix" | "repository" | "insights" | "trends";
+
+export function getReportsExportUrl(
+  projectId: string,
+  view: ReportExportView,
+  format: "csv" | "xlsx",
+  params?: { filterBy?: string; filterValue?: string }
+): string {
+  const sp = new URLSearchParams({ view });
+  if (params?.filterBy) sp.set("filterBy", params.filterBy);
+  if (params?.filterValue) sp.set("filterValue", params.filterValue);
+  return `${API_BASE}/api/projects/${projectId}/reports/export/${format}?${sp.toString()}`;
+}
+
 // ── Project Home dashboard summary ──
 export interface ProjectDashboardSummary {
   testCases: { total: number; addedThisWeek: number };

@@ -132,3 +132,39 @@ export function validateKnowledgeFolderName(name: string): string | null {
 export function blankDocumentFlagKey(documentId: string): string {
   return `kb-blank-doc:${documentId}`;
 }
+
+// Mirrors Tesbo-Backend-Nest/src/legacy/legacy.service.ts — KB_ALLOWED_EXTENSIONS and
+// EVIDENCE_MAX_FILE_SIZE / assertValidEvidenceFiles — keep both in sync. The server is still the
+// authority; this copy exists so a rejected file is named the moment it is picked, instead of after
+// a full upload that the modal used to swallow silently (Basecamp 10226296533).
+export const EVIDENCE_ALLOWED_EXTENSIONS = [
+  "png", "jpg", "jpeg", "webp", "svg",
+  "pdf", "doc", "docx", "txt", "md",
+  "xls", "xlsx", "csv",
+  "ppt", "pptx",
+  "js", "ts", "java", "py", "json", "xml", "yaml", "yml", "sql", "html", "css",
+  "mp3", "wav", "m4a",
+  "mp4", "mov", "webm",
+];
+
+export const EVIDENCE_MAX_FILE_SIZE = 25 * 1024 * 1024;
+
+// The picker's `accept` list. Advisory only — a viewer can always switch the dialog to "All files",
+// which is why validateEvidenceFile still runs on everything that comes back.
+export const EVIDENCE_ACCEPT_ATTRIBUTE = EVIDENCE_ALLOWED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
+
+export function formatFileSizeShort(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+}
+
+export function validateEvidenceFile(file: { name: string; size: number }): string | null {
+  const ext = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
+  if (!ext) return `${file.name} has no file extension, so its type can't be determined.`;
+  if (!EVIDENCE_ALLOWED_EXTENSIONS.includes(ext)) return `${file.name}: .${ext} files aren't supported.`;
+  if (file.size <= 0) return `${file.name} is empty (0 bytes).`;
+  if (file.size > EVIDENCE_MAX_FILE_SIZE) {
+    return `${file.name} is ${formatFileSizeShort(file.size)}, which is over the ${formatFileSizeShort(EVIDENCE_MAX_FILE_SIZE)} limit.`;
+  }
+  return null;
+}

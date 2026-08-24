@@ -2629,8 +2629,112 @@ export class LegacyService implements OnModuleInit {
    * Kept unguarded for the callers that have already decided access: the MCP tool (token bound to one
    * project), the Zyra chat flow, and CSV import. Route traffic goes through createTestCaseForUser.
    */
+  /*
+   * Every length-bounded column on `testcases`, with the width its migration actually declares.
+   *
+   * Basecamp 10226376787 came in as "Internal Server Error When Adding a Long Description to Test Case
+   * Details". The description is TEXT and cannot overflow — the screenshot shows the long text was in
+   * the TITLE, which is VARCHAR(512). Nothing bounded it, so Postgres raised 22001
+   * (string_data_right_truncation) and, with no handler for that code, the create answered 500.
+   *
+   * Title was simply the field the reporter happened to use. All fourteen of these are reachable
+   * through the API with no validation between the caller and the column, so each one was its own
+   * latent 500 — the same defect class as the Knowledge Base folder rename (Basecamp 10199204536).
+   *
+   * Kept as data next to the widths rather than as scattered `if` blocks so a future ALTER that widens
+   * or adds a column has exactly one place to stay in step with.
+   */
+  private static readonly TESTCASE_FIELD_LIMITS: ReadonlyArray<{ field: string; label: string; max: number }> = [
+    { field: "automationRepo", label: "Automation repo", max: 1024 },
+    { field: "title", label: "Title", max: 512 },
+    { field: "automationPath", label: "Automation path", max: 512 },
+    { field: "automationTestName", label: "Automation test name", max: 512 },
+    { field: "automationTags", label: "Automation tags", max: 512 },
+    { field: "component", label: "Component", max: 255 },
+    { field: "automationFramework", label: "Automation framework", max: 64 },
+    { field: "estimatedDuration", label: "Estimated duration", max: 64 },
+    { field: "severity", label: "Severity", max: 32 },
+    { field: "type", label: "Type", max: 32 },
+    { field: "status", label: "Status", max: 32 },
+    { field: "automationStatus", label: "Automation type", max: 32 },
+    { field: "externalId", label: "Test case ID", max: 32 },
+    { field: "priority", label: "Priority", max: 8 }
+  ];
+
+  /*
+   * Estimated duration: plain minutes ("90") or an hours/minutes form ("2h", "45m", "2h 30m").
+   *
+   * Basecamp 10226363759 reported that this field "accepts invalid text and special characters". It was
+   * worse than that: the frontend has always sent `estimatedDuration` on create and update, and the
+   * backend had NO reference to it anywhere, so the V7 `estimated_duration VARCHAR(64)` column was dead
+   * and every value typed was silently discarded. It accepted anything because it stored nothing.
+   *
+   * Now persisted and bounded to a shape a report could add up. An empty value is allowed and clears
+   * the field, because "no estimate yet" is a legitimate answer.
+   */
+  private static readonly DURATION_MINUTES = "m|min|mins|minute|minutes";
+  private static readonly DURATION_HOURS = "h|hr|hrs|hour|hours";
+  /*
+   * Deliberately accepts the spellings the form itself suggests. The input's placeholder is "e.g. 10 min",
+   * so a pattern that took only "10m" would have made the product's own guidance invalid — the field
+   * would reject exactly what it told the user to type.
+   */
+  private static readonly ESTIMATED_DURATION_RE = new RegExp(
+    `^(?:\\d{1,4}` +
+      `|\\d{1,4}\\s*(?:${LegacyService.DURATION_HOURS})(?:\\s*\\d{1,2}\\s*(?:${LegacyService.DURATION_MINUTES}))?` +
+      `|\\d{1,4}\\s*(?:${LegacyService.DURATION_MINUTES}))$`,
+    "i"
+  );
+
+  private normalizeEstimatedDuration(raw: unknown): string | null {
+    if (raw === undefined || raw === null) return null;
+    const value = String(raw).trim();
+    if (!value) return "";
+    if (!LegacyService.ESTIMATED_DURATION_RE.test(value)) {
+      throw new BadRequestException({
+        error: 'Estimated duration must be minutes ("90") or hours and minutes ("2h", "2h 30m")'
+      });
+    }
+    return value;
+  }
+
+  /**
+   * Refuses an over-long value before it can reach a bounded column.
+   *
+   * Only fields actually present in the body are checked, so a PATCH that omits a field is untouched.
+   * The message names the field and the limit — a bare "Internal server error" told the reporter
+   * nothing about which of fourteen inputs to shorten.
+   */
+  private assertTestcaseFieldLengths(body: Body): void {
+    for (const { field, label, max } of LegacyService.TESTCASE_FIELD_LIMITS) {
+      const raw = body[field];
+      if (raw === undefined || raw === null) continue;
+      const value = String(raw);
+      if (value.length > max) {
+        throw new BadRequestException({ error: `${label} must be at most ${max} characters` });
+      }
+    }
+  }
+
+  /**
+   * Converts a truncation error into a field-level 400 instead of a 500.
+   *
+   * A backstop, not the primary guard: assertTestcaseFieldLengths above is what callers should hit.
+   * This exists because the same tables are written by import, Zyra and the MCP tool, and any path
+   * that grows a new column tomorrow would otherwise reintroduce the 500 this card was raised for.
+   */
+  private rethrowTruncationAs400(error: unknown): never {
+    if ((error as { code?: string })?.code === "22001") {
+      throw new BadRequestException({
+        error: "One of the fields is too long for the field it is stored in. Shorten it and try again."
+      });
+    }
+    throw error as Error;
+  }
+
   async createTestCase(projectId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
+    this.assertTestcaseFieldLengths(body);
     // nextExternalId reads MAX(trailing number) + 1 in a separate statement from the INSERT below,
     // so two creates racing in the same project both read the same MAX and both try to write
     // "<KEY>-TC-<n>". idx_testcases_project_external then rejects the loser, and the caller got a
@@ -2648,6 +2752,8 @@ export class LegacyService implements OnModuleInit {
           !body.externalId &&
           (error as { code?: string })?.code === "23505" &&
           String((error as { constraint?: string })?.constraint || "") === "idx_testcases_project_external";
+        // A value too long for its column is the caller's to fix, not something to retry.
+        if ((error as { code?: string })?.code === "22001") this.rethrowTruncationAs400(error);
         if (!collided || attempt >= 5) throw error;
       }
     }
@@ -2672,8 +2778,8 @@ export class LegacyService implements OnModuleInit {
          (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
           priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
           automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
-          linear_issue_key, linear_url, attachments, created_by, updated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
+          linear_issue_key, linear_url, attachments, created_by, updated_by, estimated_duration)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27,$28)
          RETURNING *`,
         [
           projectId,
@@ -2702,7 +2808,8 @@ export class LegacyService implements OnModuleInit {
           body.linearIssueKey || null,
           body.linearUrl || null,
           body.attachments || null,
-          uid
+          uid,
+          this.normalizeEstimatedDuration(body.estimatedDuration)
         ]
       );
       const row = res.rows[0];
@@ -2731,6 +2838,24 @@ export class LegacyService implements OnModuleInit {
       throw new BadRequestException({
         error: `A batch is limited to ${LegacyService.MAX_BULK_TESTCASES} test cases — send larger imports as several batches.`
       });
+    }
+
+    /*
+     * Every row is bounded before the batch runs, and the row number is named.
+     *
+     * The INSERT ... SELECT below casts each text column to its varchar width, so one over-long value
+     * anywhere in the batch raises 22001 and — as the comment on that statement already noted — fails
+     * exactly like the single insert did, i.e. as a 500. Worse here: the whole transaction rolls back,
+     * so an import of 500 rows dies on row 400 with nothing written and no indication which row or
+     * which field was at fault. Checked up front, and the message names both.
+     */
+    for (const [index, row] of incoming.entries()) {
+      try {
+        this.assertTestcaseFieldLengths(row);
+      } catch (error) {
+        const detail = (error as { response?: { error?: string } })?.response?.error ?? "a field is too long";
+        throw new BadRequestException({ error: `Row ${index + 1}: ${detail}` });
+      }
     }
 
     const created = await this.db.transaction(async (client) => {
@@ -3297,6 +3422,8 @@ export class LegacyService implements OnModuleInit {
 
   async updateTestCase(id: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
+    // Same guard as create: an over-long value here hit the bounded column and answered 500.
+    this.assertTestcaseFieldLengths(body);
     const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
     if (!before.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     const projectId = before.rows[0].project_id;
@@ -3312,7 +3439,8 @@ export class LegacyService implements OnModuleInit {
          automation_tags=COALESCE($17,automation_tags), owner_id=$18, component=COALESCE($19,component),
          status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url),
          linear_issue_key=COALESCE($23,linear_issue_key), linear_url=COALESCE($24,linear_url),
-         attachments=COALESCE($25,attachments), updated_by=$26, updated_at=now()
+         attachments=COALESCE($25,attachments), updated_by=$26,
+         estimated_duration=COALESCE($27,estimated_duration), updated_at=now()
          WHERE id=$1 AND deleted_at IS NULL
          RETURNING *`,
         [
@@ -3341,7 +3469,8 @@ export class LegacyService implements OnModuleInit {
           body.linearIssueKey ?? null,
           body.linearUrl ?? null,
           body.attachments ?? null,
-          uid
+          uid,
+          this.normalizeEstimatedDuration(body.estimatedDuration)
         ]
       );
       const row = res.rows[0];
@@ -3435,6 +3564,9 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const ids = Array.isArray(body.testcaseIds) ? body.testcaseIds : [];
     if (!ids.length) return;
+    // Bulk writes priority/status/automationStatus into the same bounded columns as a single update,
+    // so it needs the same guard — otherwise the 500 is simply reachable a different way.
+    this.assertTestcaseFieldLengths(body);
     /*
      * `suiteId: "none"` clears the suite; an absent suiteId leaves it alone.
      *
@@ -4378,6 +4510,63 @@ export class LegacyService implements OnModuleInit {
     return ext.length > 0 && ext.length < max ? `${base.slice(0, max - ext.length)}${ext}` : base.slice(0, max);
   }
 
+  /*
+   * Evidence uploads — bug attachments and execution attachments — validate what they accept.
+   *
+   * Basecamp 10226296533 ("[Bug Attachments] Missing File Type and Size Validations Cause Upload to
+   * Get Stuck on Saving"): nothing here checked type or size. Every extension was accepted, and the
+   * only ceiling was the interceptor's MAX_UPLOAD_SIZE — the 100MB the knowledge base uses — which
+   * multer enforces mid-stream, so the caller got a failure with no field-level reason and the modal
+   * simply sat there. Both gaps are one function now, and both evidence routes call it, because
+   * uploadExecutionAttachments had exactly the same hole.
+   *
+   * The allowlist is deliberately the knowledge base's: it already excludes zip and exe on purpose
+   * (a zip hides anything past an extension check) and evidence has no reason to accept more than a
+   * knowledge base document does.
+   *
+   * The size cap is its own, lower value. Evidence is screenshots, logs and short clips; a
+   * full-length recording belongs in the BetterBugs session a bug can already link to, not in a
+   * 100MB upload billed against the workspace's storage allowance. MAX_EVIDENCE_FILE_SIZE overrides
+   * it without a code change.
+   */
+  static readonly EVIDENCE_MAX_FILE_SIZE = Number(process.env.MAX_EVIDENCE_FILE_SIZE) || 25 * 1024 * 1024;
+
+  private static formatFileSize(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  }
+
+  /*
+   * Validates the whole batch before a single byte is stored: the upload loops over the files
+   * calling storage.put per file, so rejecting halfway would leave the accepted ones written and
+   * billed while the request answers 400. All-or-nothing is the only defensible outcome.
+   */
+  private static assertValidEvidenceFiles(files: Array<{ originalname: string; size: number }>) {
+    const supported = [...LegacyService.KB_ALLOWED_EXTENSIONS].sort().join(", ");
+    for (const file of files) {
+      const name = LegacyService.displayFileName(file.originalname);
+      const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase();
+      if (!ext) {
+        throw new BadRequestException({
+          error: `${name} has no file extension, so its type can't be determined. Supported types: ${supported}.`
+        });
+      }
+      if (!LegacyService.KB_ALLOWED_EXTENSIONS.has(ext)) {
+        throw new BadRequestException({ error: `${name}: .${ext} files aren't supported. Supported types: ${supported}.` });
+      }
+      // A zero-byte file is almost always a failed drag-and-drop or a still-being-written file, and
+      // it stores nothing useful while still consuming an attachment row and a storage key.
+      if (file.size <= 0) throw new BadRequestException({ error: `${name} is empty (0 bytes).` });
+      if (file.size > LegacyService.EVIDENCE_MAX_FILE_SIZE) {
+        throw new BadRequestException({
+          error:
+            `${name} is ${LegacyService.formatFileSize(file.size)}, which is over the ` +
+            `${LegacyService.formatFileSize(LegacyService.EVIDENCE_MAX_FILE_SIZE)} limit for evidence files.`
+        });
+      }
+    }
+  }
+
   // Bug evidence uploads — reuses the generic `attachments` table (entity_type='bug') rather
   // than a dedicated table, since it already models exactly this (project-scoped file metadata
   // pointing at a storage key), and nothing else in the app used it yet.
@@ -4396,6 +4585,7 @@ export class LegacyService implements OnModuleInit {
     if (!isUuid(bugId)) throw new NotFoundException({ error: "Bug not found" });
     const bug = await this.db.query("SELECT b.id FROM bugs b WHERE b.id = $1 AND b.project_id = $2", [bugId, projectId]);
     if (!bug.rows[0]) throw new NotFoundException({ error: "Bug not found" });
+    LegacyService.assertValidEvidenceFiles(files);
     await this.planLimits.assertStorageAvailable(
       project.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
@@ -4490,6 +4680,7 @@ export class LegacyService implements OnModuleInit {
     // Being signed in to the workspace isn't enough: attaching evidence to a run means writing
     // into that project, so the caller has to be a member of it.
     await this.requireProjectAccess(uid, projectId);
+    LegacyService.assertValidEvidenceFiles(files);
     await this.planLimits.assertStorageAvailable(
       execution.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
