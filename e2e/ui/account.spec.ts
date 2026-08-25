@@ -13,14 +13,20 @@ import {
  * The account screen at /account, and the forgot/reset-password flow that reaches the same stored
  * password from outside a session.
  *
- * Three reported tickets live here:
+ * Four reported tickets live here:
  *
  *   - BetterBugs 6a840253 — the page's label should read "My Account", not "Account". ACU-01 is
  *     currently RED: app/(app)/account/page.tsx renders `<h1>Account</h1>` and Sidebar.tsx labels
  *     its footer link "Account". Per §3 this is not to be turned green by weakening it — it clears
  *     when the label changes in both places.
- *   - BetterBugs 6a8400e2 — changing a password must confirm it did. Already implemented
- *     (`showToast` after `changePassword`), so ACU-02 is regression cover.
+ *   - BetterBugs 6a8400e2 — changing a password must confirm it did. Confirmed by redirecting to
+ *     /login with a notice rather than a toast, so ACU-02 asserts the redirect and notice.
+ *   - "[Change Password] User Session Is Not Logged Out After Password Change in the Same Browser" —
+ *     auth.service.ts changePassword used to invalidate every *other* session and deliberately keep
+ *     the one making the request alive, so the tab (and any sibling tab sharing its cookie) that
+ *     just changed the password stayed signed in. Fixed to invalidate every session, including this
+ *     one — the same reasoning password-reset already used (see password-reset.service.ts). ACU-02
+ *     and ACU-03 pin this; ACU-12 pins the cross-device half that already worked.
  *   - BetterBugs 6a7b24ef — "Forgot/Reset Password functionality is missing". It exists now, end to
  *     end: a link on /login, POST /password/forgot, an emailed token, /reset-password/:token, and
  *     POST /password/reset. ACU-05..ACU-10 pin the whole path including its refusals.
@@ -35,8 +41,7 @@ import {
  * sendPasswordReset keeps that format parseable precisely for this). No real mail is sent.
  *
  * Locator notes: `Field`/`FieldLabel` DO set htmlFor on this screen, so ids are used directly
- * (#current-password, #new-password, #confirm-new-password). The toast is a fixed-position div with
- * no role, so it is matched by its text.
+ * (#current-password, #new-password, #confirm-new-password).
  */
 
 /** Distinct from FIXTURE_PASSWORD, and satisfies validatePasswordValue (upper, lower, digit, 8+). */
@@ -44,13 +49,10 @@ const NEW_PASSWORD = "E2E-Account-Next-7k2!";
 
 test.describe("account screen and password reset (UI)", () => {
   let tenant: RbacTenant | null = null;
-  let ownerState = "";
   const contexts: BrowserContext[] = [];
 
   test.beforeAll(async () => {
     tenant = await provisionRbacTenant("account-ui");
-    if (!tenant) return;
-    ownerState = await writeStorageState(tenant.owner, "account-ui-owner");
   });
 
   test.afterAll(async () => {
@@ -109,8 +111,15 @@ test.describe("account screen and password reset (UI)", () => {
     return ctx;
   }
 
+  /**
+   * A fresh session every call, not one snapshot reused across the file: a successful change now
+   * invalidates every session for the user, including whichever one made the request (that's the
+   * whole point of ACU-02/ACU-03 below), so a session captured once in beforeAll would already be
+   * dead by the second test that performs a real change.
+   */
   async function openAccount(browser: Browser): Promise<Page> {
-    const ctx = await browser.newContext({ storageState: ownerState });
+    const state = await writeStorageState(tenant!.owner, `account-ui-owner-${contexts.length}`);
+    const ctx = await browser.newContext({ storageState: state });
     contexts.push(ctx);
     const page = await ctx.newPage();
     await page.goto("/account");
@@ -152,27 +161,37 @@ test.describe("account screen and password reset (UI)", () => {
 
   // ─── Changing a password from the account screen ───────────────────────────
 
-  test("ACU-02 a successful change confirms itself on screen", async ({ browser }) => {
+  test("ACU-02 a successful change confirms itself and signs the tab out", async ({ browser }) => {
     const page = await openAccount(browser);
 
     await fillChangePassword(page, FIXTURE_PASSWORD, NEW_PASSWORD);
 
-    await expect(page.getByText(/Password changed/i)).toBeVisible();
-    // The toast is not the assertion on its own — the new password has to actually work.
+    // No toast to read on a page that's about to be signed out from under it — the confirmation is
+    // the redirect itself, landing on /login with a notice.
+    await page.waitForURL(/\/login/);
+    await expect(page.getByText(/Password changed\. Sign in with your new password\./i)).toBeVisible();
     expect(await passwordWorks(NEW_PASSWORD), "the new password should authenticate").toBe(true);
     expect(await passwordWorks(FIXTURE_PASSWORD), "the old password must stop working").toBe(false);
   });
 
-  test("ACU-03 the form clears itself after a successful change", async ({ browser }) => {
+  test("ACU-03 the tab that changed the password is itself signed out, not just other sessions", async ({
+    browser,
+  }) => {
+    // Regression cover for "[Change Password] User Session Is Not Logged Out After Password Change
+    // in the Same Browser": changePassword used to keep the requesting session alive deliberately,
+    // so the tab that submitted the form — and any sibling tab sharing its cookie jar — stayed
+    // signed in. A second page in the SAME browser context stands in for that sibling tab.
     const page = await openAccount(browser);
+    const siblingTab = await page.context().newPage();
+    await siblingTab.goto("/projects");
 
     await fillChangePassword(page, FIXTURE_PASSWORD, NEW_PASSWORD);
-    await expect(page.getByText(/Password changed/i)).toBeVisible();
+    await page.waitForURL(/\/login/);
 
-    // Leaving the old values in the boxes would offer them to the next shoulder that walks past.
-    await expect(page.locator("#current-password")).toHaveValue("");
-    await expect(page.locator("#new-password")).toHaveValue("");
-    await expect(page.locator("#confirm-new-password")).toHaveValue("");
+    for (const p of [page, siblingTab]) {
+      const status = await p.evaluate(async () => (await fetch("/api/auth/me", { credentials: "include" })).status);
+      expect(status, "a same-browser session should be signed out after the password change").toBe(401);
+    }
   });
 
   test("ACU-04 a wrong current password, a mismatch, and a weak password are each refused", async ({
@@ -180,9 +199,10 @@ test.describe("account screen and password reset (UI)", () => {
   }) => {
     const page = await openAccount(browser);
 
-    // Wrong current password — refused by the server.
+    // Wrong current password — refused by the server, and nothing about the current session changes.
     await fillChangePassword(page, "E2E-Not-The-Password-1x", NEW_PASSWORD);
-    await expect(page.getByText(/Password changed/i)).toHaveCount(0);
+    await expect(page.getByText("Current password is incorrect")).toBeVisible();
+    expect(page.url(), "a refused change should not sign the tab out").toContain("/account");
 
     // Mismatched confirmation — refused in the page, before any request.
     await page.reload();
@@ -359,5 +379,26 @@ test.describe("account screen and password reset (UI)", () => {
 
     // The email it used to show alone is still there.
     await expect(page.locator("#account-email")).toHaveText((reported!.email ?? "").trim());
+  });
+
+  // ─── Cross-device session invalidation ─────────────────────────────────────
+
+  test("ACU-12 a different browser's session is signed out too", async ({ browser }) => {
+    // The half of this behaviour that already worked before the fix — kept as regression cover now
+    // that the mechanism changed from "invalidate the others" to "invalidate everything".
+    const otherDeviceState = await writeStorageState(tenant!.owner, `account-ui-owner-other-device-${contexts.length}`);
+    const otherDeviceCtx = await browser.newContext({ storageState: otherDeviceState });
+    contexts.push(otherDeviceCtx);
+    const otherDevicePage = await otherDeviceCtx.newPage();
+    await otherDevicePage.goto("/projects");
+
+    const page = await openAccount(browser);
+    await fillChangePassword(page, FIXTURE_PASSWORD, NEW_PASSWORD);
+    await page.waitForURL(/\/login/);
+
+    const status = await otherDevicePage.evaluate(
+      async () => (await fetch("/api/auth/me", { credentials: "include" })).status,
+    );
+    expect(status, "a different device's session should be signed out too").toBe(401);
   });
 });

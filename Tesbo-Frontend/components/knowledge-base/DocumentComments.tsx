@@ -33,15 +33,16 @@ function timeAgo(iso: string): string {
 }
 
 /*
- * Seeded per author, so two commenters are told apart at a glance and one person keeps the same
- * colour they have on cycles, plan cards and the top bar. Was a flat --brand-soft for everyone —
+ * Seeded per author's id (not name), so two commenters are told apart at a glance and one person
+ * keeps the same colour they have on cycles, plan cards and the top bar. Was a flat --brand-soft
+ * for everyone, then a name-only seed that could still disagree with the rest of the app — both
  * part of Basecamp 10198836413.
  */
-function Avatar({ name }: { name: string }) {
+function Avatar({ name, seed }: { name: string; seed?: string | null }) {
   return (
     <span
       className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white"
-      style={{ backgroundColor: avatarColor(name || "?") }}
+      style={{ backgroundColor: avatarColor(seed || name || "?") }}
     >
       {initials(name)}
     </span>
@@ -265,7 +266,7 @@ export function DocumentComments({
               )}
 
               <div className="flex items-start gap-2.5">
-                <Avatar name={thread.authorName} />
+                <Avatar name={thread.authorName} seed={thread.authorId} />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-[13px] font-semibold text-[var(--foreground)]">{thread.authorName}</span>
@@ -315,7 +316,7 @@ export function DocumentComments({
                 <ul className="mt-3 space-y-2.5 border-l border-[var(--border-subtle)] pl-3">
                   {thread.replies.map((reply) => (
                     <li key={reply.id} className="flex items-start gap-2.5">
-                      <Avatar name={reply.authorName} />
+                      <Avatar name={reply.authorName} seed={reply.authorId} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-[12px] font-semibold text-[var(--foreground)]">{reply.authorName}</span>

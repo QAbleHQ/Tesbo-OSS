@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { authMe, getWorkspaceAnalytics, getWorkspace, type WorkspaceAnalytics, type WorkspaceInfo } from "@/lib/api";
-import { Card } from "@/components/ui";
+import { Card, PageLoader } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
 /*
@@ -82,19 +82,11 @@ export default function DashboardPage() {
   }, [router]);
 
   if (!auth) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading analytics…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading analytics…" />;
   }
 
   if (error || !analytics) {

@@ -48,7 +48,7 @@ import {
   type KnowledgeFile,
   type KnowledgeBaseSummary,
 } from "@/lib/api";
-import { Button, Input, Textarea, Modal, Field, FieldLabel, FieldError, StatusChip, EmptyStateBlock } from "@/components/ui";
+import { Button, Input, Textarea, Modal, Field, FieldLabel, FieldError, PageLoader, StatusChip, EmptyStateBlock } from "@/components/ui";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import FileViewerModal from "@/components/knowledge-base/FileViewerModal";
 import { Menu, MenuItem } from "@/components/knowledge-base/Menu";
@@ -256,16 +256,43 @@ function aiMemoryTone(status: string): "draft" | "success" | "error" {
 
 // ─── Modals ─────────────────────────────────────────────────────────────────
 
+// The backend answers a rename/create/move with a plain 400 for a handful of cases that name the
+// exact field the open modal is showing (duplicate name, required, too long). Those read better as
+// an inline FieldError next to the input than as a toast the user has to look away from the dialog
+// to notice. Anything else (403 permission denials, 404s, network failures) still isn't about the
+// field on screen, so it falls through to the caller's onError (a toast) instead.
+function isFolderNameConflict(message: string): boolean {
+  return (
+    message.startsWith("Folder name is required") ||
+    message.startsWith("Folder name must be at most") ||
+    message.startsWith("A folder with this name already exists")
+  );
+}
+
+function isDocumentTitleConflict(message: string): boolean {
+  return message.startsWith("Document title is required") || message.startsWith("Title must be at most");
+}
+
+function isMoveDestinationConflict(message: string): boolean {
+  return (
+    message.startsWith("A folder with this name already exists") ||
+    message.startsWith("A folder cannot be moved into itself") ||
+    message.startsWith("The root folder cannot be moved")
+  );
+}
+
 function CreateFolderModal({
   open,
   onClose,
   onCreate,
   saving,
+  onError,
 }: {
   open: boolean;
   onClose: () => void;
-  onCreate: (name: string, description: string) => void;
+  onCreate: (name: string, description: string) => Promise<void>;
   saving: boolean;
+  onError: (message: string) => void;
 }) {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -277,14 +304,20 @@ function CreateFolderModal({
       setNameError("");
     }
   }, [open]);
-  function handleCreateClick() {
+  async function handleCreateClick() {
     const trimmed = name.trim();
     const error = validateKnowledgeFolderName(trimmed);
     if (error) {
       setNameError(error);
       return;
     }
-    onCreate(trimmed, description.trim());
+    try {
+      await onCreate(trimmed, description.trim());
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create folder.";
+      if (isFolderNameConflict(message)) setNameError(message);
+      else onError(message);
+    }
   }
   return (
     <Modal open={open} onClose={onClose} title="Create folder">
@@ -325,12 +358,14 @@ function RenameFolderModal({
   onClose,
   onSave,
   saving,
+  onError,
 }: {
   open: boolean;
   initialName: string;
   onClose: () => void;
-  onSave: (name: string) => void;
+  onSave: (name: string) => Promise<void>;
   saving: boolean;
+  onError: (message: string) => void;
 }) {
   const [name, setName] = useState(initialName);
   const [nameError, setNameError] = useState("");
@@ -340,14 +375,20 @@ function RenameFolderModal({
       setNameError("");
     }
   }, [open, initialName]);
-  function handleSaveClick() {
+  async function handleSaveClick() {
     const trimmed = name.trim();
     const error = validateKnowledgeFolderName(trimmed);
     if (error) {
       setNameError(error);
       return;
     }
-    onSave(trimmed);
+    try {
+      await onSave(trimmed);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to rename folder.";
+      if (isFolderNameConflict(message)) setNameError(message);
+      else onError(message);
+    }
   }
   return (
     <Modal open={open} onClose={onClose} title="Rename folder">
@@ -382,19 +423,39 @@ function MoveModal({
   onClose,
   onMove,
   saving,
+  onError,
 }: {
   open: boolean;
   tree: KnowledgeFolderTreeNode | null;
   excludeId?: string;
   onClose: () => void;
-  onMove: (folderId: string) => void;
+  onMove: (folderId: string) => Promise<void>;
   saving: boolean;
+  onError: (message: string) => void;
 }) {
   const [target, setTarget] = useState("");
+  const [destError, setDestError] = useState("");
   const options = tree ? flattenFolders(tree).filter((f) => f.id !== excludeId) : [];
   useEffect(() => {
-    if (open) setTarget(tree?.id || "");
+    if (open) {
+      setTarget(tree?.id || "");
+      setDestError("");
+    }
   }, [open, tree]);
+  async function handleMoveClick() {
+    if (!target) return;
+    try {
+      await onMove(target);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to move item.";
+      // A destination folder can be a descendant of the item being moved — the option list only
+      // excludes the item itself, not its subtree — so this validation error is reachable through
+      // normal use, not just a malformed request. Since it's about the very selection shown here,
+      // it belongs next to the select, not in a toast the user has to look away to notice.
+      if (isMoveDestinationConflict(message)) setDestError(message);
+      else onError(message);
+    }
+  }
   return (
     <Modal open={open} onClose={onClose} title="Move to folder">
       <div className="space-y-4">
@@ -403,16 +464,20 @@ function MoveModal({
           <select
             className="h-9 w-full rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[14px] text-[var(--foreground)]"
             value={target}
-            onChange={(e) => setTarget(e.target.value)}
+            onChange={(e) => {
+              setTarget(e.target.value);
+              if (destError) setDestError("");
+            }}
           >
             {options.map((o) => (
               <option key={o.id} value={o.id}>{o.label}</option>
             ))}
           </select>
+          {destError && <FieldError>{destError}</FieldError>}
         </Field>
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
-          <Button disabled={!target || saving} onClick={() => onMove(target)}>{saving ? "Moving…" : "Move"}</Button>
+          <Button disabled={!target || saving} onClick={handleMoveClick}>{saving ? "Moving…" : "Move"}</Button>
         </div>
       </div>
     </Modal>
@@ -424,11 +489,13 @@ function CreateDocumentModal({
   onClose,
   onCreate,
   saving,
+  onError,
 }: {
   open: boolean;
   onClose: () => void;
-  onCreate: (title: string, template: DocumentTemplate, blankContent?: string) => void;
+  onCreate: (title: string, template: DocumentTemplate, blankContent?: string) => Promise<void>;
   saving: boolean;
+  onError: (message: string) => void;
 }) {
   const [title, setTitle] = useState("");
   const [titleError, setTitleError] = useState("");
@@ -447,7 +514,7 @@ function CreateDocumentModal({
   const template = DOCUMENT_TEMPLATES.find((t) => t.key === templateKey) || DOCUMENT_TEMPLATES[0];
   const isBlankTemplate = template.key === "blank";
   const canCreate = Boolean(title.trim()) && (!isBlankTemplate || Boolean(blankContent.trim()));
-  function handleCreateClick() {
+  async function handleCreateClick() {
     const trimmed = title.trim();
     if (!trimmed || (isBlankTemplate && !blankContent.trim())) return;
     const error = validateKnowledgeDocumentTitle(trimmed);
@@ -455,7 +522,13 @@ function CreateDocumentModal({
       setTitleError(error);
       return;
     }
-    onCreate(trimmed, template, isBlankTemplate ? blankContent.trim() : undefined);
+    try {
+      await onCreate(trimmed, template, isBlankTemplate ? blankContent.trim() : undefined);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create document.";
+      if (isDocumentTitleConflict(message)) setTitleError(message);
+      else onError(message);
+    }
   }
   return (
     <Modal open={open} onClose={onClose} title="Create document" className="max-w-2xl">
@@ -767,6 +840,14 @@ function KnowledgeBasePageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [folderParam, loading, tree]);
 
+  // Auto-dismiss the error toast so a stale failure doesn't linger indefinitely; the manual
+  // dismiss button still works for anyone who wants it gone sooner.
+  useEffect(() => {
+    if (!error) return;
+    const timeout = setTimeout(() => setError(null), 6000);
+    return () => clearTimeout(timeout);
+  }, [error]);
+
   // Debounce typing into the search box instead of waiting for Enter/submit, so results
   // update live as the user types (matches the search UX elsewhere in the app).
   useEffect(() => {
@@ -825,8 +906,6 @@ function KnowledgeBasePageInner() {
       await createKnowledgeFolder(projectId, { name, description: description || undefined, parentFolderId: createFolderParent || selectedFolderId || undefined });
       setCreateFolderOpen(false);
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create folder.");
     } finally {
       setSaving(false);
     }
@@ -840,8 +919,6 @@ function KnowledgeBasePageInner() {
       await updateKnowledgeFolder(projectId, renameTarget.id, { name });
       setRenameTarget(null);
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to rename folder.");
     } finally {
       setSaving(false);
     }
@@ -910,8 +987,6 @@ function KnowledgeBasePageInner() {
       else await moveKnowledgeFile(projectId, moveTarget.id, folderId);
       setMoveTarget(null);
       await refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to move item.");
     } finally {
       setSaving(false);
     }
@@ -944,8 +1019,10 @@ function KnowledgeBasePageInner() {
       setCreateDocOpen(false);
       router.push(`/projects/${projectId}/knowledge-base/documents/${created.id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create document.");
+      // No `finally` here on purpose: on success, `saving` stays true until the route change
+      // unmounts this page, so the button never flashes back to its enabled state first.
       setSaving(false);
+      throw err;
     }
   }
 
@@ -1006,11 +1083,7 @@ function KnowledgeBasePageInner() {
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   const baseItems = searchResults ?? items;
@@ -1095,8 +1168,8 @@ function KnowledgeBasePageInner() {
             topBarEndEl
           )}
 
-        <CreateFolderModal open={createFolderOpen} onClose={() => setCreateFolderOpen(false)} onCreate={handleCreateFolder} saving={saving} />
-        <CreateDocumentModal open={createDocOpen} onClose={() => setCreateDocOpen(false)} onCreate={handleCreateDocument} saving={saving} />
+        <CreateFolderModal open={createFolderOpen} onClose={() => setCreateFolderOpen(false)} onCreate={handleCreateFolder} saving={saving} onError={setError} />
+        <CreateDocumentModal open={createDocOpen} onClose={() => setCreateDocOpen(false)} onCreate={handleCreateDocument} saving={saving} onError={setError} />
         <UploadModal
           open={uploadOpen}
           onClose={() => { if (!uploading) setUploadOpen(false); }}
@@ -1110,6 +1183,7 @@ function KnowledgeBasePageInner() {
           onClose={() => setRenameTarget(null)}
           onSave={handleRenameFolder}
           saving={saving}
+          onError={setError}
         />
         <MoveModal
           open={!!moveTarget}
@@ -1118,6 +1192,7 @@ function KnowledgeBasePageInner() {
           onClose={() => setMoveTarget(null)}
           onMove={handleMove}
           saving={saving}
+          onError={setError}
         />
         <FileViewerModal
           projectId={projectId}
@@ -1158,9 +1233,16 @@ function KnowledgeBasePageInner() {
         </div>
 
         {error && (
-          <div className="mb-3 flex shrink-0 items-center justify-between rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)]">
-            <span>{error}</span>
-            <button onClick={() => setError(null)}><IconX size={16} /></button>
+          // Fixed + z-[60] so this floats above any open modal (Modal.tsx portals its overlay at
+          // z-50) instead of rendering inline in the page, where it sits underneath — invisible —
+          // while a dialog is open. Matches the toast convention already used on the test cases
+          // page (app/(app)/projects/[id]/testcases/page.tsx).
+          <div
+            role="alert"
+            className="fixed bottom-5 right-5 z-[60] flex max-w-sm items-start gap-3 rounded-lg border border-[var(--error)]/30 bg-[var(--error-soft)] px-4 py-2.5 text-sm text-[var(--error-foreground)] shadow-lg"
+          >
+            <span className="flex-1">{error}</span>
+            <button onClick={() => setError(null)} className="shrink-0"><IconX size={16} /></button>
           </div>
         )}
 

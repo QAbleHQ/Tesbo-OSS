@@ -25,7 +25,7 @@ import {
   type TestRunListItem,
   type ActivityLogItem,
 } from "@/lib/api";
-import { Card, StatusChip, type StatusChipProps } from "@/components/ui";
+import { Card, PageLoader, StatusChip, type StatusChipProps } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 import { OwnerAvatar } from "@/components/testplans/PlanCard";
 
@@ -205,14 +205,7 @@ export default function ProjectDashboardPage() {
   }, [projectId, router]);
 
   if (loading || !project || !summary) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--ink-200)] border-t-[var(--denim)]" />
-          <p className="text-[13px] text-[var(--ink-400)]">Loading project…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading project…" />;
   }
 
   const name = (project.name as string) ?? "";
@@ -229,6 +222,10 @@ export default function ProjectDashboardPage() {
     { label: "Medium", count: bySeverity.Medium, text: "var(--muted)", bg: "var(--surface-secondary)", bar: "var(--muted-soft)" },
     { label: "Low", count: bySeverity.Low, text: "var(--success-foreground)", bg: "var(--success-soft)", bar: "var(--success)" },
   ];
+  // The "Open bugs" stat card's badge used to only ever show Critical's count — so a project with,
+  // say, 5 High bugs and 0 Critical showed no count badge at all, even though a non-zero count
+  // existed. Falls through in severity order to the first non-zero row instead.
+  const topSeverityRow = SEVERITY_ROWS.find((row) => row.count > 0);
 
   return (
     <StandardPageLayout
@@ -326,14 +323,29 @@ export default function ProjectDashboardPage() {
           icon={<IconBug size={18} stroke={1.75} />}
           iconBg="var(--error-soft)"
           iconColor="var(--error-foreground)"
-          badge={bySeverity.Critical > 0 ? <StatusChip tone="error">{bySeverity.Critical} critical</StatusChip> : undefined}
+          badge={
+            topSeverityRow ? (
+              <StatusChip
+                tone={
+                  topSeverityRow.label === "Critical" ? "error" : topSeverityRow.label === "High" ? "warning" : "neutral"
+                }
+              >
+                {topSeverityRow.count} {topSeverityRow.label.toLowerCase()}
+              </StatusChip>
+            ) : undefined
+          }
           value={openBugsTotal}
           label="Open bugs"
           bar={
             openBugsTotal > 0 ? (
               <ThinBar>
                 {SEVERITY_ROWS.filter((r) => r.count > 0).map((r) => (
-                  <div key={r.label} className="h-full" style={{ width: `${severityPct(r.count)}%`, background: r.bar }} />
+                  <div
+                    key={r.label}
+                    className="h-full"
+                    title={`${r.count} ${r.label}`}
+                    style={{ width: `${severityPct(r.count)}%`, background: r.bar }}
+                  />
                 ))}
               </ThinBar>
             ) : undefined
@@ -517,7 +529,10 @@ export default function ProjectDashboardPage() {
                   <div className="min-w-0 flex-1">
                     <p className="text-[12px] leading-[1.5] text-[var(--muted)]">{describeActivity(item)}</p>
                     <div className="mt-1 flex items-center gap-1.5">
-                      <OwnerAvatar name={item.actorKind === "agent" ? item.actorName || "Zyra" : item.actorName || item.actorEmail || "System"} />
+                      <OwnerAvatar
+                        name={item.actorKind === "agent" ? item.actorName || "Zyra" : item.actorName || item.actorEmail || "System"}
+                        seed={item.actorKind === "agent" ? undefined : item.actorId}
+                      />
                       <span className="font-mono text-[11px] text-[var(--muted-soft)]">{formatRelative(item.createdAt)}</span>
                     </div>
                   </div>

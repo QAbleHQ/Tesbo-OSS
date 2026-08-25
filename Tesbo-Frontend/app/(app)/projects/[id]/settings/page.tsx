@@ -4,7 +4,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
-import { IconChevronRight, IconKey, IconSettings, IconStack2 } from "@tabler/icons-react";
+import { IconChevronRight, IconKey, IconSettings, IconStack2, IconTrash } from "@tabler/icons-react";
 import {
   authMe,
   getProject,
@@ -29,17 +29,23 @@ import {
   Input,
   Card,
   Modal,
+  ConfirmModal,
   Select,
   Textarea,
   Field,
   FieldError,
   FieldLabel,
+  PageLoader,
 } from "@/components/ui";
 import {
   PROJECT_DESCRIPTION_MAX_LENGTH,
   PROJECT_NAME_MAX_LENGTH,
+  ENVIRONMENT_NAME_MAX_LENGTH,
+  ENVIRONMENT_URL_MAX_LENGTH,
   validateProjectDescription,
   validateProjectName,
+  validateEnvironmentName,
+  validateEnvironmentUrl,
 } from "@/lib/validation";
 
 type ProjectSettingsPayload = {
@@ -92,6 +98,9 @@ export default function ProjectSettingsPage() {
   const [testRunEnvironments, setTestRunEnvironments] = useState<TestEnvironmentSetting[]>([]);
   const [newEnvironmentName, setNewEnvironmentName] = useState("");
   const [newEnvironmentUrl, setNewEnvironmentUrl] = useState("");
+  const [newEnvironmentNameError, setNewEnvironmentNameError] = useState("");
+  const [newEnvironmentUrlError, setNewEnvironmentUrlError] = useState("");
+  const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
@@ -116,10 +125,12 @@ export default function ProjectSettingsPage() {
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [membersLoading, setMembersLoading] = useState(true);
   const [memberError, setMemberError] = useState<string | null>(null);
+  const [addMemberError, setAddMemberError] = useState<string | null>(null);
   const [addUserId, setAddUserId] = useState("");
   const [addRole, setAddRole] = useState<string>("qa_engineer");
   const [addingMember, setAddingMember] = useState(false);
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
+  const [pendingMemberRemoval, setPendingMemberRemoval] = useState<{ userId: string; label: string } | null>(null);
   const [changingRoleId, setChangingRoleId] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [apiTokenCount, setApiTokenCount] = useState<number | null>(null);
@@ -127,6 +138,7 @@ export default function ProjectSettingsPage() {
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteProjectModalOpen, setDeleteProjectModalOpen] = useState(false);
   const [deleteProjectTypedName, setDeleteProjectTypedName] = useState("");
+  const [toast, setToast] = useState("");
   const { startEl: topBarStartEl, setFilled: setTopBarFilled } = useTopBarSlots();
   // Hoisted above visibleTabs (rather than computed further down with the rest of the
   // members logic) because the Custom Fields tab needs the role check to decide whether
@@ -259,19 +271,21 @@ export default function ProjectSettingsPage() {
     try {
       const draftName = newEnvironmentName.trim();
       const draftUrl = newEnvironmentUrl.trim();
-      if (activeTab === "testRuns" && (draftName || draftUrl)) {
-        if (!draftName || !draftUrl) {
-          setMessage("Environment name and URL are required.");
+      // Only blocks the save (and only looks at these two fields) while the Test Environments tab
+      // is active — leftover text left in an unrelated, hidden tab's inputs shouldn't stop someone
+      // from saving a name/description change on the General tab.
+      const hasDraftEnvironment = activeTab === "testRuns" && Boolean(draftName || draftUrl);
+      if (hasDraftEnvironment) {
+        const draftNameError = validateEnvironmentName(newEnvironmentName, testRunEnvironments);
+        const draftUrlError = validateEnvironmentUrl(newEnvironmentUrl, testRunEnvironments);
+        if (draftNameError || draftUrlError) {
+          setNewEnvironmentNameError(draftNameError);
+          setNewEnvironmentUrlError(draftUrlError);
           return;
         }
       }
       const environmentsToSave = [...testRunEnvironments];
-      if (
-        activeTab === "testRuns" &&
-        draftName &&
-        draftUrl &&
-        !environmentsToSave.some((item) => item.name.toLowerCase() === draftName.toLowerCase())
-      ) {
+      if (hasDraftEnvironment) {
         environmentsToSave.push({ name: draftName, url: draftUrl });
       }
       const currentSettings = parseProjectSettings(project?.settings);
@@ -307,44 +321,40 @@ export default function ProjectSettingsPage() {
   async function handleDeleteProject() {
     const projectName = String(project?.name ?? "").trim();
     if (!projectName) {
-      setMessage("Project name is unavailable. Refresh and try again.");
+      setDeleteProjectError("Project name is unavailable. Refresh and try again.");
       return;
     }
     if (deleteProjectTypedName.trim() !== projectName) {
-      setMessage("Project deletion cancelled. Entered name does not match.");
+      setDeleteProjectError("Entered name does not match. Deletion cancelled.");
       return;
     }
 
     setDeletingProject(true);
-    setMessage(null);
+    setDeleteProjectError(null);
     try {
       await deleteProjectRequest(projectId);
+      setDeleteProjectModalOpen(false);
+      setDeleteProjectTypedName("");
       router.replace("/projects");
     } catch (error) {
       const text = error instanceof Error ? error.message : "Failed to delete project.";
-      setMessage(text);
+      setDeleteProjectError(text);
     } finally {
       setDeletingProject(false);
-      setDeleteProjectModalOpen(false);
-      setDeleteProjectTypedName("");
     }
   }
 
   function handleAddEnvironment() {
-    const name = newEnvironmentName.trim();
-    const url = newEnvironmentUrl.trim();
-    if (!name || !url) {
-      setMessage("Environment name and URL are required.");
-      return;
-    }
-    if (testRunEnvironments.some((item) => item.name.toLowerCase() === name.toLowerCase())) {
-      setMessage("Environment name already exists.");
-      return;
-    }
-    setTestRunEnvironments((prev) => [...prev, { name, url }]);
+    const nameValidationError = validateEnvironmentName(newEnvironmentName, testRunEnvironments);
+    const urlValidationError = validateEnvironmentUrl(newEnvironmentUrl, testRunEnvironments);
+    setNewEnvironmentNameError(nameValidationError);
+    setNewEnvironmentUrlError(urlValidationError);
+    if (nameValidationError || urlValidationError) return;
+    setTestRunEnvironments((prev) => [...prev, { name: newEnvironmentName.trim(), url: newEnvironmentUrl.trim() }]);
     setNewEnvironmentName("");
     setNewEnvironmentUrl("");
-    setMessage(null);
+    setNewEnvironmentNameError("");
+    setNewEnvironmentUrlError("");
   }
 
   function handleRemoveEnvironment(index: number) {
@@ -379,18 +389,18 @@ export default function ProjectSettingsPage() {
   async function handleAddMember(e: React.FormEvent) {
     e.preventDefault();
     if (!addUserId) {
-      setMemberError("Select a workspace member");
+      setAddMemberError("Select a workspace member");
       return;
     }
     setAddingMember(true);
-    setMemberError(null);
+    setAddMemberError(null);
     try {
       await addProjectMember(projectId, { userId: addUserId, role: addRole });
       setAddUserId("");
       setAddRole("qa_engineer");
       await loadMembers();
     } catch {
-      setMemberError("Failed to add project member.");
+      setAddMemberError("Failed to add project member.");
     } finally {
       setAddingMember(false);
     }
@@ -410,28 +420,28 @@ export default function ProjectSettingsPage() {
     }
   }
 
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(""), 3500);
+  }
+
   async function handleRemoveMember(userId: string) {
     setRemovingMemberId(userId);
     setMemberError(null);
     try {
       await removeProjectMember(projectId, userId);
       setProjectMembers((prev) => prev.filter((member) => member.userId !== userId));
+      showToast("Member removed from project");
     } catch {
       setMemberError("Failed to remove project member.");
     } finally {
       setRemovingMemberId(null);
+      setPendingMemberRemoval(null);
     }
   }
 
   if (!project) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
-          <p className="text-sm text-[var(--muted)]">Loading project settings…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading project settings…" />;
   }
 
   const projectName = typeof project.name === "string" ? project.name : "";
@@ -496,7 +506,10 @@ export default function ProjectSettingsPage() {
           <div className="min-w-0 flex-1 overflow-y-auto p-6">
             <div className="max-w-3xl space-y-5">
       {(activeTab === "general" || activeTab === "testRuns") && (
-        <form onSubmit={handleSubmit} className="space-y-5">
+        // noValidate: without it, the environment URL input's native type="url" constraint
+        // intercepts Save's submit before handleSubmit ever runs, so the styled inline validation
+        // above never gets a chance to show (same class of bug as the login/signup email fields).
+        <form onSubmit={handleSubmit} className="space-y-5" noValidate>
           {activeTab === "general" && (
             <>
               <Card className="p-4 space-y-4">
@@ -507,7 +520,12 @@ export default function ProjectSettingsPage() {
                   </p>
                 </div>
                 <Field>
-                  <FieldLabel>Name</FieldLabel>
+                  <div className="flex items-baseline justify-between">
+                    <FieldLabel>Name</FieldLabel>
+                    <span className="text-[12px] text-[var(--muted)]">
+                      {name.length}/{PROJECT_NAME_MAX_LENGTH}
+                    </span>
+                  </div>
                   <Input
                     type="text"
                     value={name}
@@ -521,7 +539,12 @@ export default function ProjectSettingsPage() {
                   {nameError && <FieldError>{nameError}</FieldError>}
                 </Field>
                 <Field>
-                  <FieldLabel>Description</FieldLabel>
+                  <div className="flex items-baseline justify-between">
+                    <FieldLabel>Description</FieldLabel>
+                    <span className="text-[12px] text-[var(--muted)]">
+                      {description.length}/{PROJECT_DESCRIPTION_MAX_LENGTH}
+                    </span>
+                  </div>
                   <Textarea
                     value={description}
                     onChange={(e) => {
@@ -562,6 +585,7 @@ export default function ProjectSettingsPage() {
                   variant="destructive"
                   onClick={() => {
                     setDeleteProjectTypedName("");
+                    setDeleteProjectError(null);
                     setDeleteProjectModalOpen(true);
                   }}
                   disabled={deletingProject}
@@ -617,19 +641,39 @@ export default function ProjectSettingsPage() {
                   </div>
                 )}
               </div>
-              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-                <Input
-                  type="text"
-                  value={newEnvironmentName}
-                  onChange={(e) => setNewEnvironmentName(e.target.value)}
-                  placeholder="Environment name"
-                />
-                <Input
-                  type="url"
-                  value={newEnvironmentUrl}
-                  onChange={(e) => setNewEnvironmentUrl(e.target.value)}
-                  placeholder="https://staging.example.com"
-                />
+              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-start">
+                <div>
+                  <Input
+                    type="text"
+                    value={newEnvironmentName}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEnvironmentName(value);
+                      if (newEnvironmentNameError && !validateEnvironmentName(value, testRunEnvironments)) {
+                        setNewEnvironmentNameError("");
+                      }
+                    }}
+                    placeholder="Environment name"
+                    maxLength={ENVIRONMENT_NAME_MAX_LENGTH}
+                  />
+                  {newEnvironmentNameError && <FieldError>{newEnvironmentNameError}</FieldError>}
+                </div>
+                <div>
+                  <Input
+                    type="url"
+                    value={newEnvironmentUrl}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEnvironmentUrl(value);
+                      if (newEnvironmentUrlError && !validateEnvironmentUrl(value, testRunEnvironments)) {
+                        setNewEnvironmentUrlError("");
+                      }
+                    }}
+                    placeholder="https://staging.example.com"
+                    maxLength={ENVIRONMENT_URL_MAX_LENGTH}
+                  />
+                  {newEnvironmentUrlError && <FieldError>{newEnvironmentUrlError}</FieldError>}
+                </div>
                 <Button
                   type="button"
                   variant="secondary"
@@ -662,10 +706,9 @@ export default function ProjectSettingsPage() {
               Members added here can perform actions inside this project based on their project role.
             </p>
             <div className="mt-3 rounded-lg bg-[var(--surface-secondary)] p-3 text-xs text-[var(--muted)] space-y-1">
-              <p><strong>Owner:</strong> Full access to all features and can add admins.</p>
-              <p><strong>Admin:</strong> Similar to owner, but cannot add or remove owners/admins.</p>
-              <p><strong>Manager:</strong> Can invite members and manage project operations.</p>
-              <p><strong>Member:</strong> Can work inside assigned projects, but cannot invite or create projects.</p>
+              <p><strong>Owner:</strong> Full access to this project, including managing every member. The owner&apos;s role cannot be changed.</p>
+              <p><strong>Manager:</strong> Can add or remove QA Engineers and manage project settings, but cannot change another manager&apos;s role or add an owner.</p>
+              <p><strong>QA Engineer:</strong> Works inside this project, but cannot manage members or change project settings.</p>
             </div>
           </Card>
 
@@ -677,8 +720,12 @@ export default function ProjectSettingsPage() {
                     <FieldLabel>Add workspace member</FieldLabel>
                     <Select
                       value={addUserId}
-                      onChange={(e) => setAddUserId(e.target.value)}
+                      onChange={(e) => {
+                        setAddUserId(e.target.value);
+                        if (addMemberError) setAddMemberError(null);
+                      }}
                       disabled={addingMember || membersLoading}
+                      aria-invalid={Boolean(addMemberError)}
                     >
                       <option value="">Select member…</option>
                       {availableToAdd.map((member) => (
@@ -687,6 +734,7 @@ export default function ProjectSettingsPage() {
                         </option>
                       ))}
                     </Select>
+                    {addMemberError && <FieldError>{addMemberError}</FieldError>}
                   </Field>
                   <Field>
                     <FieldLabel>Role</FieldLabel>
@@ -761,11 +809,12 @@ export default function ProjectSettingsPage() {
                         {canManageMembers && member.userId !== currentUserId && normalizeRole(member.role) !== "owner" && (
                           <button
                             type="button"
-                            onClick={() => handleRemoveMember(member.userId)}
+                            onClick={() => setPendingMemberRemoval({ userId: member.userId, label: member.name || member.email })}
                             disabled={removingMemberId === member.userId}
-                            className="text-[var(--error-foreground)] hover:underline disabled:opacity-50"
+                            title="Remove from project"
+                            className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--error-foreground)] transition-colors hover:bg-[var(--error-soft)] disabled:opacity-50"
                           >
-                            {removingMemberId === member.userId ? "Removing…" : "Remove"}
+                            <IconTrash size={15} />
                           </button>
                         )}
                       </td>
@@ -1011,6 +1060,7 @@ export default function ProjectSettingsPage() {
         onClose={() => {
           if (deletingProject) return;
           setDeleteProjectModalOpen(false);
+          setDeleteProjectError(null);
         }}
         title="Confirm project deletion"
       >
@@ -1023,10 +1073,15 @@ export default function ProjectSettingsPage() {
             <Input
               type="text"
               value={deleteProjectTypedName}
-              onChange={(event) => setDeleteProjectTypedName(event.target.value)}
+              onChange={(event) => {
+                setDeleteProjectTypedName(event.target.value);
+                if (deleteProjectError) setDeleteProjectError(null);
+              }}
               placeholder={String(project?.name ?? "")}
               disabled={deletingProject}
+              aria-invalid={Boolean(deleteProjectError)}
             />
+            {deleteProjectError && <FieldError>{deleteProjectError}</FieldError>}
           </Field>
           <div className="flex justify-end gap-2">
             <Button
@@ -1035,6 +1090,7 @@ export default function ProjectSettingsPage() {
               onClick={() => {
                 setDeleteProjectModalOpen(false);
                 setDeleteProjectTypedName("");
+                setDeleteProjectError(null);
               }}
               disabled={deletingProject}
             >
@@ -1051,6 +1107,26 @@ export default function ProjectSettingsPage() {
           </div>
         </div>
       </Modal>
+
+      <ConfirmModal
+        open={pendingMemberRemoval !== null}
+        title="Remove project member"
+        message={
+          pendingMemberRemoval
+            ? `Remove ${pendingMemberRemoval.label} from this project? They will lose access to it.`
+            : ""
+        }
+        confirmLabel="Remove member"
+        loading={pendingMemberRemoval !== null && removingMemberId === pendingMemberRemoval.userId}
+        onConfirm={() => pendingMemberRemoval && handleRemoveMember(pendingMemberRemoval.userId)}
+        onCancel={() => setPendingMemberRemoval(null)}
+      />
+
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--toast-surface)] px-4 py-2.5 text-sm text-[var(--toast-foreground)] shadow-lg">
+          {toast}
+        </div>
+      )}
     </main>
   );
 }

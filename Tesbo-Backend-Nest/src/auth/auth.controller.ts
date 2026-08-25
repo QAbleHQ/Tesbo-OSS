@@ -51,9 +51,13 @@ export class AuthController {
 
   @Post("/password/change")
   @HttpCode(204)
-  changePassword(@Body() body: ChangePasswordBody, @Req() req: AuthenticatedRequest) {
+  changePassword(
+    @Body() body: ChangePasswordBody,
+    @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response
+  ) {
     if (!req.userId) throw new UnauthorizedException("Not authenticated");
-    return this.auth.changePassword(req.userId, body.currentPassword, body.newPassword, req);
+    return this.auth.changePassword(req.userId, body.currentPassword, body.newPassword, req, res);
   }
 
   @Post("/logout")

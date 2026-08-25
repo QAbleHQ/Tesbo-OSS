@@ -1,5 +1,5 @@
 import path from "node:path";
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 import {
   createBug,
   createProject,
@@ -265,8 +265,9 @@ test.describe("bugs list — controls and filters", () => {
   });
 
   test("BUG-U-09 the severity filter is available on the board too", async ({ page }) => {
-    // The board groups by status, so the status filter is deliberately list-only — but "show me the
-    // Critical ones" is exactly what the board is for, which is why this one is not gated on the view.
+    // Neither filter is gated on the view: both feed the same `filtered` list, which the board's
+    // columns are built from as well (see BUG-U-14 below). "Show me the Critical ones" is exactly
+    // what the board is for.
     await page.getByRole("button", { name: "Board", exact: true }).click();
     const severity = page.getByLabel("Filter by severity");
     await expect(severity).toBeVisible();
@@ -380,5 +381,181 @@ test.describe("bug priority", () => {
     await page.getByLabel("Bug priority").selectOption("");
     await page.getByRole("button", { name: "Save Changes" }).click();
     await expect(row.getByText(/^P[0-3]$/)).toHaveCount(0);
+  });
+});
+
+/*
+ * The status filter's consistency across Board and List — dev commit cdcd5dd, ported here when the
+ * two branches' bugs specs were merged.
+ *
+ * Reported: the status Select was only rendered while viewMode === "list", but the filtered list it
+ * controlled (`filtered`, which feeds the List rows AND the board's kanbanColumns) applied
+ * filterStatus regardless of which view was showing. So a filter set in List kept silently narrowing
+ * Board after switching — with no control visible there to see it was active or clear it — while
+ * Search (never gated on viewMode) already behaved consistently across both. The fix renders the
+ * same Select in both views, matching Search.
+ *
+ * Two changes from dev's original: these run in the screens tenant's own project rather than the
+ * shared smoke project, so the "a whole column is empty" assertions hold outright instead of only
+ * for statuses a filter provably excludes; and the status filter is addressed by its aria-label,
+ * because the severity filter added alongside it (BUG-U-08/09) makes getByRole("combobox")
+ * ambiguous.
+ */
+test.describe("bugs — status filter and search consistency across Board and List", () => {
+  let api: APIRequestContext;
+  let projectId: string;
+
+  test.beforeAll(async () => {
+    if (skipReason) return;
+    api = await screensApi();
+    const project = await createProject(api);
+    projectId = project.id;
+  });
+
+  test.afterAll(async () => {
+    if (api) {
+      await deleteProjects(api, [projectId]);
+      await api.dispose();
+    }
+  });
+
+  test.beforeEach(() => {
+    test.skip(skipReason !== null, skipReason ?? "");
+  });
+
+  /** The board column for `status`, found from its heading so it survives class changes. */
+  function kanbanColumn(page: Page, status: string): Locator {
+    return page
+      .getByRole("heading", { name: status, exact: true })
+      .locator("xpath=ancestor::div[contains(@class,'min-w-')][1]");
+  }
+
+  /** Two bugs, in different statuses, in a project of this describe's own. */
+  async function seedPair(): Promise<{ openTitle: string; inProgressTitle: string; ids: string[] }> {
+    const suffix = uniqueSuffix();
+    const openTitle = `E2E Bug Filter Open ${suffix}`;
+    const inProgressTitle = `E2E Bug Filter InProgress ${suffix}`;
+    const open = await createBug(api, projectId, { title: openTitle, severity: "Medium" });
+    const inProgress = await createBug(api, projectId, {
+      title: inProgressTitle,
+      severity: "Medium",
+      status: "In Progress",
+    });
+    return { openTitle, inProgressTitle, ids: [open.id, inProgress.id] };
+  }
+
+  async function deleteBugs(ids: string[]): Promise<void> {
+    for (const id of ids) await api.delete(`/api/bugs/${id}`, { failOnStatusCode: false });
+  }
+
+  test("BUG-U-14 a status filter applied in List stays visible and applied after switching to Board", async ({
+    page,
+  }) => {
+    const { openTitle, inProgressTitle, ids } = await seedPair();
+    try {
+      await page.goto(`/projects/${projectId}/bugs`);
+      await page.getByRole("button", { name: "List", exact: true }).click();
+
+      const statusFilter = page.getByLabel("Filter by status");
+      await statusFilter.selectOption("Open");
+      await expect(page.getByText(openTitle, { exact: true })).toBeVisible();
+      await expect(page.getByText(inProgressTitle, { exact: true })).toHaveCount(0);
+
+      await page.getByRole("button", { name: "Board", exact: true }).click();
+
+      // The regression itself: the control that shows and edits the filter must still be there and
+      // still read "Open" — not just the filtering effect, but visible evidence of why it happens.
+      await expect(statusFilter).toBeVisible();
+      await expect(statusFilter).toHaveValue("Open");
+
+      await expect(kanbanColumn(page, "In Progress").getByText("No bugs")).toBeVisible();
+      await expect(kanbanColumn(page, "Reopened").getByText("No bugs")).toBeVisible();
+      await expect(kanbanColumn(page, "Closed").getByText("No bugs")).toBeVisible();
+      await expect(kanbanColumn(page, "Open").getByText(openTitle, { exact: true })).toBeVisible();
+      await expect(page.getByText(inProgressTitle, { exact: true })).toHaveCount(0);
+    } finally {
+      await deleteBugs(ids);
+    }
+  });
+
+  test("BUG-U-15 the filter round-trips back to List unchanged", async ({ page }) => {
+    const { openTitle, inProgressTitle, ids } = await seedPair();
+    try {
+      await page.goto(`/projects/${projectId}/bugs`);
+      const statusFilter = page.getByLabel("Filter by status");
+      await statusFilter.selectOption("In Progress");
+      await expect(kanbanColumn(page, "In Progress").getByText(inProgressTitle, { exact: true })).toBeVisible();
+
+      await page.getByRole("button", { name: "List", exact: true }).click();
+      await expect(statusFilter).toHaveValue("In Progress");
+      await expect(page.getByText(inProgressTitle, { exact: true })).toBeVisible();
+      await expect(page.getByText(openTitle, { exact: true })).toHaveCount(0);
+
+      await page.getByRole("button", { name: "Board", exact: true }).click();
+      await expect(statusFilter).toHaveValue("In Progress");
+    } finally {
+      await deleteBugs(ids);
+    }
+  });
+
+  test("BUG-U-16 a filter that excludes both bugs hides them in both views", async ({ page }) => {
+    const { openTitle, inProgressTitle, ids } = await seedPair();
+    try {
+      await page.goto(`/projects/${projectId}/bugs`);
+      await page.getByLabel("Filter by status").selectOption("Closed");
+
+      await expect(page.getByText(openTitle, { exact: true })).toHaveCount(0);
+      await expect(page.getByText(inProgressTitle, { exact: true })).toHaveCount(0);
+      await expect(kanbanColumn(page, "Open").getByText("No bugs")).toBeVisible();
+      await expect(kanbanColumn(page, "In Progress").getByText("No bugs")).toBeVisible();
+
+      await page.getByRole("button", { name: "List", exact: true }).click();
+      await expect(page.getByText(openTitle, { exact: true })).toHaveCount(0);
+      await expect(page.getByText(inProgressTitle, { exact: true })).toHaveCount(0);
+    } finally {
+      await deleteBugs(ids);
+    }
+  });
+
+  test("BUG-U-17 clearing the filter back to All Statuses from Board restores both bugs", async ({ page }) => {
+    const { openTitle, inProgressTitle, ids } = await seedPair();
+    try {
+      await page.goto(`/projects/${projectId}/bugs`);
+      const statusFilter = page.getByLabel("Filter by status");
+      await statusFilter.selectOption("Open");
+      await expect(page.getByText(inProgressTitle, { exact: true })).toHaveCount(0);
+
+      // Clearing is only possible from Board because the control used to be hidden there — the
+      // concrete edge case the "keep them consistent" fix has to unblock.
+      await statusFilter.selectOption("");
+      await expect(statusFilter).toHaveValue("");
+      await expect(kanbanColumn(page, "Open").getByText(openTitle, { exact: true })).toBeVisible();
+      await expect(kanbanColumn(page, "In Progress").getByText(inProgressTitle, { exact: true })).toBeVisible();
+    } finally {
+      await deleteBugs(ids);
+    }
+  });
+
+  test("BUG-U-18 a search term persists and keeps filtering after switching views", async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const wantedTitle = `E2E Bug Search ${suffix}`;
+    const otherTitle = `E2E Bug Search Other ${suffix}`;
+    const wanted = await createBug(api, projectId, { title: wantedTitle, severity: "Medium" });
+    const other = await createBug(api, projectId, { title: otherTitle, severity: "Medium" });
+    try {
+      await page.goto(`/projects/${projectId}/bugs`);
+      const search = page.getByPlaceholder("Search bugs…");
+      await search.fill(wantedTitle);
+
+      await expect(page.getByText(wantedTitle, { exact: true })).toBeVisible();
+      await expect(page.getByText(otherTitle, { exact: true })).toHaveCount(0);
+
+      await page.getByRole("button", { name: "List", exact: true }).click();
+      await expect(search).toHaveValue(wantedTitle);
+      await expect(page.getByText(wantedTitle, { exact: true })).toBeVisible();
+      await expect(page.getByText(otherTitle, { exact: true })).toHaveCount(0);
+    } finally {
+      await deleteBugs([wanted.id, other.id]);
+    }
   });
 });

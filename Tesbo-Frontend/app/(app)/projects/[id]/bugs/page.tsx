@@ -28,6 +28,7 @@ import {
   Field,
   FieldLabel,
   Modal,
+  PageLoader,
   Textarea,
   Select,
   StatusChip,
@@ -375,10 +376,10 @@ export default function BugsPage() {
   const [filterStatus, setFilterStatus] = useState("");
   /*
    * Basecamp 10226242373 ("Severity filter is missing"). Severity is a first-class field — it has its
-   * own column, its own badge and its own index on the table — but the only filter was status. Unlike
-   * the status filter this one is shown in BOTH views: the board is already grouped by status, so a
-   * status filter there is redundant, while "show me the Critical ones" is exactly what the board is
-   * for.
+   * own column, its own badge and its own index on the table — but the only filter was status. Like
+   * the status filter it is shown in BOTH views, since `filtered` below feeds the board's columns as
+   * well as the list rows: a filter that applies everywhere needs a control that is visible
+   * everywhere.
    */
   const [filterSeverity, setFilterSeverity] = useState("");
   const [search, setSearch] = useState("");
@@ -643,11 +644,7 @@ export default function BugsPage() {
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   return (
@@ -701,19 +698,23 @@ export default function BugsPage() {
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-64"
               />
-              {viewMode === "list" && (
-                <Select
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                  aria-label="Filter by status"
-                >
-                  <option value="">All Statuses</option>
-                  <option value="Open">Open</option>
-                  <option value="In Progress">In Progress</option>
-                  <option value="Closed">Closed</option>
-                  <option value="Reopened">Reopened</option>
-                </Select>
-              )}
+              {/*
+                * Both filters are rendered in BOTH views. `filtered` feeds the List rows and the
+                * board's kanbanColumns alike, so a filter set in List kept narrowing the board with
+                * no visible control there to see or clear it (dev commit cdcd5dd). Search was never
+                * gated on viewMode; these now match it.
+                */}
+              <Select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                aria-label="Filter by status"
+              >
+                <option value="">All Statuses</option>
+                <option value="Open">Open</option>
+                <option value="In Progress">In Progress</option>
+                <option value="Closed">Closed</option>
+                <option value="Reopened">Reopened</option>
+              </Select>
               <Select
                 value={filterSeverity}
                 onChange={(e) => setFilterSeverity(e.target.value)}

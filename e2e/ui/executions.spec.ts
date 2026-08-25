@@ -55,6 +55,12 @@ test.describe("auto bug-filing on Failed", () => {
       const titleInput = page.getByPlaceholder("Brief summary of the bug…");
       await expect(titleInput).toHaveValue(`Failed: ${title}`);
 
+      // Severity is mandatory and defaults to Medium so the dialog can always be filed without
+      // the reporter having to touch it.
+      const severitySelect = page.getByRole("combobox", { name: "Severity" });
+      await expect(severitySelect).toHaveValue("Medium");
+      await severitySelect.selectOption("Critical");
+
       await page.getByRole("button", { name: "File Bug" }).click();
       await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeHidden();
 
@@ -64,6 +70,7 @@ test.describe("auto bug-filing on Failed", () => {
         const bugs = await bugsRes.json();
         const filedBug = bugs.find((b: { title: string }) => b.title === `Failed: ${title}`);
         expect(filedBug).toBeTruthy();
+        expect(filedBug.severity).toBe("Critical");
         expect(filedBug.links.some((l: { testcaseId: string; cycleId: string }) =>
           l.testcaseId === testcase.id && l.cycleId === cycle.id,
         )).toBeTruthy();
@@ -72,6 +79,79 @@ test.describe("auto bug-filing on Failed", () => {
       }
     } finally {
       await cleanUp(cycle.id, testcase.id);
+    }
+  });
+
+  test("the severity dropdown offers only the four valid values and resets to Medium for the next dialog", async ({
+    page,
+  }) => {
+    const stamp = Date.now();
+    const titleA = `UI Bug Severity Reset A ${stamp}`;
+    const titleB = `UI Bug Severity Reset B ${stamp}`;
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    const cycle = await (
+      await api.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `UI Bug Severity Reset Cycle ${stamp}` } })
+    ).json();
+    await api.patch(`/api/cycles/${cycle.id}`, { data: { status: "In Progress" } });
+    const testcaseA = await (
+      await api.post(`/api/projects/${ctx.projectId}/testcases`, { data: { title: titleA } })
+    ).json();
+    const testcaseB = await (
+      await api.post(`/api/projects/${ctx.projectId}/testcases`, { data: { title: titleB } })
+    ).json();
+    await api.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds: [testcaseA.id, testcaseB.id] } });
+    await api.dispose();
+
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+
+      // Fail the first case, pick a non-default severity, and skip — the dialog must not carry
+      // that choice over into the next execution's report.
+      await page.getByRole("combobox").first().selectOption("Failed");
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeVisible();
+      const severitySelect = page.getByRole("combobox", { name: "Severity" });
+
+      // Mandatory dropdown: exactly the four backend-accepted values, no blank/empty option.
+      const optionValues = await severitySelect.locator("option").allTextContents();
+      expect(optionValues).toEqual(["Critical", "High", "Medium", "Low"]);
+
+      await severitySelect.selectOption("Low");
+      await page.getByRole("button", { name: "Skip", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeHidden();
+
+      // Fail the second case — its dialog must default back to Medium, not inherit "Low".
+      await page.getByRole("combobox").nth(1).selectOption("Failed");
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Severity" })).toHaveValue("Medium");
+      await page.getByRole("button", { name: "File Bug" }).click();
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeHidden();
+
+      const verifyApi = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+      try {
+        const bugsRes = await verifyApi.get(`/api/projects/${ctx.projectId}/bugs`);
+        const bugs = await bugsRes.json();
+        const filedBug = bugs.find((b: { title: string }) => b.title === `Failed: ${titleB}`);
+        expect(filedBug).toBeTruthy();
+        expect(filedBug.severity).toBe("Medium");
+      } finally {
+        await verifyApi.dispose();
+      }
+    } finally {
+      const cleanupApi = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+      try {
+        const bugsRes = await cleanupApi.get(`/api/projects/${ctx.projectId}/bugs`);
+        const bugs = await bugsRes.json();
+        for (const bug of bugs) {
+          if (bug.links?.some((l: { testcaseId: string }) => l.testcaseId === testcaseA.id || l.testcaseId === testcaseB.id)) {
+            await cleanupApi.delete(`/api/bugs/${bug.id}`, { failOnStatusCode: false });
+          }
+        }
+        await cleanupApi.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+        await cleanupApi.delete(`/api/projects/${ctx.projectId}/testcases/${testcaseA.id}`, { failOnStatusCode: false });
+        await cleanupApi.delete(`/api/projects/${ctx.projectId}/testcases/${testcaseB.id}`, { failOnStatusCode: false });
+      } finally {
+        await cleanupApi.dispose();
+      }
     }
   });
 

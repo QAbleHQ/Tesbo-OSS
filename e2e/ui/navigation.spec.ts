@@ -1,8 +1,10 @@
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { dbControlAvailable } from "../utils/psql";
 import {
+  createPlan,
   removeWorkspaceMember,
+  screensApi,
   screensSuiteSkipReason,
   screensTenant,
   seedWorkspaceMember,
@@ -277,16 +279,51 @@ test.describe("side navigation — behaviour", () => {
     await expect(sidebar(page)).toHaveCSS("width", "260px");
   });
 
-  test("NAV-B-05 the theme toggle and log out stay usable in the collapsed rail", async ({ page }) => {
+  test("NAV-B-05 the theme toggle and logout stay usable in the collapsed rail", async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
 
     await expect(page.getByRole("button", { name: "Use dark theme" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Use light theme" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
-  test("NAV-B-06/09 logging out ends the session and Back cannot resurrect it", async ({ browser }) => {
+  test("NAV-B-05b clicking Logout opens a Yes/No confirmation instead of logging out immediately", async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+
+    // Modal.tsx renders without role="dialog" (see its own comment on this) — asserting on the
+    // title text and the Yes/No controls is the reliable signal that it's actually open.
+    await expect(page.getByRole("heading", { name: "Logout" })).toBeVisible();
+    await expect(page.getByText("Are you sure you want to logout?")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Yes" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "No" })).toBeVisible();
+    // No network call yet — confirming is a separate, deliberate step.
+    await expect(page).toHaveURL(/\/projects/);
+  });
+
+  test("NAV-B-05c No dismisses the confirmation and keeps the session", async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "No" }).click();
+
+    await expect(page.getByText("Are you sure you want to logout?")).toBeHidden();
+    await expect(page).toHaveURL(/\/projects/);
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
+  });
+
+  test("NAV-B-05d pressing Escape on the confirmation keeps the session, same as No", async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+    await expect(page.getByText("Are you sure you want to logout?")).toBeVisible();
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.getByText("Are you sure you want to logout?")).toBeHidden();
+    await expect(page).toHaveURL(/\/projects/);
+  });
+
+  test("NAV-B-06/09 confirming with Yes ends the session and Back cannot resurrect it", async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a disposable user to log out with");
     // Its own user: logout invalidates the session server-side, and the shared screens storage
     // state would be left holding a dead cookie for every other spec in the run.
@@ -295,7 +332,8 @@ test.describe("side navigation — behaviour", () => {
     const page = await context.newPage();
     try {
     await page.goto("/projects");
-    await page.getByRole("button", { name: "Log out" }).click();
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "Yes" }).click();
     // Generous: this test shares the stack with the rest of the suite, and the redirect waits on a
     // real round trip to the backend.
     await page.waitForURL("**/login", { timeout: 30_000 });
@@ -314,20 +352,23 @@ test.describe("side navigation — behaviour", () => {
     }
   });
 
-  test("NAV-B-07 a failed logout says so and leaves the button usable", async ({ page }) => {
+  test("NAV-B-07 a failed logout says so inside the confirmation and leaves Yes usable to retry", async ({ page }) => {
     await page.goto("/projects");
     // Matched by predicate, not glob: the frontend posts to the backend origin (:1021) while the
     // page sits on :1020, and a relative glob is resolved against baseURL, so it never matches.
     await page.route((url) => url.pathname === "/api/auth/logout", (route) => route.abort("failed"));
 
-    await page.getByRole("button", { name: "Log out" }).click();
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "Yes" }).click();
 
+    // Left open on failure, not dismissed, so the user can retry without reopening the confirmation.
     await expect(page.getByText("Could not log out. Please try again.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Log out" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Yes" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "No" })).toBeEnabled();
     await expect(page).toHaveURL(/\/projects/);
   });
 
-  test("NAV-B-08 a double-click sends exactly one logout request", async ({ browser }) => {
+  test("NAV-B-08 a double-click on Yes sends exactly one logout request", async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a disposable user to log out with");
     const member = await seedWorkspaceMember(tenant!.organizationId, "member");
     const context = await browser.newContext({ storageState: member.storageStatePath });
@@ -342,9 +383,10 @@ test.describe("side navigation — behaviour", () => {
       await route.continue();
     });
 
-    const logout = page.getByRole("button", { name: /Log out|Logging out/ });
-    await logout.click();
-    await logout.click({ force: true }).catch(() => undefined);
+    await page.getByRole("button", { name: "Logout" }).click();
+    const confirm = page.getByRole("button", { name: /^(Yes|Logging out…)$/ });
+    await confirm.click();
+    await confirm.click({ force: true }).catch(() => undefined);
     await page.waitForURL("**/login");
 
     expect(logoutCalls).toBe(1);
@@ -358,7 +400,7 @@ test.describe("side navigation — behaviour", () => {
     await page.setViewportSize({ width: 1280, height: 500 });
     await page.goto(`/projects/${tenant!.projectId}/dashboard`);
 
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
     await expect(navLink(page, "Project settings")).toBeVisible();
   });
 
@@ -490,5 +532,145 @@ test.describe("side navigation — behaviour", () => {
     ]) {
       expect(await avatarColourOn(path), `the avatar changes colour on ${path}`).toBe(first);
     }
+  });
+
+  test("NAV-B-15 the same person's avatar matches across different components, not just different pages", async ({
+    page,
+  }) => {
+    /*
+     * NAV-B-14 above only ever reads the top bar's own avatar on different routes — the same
+     * <TopBar/> instance every time — so it could never have caught this ticket's actual
+     * regression: PlanCard's OwnerAvatar and the workspace Activity feed's ActorAvatar each seeded
+     * avatarColor() with the person's *name* instead of their id, so the same person could land on
+     * a different palette swatch in a plan card or the activity feed than in the top bar, even
+     * though every one of them called avatarColor(). This reproduces the reported pairing (header
+     * vs. Activity section) by comparing the top bar's avatar against a plan card's owner avatar
+     * and an activity row for an action the signed-in user just performed.
+     */
+    const api = await screensApi();
+    let planId: string | undefined;
+    try {
+      await page.goto("/projects");
+      const topBarAvatar = page.locator("header span.rounded-full").first();
+      await expect(topBarAvatar).toBeVisible();
+      const topBarColour = await topBarAvatar.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+      const plan = await createPlan(api, tenant!.projectId);
+      planId = plan.id;
+
+      await page.goto(`/projects/${tenant!.projectId}/plans`);
+      const card = page.locator(".group", { has: page.getByRole("link", { name: plan.name, exact: true }) }).first();
+      const cardAvatar = card.locator("span.rounded-full").first();
+      await expect(cardAvatar, "the plan card never shows an owner avatar").toBeVisible();
+      expect(
+        await cardAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the plan card's owner avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+
+      await page.goto("/activity");
+      await page.getByPlaceholder("Search activity…").fill(plan.name);
+      const row = page.locator("div.grid", { hasText: plan.name }).first();
+      const rowAvatar = row.locator("span.rounded-full").first();
+      await expect(rowAvatar, "no activity row found for the plan-created event").toBeVisible();
+      expect(
+        await rowAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the activity feed's actor avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+    } finally {
+      if (planId) await api.delete(`/api/plans/${planId}`, { failOnStatusCode: false }).catch(() => {});
+      await api.dispose();
+    }
+  });
+});
+
+test.describe("top bar — notifications", () => {
+  test.skip(!!skipReason, skipReason ?? "");
+
+  /*
+   * BetterBugs: "Notification Icon Does Not Respond When Clicked" — the bell in TopBar.tsx had no
+   * onClick at all. Fixed by wiring it to a dropdown panel backed by GET /api/notifications
+   * (notifications.spec.ts pins that route's own contract). The backend route is still a stub that
+   * always answers an empty list (see legacy.controller.ts's comment on it), so the primary path
+   * here is necessarily the empty state — these tests are about the panel's own behaviour
+   * (open/close, keyboard, error handling), not about real notification content.
+   */
+
+  const bell = (page: Page) => page.getByRole("button", { name: "Notifications" });
+  const panel = (page: Page) => page.getByRole("menu", { name: "Notifications" });
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/projects");
+  });
+
+  test("NOTIF-UI-01 clicking the bell opens the panel and shows the empty state", async ({ page }) => {
+    await expect(panel(page)).toBeHidden();
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await expect(panel(page).getByText("No notifications")).toBeVisible();
+    await expect(bell(page)).toHaveAttribute("aria-expanded", "true");
+  });
+
+  test("NOTIF-UI-02 clicking the bell again closes it", async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await bell(page).click();
+    await expect(panel(page)).toBeHidden();
+    await expect(bell(page)).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("NOTIF-UI-03 clicking outside the panel closes it", async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    // The top-bar avatar (same locator NAV-B-14 uses) — always present, has no click handler of its
+    // own, and sits outside notifBoxRef, so clicking it is an unambiguous "outside click".
+    await page.locator("header span.rounded-full").first().click();
+    await expect(panel(page)).toBeHidden();
+  });
+
+  test("NOTIF-UI-04 pressing Escape closes it", async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel(page)).toBeHidden();
+  });
+
+  test("NOTIF-UI-05 the bell is reachable and activatable from the keyboard", async ({ page }) => {
+    await bell(page).focus();
+    await expect(bell(page)).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(panel(page)).toBeVisible();
+  });
+
+  test("NOTIF-UI-06 a failed fetch shows an inline error instead of an empty panel or a crash", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    // Matched by pathname, not a glob against the page's own origin — the frontend calls the
+    // backend's origin, which the NAV-B-07 logout test already established a glob against baseURL
+    // won't match.
+    await page.route((url) => url.pathname === "/api/notifications", (route) => route.abort("failed"));
+
+    await bell(page).click();
+
+    await expect(panel(page).getByText("No notifications")).toBeHidden();
+    await expect(panel(page).getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(pageErrors, "a failed notifications fetch raised a client-side error").toEqual([]);
+  });
+
+  test("NOTIF-UI-07 Try again recovers once the request succeeds", async ({ page }) => {
+    let attempt = 0;
+    await page.route((url) => url.pathname === "/api/notifications", (route) => {
+      attempt += 1;
+      if (attempt === 1) return route.abort("failed");
+      return route.continue();
+    });
+
+    await bell(page).click();
+    await expect(panel(page).getByRole("button", { name: "Try again" })).toBeVisible();
+
+    await panel(page).getByRole("button", { name: "Try again" }).click();
+
+    await expect(panel(page).getByText("No notifications")).toBeVisible();
   });
 });

@@ -31,7 +31,7 @@ import {
   type KnowledgeDocumentVersion,
   type KnowledgeBreadcrumbEntry,
 } from "@/lib/api";
-import { Button, Input, Modal, StatusChip } from "@/components/ui";
+import { Button, Input, Modal, PageLoader, StatusChip } from "@/components/ui";
 import RichTextEditor from "@/components/knowledge-base/RichTextEditor";
 import { DocumentComments } from "@/components/knowledge-base/DocumentComments";
 import { blankDocumentFlagKey } from "@/lib/validation";
@@ -453,11 +453,7 @@ export default function KnowledgeDocumentPage() {
   }
 
   if (loading || !doc) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   const isAiMemory = doc.documentType === "ai_memory";

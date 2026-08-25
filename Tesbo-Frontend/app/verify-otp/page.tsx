@@ -8,15 +8,8 @@ import { IconMailOpened } from "@tabler/icons-react";
 import { requestOtp, verifyOtp } from "@/lib/api";
 import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { OtpBoxInput } from "@/components/auth/OtpBoxInput";
+import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { Button, FieldError } from "@/components/ui";
-
-function AuthLoadingScreen() {
-  return (
-    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
-      <p className="text-sm text-white/40">Loading…</p>
-    </div>
-  );
-}
 
 function VerifyOtpForm() {
   const router = useRouter();

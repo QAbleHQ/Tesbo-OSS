@@ -12,15 +12,9 @@ import {
 } from "@/lib/redirect";
 import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { AuthModeToggle } from "@/components/auth/AuthModeToggle";
+import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
-
-function AuthLoadingScreen() {
-  return (
-    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
-      <p className="text-sm text-white/40">Loading...</p>
-    </div>
-  );
-}
+import { validateEmailValue } from "@/lib/validation";
 
 function unreachableDestinationMessage(target: string): string {
   return `Signed in, but we could not open ${target}. Sign in again to continue.`;
@@ -33,6 +27,7 @@ function LoginForm() {
   // the OTP hand-off — inherits the same guarantee that this is a path on our own origin.
   const redirect = safeRedirectPath(searchParams.get("redirect"));
   const inviteEmail = searchParams.get("inviteEmail")?.trim().toLowerCase() || "";
+  const passwordChanged = searchParams.get("passwordChanged") === "1";
   const isInviteEmailLocked = Boolean(inviteEmail);
   const [email, setEmail] = useState(inviteEmail);
   const [password, setPassword] = useState("");
@@ -40,6 +35,8 @@ function LoginForm() {
   const [checkingSetup, setCheckingSetup] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
 
   /*
    * One decision per mount. React re-invokes effects in development, and without this the second
@@ -66,6 +63,19 @@ function LoginForm() {
       .then((me) => {
         if (!me) {
           // Signed out for real, so whatever bounce may have brought the user here is over.
+          clearRedirectAttempts();
+          setCheckingSetup(false);
+          return;
+        }
+        /*
+         * The invite page sends a signed-in user here to switch accounts — "Sign in with
+         * {invite.email}" — without signing them out first, because /login is what owns that. The
+         * still-active session is for the *wrong* account by definition of the user having clicked
+         * that link, so auto-redirecting back to the invite page would only bounce again and, on
+         * the way, misreport a normal account switch as "we could not open" the destination. This
+         * visit's whole purpose is the form below, not a redirect.
+         */
+        if (isInviteEmailLocked && me.email && me.email.trim().toLowerCase() !== inviteEmail) {
           clearRedirectAttempts();
           setCheckingSetup(false);
           return;
@@ -124,16 +134,22 @@ function LoginForm() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    setEmailError("");
+    setPasswordError("");
     // A deliberate sign-in starts the redirect budget over: the user is asking to be sent onward
     // again, and a marker left by an earlier bounce must not pre-empt that.
     clearRedirectAttempts();
     const emailToUse = (isInviteEmailLocked ? inviteEmail : email).trim().toLowerCase();
-    if (!emailToUse) {
-      setError("Email is required");
-      return;
-    }
-    if (!otpMode && !password) {
-      setError("Password is required");
+    // The invite-locked email came from the server, not this field, so there is nothing for the
+    // user to correct here even if it were somehow malformed — only validate what they can edit.
+    const emailValidationError = isInviteEmailLocked ? "" : validateEmailValue(emailToUse) || "";
+    // Login only needs a non-empty password — full complexity rules (validatePasswordValue) belong
+    // to signup/reset, where the password is being *set*. Re-checking them here would reject a
+    // correct password on an older account created before a rule was tightened.
+    const passwordValidationError = !otpMode && !password.trim() ? "Password is required" : "";
+    if (emailValidationError || passwordValidationError) {
+      setEmailError(emailValidationError);
+      setPasswordError(passwordValidationError);
       return;
     }
 
@@ -172,6 +188,12 @@ function LoginForm() {
           {otpMode ? "Sign in with a one-time code" : "Sign in to your workspace"}
         </p>
 
+        {passwordChanged && (
+          <p className="mb-5 rounded-lg border border-[var(--success)] bg-[var(--success-soft)] px-3 py-2 text-[13px] text-[var(--success-foreground)]">
+            Password changed. Sign in with your new password.
+          </p>
+        )}
+
         {!isInviteEmailLocked && (
           <AuthModeToggle
             mode={otpMode ? "otp" : "password"}
@@ -180,18 +202,27 @@ function LoginForm() {
           />
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {/* noValidate: without it, the browser's own "not a valid email" bubble intercepts
+            submit on type="email" before onSubmit ever runs, so our inline message below the
+            field never gets a chance to show. */}
+        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
           <Field>
-            <FieldLabel htmlFor="email">Email</FieldLabel>
+            <FieldLabel htmlFor="email">Email *</FieldLabel>
             <Input
               id="email"
               type="email"
               autoComplete="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                const value = e.target.value;
+                setEmail(value);
+                if (emailError && !validateEmailValue(value)) setEmailError("");
+              }}
               placeholder="you@company.com"
               disabled={loading || isInviteEmailLocked}
+              aria-invalid={Boolean(emailError)}
             />
+            {emailError && <FieldError>{emailError}</FieldError>}
             {isInviteEmailLocked && (
               <FieldHint>This invitation can only be accepted with this email address.</FieldHint>
             )}
@@ -200,7 +231,7 @@ function LoginForm() {
           {!otpMode && (
             <Field>
               <div className="flex items-center justify-between">
-                <FieldLabel htmlFor="password">Password</FieldLabel>
+                <FieldLabel htmlFor="password">Password *</FieldLabel>
                 <Link href="/forgot-password" className="text-xs font-medium text-[var(--brand-primary)] hover:underline">
                   Forgot password?
                 </Link>
@@ -209,10 +240,16 @@ function LoginForm() {
                 id="password"
                 autoComplete="current-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setPassword(value);
+                  if (passwordError && value.trim()) setPasswordError("");
+                }}
                 placeholder="Your password"
                 disabled={loading}
+                aria-invalid={Boolean(passwordError)}
               />
+              {passwordError && <FieldError>{passwordError}</FieldError>}
               <FieldHint>Use the password created during initial setup.</FieldHint>
             </Field>
           )}

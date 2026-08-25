@@ -315,7 +315,10 @@ test.describe("team members", () => {
     try {
       await page.goto(WORKSPACE_MEMBERS_URL);
       await rowFor(membersTable(page), tenant!.guest.email).getByTitle("Remove from team").click();
+      await page.getByRole("button", { name: "Remove member" }).click();
 
+      // Exactly one success toast — getByText resolves to a single node under Playwright's
+      // strict mode, so a duplicate toast would fail this assertion rather than pass silently.
       await expect(page.getByText("Team member removed")).toBeVisible();
       await expect(rowFor(membersTable(page), tenant!.guest.email)).toHaveCount(0);
       expect(storedOrgRole(tenant!, tenant!.guest.userId)).toBe("");
@@ -373,6 +376,10 @@ test.describe("team members", () => {
       expect(storedProjectRole(tenant!.mainProjectId, tenant!.guest.userId)).toBe("qa_engineer");
 
       await rowFor(projectTable, tenant!.guest.email).getByRole("button", { name: "Remove" }).click();
+      await page.getByRole("button", { name: "Remove member" }).click();
+
+      // Exactly one success toast — same guarantee as the workspace-level removal above.
+      await expect(page.getByText("Member removed from project")).toBeVisible();
       await expect(rowFor(projectTable, tenant!.guest.email)).toHaveCount(0);
       expect(storedProjectRole(tenant!.mainProjectId, tenant!.guest.userId)).toBe("");
     } finally {
@@ -415,6 +422,26 @@ test.describe("team members", () => {
     // Custom Fields is the one tab that disappears entirely below manager, rather than going
     // read-only — so its absence is part of what this role sees.
     await expect(page.getByRole("button", { name: "Custom Fields" })).toHaveCount(0);
+  });
+
+  test("the project role legend describes the roles the product actually has", async ({ browser }) => {
+    // Regression for a legend that used to describe a nonexistent "Admin"/generic "Member" tier
+    // (the roles were literally "Owner: ... Admin: ... Manager: ... Member: ...") while the role
+    // dropdown and the backend have only ever recognised owner/manager/qa_engineer. Asserted on the
+    // descriptions rather than the bare role names: "Manager" and "QA Engineer" also appear as
+    // <option> text inside the roster's hidden-but-present role dropdowns.
+    const page = await pageAs(browser, "owner");
+    await page.goto(`/projects/${tenant!.mainProjectId}/settings?tab=members`);
+    await expect(page.getByRole("heading", { name: "Project members" })).toBeVisible();
+
+    await expect(page.getByText("Admin:")).toHaveCount(0);
+    for (const description of [
+      "Full access to this project, including managing every member.",
+      "Can add or remove QA Engineers and manage project settings",
+      "Works inside this project, but cannot manage members or change project settings.",
+    ]) {
+      await expect(page.getByText(description)).toBeVisible();
+    }
   });
 
   // ─── Routes that only redirect ─────────────────────────────────────────────

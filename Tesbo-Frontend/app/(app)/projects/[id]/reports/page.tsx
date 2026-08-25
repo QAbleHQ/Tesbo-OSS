@@ -28,6 +28,7 @@ import {
   type SuiteNode,
 } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { PageLoader } from "@/components/ui";
 import { ReportsNav, type ReportView } from "@/components/reports/ReportsNav";
 import { OverviewTab } from "@/components/reports/OverviewTab";
 import { ExecutionReportTab } from "@/components/reports/ExecutionReportTab";
@@ -217,11 +218,7 @@ export default function ReportsPage() {
       : undefined;
 
   if (!auth) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   return (

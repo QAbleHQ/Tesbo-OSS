@@ -20,6 +20,9 @@ export default function SetupPage() {
   const [demoData, setDemoData] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [emailError, setEmailError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [confirmPasswordError, setConfirmPasswordError] = useState("");
 
   useEffect(() => {
     getSetupStatus()
@@ -35,21 +38,29 @@ export default function SetupPage() {
 
   function continueFromAdmin(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
+    setEmailError("");
+    setPasswordError("");
+    setConfirmPasswordError("");
+
+    let valid = true;
     const normalizedEmail = email.trim().toLowerCase();
     if (!normalizedEmail) {
-      setError("Admin email is required.");
-      return;
+      setEmailError("Admin email is required.");
+      valid = false;
     }
-    const passwordError = validatePasswordValue(password);
-    if (passwordError) {
-      setError(passwordError);
-      return;
+    const passwordMsg = validatePasswordValue(password);
+    if (passwordMsg) {
+      setPasswordError(passwordMsg);
+      valid = false;
+    } else if (!confirmPassword) {
+      setConfirmPasswordError("Confirm your password.");
+      valid = false;
+    } else if (password !== confirmPassword) {
+      setConfirmPasswordError("Passwords do not match.");
+      valid = false;
     }
-    if (password !== confirmPassword) {
-      setError("Passwords do not match.");
-      return;
-    }
+    if (!valid) return;
+
     setEmail(normalizedEmail);
     setStep("organization");
   }
@@ -132,9 +143,14 @@ export default function SetupPage() {
                 type="email"
                 autoComplete="email"
                 value={email}
-                onChange={(e) => setEmail(e.target.value)}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (emailError) setEmailError("");
+                }}
                 placeholder="admin@example.com"
+                aria-invalid={Boolean(emailError)}
               />
+              {emailError && <FieldError>{emailError}</FieldError>}
             </Field>
             <Field>
               <FieldLabel htmlFor="setup-password">Password</FieldLabel>
@@ -143,10 +159,15 @@ export default function SetupPage() {
                 type="password"
                 autoComplete="new-password"
                 value={password}
-                onChange={(e) => setPassword(e.target.value)}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  if (passwordError) setPasswordError("");
+                }}
                 placeholder="Choose a password"
                 maxLength={PASSWORD_MAX_LENGTH}
+                aria-invalid={Boolean(passwordError)}
               />
+              {passwordError && <FieldError>{passwordError}</FieldError>}
               <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
             </Field>
             <Field>
@@ -156,12 +177,16 @@ export default function SetupPage() {
                 type="password"
                 autoComplete="new-password"
                 value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
+                onChange={(e) => {
+                  setConfirmPassword(e.target.value);
+                  if (confirmPasswordError) setConfirmPasswordError("");
+                }}
                 placeholder="Re-enter password"
                 maxLength={PASSWORD_MAX_LENGTH}
+                aria-invalid={Boolean(confirmPasswordError)}
               />
+              {confirmPasswordError && <FieldError>{confirmPasswordError}</FieldError>}
             </Field>
-            {error && <FieldError>{error}</FieldError>}
             <Button type="submit" fullWidth>Continue</Button>
           </form>
         )}

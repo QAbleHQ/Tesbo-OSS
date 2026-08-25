@@ -15,13 +15,7 @@ const STATUS_META: Record<PlanStatus, { label: string; text: string; dot: string
   draft: { label: "Draft", text: "var(--muted)", dot: "var(--muted-soft)", fill: "var(--surface-tertiary)" },
 };
 
-import { AVATAR_COLORS } from "@/lib/avatarColors";
-
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
+import { avatarColor } from "@/lib/avatarColors";
 
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -67,12 +61,14 @@ export function PlanStatusBadge({ status }: { status: PlanStatus }) {
   );
 }
 
-export function OwnerAvatar({ name }: { name: string }) {
-  const color = AVATAR_COLORS[hashSeed(name) % AVATAR_COLORS.length];
+// Seeded on the owner's id, not their name — matches every other person avatar (top bar, team
+// avatars, activity, admins) so the same person keeps the same colour everywhere. Part of
+// Basecamp 10198836413.
+export function OwnerAvatar({ name, seed }: { name: string; seed?: string | null }) {
   return (
     <span
       className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold text-white"
-      style={{ background: color }}
+      style={{ background: avatarColor(seed || name) }}
       title={name}
     >
       {getInitials(name)}
@@ -191,7 +187,7 @@ export function PlanCard({ plan, projectId, ownerName, canManage, onDelete }: Pl
           {formatLastRun(plan.lastRunAt)}
         </span>
         <div className="flex-1" />
-        {ownerName && <OwnerAvatar name={ownerName} />}
+        {ownerName && <OwnerAvatar name={ownerName} seed={plan.ownerId} />}
       </div>
     </Card>
   );

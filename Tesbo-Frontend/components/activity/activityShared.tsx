@@ -260,7 +260,7 @@ export function ZyraMark({ size = 32 }: { size?: number }) {
 export function ActorAvatar({ item }: { item: ActivityLogItem }) {
   if (item.actorKind === "agent" && item.actorName) return <ZyraMark size={32} />;
   const name = item.actorName || item.actorEmail;
-  if (name) return <OwnerAvatar name={name} />;
+  if (name) return <OwnerAvatar name={name} seed={item.actorId} />;
   return (
     <span
       className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold"
@@ -372,7 +372,7 @@ export function ActivitySummaryPanel({ summary }: { summary: ActivitySummary | n
                 const pct = Math.round((m.count / topMemberCount) * 100);
                 return (
                   <div key={m.actorId} className="flex items-center gap-2.5">
-                    {isAgent ? <ZyraMark size={24} /> : <OwnerAvatar name={label} />}
+                    {isAgent ? <ZyraMark size={24} /> : <OwnerAvatar name={label} seed={m.actorId} />}
                     <div className="min-w-0 flex-1">
                       <div
                         className="truncate text-[12px] font-medium"
