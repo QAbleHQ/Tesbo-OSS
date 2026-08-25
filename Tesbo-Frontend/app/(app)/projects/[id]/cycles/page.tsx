@@ -15,6 +15,7 @@ import {
   IconDeviceDesktop,
   IconPencil,
   IconPlayerPlay,
+  IconPlayerSkipForward,
   IconPlus,
   IconTrash,
 } from "@tabler/icons-react";
@@ -132,13 +133,26 @@ function OwnerAvatar({ name }: { name: string }) {
   );
 }
 
-function RunProgressBar({ passed, failed, blocked, total }: { passed: number; failed: number; blocked: number; total: number }) {
+function RunProgressBar({
+  passed,
+  failed,
+  blocked,
+  skipped,
+  total,
+}: {
+  passed: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  total: number;
+}) {
   const pct = (n: number) => `${total ? (n / total) * 100 : 0}%`;
   return (
     <div className="flex h-[5px] gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
       {passed > 0 && <div className="h-full" style={{ width: pct(passed), background: "var(--status-pass-dot)" }} />}
       {failed > 0 && <div className="h-full" style={{ width: pct(failed), background: "var(--status-fail-dot)" }} />}
       {blocked > 0 && <div className="h-full" style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
+      {skipped > 0 && <div className="h-full" style={{ width: pct(skipped), background: "var(--status-skipped-dot)" }} />}
     </div>
   );
 }
@@ -531,7 +545,7 @@ export default function TestRunsPage() {
 
                   {total > 0 && (
                     <div className="border-t border-[var(--border-subtle)] px-4 py-3">
-                      <RunProgressBar passed={r.passed} failed={r.failed} blocked={r.blocked} total={total} />
+                      <RunProgressBar passed={r.passed} failed={r.failed} blocked={r.blocked} skipped={r.skipped} total={total} />
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-4">
                           <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-pass-text)]">
@@ -545,6 +559,10 @@ export default function TestRunsPage() {
                           <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-blocked-text)]">
                             <IconCircleMinus size={13} stroke={1.75} />
                             {r.blocked} blocked
+                          </span>
+                          <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-skipped-text)]">
+                            <IconPlayerSkipForward size={13} stroke={1.75} />
+                            {r.skipped} skipped
                           </span>
                           <span className="flex items-center gap-1 text-[11.5px] text-[var(--muted-soft)]">
                             <IconCircleDashed size={13} stroke={1.75} />

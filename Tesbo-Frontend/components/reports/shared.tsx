@@ -2,14 +2,16 @@
 
 import { Card } from "@/components/ui";
 
-export function statusTone(s: string | null): "neutral" | "brand" | "ai" | "success" | "warning" | "error" | "info" {
+export function statusTone(
+  s: string | null,
+): "neutral" | "brand" | "ai" | "success" | "warning" | "error" | "info" | "blocked" | "skipped" {
   if (!s) return "neutral";
-  const map: Record<string, "success" | "error" | "warning" | "info" | "neutral"> = {
-    Passed: "success", Failed: "error", Skipped: "warning", Blocked: "warning", Retest: "info",
+  const map: Record<string, "success" | "error" | "warning" | "info" | "neutral" | "blocked" | "skipped"> = {
+    Passed: "success", Failed: "error", Skipped: "skipped", Blocked: "blocked", Retest: "info",
     Untested: "neutral", Open: "error", Closed: "success", "In Progress": "info", Planning: "warning",
     Completed: "success", Draft: "neutral", Approved: "success", "In Review": "info", Deprecated: "neutral",
   };
-  return (map[s] ?? "neutral") as "neutral" | "success" | "warning" | "error" | "info";
+  return map[s] ?? "neutral";
 }
 
 export function MetricCard({ label, value, sub, color }: { label: string; value: number | string; sub?: string; color?: string }) {

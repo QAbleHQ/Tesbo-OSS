@@ -252,9 +252,9 @@
   --status-draft-text: #C4B5FD;
   --status-draft-dot: #A78BFA;
   --status-draft-fill: rgba(124, 95, 204, 0.18);
-  --status-running-text: #D97C0A;
-  --status-running-dot: #D97C0A;
-  --status-running-fill: #2A1F10;
+  --status-running-text: #FB923C;
+  --status-running-dot: #F97316;
+  --status-running-fill: #2E1608;
   --status-notrun-text: #38BDF8;
   --status-notrun-dot: #1D7FA8;
   --status-notrun-fill: #102030;

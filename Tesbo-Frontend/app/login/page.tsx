@@ -27,6 +27,7 @@ function LoginForm() {
   // the OTP hand-off — inherits the same guarantee that this is a path on our own origin.
   const redirect = safeRedirectPath(searchParams.get("redirect"));
   const inviteEmail = searchParams.get("inviteEmail")?.trim().toLowerCase() || "";
+  const passwordChanged = searchParams.get("passwordChanged") === "1";
   const isInviteEmailLocked = Boolean(inviteEmail);
   const [email, setEmail] = useState(inviteEmail);
   const [password, setPassword] = useState("");
@@ -173,6 +174,12 @@ function LoginForm() {
         <p className="mb-7 text-[13px] text-[var(--muted)]">
           {otpMode ? "Sign in with a one-time code" : "Sign in to your workspace"}
         </p>
+
+        {passwordChanged && (
+          <p className="mb-5 rounded-lg border border-[var(--success)] bg-[var(--success-soft)] px-3 py-2 text-[13px] text-[var(--success-foreground)]">
+            Password changed. Sign in with your new password.
+          </p>
+        )}
 
         {!isInviteEmailLocked && (
           <AuthModeToggle

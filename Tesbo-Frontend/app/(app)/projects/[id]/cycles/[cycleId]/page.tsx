@@ -84,11 +84,11 @@ const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
 
 /* ───── Status tone helpers ───── */
 function statusToTone(status: string) {
-  const map: Record<string, "success" | "error" | "warning" | "info" | "neutral"> = {
+  const map: Record<string, "success" | "error" | "blocked" | "skipped" | "info" | "neutral"> = {
     Passed: "success",
     Failed: "error",
-    Skipped: "warning",
-    Blocked: "warning",
+    Skipped: "skipped",
+    Blocked: "blocked",
     Retest: "info",
     Untested: "neutral",
   };
@@ -141,8 +141,8 @@ function normalizeSteps(value: unknown): Array<{ action: string; expected: strin
 const PANEL_STATUS_COLORS: Record<string, { active: string; idle: string }> = {
   Passed: { active: "bg-[var(--success)] text-white border-[var(--success)]", idle: "border-[var(--success)]/30 text-[var(--success-foreground)] hover:bg-[var(--success-soft)]" },
   Failed: { active: "bg-[var(--error)] text-white border-[var(--error)]", idle: "border-[var(--error)]/30 text-[var(--error-foreground)] hover:bg-[var(--error-soft)]" },
-  Skipped: { active: "bg-[var(--warning)] text-white border-[var(--warning)]", idle: "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]" },
-  Blocked: { active: "bg-[var(--warning)] text-white border-[var(--warning)]", idle: "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]" },
+  Skipped: { active: "bg-[var(--status-skipped-dot)] text-white border-[var(--status-skipped-dot)]", idle: "border-[var(--status-skipped-dot)]/30 text-[var(--status-skipped-text)] hover:bg-[var(--status-skipped-fill)]" },
+  Blocked: { active: "bg-[var(--status-blocked-dot)] text-white border-[var(--status-blocked-dot)]", idle: "border-[var(--status-blocked-dot)]/30 text-[var(--status-blocked-text)] hover:bg-[var(--status-blocked-fill)]" },
   Retest: { active: "bg-[var(--info)] text-white border-[var(--info)]", idle: "border-[var(--info)]/30 text-[var(--info-foreground)] hover:bg-[var(--info-soft)]" },
   Untested: { active: "bg-[var(--muted)] text-white border-[var(--muted)]", idle: "border-[var(--border)] text-[var(--muted)] hover:bg-[var(--surface-secondary)]" },
 };
@@ -280,8 +280,8 @@ function execSelectStyle(status: string): React.CSSProperties {
   const map: Record<string, { border: string; bg: string; color: string }> = {
     Passed: { border: "var(--success-border)", bg: "var(--success-soft)", color: "var(--success-foreground)" },
     Failed: { border: "var(--error-border)", bg: "var(--error-soft)", color: "var(--error-foreground)" },
-    Skipped: { border: "var(--warning-border)", bg: "var(--warning-soft)", color: "var(--warning-foreground)" },
-    Blocked: { border: "var(--warning-border)", bg: "var(--warning-soft)", color: "var(--warning-foreground)" },
+    Skipped: { border: "var(--status-skipped-dot)", bg: "var(--status-skipped-fill)", color: "var(--status-skipped-text)" },
+    Blocked: { border: "var(--status-blocked-dot)", bg: "var(--status-blocked-fill)", color: "var(--status-blocked-text)" },
     Retest: { border: "var(--info-border)", bg: "var(--info-soft)", color: "var(--info-foreground)" },
   };
   const s = map[status] || { border: "var(--border)", bg: "var(--surface-secondary)", color: "var(--muted)" };
@@ -299,14 +299,34 @@ function tabBadgeStyle(tab: RunTab): { bg: string; color: string } {
   return map[tab] || { bg: "var(--surface-tertiary)", color: "var(--muted)" };
 }
 
-/* ───── Segmented progress bar ───── */
-function RunProgressBar({ passed, failed, other, total }: { passed: number; failed: number; other: number; total: number }) {
+/* ───── Segmented progress bar ─────
+ * One segment per status, each colored with that same status's own token — the StatPill row
+ * above and the per-execution badges elsewhere use the same tokens, so a Blocked segment here
+ * reads as the same color as "Blocked" everywhere else in the screen, not a shared "other" bucket.
+ */
+function RunProgressBar({
+  passed,
+  failed,
+  blocked,
+  skipped,
+  pending,
+  total,
+}: {
+  passed: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  pending: number;
+  total: number;
+}) {
   const pct = (n: number) => (total ? `${(n / total) * 100}%` : "0%");
   return (
     <div className="flex h-2 gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
       {passed > 0 && <div style={{ width: pct(passed), background: "var(--success)" }} />}
       {failed > 0 && <div style={{ width: pct(failed), background: "var(--error)" }} />}
-      {other > 0 && <div style={{ width: pct(other), background: "var(--warning)" }} />}
+      {blocked > 0 && <div style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
+      {skipped > 0 && <div style={{ width: pct(skipped), background: "var(--status-skipped-dot)" }} />}
+      {pending > 0 && <div style={{ width: pct(pending), background: "var(--ink-400)" }} />}
     </div>
   );
 }
@@ -321,23 +341,27 @@ function StatPill({
   icon: React.ReactNode;
   label: string;
   value: number;
-  tone?: "success" | "error" | "warning";
+  tone?: "success" | "error" | "blocked" | "skipped";
 }) {
   const toneClasses =
     tone === "success"
       ? "border-[var(--success-border)] bg-[var(--success-soft)]"
       : tone === "error"
       ? "border-[var(--error-border)] bg-[var(--error-soft)]"
-      : tone === "warning"
-      ? "border-[var(--warning-border)] bg-[var(--warning-soft)]"
+      : tone === "blocked"
+      ? "border-[var(--status-blocked-dot)]/30 bg-[var(--status-blocked-fill)]"
+      : tone === "skipped"
+      ? "border-[var(--status-skipped-dot)]/30 bg-[var(--status-skipped-fill)]"
       : "border-[var(--border)] bg-[var(--surface-secondary)]";
   const textColor =
     tone === "success"
       ? "var(--success-foreground)"
       : tone === "error"
       ? "var(--error-foreground)"
-      : tone === "warning"
-      ? "var(--warning-foreground)"
+      : tone === "blocked"
+      ? "var(--status-blocked-text)"
+      : tone === "skipped"
+      ? "var(--status-skipped-text)"
       : "var(--muted)";
   return (
     <div className={`flex h-7 items-center gap-1.5 rounded-full border px-3 text-[12px] font-medium ${toneClasses}`} style={{ color: textColor }}>
@@ -1098,8 +1122,8 @@ export default function TestRunDetailPage() {
                 <StatPill icon={<IconClipboardCheck size={13} />} label="Total" value={stats.total} />
                 <StatPill icon={<IconCircleCheck size={13} />} label="Passed" value={stats.passed} tone="success" />
                 <StatPill icon={<IconCircleX size={13} />} label="Failed" value={stats.failed} tone="error" />
-                <StatPill icon={<IconCircleMinus size={13} />} label="Blocked" value={stats.blocked} tone="warning" />
-                <StatPill icon={<IconCircleDashed size={13} />} label="Skipped" value={stats.skipped} />
+                <StatPill icon={<IconCircleMinus size={13} />} label="Blocked" value={stats.blocked} tone="blocked" />
+                <StatPill icon={<IconCircleDashed size={13} />} label="Skipped" value={stats.skipped} tone="skipped" />
                 <StatPill icon={<IconClock size={13} />} label="Pending" value={stats.pending} />
 
                 <div className="min-w-[160px] flex-1">
@@ -1109,7 +1133,14 @@ export default function TestRunDetailPage() {
                       {passRate}% pass rate
                     </span>
                   </div>
-                  <RunProgressBar passed={stats.passed} failed={stats.failed} other={stats.blocked + stats.skipped + stats.pending} total={stats.total} />
+                  <RunProgressBar
+                    passed={stats.passed}
+                    failed={stats.failed}
+                    blocked={stats.blocked}
+                    skipped={stats.skipped}
+                    pending={stats.pending}
+                    total={stats.total}
+                  />
                 </div>
               </div>
             </section>
