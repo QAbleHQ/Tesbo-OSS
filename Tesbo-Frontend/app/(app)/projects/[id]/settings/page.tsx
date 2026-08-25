@@ -35,6 +35,7 @@ import {
   Field,
   FieldError,
   FieldLabel,
+  PageLoader,
 } from "@/components/ui";
 import {
   PROJECT_DESCRIPTION_MAX_LENGTH,
@@ -93,6 +94,8 @@ export default function ProjectSettingsPage() {
   const [testRunEnvironments, setTestRunEnvironments] = useState<TestEnvironmentSetting[]>([]);
   const [newEnvironmentName, setNewEnvironmentName] = useState("");
   const [newEnvironmentUrl, setNewEnvironmentUrl] = useState("");
+  const [environmentError, setEnvironmentError] = useState<string | null>(null);
+  const [deleteProjectError, setDeleteProjectError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
@@ -117,6 +120,7 @@ export default function ProjectSettingsPage() {
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [membersLoading, setMembersLoading] = useState(true);
   const [memberError, setMemberError] = useState<string | null>(null);
+  const [addMemberError, setAddMemberError] = useState<string | null>(null);
   const [addUserId, setAddUserId] = useState("");
   const [addRole, setAddRole] = useState<string>("qa_engineer");
   const [addingMember, setAddingMember] = useState(false);
@@ -248,6 +252,7 @@ export default function ProjectSettingsPage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMessage(null);
+    setEnvironmentError(null);
     const nameValidationError = validateProjectName(name);
     if (nameValidationError) {
       setNameError(nameValidationError);
@@ -264,7 +269,7 @@ export default function ProjectSettingsPage() {
       const draftUrl = newEnvironmentUrl.trim();
       if (activeTab === "testRuns" && (draftName || draftUrl)) {
         if (!draftName || !draftUrl) {
-          setMessage("Environment name and URL are required.");
+          setEnvironmentError("Environment name and URL are required.");
           return;
         }
       }
@@ -310,26 +315,26 @@ export default function ProjectSettingsPage() {
   async function handleDeleteProject() {
     const projectName = String(project?.name ?? "").trim();
     if (!projectName) {
-      setMessage("Project name is unavailable. Refresh and try again.");
+      setDeleteProjectError("Project name is unavailable. Refresh and try again.");
       return;
     }
     if (deleteProjectTypedName.trim() !== projectName) {
-      setMessage("Project deletion cancelled. Entered name does not match.");
+      setDeleteProjectError("Entered name does not match. Deletion cancelled.");
       return;
     }
 
     setDeletingProject(true);
-    setMessage(null);
+    setDeleteProjectError(null);
     try {
       await deleteProjectRequest(projectId);
+      setDeleteProjectModalOpen(false);
+      setDeleteProjectTypedName("");
       router.replace("/projects");
     } catch (error) {
       const text = error instanceof Error ? error.message : "Failed to delete project.";
-      setMessage(text);
+      setDeleteProjectError(text);
     } finally {
       setDeletingProject(false);
-      setDeleteProjectModalOpen(false);
-      setDeleteProjectTypedName("");
     }
   }
 
@@ -337,17 +342,17 @@ export default function ProjectSettingsPage() {
     const name = newEnvironmentName.trim();
     const url = newEnvironmentUrl.trim();
     if (!name || !url) {
-      setMessage("Environment name and URL are required.");
+      setEnvironmentError("Environment name and URL are required.");
       return;
     }
     if (testRunEnvironments.some((item) => item.name.toLowerCase() === name.toLowerCase())) {
-      setMessage("Environment name already exists.");
+      setEnvironmentError("Environment name already exists.");
       return;
     }
     setTestRunEnvironments((prev) => [...prev, { name, url }]);
     setNewEnvironmentName("");
     setNewEnvironmentUrl("");
-    setMessage(null);
+    setEnvironmentError(null);
   }
 
   function handleRemoveEnvironment(index: number) {
@@ -382,18 +387,18 @@ export default function ProjectSettingsPage() {
   async function handleAddMember(e: React.FormEvent) {
     e.preventDefault();
     if (!addUserId) {
-      setMemberError("Select a workspace member");
+      setAddMemberError("Select a workspace member");
       return;
     }
     setAddingMember(true);
-    setMemberError(null);
+    setAddMemberError(null);
     try {
       await addProjectMember(projectId, { userId: addUserId, role: addRole });
       setAddUserId("");
       setAddRole("qa_engineer");
       await loadMembers();
     } catch {
-      setMemberError("Failed to add project member.");
+      setAddMemberError("Failed to add project member.");
     } finally {
       setAddingMember(false);
     }
@@ -434,14 +439,7 @@ export default function ProjectSettingsPage() {
   }
 
   if (!project) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
-          <p className="text-sm text-[var(--muted)]">Loading project settings…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading project settings…" />;
   }
 
   const projectName = typeof project.name === "string" ? project.name : "";
@@ -582,6 +580,7 @@ export default function ProjectSettingsPage() {
                   variant="destructive"
                   onClick={() => {
                     setDeleteProjectTypedName("");
+                    setDeleteProjectError(null);
                     setDeleteProjectModalOpen(true);
                   }}
                   disabled={deletingProject}
@@ -637,19 +636,31 @@ export default function ProjectSettingsPage() {
                   </div>
                 )}
               </div>
-              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-                <Input
-                  type="text"
-                  value={newEnvironmentName}
-                  onChange={(e) => setNewEnvironmentName(e.target.value)}
-                  placeholder="Environment name"
-                />
-                <Input
-                  type="url"
-                  value={newEnvironmentUrl}
-                  onChange={(e) => setNewEnvironmentUrl(e.target.value)}
-                  placeholder="https://staging.example.com"
-                />
+              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-start">
+                <div>
+                  <Input
+                    type="text"
+                    value={newEnvironmentName}
+                    onChange={(e) => {
+                      setNewEnvironmentName(e.target.value);
+                      if (environmentError) setEnvironmentError(null);
+                    }}
+                    placeholder="Environment name"
+                    aria-invalid={Boolean(environmentError)}
+                  />
+                </div>
+                <div>
+                  <Input
+                    type="url"
+                    value={newEnvironmentUrl}
+                    onChange={(e) => {
+                      setNewEnvironmentUrl(e.target.value);
+                      if (environmentError) setEnvironmentError(null);
+                    }}
+                    placeholder="https://staging.example.com"
+                    aria-invalid={Boolean(environmentError)}
+                  />
+                </div>
                 <Button
                   type="button"
                   variant="secondary"
@@ -658,6 +669,7 @@ export default function ProjectSettingsPage() {
                   Add
                 </Button>
               </div>
+              {environmentError && <FieldError>{environmentError}</FieldError>}
             </Card>
           )}
 
@@ -697,8 +709,12 @@ export default function ProjectSettingsPage() {
                     <FieldLabel>Add workspace member</FieldLabel>
                     <Select
                       value={addUserId}
-                      onChange={(e) => setAddUserId(e.target.value)}
+                      onChange={(e) => {
+                        setAddUserId(e.target.value);
+                        if (addMemberError) setAddMemberError(null);
+                      }}
                       disabled={addingMember || membersLoading}
+                      aria-invalid={Boolean(addMemberError)}
                     >
                       <option value="">Select member…</option>
                       {availableToAdd.map((member) => (
@@ -707,6 +723,7 @@ export default function ProjectSettingsPage() {
                         </option>
                       ))}
                     </Select>
+                    {addMemberError && <FieldError>{addMemberError}</FieldError>}
                   </Field>
                   <Field>
                     <FieldLabel>Role</FieldLabel>
@@ -1032,6 +1049,7 @@ export default function ProjectSettingsPage() {
         onClose={() => {
           if (deletingProject) return;
           setDeleteProjectModalOpen(false);
+          setDeleteProjectError(null);
         }}
         title="Confirm project deletion"
       >
@@ -1044,10 +1062,15 @@ export default function ProjectSettingsPage() {
             <Input
               type="text"
               value={deleteProjectTypedName}
-              onChange={(event) => setDeleteProjectTypedName(event.target.value)}
+              onChange={(event) => {
+                setDeleteProjectTypedName(event.target.value);
+                if (deleteProjectError) setDeleteProjectError(null);
+              }}
               placeholder={String(project?.name ?? "")}
               disabled={deletingProject}
+              aria-invalid={Boolean(deleteProjectError)}
             />
+            {deleteProjectError && <FieldError>{deleteProjectError}</FieldError>}
           </Field>
           <div className="flex justify-end gap-2">
             <Button
@@ -1056,6 +1079,7 @@ export default function ProjectSettingsPage() {
               onClick={() => {
                 setDeleteProjectModalOpen(false);
                 setDeleteProjectTypedName("");
+                setDeleteProjectError(null);
               }}
               disabled={deletingProject}
             >

@@ -20,7 +20,7 @@ import {
   type ZyraChatSession,
   type ZyraChatTestcaseRow,
 } from "@/lib/api";
-import { Button, StatusChip, Textarea } from "@/components/ui";
+import { Button, PageLoader, StatusChip, Textarea } from "@/components/ui";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 
 // ─── Zyra icon badge — gradient sparkle mark used in the header and per-message ──
@@ -738,12 +738,11 @@ export default function ZyraChatPage() {
         )}
 
         {loading ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
-            <div className="text-center space-y-2">
-              <div className="h-8 w-8 rounded-full border-2 border-[var(--brand-primary)] border-t-transparent animate-spin mx-auto" />
-              <p className="text-sm text-[var(--muted)]">Loading Zyra...</p>
-            </div>
-          </div>
+          <PageLoader
+            variant="inline"
+            label="Loading Zyra…"
+            className="min-h-0 flex-1 rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]"
+          />
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
 

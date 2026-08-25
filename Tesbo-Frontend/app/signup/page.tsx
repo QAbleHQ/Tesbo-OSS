@@ -37,25 +37,26 @@ export default function SignupPage() {
   const [lastNameError, setLastNameError] = useState("");
   const [emailError, setEmailError] = useState("");
   const [passwordError, setPasswordError] = useState("");
+  const [formError, setFormError] = useState("");
 
-  function clearFieldErrors() {
+  function clearFormErrors() {
     setFirstNameError("");
     setLastNameError("");
     setEmailError("");
     setPasswordError("");
+    setFormError("");
   }
 
   function switchMode(next: AuthMode) {
     setMode(next);
     setStep("form");
     setError("");
-    clearFieldErrors();
+    clearFormErrors();
   }
 
   async function handlePasswordFormSubmit(e: FormEvent) {
     e.preventDefault();
-    setError("");
-    clearFieldErrors();
+    clearFormErrors();
     // All four are checked together (not stopping at the first) so the user sees every field that
     // needs fixing in one pass instead of one error at a time.
     const firstNameValidationError = validateName(firstName, "First name") || "";
@@ -69,6 +70,7 @@ export default function SignupPage() {
       setPasswordError(passwordValidationError);
       return;
     }
+
     setSubmitting(true);
     try {
       await startSignup({
@@ -78,7 +80,7 @@ export default function SignupPage() {
       });
       setStep("code");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start signup");
+      setFormError(err instanceof Error ? err.message : "Failed to start signup");
     } finally {
       setSubmitting(false);
     }
@@ -176,6 +178,7 @@ export default function SignupPage() {
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
                   autoFocus
+                  aria-invalid={Boolean(firstNameError)}
                 />
                 {firstNameError && <FieldError>{firstNameError}</FieldError>}
               </Field>
@@ -193,6 +196,7 @@ export default function SignupPage() {
                   placeholder="Smith"
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
+                  aria-invalid={Boolean(lastNameError)}
                 />
                 {lastNameError && <FieldError>{lastNameError}</FieldError>}
               </Field>
@@ -212,6 +216,7 @@ export default function SignupPage() {
                 placeholder="you@company.com"
                 disabled={submitting}
                 maxLength={EMAIL_MAX_LENGTH}
+                aria-invalid={Boolean(emailError)}
               />
               {emailError && <FieldError>{emailError}</FieldError>}
             </Field>
@@ -229,11 +234,12 @@ export default function SignupPage() {
                 placeholder="At least 8 characters"
                 disabled={submitting}
                 maxLength={PASSWORD_MAX_LENGTH}
+                aria-invalid={Boolean(passwordError)}
               />
-              <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
               {passwordError && <FieldError>{passwordError}</FieldError>}
+              <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
             </Field>
-            {error && <FieldError>{error}</FieldError>}
+            {formError && <FieldError>{formError}</FieldError>}
             <Button type="submit" disabled={submitting} fullWidth style={gradientCta}>
               {submitting ? "Sending code..." : "Create account"}
             </Button>

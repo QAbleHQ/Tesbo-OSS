@@ -144,6 +144,7 @@ export default function OnboardingPage() {
                 }}
                 placeholder="My Team"
                 disabled={loading}
+                aria-invalid={Boolean(orgNameError)}
               />
               {orgNameError && <FieldError>{orgNameError}</FieldError>}
             </Field>

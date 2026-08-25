@@ -25,7 +25,7 @@ import {
   type TestRunListItem,
   type ActivityLogItem,
 } from "@/lib/api";
-import { Card, StatusChip, type StatusChipProps } from "@/components/ui";
+import { Card, PageLoader, StatusChip, type StatusChipProps } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 import { OwnerAvatar } from "@/components/testplans/PlanCard";
 
@@ -205,14 +205,7 @@ export default function ProjectDashboardPage() {
   }, [projectId, router]);
 
   if (loading || !project || !summary) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--ink-200)] border-t-[var(--denim)]" />
-          <p className="text-[13px] text-[var(--ink-400)]">Loading project…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading project…" />;
   }
 
   const name = (project.name as string) ?? "";

@@ -53,7 +53,9 @@ export default function CustomFieldDefinitionForm({
   const [allowFutureDates, setAllowFutureDates] = useState(true);
   const [defaultDate, setDefaultDate] = useState("");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     const config = definition?.config;
@@ -77,7 +79,9 @@ export default function CustomFieldDefinitionForm({
     setAllowPastDates(config?.allowPastDates !== false);
     setAllowFutureDates(config?.allowFutureDates !== false);
     setDefaultDate(definition?.fieldType === "date" && typeof config?.defaultValue === "string" ? config.defaultValue : "");
-    setError(null);
+    setNameError(null);
+    setOptionsError(null);
+    setFormError(null);
   }, [definition]);
 
   function buildConfig(): CustomFieldConfig {
@@ -123,17 +127,23 @@ export default function CustomFieldDefinitionForm({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setNameError(null);
+    setOptionsError(null);
+    setFormError(null);
+
     const trimmedName = name.trim();
+    let valid = true;
     if (!trimmedName) {
-      setError("Field name is required.");
-      return;
+      setNameError("Field name is required.");
+      valid = false;
     }
     if ((fieldType === "single_select" || fieldType === "multi_select") && options.length === 0) {
-      setError("Add at least one option.");
-      return;
+      setOptionsError("Add at least one option.");
+      valid = false;
     }
+    if (!valid) return;
+
     setSaving(true);
-    setError(null);
     try {
       const config = buildConfig();
       if (isEditing && definition) {
@@ -160,7 +170,7 @@ export default function CustomFieldDefinitionForm({
         onSaved(saved);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save custom field.");
+      setFormError(err instanceof Error ? err.message : "Failed to save custom field.");
     } finally {
       setSaving(false);
     }
@@ -172,7 +182,18 @@ export default function CustomFieldDefinitionForm({
     <form onSubmit={handleSubmit} className="space-y-4">
       <Field>
         <FieldLabel>Field name</FieldLabel>
-        <Input type="text" value={name} onChange={(e) => setName(e.target.value)} autoFocus disabled={saving} />
+        <Input
+          type="text"
+          value={name}
+          onChange={(e) => {
+            setName(e.target.value);
+            if (nameError) setNameError(null);
+          }}
+          autoFocus
+          disabled={saving}
+          aria-invalid={Boolean(nameError)}
+        />
+        {nameError && <FieldError>{nameError}</FieldError>}
         {!isEditing && name.trim() && <FieldHint>Key: {slugPreview(name)}</FieldHint>}
       </Field>
 
@@ -223,7 +244,15 @@ export default function CustomFieldDefinitionForm({
       {isSelectType && (
         <Field>
           <FieldLabel>Options</FieldLabel>
-          <CustomFieldOptionsEditor options={options} onChange={setOptions} disabled={saving} />
+          <CustomFieldOptionsEditor
+            options={options}
+            onChange={(next) => {
+              setOptions(next);
+              if (optionsError) setOptionsError(null);
+            }}
+            disabled={saving}
+          />
+          {optionsError && <FieldError>{optionsError}</FieldError>}
         </Field>
       )}
 
@@ -295,7 +324,7 @@ export default function CustomFieldDefinitionForm({
         </label>
       </div>
 
-      {error && <FieldError>{error}</FieldError>}
+      {formError && <FieldError>{formError}</FieldError>}
 
       <div className="flex justify-end gap-2 pt-2">
         <Button type="button" variant="secondary" onClick={onCancel} disabled={saving}>
