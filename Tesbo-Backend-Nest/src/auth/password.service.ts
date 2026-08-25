@@ -36,16 +36,22 @@ export class PasswordService {
     }
   }
 
-  async verifyLogin(rawEmail: string, password: string): Promise<string | null> {
-    if (!rawEmail?.trim() || !password?.trim()) return null;
+  async verifyLogin(
+    rawEmail: string,
+    password: string
+  ): Promise<{ outcome: "ok"; userId: string } | { outcome: "not_found" } | { outcome: "invalid_password" }> {
+    if (!rawEmail?.trim() || !password?.trim()) return { outcome: "invalid_password" };
     const email = rawEmail.trim().toLowerCase();
     const result = await this.db.query<{ id: string; password_hash: string | null }>(
       "SELECT id, password_hash FROM users WHERE email = $1",
       [email]
     );
     const row = result.rows[0];
-    if (!row?.password_hash) return null;
-    return this.verifyPassword(password, row.password_hash) ? row.id : null;
+    if (!row) return { outcome: "not_found" };
+    if (!row.password_hash) return { outcome: "invalid_password" };
+    return this.verifyPassword(password, row.password_hash)
+      ? { outcome: "ok", userId: row.id }
+      : { outcome: "invalid_password" };
   }
 
   hashPassword(password: string): string {

@@ -14,6 +14,7 @@ import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { AuthModeToggle } from "@/components/auth/AuthModeToggle";
 import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
+import { validateEmailValue } from "@/lib/validation";
 
 function unreachableDestinationMessage(target: string): string {
   return `Signed in, but we could not open ${target}. Sign in again to continue.`;
@@ -125,16 +126,18 @@ function LoginForm() {
     // again, and a marker left by an earlier bounce must not pre-empt that.
     clearRedirectAttempts();
     const emailToUse = (isInviteEmailLocked ? inviteEmail : email).trim().toLowerCase();
-    let valid = true;
-    if (!emailToUse) {
-      setEmailError("Email is required");
-      valid = false;
+    // The invite-locked email came from the server, not this field, so there is nothing for the
+    // user to correct here even if it were somehow malformed — only validate what they can edit.
+    const emailValidationError = isInviteEmailLocked ? "" : validateEmailValue(emailToUse) || "";
+    // Login only needs a non-empty password — full complexity rules (validatePasswordValue) belong
+    // to signup/reset, where the password is being *set*. Re-checking them here would reject a
+    // correct password on an older account created before a rule was tightened.
+    const passwordValidationError = !otpMode && !password.trim() ? "Password is required" : "";
+    if (emailValidationError || passwordValidationError) {
+      setEmailError(emailValidationError);
+      setPasswordError(passwordValidationError);
+      return;
     }
-    if (!otpMode && !password) {
-      setPasswordError("Password is required");
-      valid = false;
-    }
-    if (!valid) return;
 
     setLoading(true);
     try {
@@ -179,17 +182,21 @@ function LoginForm() {
           />
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        {/* noValidate: without it, the browser's own "not a valid email" bubble intercepts
+            submit on type="email" before onSubmit ever runs, so our inline message below the
+            field never gets a chance to show. */}
+        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
           <Field>
-            <FieldLabel htmlFor="email">Email</FieldLabel>
+            <FieldLabel htmlFor="email">Email *</FieldLabel>
             <Input
               id="email"
               type="email"
               autoComplete="email"
               value={email}
               onChange={(e) => {
-                setEmail(e.target.value);
-                if (emailError) setEmailError("");
+                const value = e.target.value;
+                setEmail(value);
+                if (emailError && !validateEmailValue(value)) setEmailError("");
               }}
               placeholder="you@company.com"
               disabled={loading || isInviteEmailLocked}
@@ -204,7 +211,7 @@ function LoginForm() {
           {!otpMode && (
             <Field>
               <div className="flex items-center justify-between">
-                <FieldLabel htmlFor="password">Password</FieldLabel>
+                <FieldLabel htmlFor="password">Password *</FieldLabel>
                 <Link href="/forgot-password" className="text-xs font-medium text-[var(--brand-primary)] hover:underline">
                   Forgot password?
                 </Link>
@@ -214,8 +221,9 @@ function LoginForm() {
                 autoComplete="current-password"
                 value={password}
                 onChange={(e) => {
-                  setPassword(e.target.value);
-                  if (passwordError) setPasswordError("");
+                  const value = e.target.value;
+                  setPassword(value);
+                  if (passwordError && value.trim()) setPasswordError("");
                 }}
                 placeholder="Your password"
                 disabled={loading}

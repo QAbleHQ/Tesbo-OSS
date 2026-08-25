@@ -132,14 +132,15 @@ export default function OnboardingPage() {
         {step === "workspace" ? (
           <form onSubmit={handleCreateWorkspace} className="space-y-4">
             <Field>
-              <FieldLabel htmlFor="orgName">Organization / workspace name</FieldLabel>
+              <FieldLabel htmlFor="orgName">Organization / workspace name *</FieldLabel>
               <Input
                 id="orgName"
                 type="text"
                 value={orgName}
                 onChange={(e) => {
-                  setOrgName(e.target.value);
-                  if (orgNameError) setOrgNameError("");
+                  const value = e.target.value;
+                  setOrgName(value);
+                  if (orgNameError && value.trim()) setOrgNameError("");
                 }}
                 placeholder="My Team"
                 disabled={loading}

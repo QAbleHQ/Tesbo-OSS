@@ -31,8 +31,10 @@ import { ListWorkspaceLayout, PageHeader } from "@/components/workflows";
 import { readStoredValue, writeStoredValue } from "@/lib/storage";
 import {
   PROJECT_DESCRIPTION_MAX_LENGTH,
+  PROJECT_KEY_MAX_LENGTH,
   PROJECT_NAME_MAX_LENGTH,
   validateProjectDescription,
+  validateProjectKey,
   validateProjectName,
 } from "@/lib/validation";
 import { avatarColor } from "@/lib/avatarColors";
@@ -332,6 +334,7 @@ function ProjectsPageContent() {
   const [createLoading, setCreateLoading] = useState(false);
   const [createError, setCreateError] = useState("");
   const [createNameError, setCreateNameError] = useState("");
+  const [createKeyError, setCreateKeyError] = useState("");
   const [createDescriptionError, setCreateDescriptionError] = useState("");
   const [workspaceRole, setWorkspaceRole] = useState<string>("");
   const canCreateProject = workspaceRole === "owner" || workspaceRole === "admin" || workspaceRole === "manager";
@@ -433,6 +436,7 @@ function ProjectsPageContent() {
     // Field-level validation errors have to go too, or reopening the modal shows a complaint about
     // input the user can no longer see.
     setCreateNameError("");
+    setCreateKeyError("");
     setCreateDescriptionError("");
   }
 
@@ -446,6 +450,11 @@ function ProjectsPageContent() {
     const nameError = validateProjectName(createName);
     if (nameError) {
       setCreateNameError(nameError);
+      return;
+    }
+    const keyError = validateProjectKey(createKey);
+    if (keyError) {
+      setCreateKeyError(keyError);
       return;
     }
     const descriptionError = validateProjectDescription(createDescription);
@@ -467,6 +476,7 @@ function ProjectsPageContent() {
       setCreateDescription("");
       setCreateError("");
       setCreateNameError("");
+      setCreateKeyError("");
       setCreateDescriptionError("");
       router.push(`/projects/${created.id}/dashboard`);
     } catch (err) {
@@ -544,7 +554,12 @@ function ProjectsPageContent() {
       <Modal open={createOpen} onClose={closeCreate} title="Create project">
         <form onSubmit={handleCreate} className="space-y-5">
           <Field>
-            <FieldLabel htmlFor="create-name">Name *</FieldLabel>
+            <div className="flex items-baseline justify-between">
+              <FieldLabel htmlFor="create-name">Name *</FieldLabel>
+              <span className="text-[12px] text-[var(--muted)]">
+                {createName.length}/{PROJECT_NAME_MAX_LENGTH}
+              </span>
+            </div>
             <Input
                   id="create-name"
                   type="text"
@@ -562,20 +577,36 @@ function ProjectsPageContent() {
             {createNameError && <FieldError>{createNameError}</FieldError>}
           </Field>
           <Field>
-            <FieldLabel htmlFor="create-key">Key (optional)</FieldLabel>
+            <div className="flex items-baseline justify-between">
+              <FieldLabel htmlFor="create-key">Key (optional)</FieldLabel>
+              <span className="text-[12px] text-[var(--muted)]">
+                {createKey.length}/{PROJECT_KEY_MAX_LENGTH}
+              </span>
+            </div>
             <Input
                   id="create-key"
                   type="text"
                   value={createKey}
-                  onChange={(e) => setCreateKey(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ""))}
+                  onChange={(e) => {
+                    const value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+                    setCreateKey(value);
+                    if (createKeyError && !validateProjectKey(value)) setCreateKeyError("");
+                  }}
                   placeholder="PROJ"
                   className="font-mono"
                   disabled={createLoading}
+                  maxLength={PROJECT_KEY_MAX_LENGTH}
                 />
             <FieldHint>Short code; derived from name if blank.</FieldHint>
+            {createKeyError && <FieldError>{createKeyError}</FieldError>}
           </Field>
           <Field>
-            <FieldLabel htmlFor="create-desc">Description (optional)</FieldLabel>
+            <div className="flex items-baseline justify-between">
+              <FieldLabel htmlFor="create-desc">Description (optional)</FieldLabel>
+              <span className="text-[12px] text-[var(--muted)]">
+                {createDescription.length}/{PROJECT_DESCRIPTION_MAX_LENGTH}
+              </span>
+            </div>
             <Textarea
                   id="create-desc"
                   value={createDescription}
@@ -615,8 +646,10 @@ function ProjectsPageContent() {
               {filteredProjects.map((p) => {
                 const color = projectColor(p.id);
                 return (
-                  <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
-                    <Card className="flex h-full flex-col overflow-hidden p-0 transition hover:border-[var(--border-strong)]">
+                  <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block cursor-pointer">
+                    {/* Hover border/shadow live in globals.css (a.group:hover > .tesbo-card) — see
+                        the comment there for why this isn't a Tailwind hover: utility. */}
+                    <Card className="flex h-full flex-col overflow-hidden p-0 transition">
                       <div className="border-b border-[var(--border-subtle)] p-5">
                         <div className="mb-2.5 flex items-start gap-3">
                           <div
@@ -675,22 +708,28 @@ function ProjectsPageContent() {
             <Card className="overflow-hidden p-0">
               <div
                 className="grid items-center gap-0 border-b border-[var(--border-subtle)] px-5 py-2.5"
-                style={{ gridTemplateColumns: "1fr 90px 100px 110px 160px 100px" }}
+                style={{ gridTemplateColumns: "1fr 120px 90px 100px 110px 160px 100px" }}
               >
                 <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Project</div>
+                <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Status</div>
                 <div className="text-center text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Test cases</div>
                 <div className="text-center text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Total Suites</div>
                 <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Pass rate</div>
                 <div className="text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Team</div>
                 <div className="text-right text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">Updated</div>
               </div>
-              {filteredProjects.map((p) => {
+              {filteredProjects.map((p, idx) => {
                 const color = projectColor(p.id);
+                // `last:border-b-0` doesn't work here: each row's border-carrying div is wrapped in
+                // its own <Link>, so it's trivially the :last-child of that single-child parent on
+                // every row, not just the last project — CSS never sees "last in this list", only
+                // "last sibling under this specific parent". Computed from array position instead.
+                const isLastRow = idx === filteredProjects.length - 1;
                 return (
-                  <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block">
+                  <Link key={p.id} href={`/projects/${p.id}/dashboard`} className="group block cursor-pointer">
                     <div
-                      className="grid items-center gap-0 border-b border-[var(--border-subtle)] px-5 py-3 transition-colors last:border-b-0 hover:bg-[var(--surface-secondary)]"
-                      style={{ gridTemplateColumns: "1fr 90px 100px 110px 160px 100px" }}
+                      className={`grid items-center gap-0 px-5 py-3 transition-colors hover:bg-[var(--surface-secondary)] ${isLastRow ? "" : "border-b border-[var(--border-subtle)]"}`}
+                      style={{ gridTemplateColumns: "1fr 120px 90px 100px 110px 160px 100px" }}
                     >
                       <div className="flex min-w-0 items-center gap-2.5">
                         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-semibold text-white" style={{ background: color }}>
@@ -700,6 +739,9 @@ function ProjectsPageContent() {
                           <div className="truncate text-[13px] font-medium text-[var(--foreground)] group-hover:text-[var(--accent-light)]">{p.name}</div>
                           <div className="font-mono text-[11px] uppercase text-[var(--muted-soft)]">{p.key}</div>
                         </div>
+                      </div>
+                      <div>
+                        <StatusBadge status={p.status} pending={!p.statsLoaded} />
                       </div>
                       <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.statsLoaded ? p.testCaseCount : "—"}</div>
                       <div className="text-center text-[13px] font-medium text-[var(--foreground)]">{p.statsLoaded ? p.suiteCount : "—"}</div>

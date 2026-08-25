@@ -9,6 +9,7 @@ export type { StatusBadgeProps, TestStatus } from "@/components/ui/StatusBadge";
 export { default as PriorityBadge } from "@/components/ui/PriorityBadge";
 export type { PriorityBadgeProps, Priority } from "@/components/ui/PriorityBadge";
 export { default as Modal } from "@/components/ui/Modal";
+export { default as ConfirmModal } from "@/components/ui/ConfirmModal";
 export { default as CopyButton } from "@/components/ui/CopyButton";
 export type { CopyButtonProps } from "@/components/ui/CopyButton";
 export { default as Drawer } from "@/components/ui/Drawer";

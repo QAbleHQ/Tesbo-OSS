@@ -1,19 +1,15 @@
 "use client";
 
-import { IconMail, IconPlus, IconUserMinus, IconRefresh, IconX } from "@tabler/icons-react";
-import { useRouter } from "next/navigation";
+import { IconMail, IconPlus, IconTrash, IconRefresh, IconX } from "@tabler/icons-react";
 import { useCallback, useEffect, useState } from "react";
 import {
-  authMe,
   changeWorkspaceMemberRole,
-  getWorkspace,
   listWorkspaceMembers,
   listWorkspaceInvitations,
   createWorkspaceInvitation,
   cancelWorkspaceInvitation,
   resendWorkspaceInvitation,
   removeWorkspaceMember,
-  listProjects,
   type WorkspaceMember,
   type WorkspaceInvitation,
   type ProjectSummary,
@@ -28,7 +24,9 @@ import {
   Card,
   Modal,
   PageLoader,
+  ConfirmModal,
 } from "@/components/ui";
+import { useAppData } from "@/components/app/AppDataProvider";
 
 // ─── Role helpers ─────────────────────────────────────────────────────────────
 
@@ -216,39 +214,35 @@ function InviteModal({ open, onClose, onInvited, callerRole, projects }: InviteM
 // ─── Tab ────────────────────────────────────────────────────────────────────
 
 export default function MembersTab() {
-  const router = useRouter();
-  const [workspace, setWorkspace] = useState<{ name: string } | null>(null);
+  // currentUser/workspace/projects come from AppDataProvider (app/(app)/layout.tsx), which fetches
+  // them once for the whole app shell — this tab used to independently re-fetch all three itself,
+  // one of several duplicate authMe()/getWorkspace()/listProjects() calls that made this page slow
+  // to load (Sidebar and TopBar each had their own copies too).
+  const { currentUser, workspace, projects } = useAppData();
+  const currentUserId = currentUser?.userId ?? null;
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [actionId, setActionId] = useState<string | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<{ userId: string; label: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
-      const me = await authMe();
-      if (!me) { router.replace("/login"); return; }
-      setCurrentUserId(me.userId);
-      const [ws, memberList, inviteList, projectList] = await Promise.all([
-        getWorkspace(),
+      const [memberList, inviteList] = await Promise.all([
         listWorkspaceMembers(),
         listWorkspaceInvitations().catch(() => []),
-        listProjects().catch(() => []),
       ]);
-      setWorkspace(ws);
       setMembers(memberList);
       setInvitations(inviteList);
-      setProjects(projectList);
     } catch (e) {
       setError((e as Error).message || "Failed to load");
     } finally {
       setLoading(false);
     }
-  }, [router]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
@@ -272,6 +266,7 @@ export default function MembersTab() {
       setError(err instanceof Error ? err.message : "Failed to remove member");
     } finally {
       setActionId(null);
+      setPendingRemoval(null);
     }
   }
 
@@ -405,11 +400,12 @@ export default function MembersTab() {
                           <Button
                             variant="ghost"
                             size="sm"
-                            onClick={() => handleRemoveMember(m.userId)}
+                            onClick={() => setPendingRemoval({ userId: m.userId, label: m.name || m.email })}
                             disabled={actionId === m.userId}
                             title="Remove from team"
+                            className="text-[var(--error-foreground)] hover:bg-[var(--error-soft)]"
                           >
-                            <IconUserMinus size={15} />
+                            <IconTrash size={15} />
                           </Button>
                         )}
                       </td>
@@ -543,6 +539,20 @@ export default function MembersTab() {
         onInvited={() => { showToast("Invite sent successfully"); load(); }}
         callerRole={myRole}
         projects={projects}
+      />
+
+      <ConfirmModal
+        open={pendingRemoval !== null}
+        title="Remove team member"
+        message={
+          pendingRemoval
+            ? `Remove ${pendingRemoval.label} from this workspace? They will lose access to every project here.`
+            : ""
+        }
+        confirmLabel="Remove member"
+        loading={pendingRemoval !== null && actionId === pendingRemoval.userId}
+        onConfirm={() => pendingRemoval && handleRemoveMember(pendingRemoval.userId)}
+        onCancel={() => setPendingRemoval(null)}
       />
     </div>
   );
