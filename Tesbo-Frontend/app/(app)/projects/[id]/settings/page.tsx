@@ -694,10 +694,9 @@ export default function ProjectSettingsPage() {
               Members added here can perform actions inside this project based on their project role.
             </p>
             <div className="mt-3 rounded-lg bg-[var(--surface-secondary)] p-3 text-xs text-[var(--muted)] space-y-1">
-              <p><strong>Owner:</strong> Full access to all features and can add admins.</p>
-              <p><strong>Admin:</strong> Similar to owner, but cannot add or remove owners/admins.</p>
-              <p><strong>Manager:</strong> Can invite members and manage project operations.</p>
-              <p><strong>Member:</strong> Can work inside assigned projects, but cannot invite or create projects.</p>
+              <p><strong>Owner:</strong> Full access to this project, including managing every member. The owner&apos;s role cannot be changed.</p>
+              <p><strong>Manager:</strong> Can add or remove QA Engineers and manage project settings, but cannot change another manager&apos;s role or add an owner.</p>
+              <p><strong>QA Engineer:</strong> Works inside this project, but cannot manage members or change project settings.</p>
             </div>
           </Card>
 
