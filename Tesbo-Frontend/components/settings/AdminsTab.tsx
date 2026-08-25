@@ -158,10 +158,11 @@ export default function AdminsTab() {
           >
             <div className="flex items-center gap-4">
               {/* Avatar */}
-              {/* Seeded like every other person avatar — part of Basecamp 10198836413. */}
+              {/* Seeded like every other person avatar — part of Basecamp 10198836413. Id first: it's
+                  the one field that can't be edited or changed, unlike email or name. */}
               <div
                 className="flex h-10 w-10 items-center justify-center rounded-full text-[14px] font-bold text-white"
-                style={{ backgroundColor: avatarColor(admin.email || admin.name || admin.id) }}
+                style={{ backgroundColor: avatarColor(admin.id || admin.email || admin.name || "") }}
               >
                 {admin.name
                   ? admin.name

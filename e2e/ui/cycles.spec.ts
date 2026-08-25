@@ -1,0 +1,192 @@
+import fs from "node:fs";
+import path from "node:path";
+import { expect, request as pwRequest, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
+import { env } from "../utils/env";
+
+const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.json"), "utf-8"));
+const STATE_PATH = path.join(__dirname, "../.auth/state.json");
+
+/**
+ * Creates a run, adds one Approved test case per entry in `statuses`, and sets each execution to
+ * the requested status (an "Untested" entry is left alone since that is already the default on
+ * creation). Cycles are created in "Planning" by default (migrations/V9_cycle_status.sql).
+ */
+async function seedRunWithStatuses(api: APIRequestContext, namePrefix: string, statuses: string[]) {
+  const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+  const cycle = await (
+    await api.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `${namePrefix} ${stamp}` } })
+  ).json();
+
+  let testcaseIds: string[] = [];
+  if (statuses.length > 0) {
+    const created = await (
+      await api.post(`/api/projects/${ctx.projectId}/testcases/bulk-create`, {
+        data: {
+          testcases: statuses.map((_, i) => ({ title: `${namePrefix} Case ${stamp}-${i}`, status: "Approved" })),
+        },
+      })
+    ).json();
+    testcaseIds = created.created.map((c: { id: string }) => c.id);
+    await api.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds } });
+
+    const executions = await (await api.get(`/api/cycles/${cycle.id}/executions`)).json();
+    for (let i = 0; i < statuses.length; i++) {
+      if (statuses[i] === "Untested") continue;
+      await api.patch(`/api/cycles/${cycle.id}/executions/${executions[i].id}`, { data: { status: statuses[i] } });
+    }
+  }
+
+  return { cycleId: cycle.id as string, testcaseIds };
+}
+
+async function cleanUpRun(api: APIRequestContext, cycleId: string, testcaseIds: string[]) {
+  await api.delete(`/api/cycles/${cycleId}`, { failOnStatusCode: false });
+  if (testcaseIds.length > 0) {
+    await api.post(`/api/projects/${ctx.projectId}/testcases/bulk-delete`, {
+      data: { testcaseIds },
+      failOnStatusCode: false,
+    });
+  }
+}
+
+/** The Test Runs list card for one run, found by the link to its details page. */
+function runCard(page: Page, cycleId: string): Locator {
+  return page.locator(`a[href$="/cycles/${cycleId}"]`).locator("xpath=ancestor::div[contains(@class,'p-0')]").first();
+}
+
+/** The value of a summary StatTile ("Total Runs", "Pass Rate", "Open Failures", ...) by its label. */
+function statTileValue(page: Page, label: string): Locator {
+  return page.getByText(label, { exact: true }).locator("xpath=following-sibling::div[1]");
+}
+
+/** The value span of a StatPill on the Test Run Details page, by its label. */
+function statPillValue(page: Page, label: string): Locator {
+  return page
+    .locator("section", { hasText: "Skipped" })
+    .first()
+    .getByText(label, { exact: true })
+    .locator("xpath=following-sibling::span[1]");
+}
+
+test.describe("Test Runs — Pass Rate and Skipped consistency", () => {
+  test("the per-run card and the Run Details page reconcile the same Pass Rate, and Skipped is visible on both", async ({
+    page,
+  }) => {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    // Reproduces the reported case exactly: 25 total cases, only 5 passed. The old summary tile
+    // divided by executed cases only (20) and read 25%; the Run Details page divided by every
+    // assigned case (25) and read 20%. Both must now read 20%.
+    const statuses = [
+      ...Array(5).fill("Passed"),
+      ...Array(5).fill("Failed"),
+      ...Array(5).fill("Blocked"),
+      ...Array(5).fill("Skipped"),
+      ...Array(5).fill("Untested"),
+    ];
+    const { cycleId, testcaseIds } = await seedRunWithStatuses(api, "E2E PassRate Mixed", statuses);
+
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles`);
+      const card = runCard(page, cycleId);
+      await expect(card).toBeVisible();
+      await expect(card).toContainText("5 passed");
+      await expect(card).toContainText("5 failed");
+      await expect(card).toContainText("5 blocked");
+      await expect(card).toContainText("5 skipped");
+      await expect(card).toContainText("5 untested");
+      await expect(card).toContainText("20 / 25 cases");
+
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycleId}`);
+      await expect(statPillValue(page, "Total")).toHaveText("25");
+      await expect(statPillValue(page, "Passed")).toHaveText("5");
+      await expect(statPillValue(page, "Failed")).toHaveText("5");
+      await expect(statPillValue(page, "Blocked")).toHaveText("5");
+      await expect(statPillValue(page, "Skipped")).toHaveText("5");
+      await expect(statPillValue(page, "Pending")).toHaveText("5");
+      await expect(page.getByText("20% pass rate")).toBeVisible();
+    } finally {
+      await cleanUpRun(api, cycleId, testcaseIds);
+      await api.dispose();
+    }
+  });
+
+  test("a run where every case is Skipped shows 0% pass rate, not NaN, with Skipped counted correctly", async ({
+    page,
+  }) => {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    const statuses = Array(5).fill("Skipped");
+    const { cycleId, testcaseIds } = await seedRunWithStatuses(api, "E2E PassRate AllSkipped", statuses);
+
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles`);
+      const card = runCard(page, cycleId);
+      await expect(card).toContainText("0 passed");
+      await expect(card).toContainText("5 skipped");
+      await expect(card).toContainText("5 / 5 cases");
+
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycleId}`);
+      await expect(page.getByText("0% pass rate")).toBeVisible();
+      await expect(statPillValue(page, "Skipped")).toHaveText("5");
+    } finally {
+      await cleanUpRun(api, cycleId, testcaseIds);
+      await api.dispose();
+    }
+  });
+
+  test("a run with zero assigned cases renders with no breakdown row and does not break the list", async ({
+    page,
+  }) => {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    const { cycleId, testcaseIds } = await seedRunWithStatuses(api, "E2E PassRate ZeroCases", []);
+
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles`);
+      const card = runCard(page, cycleId);
+      await expect(card).toBeVisible();
+      await expect(card).not.toContainText("cases");
+
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycleId}`);
+      await expect(statPillValue(page, "Total")).toHaveText("0");
+      await expect(page.getByText("No cases executed yet")).toBeVisible();
+    } finally {
+      await cleanUpRun(api, cycleId, testcaseIds);
+      await api.dispose();
+    }
+  });
+
+  test("the summary Pass Rate tile is passed over total cases for the currently filtered runs, not passed over executed cases across every run", async ({
+    page,
+  }) => {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    // Freshly created cycles default to "Planning" — filtering to that status isolates this
+    // fixture from any run another spec has already moved to In Progress or Completed.
+    const statuses = [...Array(1).fill("Passed"), ...Array(3).fill("Untested")];
+    const { cycleId, testcaseIds } = await seedRunWithStatuses(api, "E2E PassRate Scope", statuses);
+
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles`);
+      await page.getByRole("button", { name: "Planning" }).click();
+      await expect(runCard(page, cycleId)).toBeVisible();
+
+      // Computed from a live snapshot of exactly the runs the "Planning" filter shows, taken
+      // right after the page's own data has settled, so the expected value tracks whatever else
+      // is concurrently Planning in this shared project rather than assuming this fixture is the
+      // only one — the point being tested is the formula (passed / totalCases), not a fixed number.
+      const runs: Array<{ status: string; passed: number; totalCases: number }> = await (
+        await api.get(`/api/projects/${ctx.projectId}/cycles`)
+      ).json();
+      const planningRuns = runs.filter((r) => r.status === "Planning");
+      const totalPassed = planningRuns.reduce((sum, r) => sum + r.passed, 0);
+      const totalCases = planningRuns.reduce((sum, r) => sum + r.totalCases, 0);
+      const expectedPassRate = totalCases > 0 ? Math.round((totalPassed / totalCases) * 100) : null;
+
+      await expect(statTileValue(page, "Total Runs")).toHaveText(String(planningRuns.length));
+      await expect(statTileValue(page, "Pass Rate")).toHaveText(
+        expectedPassRate !== null ? `${expectedPassRate}%` : "—",
+      );
+    } finally {
+      await cleanUpRun(api, cycleId, testcaseIds);
+      await api.dispose();
+    }
+  });
+});

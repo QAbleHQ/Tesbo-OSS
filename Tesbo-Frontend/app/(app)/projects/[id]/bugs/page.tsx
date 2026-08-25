@@ -643,18 +643,16 @@ export default function BugsPage() {
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-64"
               />
-              {viewMode === "list" && (
-                <Select
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                >
-                  <option value="">All Statuses</option>
-                  <option value="Open">Open</option>
-                  <option value="In Progress">In Progress</option>
-                  <option value="Closed">Closed</option>
-                  <option value="Reopened">Reopened</option>
-                </Select>
-              )}
+              <Select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+              >
+                <option value="">All Statuses</option>
+                <option value="Open">Open</option>
+                <option value="In Progress">In Progress</option>
+                <option value="Closed">Closed</option>
+                <option value="Reopened">Reopened</option>
+              </Select>
               <div className="ml-auto">
                 <ViewToggle mode={viewMode} onChange={setViewMode} />
               </div>

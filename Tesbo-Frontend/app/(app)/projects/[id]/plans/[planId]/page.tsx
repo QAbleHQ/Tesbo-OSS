@@ -496,7 +496,7 @@ export default function PlanDetailPage() {
                   <IconFileDescription size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
                   <span className="font-mono text-[var(--foreground)]">{currentPlanSummary?.caseCount ?? items.length}</span> test cases
                 </span>
-                {ownerName && <OwnerAvatar name={ownerName} />}
+                {ownerName && <OwnerAvatar name={ownerName} seed={planOwnerId} />}
               </div>
             </>
           )}

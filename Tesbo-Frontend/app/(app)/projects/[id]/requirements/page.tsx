@@ -663,7 +663,7 @@ export default function RequirementsPage() {
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-28">Key</th>
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)]">Summary</th>
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-24">Type</th>
-                  <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-28">Status</th>
+                  <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-36">Status</th>
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-20">Priority</th>
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-32">Assignee</th>
                   <th className="text-left px-4 py-2.5 font-medium text-[var(--muted-soft)] w-24">Coverage</th>

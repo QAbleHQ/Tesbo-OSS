@@ -149,6 +149,33 @@ test.describe("knowledge base (UI)", () => {
     await menuPanel(page).getByRole("button", { name: item, exact: true }).click();
   }
 
+  /**
+   * The folder tree's own row, by its visible name — distinct from the item table's `row()`.
+   * Rename and Move are only offered from this row's ⋯ menu (components/knowledge-base/FolderTree.tsx),
+   * not from the table.
+   */
+  function treeRow(page: Page, name: string): Locator {
+    return page.locator('div[role="button"]').filter({ hasText: name }).first();
+  }
+
+  /** Opens a tree row's ⋯ menu and picks one of its entries. */
+  async function openTreeMenu(page: Page, folderName: string, action: "Create subfolder" | "Rename" | "Move" | "Delete") {
+    // `.last()` because a folder with children also renders a leading expand/collapse chevron
+    // button — the ⋯ trigger (with its IconDots svg) is always the last real <button> in the row.
+    await treeRow(page, folderName).locator("button:has(svg)").last().click();
+    await menuPanel(page).getByRole("button", { name: action, exact: true }).click();
+  }
+
+  /**
+   * The floating error toast (fixed + high z-index so it stacks above an open Modal, which portals
+   * its own overlay at z-50 — see the `error` state's render in page.tsx). Scoped away from a
+   * modal's own inline FieldError, which shares the same `role="alert"` but renders inside the
+   * dialog panel instead.
+   */
+  function errorToast(page: Page): Locator {
+    return page.locator(".fixed.bottom-5.right-5[role=\"alert\"]");
+  }
+
   async function createFolder(page: Page, name: string) {
     await newMenu(page, "Create folder");
     const dialog = modal(page, "Create folder");
@@ -309,8 +336,15 @@ test.describe("knowledge base (UI)", () => {
     await createFolder(page, shared);
     await expect(row(page, shared)).toBeVisible();
 
-    // Same name, same parent — the API refuses, and no second row may appear.
+    // Same name, same parent — the API refuses, and no second row may appear. The refusal names
+    // the exact field just submitted, so it must land inline next to "Folder name" in the dialog
+    // that is still open — not as the page-level toast, which the dialog's own overlay would hide
+    // from view while it's up.
     await createFolder(page, shared);
+    const dialog = modal(page, "Create folder");
+    await expect(dialog, "the dialog stays open so the inline error is visible").toBeVisible();
+    await expect(dialog.getByText(/a folder with this name already exists/i)).toBeVisible();
+    await expect(errorToast(page), "a field-specific error must not also surface as a toast").toHaveCount(0);
     await expect
       .poll(() => folderCount(), { message: "a duplicate name under the same parent is refused" })
       .toBe(1);
@@ -943,5 +977,110 @@ test.describe("knowledge base (UI)", () => {
     const bodies = listed.map((c: { body: string }) => c.body);
     expect(bodies, "the thread or its reply was actually deleted").toContain(threadBody);
     expect(bodies).toContain(replyBody);
+  });
+
+  // ─── Error placement: inline in the dialog vs. a floating toast ────────────
+  //
+  // Basecamp report: a rename's permission error rendered as a page-level banner, invisible behind
+  // the still-open Modal (which portals its own overlay at z-50) until the dialog was closed — and,
+  // separately, a duplicate-name refusal (a message about the very field just submitted) surfaced
+  // the same way instead of inline next to the input. Three tests: the two error-worthy field
+  // conflicts land inline in their own dialogs (renaming a folder, moving one into its own
+  // subtree), and a permission refusal — which isn't about any field on screen — floats above the
+  // dialog as a toast instead of hiding behind it.
+
+  test("KBU-32 renaming a folder to a name already taken under the same parent is refused inline, not as a toast", async ({
+    browser,
+  }) => {
+    const page = await openKb(browser);
+    const shared = stamp("Taken");
+    const toRename = stamp("Renaming");
+    await createFolder(page, shared);
+    await createFolder(page, toRename);
+    await expect(row(page, toRename)).toBeVisible();
+
+    await openTreeMenu(page, toRename, "Rename");
+    const dialog = modal(page, "Rename folder");
+    await dialog.locator("input").fill(shared);
+    await dialog.getByRole("button", { name: "Save" }).click();
+
+    await expect(dialog, "the dialog stays open so the inline error is visible").toBeVisible();
+    await expect(dialog.getByText(/a folder with this name already exists/i)).toBeVisible();
+    await expect(errorToast(page), "a field-specific error must not also surface as a toast").toHaveCount(0);
+    expect(
+      scalar(
+        `SELECT name FROM knowledge_folders WHERE project_id = ${literal(tenant!.mainProjectId)} AND name = ${literal(toRename)};`,
+      ),
+      "the rejected rename must not have been persisted",
+    ).toBe(toRename);
+  });
+
+  test("KBU-33 moving a folder into its own subfolder is refused inline under the destination field, not as a toast", async ({
+    browser,
+  }) => {
+    const parentName = stamp("MoveParent");
+    const parent = await api.post(kbUrl("/folders"), { data: { name: parentName, parentFolderId: rootFolderId } });
+    expect(parent.status()).toBe(201);
+    const parentId = (await parent.json()).id;
+    const childName = stamp("MoveChild");
+    const child = await api.post(kbUrl("/folders"), { data: { name: childName, parentFolderId: parentId } });
+    expect(child.status()).toBe(201);
+    const childId = (await child.json()).id;
+
+    const page = await openKb(browser);
+    // Expand the tree so the child row (and the parent's row menu) are actually on screen.
+    await page.getByRole("button", { name: parentName, exact: true }).first().click();
+    await expect(page.getByRole("button", { name: childName, exact: true }).first()).toBeVisible();
+
+    await openTreeMenu(page, parentName, "Move");
+    const dialog = modal(page, "Move to folder");
+    // The destination list only excludes the folder being moved itself, not its descendants — so
+    // its own child is a selectable (and, on submit, refused) option.
+    await dialog.locator("select").selectOption(childId);
+    await dialog.getByRole("button", { name: "Move" }).click();
+
+    await expect(dialog, "the dialog stays open so the inline error is visible").toBeVisible();
+    await expect(dialog.getByText(/cannot be moved into itself/i)).toBeVisible();
+    await expect(errorToast(page), "a field-specific error must not also surface as a toast").toHaveCount(0);
+    expect(
+      scalar(`SELECT parent_folder_id FROM knowledge_folders WHERE id = ${literal(parentId)};`),
+      "the rejected move must not have changed the folder's parent",
+    ).toBe(rootFolderId);
+  });
+
+  test("KBU-34 a permission refusal on rename floats above the still-open dialog as a toast, not a hidden page banner", async ({
+    browser,
+  }) => {
+    const ownersFolder = stamp("OwnersFolder");
+    const created = await api.post(kbUrl("/folders"), { data: { name: ownersFolder, parentFolderId: rootFolderId } });
+    expect(created.status()).toBe(201);
+
+    // qa_engineer: not owner/manager, and did not create this folder — kbRequireMutateAccess
+    // (legacy.service.ts) refuses with "You can only modify items you created".
+    const page = await openKb(browser, "qa");
+    await expect(row(page, ownersFolder)).toBeVisible();
+
+    await openTreeMenu(page, ownersFolder, "Rename");
+    const dialog = modal(page, "Rename folder");
+    await dialog.locator("input").fill(stamp("Attempted"));
+    await dialog.getByRole("button", { name: "Save" }).click();
+
+    const toast = errorToast(page).filter({ hasText: "You can only modify items you created" });
+    await expect(toast, "the permission refusal must be visible, not silently absorbed").toBeVisible();
+    // Not a client-side validation message — it can only have come back from the API, so this also
+    // proves the toast is reachable while the dialog it was triggered from is still open.
+    await expect(dialog, "the rename dialog must still be open underneath the toast").toBeVisible();
+
+    // The mechanism of the fix: `position: fixed` plus a z-index above the Modal's own z-50
+    // overlay is what makes the toast render on top instead of behind it.
+    await expect.poll(() => toast.evaluate((el) => getComputedStyle(el).position)).toBe("fixed");
+    await expect
+      .poll(() => toast.evaluate((el) => Number(getComputedStyle(el).zIndex)))
+      .toBeGreaterThan(50);
+
+    expect(
+      scalar(`SELECT name FROM knowledge_folders WHERE project_id = ${literal(tenant!.mainProjectId)} AND name = ${literal(ownersFolder)};`),
+      "the refused rename must not have been persisted",
+    ).toBe(ownersFolder);
   });
 });

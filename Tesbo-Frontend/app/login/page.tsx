@@ -67,6 +67,19 @@ function LoginForm() {
           setCheckingSetup(false);
           return;
         }
+        /*
+         * The invite page sends a signed-in user here to switch accounts — "Sign in with
+         * {invite.email}" — without signing them out first, because /login is what owns that. The
+         * still-active session is for the *wrong* account by definition of the user having clicked
+         * that link, so auto-redirecting back to the invite page would only bounce again and, on
+         * the way, misreport a normal account switch as "we could not open" the destination. This
+         * visit's whole purpose is the form below, not a redirect.
+         */
+        if (isInviteEmailLocked && me.email && me.email.trim().toLowerCase() !== inviteEmail) {
+          clearRedirectAttempts();
+          setCheckingSetup(false);
+          return;
+        }
         const target = redirect || "/projects";
         /*
          * Arriving back with a session still intact means the destination refused us. Redirecting

@@ -635,6 +635,27 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return api<ProjectSummary[]>("/api/projects");
 }
 
+// Raw columns from the `notifications` table (see migrations/V6_notifications.sql) — the backend
+// route returns rows as-is, unlike the camelCase DTOs above.
+export interface AppNotification {
+  id: string;
+  type: string;
+  title: string;
+  body: string | null;
+  link_entity_type: string | null;
+  link_entity_id: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
+export async function listNotifications(): Promise<AppNotification[]> {
+  return api<AppNotification[]>("/api/notifications");
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  return api<void>(`/api/notifications/${id}/read`, { method: "POST" });
+}
+
 /**
  * Every projects-list card's stats in one response, replacing the five per-project calls the
  * screen used to fan out (test cases, suites, activity, members, runs). See

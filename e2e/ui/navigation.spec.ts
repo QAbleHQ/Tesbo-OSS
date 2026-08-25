@@ -1,8 +1,10 @@
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { dbControlAvailable } from "../utils/psql";
 import {
+  createPlan,
   removeWorkspaceMember,
+  screensApi,
   screensSuiteSkipReason,
   screensTenant,
   seedWorkspaceMember,
@@ -530,5 +532,145 @@ test.describe("side navigation — behaviour", () => {
     ]) {
       expect(await avatarColourOn(path), `the avatar changes colour on ${path}`).toBe(first);
     }
+  });
+
+  test("NAV-B-15 the same person's avatar matches across different components, not just different pages", async ({
+    page,
+  }) => {
+    /*
+     * NAV-B-14 above only ever reads the top bar's own avatar on different routes — the same
+     * <TopBar/> instance every time — so it could never have caught this ticket's actual
+     * regression: PlanCard's OwnerAvatar and the workspace Activity feed's ActorAvatar each seeded
+     * avatarColor() with the person's *name* instead of their id, so the same person could land on
+     * a different palette swatch in a plan card or the activity feed than in the top bar, even
+     * though every one of them called avatarColor(). This reproduces the reported pairing (header
+     * vs. Activity section) by comparing the top bar's avatar against a plan card's owner avatar
+     * and an activity row for an action the signed-in user just performed.
+     */
+    const api = await screensApi();
+    let planId: string | undefined;
+    try {
+      await page.goto("/projects");
+      const topBarAvatar = page.locator("header span.rounded-full").first();
+      await expect(topBarAvatar).toBeVisible();
+      const topBarColour = await topBarAvatar.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+      const plan = await createPlan(api, tenant!.projectId);
+      planId = plan.id;
+
+      await page.goto(`/projects/${tenant!.projectId}/plans`);
+      const card = page.locator(".group", { has: page.getByRole("link", { name: plan.name, exact: true }) }).first();
+      const cardAvatar = card.locator("span.rounded-full").first();
+      await expect(cardAvatar, "the plan card never shows an owner avatar").toBeVisible();
+      expect(
+        await cardAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the plan card's owner avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+
+      await page.goto("/activity");
+      await page.getByPlaceholder("Search activity…").fill(plan.name);
+      const row = page.locator("div.grid", { hasText: plan.name }).first();
+      const rowAvatar = row.locator("span.rounded-full").first();
+      await expect(rowAvatar, "no activity row found for the plan-created event").toBeVisible();
+      expect(
+        await rowAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the activity feed's actor avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+    } finally {
+      if (planId) await api.delete(`/api/plans/${planId}`, { failOnStatusCode: false }).catch(() => {});
+      await api.dispose();
+    }
+  });
+});
+
+test.describe("top bar — notifications", () => {
+  test.skip(!!skipReason, skipReason ?? "");
+
+  /*
+   * BetterBugs: "Notification Icon Does Not Respond When Clicked" — the bell in TopBar.tsx had no
+   * onClick at all. Fixed by wiring it to a dropdown panel backed by GET /api/notifications
+   * (notifications.spec.ts pins that route's own contract). The backend route is still a stub that
+   * always answers an empty list (see legacy.controller.ts's comment on it), so the primary path
+   * here is necessarily the empty state — these tests are about the panel's own behaviour
+   * (open/close, keyboard, error handling), not about real notification content.
+   */
+
+  const bell = (page: Page) => page.getByRole("button", { name: "Notifications" });
+  const panel = (page: Page) => page.getByRole("menu", { name: "Notifications" });
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/projects");
+  });
+
+  test("NOTIF-UI-01 clicking the bell opens the panel and shows the empty state", async ({ page }) => {
+    await expect(panel(page)).toBeHidden();
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await expect(panel(page).getByText("No notifications")).toBeVisible();
+    await expect(bell(page)).toHaveAttribute("aria-expanded", "true");
+  });
+
+  test("NOTIF-UI-02 clicking the bell again closes it", async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await bell(page).click();
+    await expect(panel(page)).toBeHidden();
+    await expect(bell(page)).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("NOTIF-UI-03 clicking outside the panel closes it", async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    // The top-bar avatar (same locator NAV-B-14 uses) — always present, has no click handler of its
+    // own, and sits outside notifBoxRef, so clicking it is an unambiguous "outside click".
+    await page.locator("header span.rounded-full").first().click();
+    await expect(panel(page)).toBeHidden();
+  });
+
+  test("NOTIF-UI-04 pressing Escape closes it", async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel(page)).toBeHidden();
+  });
+
+  test("NOTIF-UI-05 the bell is reachable and activatable from the keyboard", async ({ page }) => {
+    await bell(page).focus();
+    await expect(bell(page)).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(panel(page)).toBeVisible();
+  });
+
+  test("NOTIF-UI-06 a failed fetch shows an inline error instead of an empty panel or a crash", async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    // Matched by pathname, not a glob against the page's own origin — the frontend calls the
+    // backend's origin, which the NAV-B-07 logout test already established a glob against baseURL
+    // won't match.
+    await page.route((url) => url.pathname === "/api/notifications", (route) => route.abort("failed"));
+
+    await bell(page).click();
+
+    await expect(panel(page).getByText("No notifications")).toBeHidden();
+    await expect(panel(page).getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(pageErrors, "a failed notifications fetch raised a client-side error").toEqual([]);
+  });
+
+  test("NOTIF-UI-07 Try again recovers once the request succeeds", async ({ page }) => {
+    let attempt = 0;
+    await page.route((url) => url.pathname === "/api/notifications", (route) => {
+      attempt += 1;
+      if (attempt === 1) return route.abort("failed");
+      return route.continue();
+    });
+
+    await bell(page).click();
+    await expect(panel(page).getByRole("button", { name: "Try again" })).toBeVisible();
+
+    await panel(page).getByRole("button", { name: "Try again" }).click();
+
+    await expect(panel(page).getByText("No notifications")).toBeVisible();
   });
 });
