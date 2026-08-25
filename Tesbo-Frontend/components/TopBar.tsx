@@ -129,9 +129,10 @@ export default function TopBar() {
   }
 
   const displayName = user?.name || user?.email || "";
-  // Seeded on the email: a display name can be edited or shared between two people, so it would move
-  // someone's colour or collide two of them. The email is the stable identity.
-  const avatarSeed = user?.email || user?.name || "";
+  // Seeded on the user id: a display name can be edited and an email can be changed, either of
+  // which would move someone's colour or collide two people. The id is the one field every other
+  // screen (team avatars, activity, admins) also has and never changes.
+  const avatarSeed = user?.userId || user?.email || user?.name || "";
 
   return (
     <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-4 border-b border-[var(--border-subtle)] bg-[var(--surface)] px-8">

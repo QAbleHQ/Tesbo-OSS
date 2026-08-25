@@ -510,7 +510,10 @@ export default function ProjectDashboardPage() {
                   <div className="min-w-0 flex-1">
                     <p className="text-[12px] leading-[1.5] text-[var(--muted)]">{describeActivity(item)}</p>
                     <div className="mt-1 flex items-center gap-1.5">
-                      <OwnerAvatar name={item.actorKind === "agent" ? item.actorName || "Zyra" : item.actorName || item.actorEmail || "System"} />
+                      <OwnerAvatar
+                        name={item.actorKind === "agent" ? item.actorName || "Zyra" : item.actorName || item.actorEmail || "System"}
+                        seed={item.actorKind === "agent" ? undefined : item.actorId}
+                      />
                       <span className="font-mono text-[11px] text-[var(--muted-soft)]">{formatRelative(item.createdAt)}</span>
                     </div>
                   </div>

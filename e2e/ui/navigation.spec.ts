@@ -1,8 +1,10 @@
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { dbControlAvailable } from "../utils/psql";
 import {
+  createPlan,
   removeWorkspaceMember,
+  screensApi,
   screensSuiteSkipReason,
   screensTenant,
   seedWorkspaceMember,
@@ -529,6 +531,54 @@ test.describe("side navigation — behaviour", () => {
       "/account",
     ]) {
       expect(await avatarColourOn(path), `the avatar changes colour on ${path}`).toBe(first);
+    }
+  });
+
+  test("NAV-B-15 the same person's avatar matches across different components, not just different pages", async ({
+    page,
+  }) => {
+    /*
+     * NAV-B-14 above only ever reads the top bar's own avatar on different routes — the same
+     * <TopBar/> instance every time — so it could never have caught this ticket's actual
+     * regression: PlanCard's OwnerAvatar and the workspace Activity feed's ActorAvatar each seeded
+     * avatarColor() with the person's *name* instead of their id, so the same person could land on
+     * a different palette swatch in a plan card or the activity feed than in the top bar, even
+     * though every one of them called avatarColor(). This reproduces the reported pairing (header
+     * vs. Activity section) by comparing the top bar's avatar against a plan card's owner avatar
+     * and an activity row for an action the signed-in user just performed.
+     */
+    const api = await screensApi();
+    let planId: string | undefined;
+    try {
+      await page.goto("/projects");
+      const topBarAvatar = page.locator("header span.rounded-full").first();
+      await expect(topBarAvatar).toBeVisible();
+      const topBarColour = await topBarAvatar.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+      const plan = await createPlan(api, tenant!.projectId);
+      planId = plan.id;
+
+      await page.goto(`/projects/${tenant!.projectId}/plans`);
+      const card = page.locator(".group", { has: page.getByRole("link", { name: plan.name, exact: true }) }).first();
+      const cardAvatar = card.locator("span.rounded-full").first();
+      await expect(cardAvatar, "the plan card never shows an owner avatar").toBeVisible();
+      expect(
+        await cardAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the plan card's owner avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+
+      await page.goto("/activity");
+      await page.getByPlaceholder("Search activity…").fill(plan.name);
+      const row = page.locator("div.grid", { hasText: plan.name }).first();
+      const rowAvatar = row.locator("span.rounded-full").first();
+      await expect(rowAvatar, "no activity row found for the plan-created event").toBeVisible();
+      expect(
+        await rowAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the activity feed's actor avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+    } finally {
+      if (planId) await api.delete(`/api/plans/${planId}`, { failOnStatusCode: false }).catch(() => {});
+      await api.dispose();
     }
   });
 });

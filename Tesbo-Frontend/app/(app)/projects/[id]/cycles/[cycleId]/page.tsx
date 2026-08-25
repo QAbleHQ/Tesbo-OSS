@@ -80,7 +80,7 @@ const EXEC_STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Re
 const RUN_TABS = ["All", "Passed", "Failed", "Blocked", "Skipped", "Pending"] as const;
 type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
-import { AVATAR_COLORS } from "@/lib/avatarColors";
+import { avatarColor } from "@/lib/avatarColors";
 const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
 const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
 
@@ -214,12 +214,6 @@ function ExistingBugPickerModal({
 }
 
 /* ───── Avatar helpers ───── */
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "U";
@@ -228,23 +222,24 @@ function getInitials(name: string): string {
 }
 
 function RunAvatar({ name, size = 40 }: { name: string; size?: number }) {
-  const color = AVATAR_COLORS[hashSeed(name) % AVATAR_COLORS.length];
   return (
     <div
       className="flex shrink-0 items-center justify-center rounded-lg text-[13px] font-bold tracking-wide text-white"
-      style={{ background: color, width: size, height: size }}
+      style={{ background: avatarColor(name), width: size, height: size }}
     >
       {getInitials(name)}
     </div>
   );
 }
 
-function MemberAvatar({ name, size = 22 }: { name: string; size?: number }) {
-  const color = AVATAR_COLORS[hashSeed(name) % AVATAR_COLORS.length];
+// Seeded on the member's id, not their name — matches every other person avatar (top bar, team
+// avatars, activity, admins) so the same person keeps the same colour everywhere. Part of
+// Basecamp 10198836413.
+function MemberAvatar({ name, seed, size = 22 }: { name: string; seed?: string | null; size?: number }) {
   return (
     <span
       className="inline-flex shrink-0 items-center justify-center rounded-full border-2 border-[var(--surface)] font-semibold text-white"
-      style={{ background: color, width: size, height: size, fontSize: size * 0.42 }}
+      style={{ background: avatarColor(seed || name), width: size, height: size, fontSize: size * 0.42 }}
       title={name}
     >
       {getInitials(name)}
@@ -1005,7 +1000,7 @@ export default function TestRunDetailPage() {
             <RunAvatar name={run.name} size={28} />
             <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">{run.name}</h1>
             <StatusChip tone={runStatusToTone(run.status)}>{run.status}</StatusChip>
-            {ownerName && <MemberAvatar name={ownerName} size={24} />}
+            {ownerName && <MemberAvatar name={ownerName} seed={run.ownerId} size={24} />}
           </div>
           {run.description && <p className="mt-1 text-[13px] text-[var(--muted-soft)]">{run.description}</p>}
           <div className="mt-2.5 flex flex-wrap items-center gap-4">
@@ -1288,7 +1283,7 @@ export default function TestRunDetailPage() {
                         <td className="px-5 py-3">
                           {assigneeName ? (
                             <span className="flex items-center gap-1.5">
-                              <MemberAvatar name={assigneeName} size={20} />
+                              <MemberAvatar name={assigneeName} seed={e.assigneeId} size={20} />
                               <span className="text-[12.5px] text-[var(--muted)]">{assigneeName}</span>
                             </span>
                           ) : (
@@ -1957,7 +1952,7 @@ export default function TestRunDetailPage() {
                 <span className="text-[var(--muted)]">{panelExecution.type || "—"}</span>
                 {panelExecution.assigneeId && memberNames[panelExecution.assigneeId] && (
                   <span className="flex items-center gap-1.5 text-[var(--muted)]">
-                    <MemberAvatar name={memberNames[panelExecution.assigneeId]} size={18} />
+                    <MemberAvatar name={memberNames[panelExecution.assigneeId]} seed={panelExecution.assigneeId} size={18} />
                     {memberNames[panelExecution.assigneeId]}
                   </span>
                 )}
