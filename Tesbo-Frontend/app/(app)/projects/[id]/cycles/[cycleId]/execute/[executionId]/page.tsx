@@ -14,11 +14,11 @@ import { Button, StatusChip, Input, PageLoader, Textarea } from "@/components/ui
 const STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"];
 
 function statusToTone(status: string) {
-  const map: Record<string, "success" | "error" | "warning" | "info" | "neutral"> = {
+  const map: Record<string, "success" | "error" | "blocked" | "skipped" | "info" | "neutral"> = {
     Passed: "success",
     Failed: "error",
-    Skipped: "warning",
-    Blocked: "warning",
+    Skipped: "skipped",
+    Blocked: "blocked",
     Retest: "info",
     Untested: "neutral",
   };
@@ -186,8 +186,8 @@ export default function ExecutionDetailPage() {
                 const colors: Record<string, string> = {
                   Passed: active ? "bg-[var(--success)] text-white" : "border-[var(--success)]/30 text-[var(--success-foreground)] hover:bg-[var(--success-soft)]",
                   Failed: active ? "bg-[var(--error)] text-white" : "border-[var(--error)]/30 text-[var(--error-foreground)] hover:bg-[var(--error-soft)]",
-                  Skipped: active ? "bg-[var(--warning)] text-white" : "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]",
-                  Blocked: active ? "bg-[var(--warning)] text-white" : "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]",
+                  Skipped: active ? "bg-[var(--status-skipped-dot)] text-white" : "border-[var(--status-skipped-dot)]/30 text-[var(--status-skipped-text)] hover:bg-[var(--status-skipped-fill)]",
+                  Blocked: active ? "bg-[var(--status-blocked-dot)] text-white" : "border-[var(--status-blocked-dot)]/30 text-[var(--status-blocked-text)] hover:bg-[var(--status-blocked-fill)]",
                   Retest: active ? "bg-[var(--info)] text-white" : "border-[var(--info)]/30 text-[var(--info)] hover:bg-[var(--info-soft)]",
                   Untested: active ? "bg-[var(--muted)] text-white" : "border-[var(--border)] text-[var(--muted)] hover:bg-[var(--surface-secondary)]",
                 };
