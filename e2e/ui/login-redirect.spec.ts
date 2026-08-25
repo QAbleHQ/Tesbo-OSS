@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { env, testAddress } from "../utils/env";
+import { clearOtpIpRateLimit, seedOtpCode } from "../utils/otp";
 import {
   clearInvitations,
   detachUserByEmail,
@@ -9,6 +10,7 @@ import {
   provisionRbacTenant,
   rbacSuiteSkipReason,
   seedFixtureUser,
+  writeStorageState,
   type RbacTenant,
 } from "../utils/rbac-tenant";
 
@@ -280,6 +282,118 @@ test.describe("login reached from an already-accepted invite", () => {
       // the invite or the loading screen.
       await page.waitForURL(/\/(projects|dashboard)/, { timeout: 20_000 });
       await expect(page.getByText("Loading...")).toHaveCount(0);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+/*
+ * The other entry path into /login from the invite flow, and the second defect it carried.
+ *
+ * /invite/[token] offers "Sign in with {invite.email}" whenever the browser already holds a session
+ * for some *other* email — that page has no way to sign the current user out, so it sends them to
+ * /login instead, which does own that. But /login's mount effect used to treat any still-active
+ * session as proof a prior redirect had bounced, auto-retried the same /invite/<token> destination,
+ * and — once that retry landed back on /login within the ten-second window — reported the ordinary
+ * first step of switching accounts as "Signed in, but we could not open /invite/<token>. Sign in
+ * again to continue." The invitee could still sign in through the form underneath; the message was
+ * simply wrong, and alarming for no reason.
+ *
+ * Reuses the "invite-signin" tenant (provisionRbacTenant caches per kind) rather than provisioning a
+ * second workspace: this only needs a pending invitation and a second role-holder in the same tenant
+ * to act as "some other signed-in account", neither of which the first describe above depends on.
+ */
+test.describe("login reached from an invite while signed in as a different email", () => {
+  let tenant: RbacTenant | null = null;
+  let asOwner: APIRequestContext | undefined;
+  let wrongAccountState: string | undefined;
+  const inviteeEmails: string[] = [];
+
+  test.beforeAll(async () => {
+    tenant = await provisionRbacTenant("invite-signin");
+    if (!tenant) return;
+    asOwner = await loginAs(tenant.owner);
+    // The tenant's manager stands in for "somebody else's account" — already a member of this
+    // workspace, but never the invitee, so it can never accidentally satisfy the invite's email.
+    wrongAccountState = await writeStorageState(tenant.manager, "invite-signin-mismatch");
+  });
+
+  test.afterAll(async () => {
+    if (tenant) clearInvitations(tenant);
+    for (const email of inviteeEmails) detachUserByEmail(email);
+    await asOwner?.dispose();
+  });
+
+  test.beforeEach(async () => {
+    const reason = rbacSuiteSkipReason(tenant);
+    test.skip(reason !== null, reason ?? "");
+    // Shared across every OTP-touching file in this run (all requests look like one caller IP to
+    // the backend); reset before each test so an earlier file's budget can't fail this one.
+    clearOtpIpRateLimit();
+  });
+
+  /** A pending (unaccepted) invitation for a fresh email, and its raw redeemable token. */
+  async function pendingInvite(label: string): Promise<{ token: string; email: string }> {
+    const email = testAddress(`invite-signin-mismatch-${label}`);
+    inviteeEmails.push(email);
+    const created = await asOwner!.post("/api/workspace/invitations", {
+      data: { email, role: "qa_engineer" },
+      failOnStatusCode: false,
+    });
+    expect(created.ok(), `inviting ${email} — ${await created.text()}`).toBeTruthy();
+    const token = mintInviteToken((await created.json()).id);
+    return { token, email };
+  }
+
+  test("the mismatch screen's sign-in link reaches a clean form, not a stale bounce error", async ({
+    browser,
+  }) => {
+    const { token, email } = await pendingInvite("clean");
+    const ctx = await browser.newContext({ storageState: wrongAccountState });
+    try {
+      const page = await ctx.newPage();
+      await page.goto(`/invite/${token}`);
+
+      await expect(page.getByText(/signed in as a different email/i)).toBeVisible();
+      await page.getByRole("button", { name: `Sign in with ${email}` }).click();
+      await page.waitForURL(/\/login/);
+
+      // The whole point of this test: the email-locked OTP form loads normally...
+      await expect(page.getByRole("button", { name: "Send login code" })).toBeVisible();
+      await expect(page.getByLabel("Email", { exact: true })).toHaveValue(email);
+      // ...with no leftover "could not open" (or any other) alert sitting above it.
+      await expect(page.locator('p[role="alert"]')).toHaveCount(0);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  test("and the invitee can still sign in through it and accept the invitation", async ({ browser }) => {
+    const { token, email } = await pendingInvite("accepts");
+    const ctx = await browser.newContext({ storageState: wrongAccountState });
+    try {
+      const page = await ctx.newPage();
+      await page.goto(`/invite/${token}`);
+      await page.getByRole("button", { name: `Sign in with ${email}` }).click();
+      await page.waitForURL(/\/login/);
+
+      await page.getByRole("button", { name: "Send login code" }).click();
+      await page.waitForURL(/\/verify-otp/);
+      seedOtpCode(email, "391847");
+      const boxes = page.locator('input[inputmode="numeric"]');
+      for (let i = 0; i < "391847".length; i++) {
+        await boxes.nth(i).fill("391847"[i]);
+      }
+      await page.getByRole("button", { name: "Verify and sign in" }).click();
+
+      // Verifying hands the invitee straight back to the invite (the `redirect` param), now signed
+      // in as the right email, so the mismatch screen is gone and the invite can actually be joined.
+      await page.waitForURL(new RegExp(`/invite/${token}`));
+      await expect(page.getByText(/signed in as a different email/i)).toHaveCount(0);
+      await page.getByRole("button", { name: "Accept and join workspace" }).click();
+
+      await page.waitForURL(/\/projects/, { timeout: 20_000 });
     } finally {
       await ctx.close();
     }
