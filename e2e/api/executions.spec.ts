@@ -202,3 +202,79 @@ test.describe("defect fields follow the result", () => {
     }
   });
 });
+
+
+/*
+ * Regression: PATCH /api/cycles/:cycleId/executions/:executionId never validated `status`.
+ *
+ * Found while scoping the automation ingest (Basecamp 10189985971). `EXECUTION_STATUSES` was
+ * checked in bulkUpdateExecutionStatus and NOT in updateExecution -- which is the single-result
+ * path taken by this route, by the MCP `record_execution_result` tool, and now by the automation
+ * ingest. `executions.status` is a bare VARCHAR(32), so before the fix:
+ *
+ *   - {"status": "pass"} stored the literal string `pass`. Every aggregate in the product counts by
+ *     exact match ('Passed', 'Failed', ...), so the case displayed a status while being counted as
+ *     neither passed nor executed. Silent corruption, no error -- and the ingest's own draft
+ *     contract specified exactly that lowercase vocabulary, so an SDK written to it would have
+ *     corrupted every run it reported.
+ *   - a 33-character status reached Postgres and failed the length constraint, turning user input
+ *     into an unhandled 500.
+ *
+ * Both cases below FAIL against the unfixed code: the first with 200 instead of 400 (and a `pass`
+ * row), the second with 500 instead of 400.
+ */
+test.describe("execution status validation", () => {
+  test("a status outside the allowed set is refused, and nothing is written", async ({ request }) => {
+    const fixture = await makeExecutionFixture(request);
+    try {
+      const rejected = ["pass", "passed", "PASSED", "banana", "x".repeat(33)];
+      for (const status of rejected) {
+        const res = await request.patch(
+          `/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`,
+          { data: { status }, failOnStatusCode: false },
+        );
+        expect(res.status(), `status ${JSON.stringify(status)} must be a 400`).toBe(400);
+        expect((await res.json()).error).toContain("status must be one of");
+
+        const [row] = await (await request.get(`/api/cycles/${fixture.cycle.id}/executions`)).json();
+        expect(row.status, `status ${JSON.stringify(status)} must not have been stored`).toBe("Untested");
+      }
+    } finally {
+      await cleanupExecutionFixture(request, fixture);
+    }
+  });
+
+  test("every allowed status is still accepted, and an omitted status still means 'no change'", async ({
+    request,
+  }) => {
+    // The other direction of the same fix: the validation must not have closed the door on the
+    // legitimate values, and a PATCH that only changes another field must not be read as
+    // "status: empty string" and refused.
+    const fixture = await makeExecutionFixture(request);
+    try {
+      for (const status of ["Passed", "Failed", "Blocked", "Skipped", "Retest", "Untested"]) {
+        const res = await request.patch(
+          `/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`,
+          { data: { status }, failOnStatusCode: false },
+        );
+        expect(res.ok(), `status ${status} must be accepted: ${await res.text()}`).toBeTruthy();
+        const [row] = await (await request.get(`/api/cycles/${fixture.cycle.id}/executions`)).json();
+        expect(row.status).toBe(status);
+      }
+
+      await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
+        data: { status: "Passed" },
+      });
+      const noStatus = await request.patch(
+        `/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`,
+        { data: { actualResult: "notes only" }, failOnStatusCode: false },
+      );
+      expect(noStatus.ok(), await noStatus.text()).toBeTruthy();
+      const [row] = await (await request.get(`/api/cycles/${fixture.cycle.id}/executions`)).json();
+      expect(row.status, "a status-less PATCH must leave the status alone").toBe("Passed");
+      expect(row.actualResult).toBe("notes only");
+    } finally {
+      await cleanupExecutionFixture(request, fixture);
+    }
+  });
+});

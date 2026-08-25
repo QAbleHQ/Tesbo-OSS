@@ -1,0 +1,154 @@
+// Standalone e2e job. NOT part of a deploy pipeline — point a new Jenkins job at this file.
+//
+// Deliberately separate from Jenkinsfile / Jenkinsfile.stage so that a red test can never leave a
+// blue/green cutover half-finished, and so this can be re-run against an environment without
+// redeploying anything. Trigger it however suits: manually, on a schedule, or from the tail of a
+// stage deploy with `build job: 'tesbo-e2e', wait: false`.
+//
+// ─── Creating the job (http://208.87.133.122:8081/) ──────────────────────────────────────────
+//
+//   New Item -> Pipeline -> name it e.g. "tesbo-e2e"
+//   Pipeline -> Definition: "Pipeline script from SCM"
+//     SCM:            Git
+//     Repository URL: https://github.com/QAbleHQ/Tesbo-Test-Manager-Private.git
+//     Credentials:    the same one Jenkinsfile.stage uses
+//     Branch:         */BugFixes   (or whichever branch carries e2e/)
+//     Script Path:    Jenkinsfile.e2e
+//   Save. The first build populates the parameters below; the second run onwards they are selectable.
+//
+// ─── Credentials this job expects ────────────────────────────────────────────────────────────
+//
+// Add these under Manage Jenkins -> Credentials. All are "Secret text" unless noted. They are
+// injected as environment variables, and utils/env-file.ts gives process.env precedence over the
+// committed e2e/environments/<env>.env file — so secrets never live in the repo.
+//
+//   tesbo-e2e-stage-email        account A's email        -> E2E_TEST_EMAIL
+//   tesbo-e2e-stage-password     account A's password     -> E2E_TEST_PASSWORD
+//   tesbo-e2e-stage-email-b      account B's email        -> E2E_TEST_EMAIL_B
+//   tesbo-e2e-stage-password-b   account B's password     -> E2E_TEST_PASSWORD_B
+//   tesbo-e2e-stage-database-url stage DATABASE_URL       -> E2E_DATABASE_URL
+//
+// The database URL is optional but changes the job's reach enormously: without it the ~46 DB-backed
+// spec files skip themselves and only the HTTP-only specs run. With it, all 1216 tests are reachable
+// and tenants are provisioned automatically. It also means the run WRITES to the stage database —
+// scoped to the disposable tenants the suite creates, but real writes to shared infrastructure.
+
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    // One at a time: e2e/.auth/state.json holds the shared session, so two concurrent builds would
+    // rewrite it under each other. This is the same hazard scripts/e2e-run.sh guards with pgrep.
+    disableConcurrentBuilds()
+    buildDiscarder(logRotator(numToKeepStr: '30'))
+    timeout(time: 90, unit: 'MINUTES')
+  }
+
+  parameters {
+    choice(
+      name: 'TARGET_ENV',
+      choices: ['stage'],
+      description: 'Which e2e/environments/<name>.env to load. Add a choice here when you add a file there.'
+    )
+    string(
+      name: 'SPECS',
+      defaultValue: 'regression/',
+      description: 'Spec paths to run, space separated. "regression/" is the reported-ticket suite (fast). "api/ ui/" is everything (tens of minutes — every statement is a round trip to the database).'
+    )
+    string(
+      name: 'WORKERS',
+      defaultValue: '10',
+      description: 'Playwright workers. API specs are network-bound so 10 costs little; a UI-heavy selection on a small agent may want fewer.'
+    )
+    booleanParam(
+      name: 'USE_DATABASE',
+      defaultValue: true,
+      description: 'Bind the stage DATABASE_URL, unlocking the ~46 DB-backed spec files. Unticked, those skip themselves and only HTTP-only specs run.'
+    )
+  }
+
+  environment {
+    E2E_ENV     = "${params.TARGET_ENV}"
+    E2E_WORKERS = "${params.WORKERS}"
+    // Pinned rather than probed. utils/psql.ts falls back to `docker compose exec` when a direct
+    // connection fails; on an agent with no compose stack that turns a bad connection string into 46
+    // silently skipped files while the build still goes green. Pinning makes it a loud failure.
+    E2E_DB_TRANSPORT = 'direct'
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        sh 'git log -1 --pretty="%h %s"'
+      }
+    }
+
+    stage('Node') {
+      steps {
+        // The suite needs a modern Node for Playwright and for the type-stripping the coverage
+        // scripts use. Fail early and clearly rather than midway through a run.
+        sh '''
+          set -eu
+          node --version
+          npm --version
+          major="$(node -p 'process.versions.node.split(".")[0]')"
+          test "$major" -ge 20 || { echo "Node 20+ required, found $(node --version)"; exit 1; }
+        '''
+      }
+    }
+
+    stage('E2E') {
+      steps {
+        script {
+          // Account B is bound unconditionally — api/authorization.spec.ts needs it, and global-setup
+          // fails the whole run without it unless a database is available to seed it.
+          def creds = [
+            string(credentialsId: 'tesbo-e2e-stage-email',      variable: 'E2E_TEST_EMAIL'),
+            string(credentialsId: 'tesbo-e2e-stage-password',   variable: 'E2E_TEST_PASSWORD'),
+            string(credentialsId: 'tesbo-e2e-stage-email-b',    variable: 'E2E_TEST_EMAIL_B'),
+            string(credentialsId: 'tesbo-e2e-stage-password-b', variable: 'E2E_TEST_PASSWORD_B'),
+          ]
+          if (params.USE_DATABASE) {
+            creds << string(credentialsId: 'tesbo-e2e-stage-database-url', variable: 'E2E_DATABASE_URL')
+          }
+
+          withCredentials(creds) {
+            // scripts/e2e-ci.sh does the rest: validates the inputs, refuses a production-looking
+            // host, refuses a 0-test selection, installs Chromium, announces the count, and exits
+            // non-zero on any failure.
+            sh "scripts/e2e-ci.sh ${params.SPECS}"
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      // allowEmptyResults so an early failure (global setup, a bad selection) reports as a build
+      // failure with readable console output, rather than being masked by "no test results found".
+      junit allowEmptyResults: true, testResults: 'e2e/.run-logs/junit.xml'
+
+      publishHTML(target: [
+        reportDir:            'e2e/playwright-report',
+        reportFiles:          'index.html',
+        reportName:           'Playwright report',
+        keepAll:              true,
+        alwaysLinkToLastBuild: true,
+        allowMissing:         true
+      ])
+
+      // Traces and screenshots for whatever failed. Capped, because a UI-heavy failure can produce
+      // a lot of trace zips and these are diagnostic aids, not artefacts worth keeping forever.
+      archiveArtifacts artifacts: 'e2e/.run-logs/*.log, e2e/test-results/**/trace.zip, e2e/test-results/**/*.png',
+                       allowEmptyArchive: true,
+                       fingerprint: false
+    }
+    failure {
+      echo "e2e FAILED against ${params.TARGET_ENV}. Open the Playwright report for the failing tests, " +
+           "and note that tests marked test.fail() are EXPECTED to fail — see e2e/regression/README.md."
+    }
+  }
+}

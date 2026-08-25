@@ -10,6 +10,8 @@ import {
   type ExecutionItem,
 } from "@/lib/api";
 import { Button, StatusChip, Input, Textarea } from "@/components/ui";
+import ExecutionEvidencePanel from "@/components/ExecutionEvidencePanel";
+import { AutomationResultMeta } from "@/components/AutomationResultMeta";
 
 const STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"];
 
@@ -252,6 +254,17 @@ export default function ExecutionDetailPage() {
               />
             </div>
           </div>
+
+          {/*
+            * The same two panels the run drawer shows, so a result looks the same wherever it is
+            * opened. Both render nothing for a human-recorded result with no evidence, which is
+            * every result that existed before the automation ingest (Basecamp 10189985971).
+            */}
+          <AutomationResultMeta execution={execution} />
+
+          <div className="h-px bg-[var(--border)]" />
+
+          <ExecutionEvidencePanel cycleId={cycleId} executionId={execution.id} />
 
           <div className="flex gap-2 pt-2">
             <Button type="submit" disabled={saving}>

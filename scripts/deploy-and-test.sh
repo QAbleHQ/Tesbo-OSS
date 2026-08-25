@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Rebuilds and (re)starts the local docker-compose stack with the latest code, waits for
-# the backend and frontend to report healthy, then runs the Playwright API + UI smoke
-# suite against it.
+# Deploy what is in the working tree, then test it. The only supported way to test new code.
 #
-# Usage: scripts/deploy-and-test.sh [playwright-args...]
-# Example: scripts/deploy-and-test.sh --project=api
+# Rebuilds the images from the CURRENT tree (committed or not), restarts the stack, waits for the
+# backend and frontend to report healthy, and then hands the run to scripts/e2e-run.sh — so the test
+# phase gets the mandated protocol: its own Terminal window, --workers=10, a tee'd log, the
+# concurrent-run guard and the zero-selection guard.
+#
+# Why the handoff instead of running Playwright here: this script used to call `npx playwright test`
+# inline, which meant a deployed run had none of those protections, and the protocol-compliant path
+# (e2e-run.sh) had no way to know the images were stale. On 2026-08-24 that gap produced a 258-test
+# run whose 64 failures were all code missing from seven-hour-old images.
+#
+# Usage: scripts/deploy-and-test.sh api/reports.spec.ts ui/reports.spec.ts
+#        scripts/deploy-and-test.sh --all          # rebuild, then the whole suite (say why)
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,12 +52,20 @@ if [ ! -d node_modules ]; then
 fi
 npx playwright install chromium
 
-if [ -f .env ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source .env
-  set +a
+cd "$ROOT_DIR"
+
+if [ "$#" -eq 0 ]; then
+  echo "==> Stack is deployed and healthy. No specs named, so nothing was run." >&2
+  echo "    Name the impacted specs:  scripts/deploy-and-test.sh api/reports.spec.ts ui/reports.spec.ts" >&2
+  echo "    Or the whole suite:       scripts/deploy-and-test.sh --all" >&2
+  exit 0
 fi
 
-echo "==> Running Playwright smoke suite"
-npx playwright test "$@"
+if [ "$1" = "--all" ]; then
+  shift
+  set -- "$@"
+  echo "==> Full-suite run against the freshly deployed stack"
+fi
+
+echo "==> Handing the run to scripts/e2e-run.sh (own window, --workers=10, tee'd log)"
+exec "$ROOT_DIR/scripts/e2e-run.sh" "$@"

@@ -542,7 +542,16 @@ export default function PlanDetailPage() {
                     * means by "how many test cases are in this plan". The pinned scope still has its
                     * own count on the Plan items tab, where the word "items" says what it is.
                     */}
-                  <span className="font-mono text-[var(--foreground)]">{derivedProgress?.totalCases ?? currentPlanSummary?.caseCount ?? items.length}</span> test cases
+                  <span className="font-mono text-[var(--foreground)]">
+                    {/*
+                      * `||`, not `??`. derivedProgress is never null — with no runs it returns the
+                      * plan-progress payload, whose totalCases is 0 — so `??` never fell through and
+                      * a plan with pinned items but no runs yet showed "0 test cases", which is the
+                      * same defect as 10221932189 pointing the other way. Caught by PLN-U-05, which
+                      * exists precisely to catch this chip being widened by accident.
+                      */}
+                    {derivedProgress?.totalCases || currentPlanSummary?.caseCount || items.length}
+                  </span> test cases
                 </span>
                 {ownerName && <OwnerAvatar name={ownerName} />}
               </div>

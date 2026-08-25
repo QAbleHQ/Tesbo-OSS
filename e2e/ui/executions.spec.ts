@@ -240,14 +240,22 @@ test.describe("run detail — progress, defects and the bug modal", () => {
   test("EXE-U-31 defect fields appear only once the case is marked Failed", async ({ page }) => {
     const { cycle, testcase } = await setUpCycleWithOneCase(`UI Defect Visibility ${Date.now()}`);
     try {
-      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
-      await page.getByText(testcase.title).first().click();
+      // Driven from the full-page execute screen rather than the run's side panel: the panel opens
+      // from a row interaction this file has no established pattern for, and the same rule governs
+      // both screens. The execute screen renders its statuses as buttons.
+      const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+      const [execution] = await (await api.get(`/api/cycles/${cycle.id}/executions`)).json();
+      await api.dispose();
 
-      // The side panel opens on Untested: no defect inputs.
-      await expect(page.getByLabel("Defect Key")).toBeHidden();
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}/execute/${execution.id}`);
+      await expect(page.getByText(testcase.title).first()).toBeVisible();
+
+      // Opens on Untested: a defect reference would be meaningless, so the fields are not offered.
+      await expect(page.getByText("Defect Key")).toBeHidden();
 
       await page.getByRole("button", { name: "Failed", exact: true }).first().click();
       await expect(page.getByText("Defect Key")).toBeVisible();
+      await expect(page.getByText("Defect URL")).toBeVisible();
 
       await page.getByRole("button", { name: "Passed", exact: true }).first().click();
       await expect(page.getByText("Defect Key")).toBeHidden();
@@ -256,20 +264,153 @@ test.describe("run detail — progress, defects and the bug modal", () => {
     }
   });
 
-  test("EXE-U-32 the run's Log Bug modal asks for severity and priority, like the Bugs page", async ({ page }) => {
+  test("EXE-U-32 the run Log Bug modal asks for severity and priority, like the Bugs page", async ({ page }) => {
     const { cycle, testcase } = await setUpCycleWithOneCase(`UI Log Bug Fields ${Date.now()}`);
     try {
       await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
-      await page.getByText(testcase.title).first().click();
-      await page.getByRole("button", { name: "Failed", exact: true }).first().click();
+      await expect(page.getByText(testcase.title).first()).toBeVisible();
 
-      // Marking Failed is what opens this modal.
+      // The inline status control is a <select>, and marking Failed is what opens this modal — the
+      // same pattern the passing tests at the top of this file use.
+      await page.getByRole("combobox").first().selectOption("Failed");
+
       await expect(page.getByText("Report a Bug", { exact: true })).toBeVisible();
       await expect(page.getByLabel("Severity")).toBeVisible();
       await expect(page.getByLabel("Bug priority")).toBeVisible();
       // Same defaults as the Bugs page: severity Medium, priority untriaged.
       await expect(page.getByLabel("Severity")).toHaveValue("Medium");
       await expect(page.getByLabel("Bug priority")).toHaveValue("");
+    } finally {
+      await cleanUp(cycle.id, testcase.id);
+    }
+  });
+});
+
+
+/*
+ * The evidence viewer, and the automation provenance on a run (Basecamp 10189985971).
+ *
+ * These are the UI half of section 5. Before this card the backend had served
+ * POST/GET /api/cycles/:cycleId/executions/:executionId/attachments since the bug-evidence work
+ * and NOTHING in the frontend called either -- so evidence was storable, billed against the
+ * workspace's storage allowance, and invisible in the product. There was not even a download route.
+ * An automated run's screenshots and traces would have been write-only without this.
+ */
+test.describe("execution evidence and automation provenance", () => {
+  /** Drives the automation ingest to produce a real automated run with a failure and evidence. */
+  async function seedAutomatedRun(label: string) {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    try {
+      const testcase = await (
+        await api.post(`/api/projects/${ctx.projectId}/testcases`, {
+          data: { title: `UI Automation ${label} ${Date.now()}` },
+        })
+      ).json();
+
+      const base = `/api/projects/${ctx.projectId}/automation`;
+      const run = await (
+        await api.post(`${base}/runs`, {
+          data: {
+            name: `UI Automation Run ${label} ${Date.now()}`,
+            triggeredBy: "github-actions",
+            branch: "release/ui-evidence",
+            commitSha: "abc1234def5678",
+            buildUrl: "https://github.com/acme/web/actions/runs/99",
+            caseIds: [testcase.externalId],
+          },
+        })
+      ).json();
+
+      await api.post(`${base}/runs/${run.runId}/results`, {
+        data: {
+          caseId: testcase.externalId,
+          status: "fail",
+          durationMs: 2500,
+          retryCount: 2,
+          errorMessage: "AssertionError: expected the cart to be empty",
+        },
+      });
+
+      // A 1x1 PNG, so the viewer has a real image to render.
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      await api.post(`${base}/runs/${run.runId}/results/${testcase.externalId}/evidence`, {
+        multipart: {
+          kind: "screenshot",
+          files: { name: "cart-failure.png", mimeType: "image/png", buffer: png },
+        },
+      });
+      await api.post(`${base}/runs/${run.runId}/results/${testcase.externalId}/evidence`, {
+        multipart: {
+          kind: "trace",
+          files: { name: "cart-trace.zip", mimeType: "application/zip", buffer: Buffer.from("PKtrace") },
+        },
+      });
+      return { runId: run.runId as string, testcase };
+    } finally {
+      await api.dispose();
+    }
+  }
+
+  test("an automated run shows its provenance, and the drawer shows the failure and its evidence", async ({
+    page,
+  }) => {
+    const { runId, testcase } = await seedAutomatedRun("evidence");
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${runId}`);
+
+      // Provenance strip: how the run was produced, and the commit it ran against. Renders nothing
+      // at all on a manual run, which is why it is asserted on an automated one.
+      await expect(page.getByTitle(/reported by an automation SDK/i).first()).toBeVisible();
+      await expect(page.getByText("release/ui-evidence")).toBeVisible();
+      await expect(page.getByText("abc1234", { exact: false }).first()).toBeVisible();
+      await expect(page.getByRole("link", { name: /^Build/ })).toBeVisible();
+
+      // Open the result's drawer.
+      await page.getByText(testcase.title).first().click();
+
+      // The framework's own failure text, kept separate from Actual Result -- that field is the
+      // tester's prose and the ingest never writes it.
+      await expect(page.getByText("Failure reported by automation")).toBeVisible();
+      await expect(page.getByText(/AssertionError: expected the cart to be empty/)).toBeVisible();
+      // Retries are a flakiness signal even on a result that eventually passed.
+      await expect(page.getByText("2 retries")).toBeVisible();
+
+      // Evidence, grouped by kind: the screenshot renders inline, the trace is a named download.
+      await expect(page.getByText("Evidence")).toBeVisible();
+      await expect(page.getByRole("img", { name: "cart-failure.png" })).toBeVisible();
+      await expect(page.getByText("cart-trace.zip")).toBeVisible();
+
+      // The download link points at the route that did not exist before this card.
+      const traceLink = page.getByRole("link", { name: /cart-trace\.zip/ });
+      await expect(traceLink).toHaveAttribute(
+        "href",
+        new RegExp(`/api/cycles/${runId}/executions/[0-9a-f-]{36}/attachments/[0-9a-f-]{36}/download$`),
+      );
+    } finally {
+      await cleanUp(runId, testcase.id);
+    }
+  });
+
+  test("a manual run shows no automation provenance", async ({ page }) => {
+    // The other direction: every provenance field is null on a manual run, and the components
+    // return null rather than an empty shell -- a manually executed run must look exactly as it did
+    // before this feature existed.
+    const title = `UI Manual Run Case ${Date.now()}`;
+    const { cycle, testcase } = await setUpCycleWithOneCase(title);
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+      await expect(page.getByText(testcase.title).first()).toBeVisible();
+      await expect(page.getByTitle(/reported by an automation SDK/i)).toHaveCount(0);
+
+      await page.getByText(testcase.title).first().click();
+      await expect(page.getByText("Failure reported by automation")).toHaveCount(0);
+      // The evidence panel itself is always present -- a person can attach evidence to a manual
+      // result too, which they previously could not do anywhere in the UI.
+      await expect(page.getByText("Evidence")).toBeVisible();
+      await expect(page.getByText(/No evidence attached/)).toBeVisible();
     } finally {
       await cleanUp(cycle.id, testcase.id);
     }

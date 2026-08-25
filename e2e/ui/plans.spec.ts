@@ -571,23 +571,15 @@ test.describe("test plans — header count, plan items and editing", () => {
     const project = await createProject(api);
     try {
       const plan = await createPlan(api, project.id);
+      // Three cases, all of them arriving through a linked RUN and none pinned as plan items — the
+      // exact shape of the report: caseCount is 0 while the plan plainly covers three cases.
       await seedRun(api, project.id, { statuses: ["Passed", "Failed", "Untested"], planId: plan.id });
 
       await page.goto(`/projects/${project.id}/plans/${plan.id}`);
 
-      // TOTAL in the progress panel is the number the reader trusts; the chip has to agree with it.
-      const total = await page
-        .locator("div")
-        .filter({ hasText: /^TOTAL/ })
-        .last()
-        .textContent();
-      const totalCount = (total ?? "").replace(/\D+/g, "");
-      expect(totalCount, "the fixture must produce a non-zero total").not.toBe("");
-
-      const header = page.getByText(/\d+ test cases/).first();
-      await expect(header).toBeVisible();
-      expect((await header.textContent())?.replace(/\D+/g, "")).toBe(totalCount);
-      // Nothing pinned to the plan, so the old chip would have said zero.
+      // Asserted against the fixture rather than by scraping the TOTAL tile: `page.locator("div")`
+      // matches every div on the screen, and filtering that set was slow enough to time the test out.
+      await expect(page.getByText(/3 test cases/)).toBeVisible();
       await expect(page.getByText(/^0 test cases$/)).toHaveCount(0);
     } finally {
       await deleteProjects(api, [project.id]);

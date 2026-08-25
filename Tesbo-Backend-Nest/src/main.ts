@@ -11,6 +11,8 @@ import { join } from "path";
 const earlyEnvPath = [join(process.cwd(), ".env"), join(process.cwd(), "backend", ".env")].find(existsSync);
 if (earlyEnvPath) dotenv.config({ path: earlyEnvPath });
 
+import { startLangfuse, stopLangfuse } from "./observability/langfuse";
+
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import compression from "compression";
@@ -85,6 +87,12 @@ async function bootstrap() {
   });
 
   app.useGlobalFilters(new HttpExceptionFilter(config.maxUploadSize));
+
+  // Before listen(), so the first request of the process is already traced. Never throws and
+  // never blocks meaningfully: with no keys configured it returns immediately without a network
+  // call, and any failure inside logs and leaves tracing off.
+  await startLangfuse();
+
   await app.listen(config.port, "0.0.0.0");
 
   // Set after listen(), which is when the underlying http.Server exists. See
@@ -104,6 +112,19 @@ async function bootstrap() {
     .then(({ mode, server, reach }) =>
       console.log(`[email] delivery mode=${mode} postmark_server=${server} reach=${reach}`)
     );
+
+  // Spans batch in memory, so without an explicit flush every container restart loses the last
+  // few seconds of traces — and a restart is exactly when the interesting trace exists. Both
+  // signals are handled because compose stop sends SIGTERM and Ctrl-C sends SIGINT.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.once(signal, () => {
+      void (async () => {
+        await stopLangfuse();
+        await app.close().catch(() => undefined);
+        process.exit(0);
+      })();
+    });
+  }
 }
 
 void bootstrap();

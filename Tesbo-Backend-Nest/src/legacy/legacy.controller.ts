@@ -581,6 +581,41 @@ export class LegacyController {
     return this.legacy.listExecutionAttachments(cycleId, req.userId, executionId);
   }
 
+  /**
+   * Download (or, for an image/video, render) one evidence file from a run's result.
+   *
+   * The list endpoint above has existed without this one, so evidence has been storable and
+   * listable but not retrievable — see getExecutionAttachmentAccess. `?inline=1` is a request, not
+   * a guarantee: the service refuses inline for anything that is not an image or a video, so a
+   * trace .zip or a log is always a download.
+   */
+  @Get("/api/cycles/:cycleId/executions/:executionId/attachments/:attachmentId/download")
+  async downloadExecutionAttachment(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+    @Param("cycleId") cycleId: string,
+    @Param("executionId") executionId: string,
+    @Param("attachmentId") attachmentId: string,
+    @Query("inline") inline?: string
+  ) {
+    const access = await this.legacy.getExecutionAttachmentAccess(
+      cycleId,
+      req.userId,
+      executionId,
+      attachmentId,
+      inline === "1" || inline === "true"
+    );
+    if ("redirectUrl" in access) return res.redirect(302, access.redirectUrl);
+    res.setHeader("Content-Type", access.mimeType);
+    res.setHeader(
+      "Content-Disposition",
+      `${access.inline ? "inline" : "attachment"}; filename="${encodeURIComponent(access.originalFileName)}"`
+    );
+    if ("buffer" in access && access.buffer) return res.send(access.buffer);
+    if ("localPath" in access && access.localPath) return res.sendFile(access.localPath);
+    throw new Error("Attachment content unavailable");
+  }
+
   @Post("/api/cycles/:cycleId/executions/bulk-assign")
   bulkAssign(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
     return this.legacy.bulkAssignExecutions(cycleId, req.userId, body);
@@ -1647,6 +1682,16 @@ export class LegacyController {
    * ignored the project in their own URL, so any request at all was served, and `settings` is shaped
    * to carry an ingestion credential. The placeholder payloads are a missing feature, recorded in
    * docs/e2e-coverage-waves.md; being readable by anyone was a defect regardless of what fills them.
+   *
+   * SUPERSEDED, and will not be filled in as designed. Basecamp 10189985971 chose the opposite
+   * linking mechanism: automation reports results against a test case's `external_id`, onto
+   * ordinary `cycles`/`executions` rows, via /api/projects/:projectId/automation/* (src/automation).
+   * These six were shaped around spec-name/test-name matching in a store of their own, and the
+   * frontend client that called them (`listTesboRuns`, `ingestTesboPlaywright`,
+   * `getTesboTestHistory(projectId, specName, testName)`, ...) has been deleted for that reason.
+   * They are left standing only because removing a route is a separate, riskier change than
+   * deleting an uncalled client. Nothing should be built on them --
+   * see docs/automation-integration-plan.md §2, trap 2.
    */
   @Get("/api/projects/:projectId/tesbo-reports/runs")
   async tesboRuns(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {

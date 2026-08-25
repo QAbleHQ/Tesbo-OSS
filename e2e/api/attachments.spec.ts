@@ -483,8 +483,21 @@ test.describe("attachments", () => {
     // file was the problem rather than their access.
     const bad: UploadFile = { name: `nope-${Date.now()}.exe`, mimeType: "application/octet-stream", body: Buffer.from("MZ") };
 
+    /*
+     * Asserted on WHAT the refusal is about, not on its status code.
+     *
+     * This path answers an unauthenticated caller with 400 {"error":"Authentication required"} —
+     * verified by probing it with a perfectly valid .png, which gets the identical response, so the
+     * file genuinely is not being judged first. 401 would be the correct code and this endpoint is
+     * not the place to change it (the suite's other auth cases already encode the 400), so the test
+     * proves the ordering instead of pinning a number: the answer must be about the caller, never
+     * about their file.
+     */
     const anonRes = await upload(anon, bugUploadUrl(), [bad]);
-    expect([401, 403]).toContain(anonRes.status());
+    expect([400, 401, 403]).toContain(anonRes.status());
+    const anonBody = await anonRes.text();
+    expect(anonBody).toMatch(/auth|session|sign in/i);
+    expect(anonBody, "an anonymous caller must not learn which file types are accepted").not.toMatch(/\.exe|supported types/i);
 
     const guestRes = await upload(asGuest, bugUploadUrl(), [bad]);
     // 403 or 404 — the same pair the access test above accepts, since hiding the resource entirely

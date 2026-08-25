@@ -68,6 +68,8 @@ import {
 import { Button, StatusChip, Input, Select, Textarea, Drawer } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
 import IssuePickerModal from "@/components/IssuePickerModal";
+import ExecutionEvidencePanel from "@/components/ExecutionEvidencePanel";
+import { AutomationResultMeta, AutomationRunProvenance } from "@/components/AutomationResultMeta";
 import TrackingDestinationField, { type TrackingDestination } from "@/components/TrackingDestinationField";
 import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
 import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
@@ -1037,6 +1039,15 @@ export default function TestRunDetailPage() {
             {ownerName && <MemberAvatar name={ownerName} size={24} />}
           </div>
           {run.description && <p className="mt-1 text-[13px] text-[var(--muted-soft)]">{run.description}</p>}
+          {/*
+            * "Automated · github-actions · main · a1b2c3d · Build ↗" — renders nothing on a manual
+            * run, so the header is unchanged for every run a person created (Basecamp 10189985971 §4).
+            */}
+          {run.source === "automation" && (
+            <div className="mt-2">
+              <AutomationRunProvenance run={run} />
+            </div>
+          )}
           <div className="mt-2.5 flex flex-wrap items-center gap-4">
             {planName && (
               <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
@@ -2056,6 +2067,13 @@ export default function TestRunDetailPage() {
 
               <div className="h-px bg-[var(--border)]" />
 
+              {/*
+                * Automation facts for this result — duration, retries and the framework's own
+                * failure text. Renders nothing at all for a human-recorded result, so a manually
+                * executed run's drawer is unchanged (Basecamp 10189985971).
+                */}
+              <AutomationResultMeta execution={panelExecution} />
+
               {/* Status picker */}
               <div>
                 <label className="mb-2 block text-[12.5px] font-medium text-[var(--muted)]">Status</label>
@@ -2101,6 +2119,23 @@ export default function TestRunDetailPage() {
                   <Input type="url" value={panelDefectUrl} onChange={(e) => setPanelDefectUrl(e.target.value)} placeholder="https://…" />
                 </div>
               </div>
+
+              <div className="h-px bg-[var(--border)]" />
+
+              {/*
+                * Evidence. Keyed on the execution id so switching rows in the drawer remounts the
+                * panel and refetches, rather than showing the previous result's files.
+                */}
+              <ExecutionEvidencePanel
+                key={panelExecution.id}
+                cycleId={cycleId}
+                executionId={panelExecution.id}
+                onCountChange={(count) =>
+                  setExecutions((prev) =>
+                    prev.map((e) => (e.id === panelExecution.id ? { ...e, evidenceCount: count } : e))
+                  )
+                }
+              />
             </div>
 
             {/* Footer actions */}

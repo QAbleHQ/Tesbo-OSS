@@ -38,7 +38,9 @@ function fileInput(page: Page) {
 
 async function openReportModal(page: Page, projectId: string): Promise<void> {
   await page.goto(`/projects/${projectId}/bugs`);
-  await page.getByRole("button", { name: /report a bug/i }).first().click();
+  // The page's button is "Report Bug"; "Report a Bug" is the MODAL TITLE. Matching the title here
+  // waited two minutes for a button that does not exist — the mistake this comment now prevents.
+  await page.getByRole("button", { name: "Report Bug" }).first().click();
   // The modal renders without role="dialog", so the title is the anchor.
   await expect(page.getByText("Report a Bug", { exact: true })).toBeVisible();
 }
@@ -152,14 +154,16 @@ test.describe("bug evidence validation", () => {
       buffer: Buffer.from("a"),
     });
 
-    const submit = page.getByRole("button", { name: "Report Bug" });
+    // Two "Report Bug" buttons exist while the modal is open — the page's and the modal's submit.
+    // The submit is the last one in the DOM.
+    const submit = page.getByRole("button", { name: "Report Bug" }).last();
     await submit.click();
 
     const error = page.getByTestId("create-bug-error");
     await expect(error).toBeVisible();
     await expect(error).toContainText("aren't supported");
     // And the modal is usable again rather than stuck mid-save.
-    await expect(page.getByRole("button", { name: "Report Bug" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Report Bug" }).last()).toBeEnabled();
     await expect(page.getByText("Report a Bug", { exact: true })).toBeVisible();
   });
 });
@@ -177,8 +181,11 @@ test.describe("bug evidence validation", () => {
 test.describe("bugs list — controls and filters", () => {
   let api: APIRequestContext;
   let projectId: string;
+  // Deliberately contains no word that appears on a control ("list", "board", "edit", "delete"):
+  // getByRole name matching is substring-based, so a title mentioning the list view matched the view
+  // toggle itself and made every test in this block ambiguous.
   const longTitle =
-    "E2E long bug title that has to be clamped in the list view because it is far too long to sit on one line " +
+    "E2E long bug title that must be shortened on screen because it is far too long to sit on one line " +
     "and used to push the whole row to six lines tall with no way to read the rest of it";
 
   test.beforeAll(async () => {
@@ -200,7 +207,7 @@ test.describe("bugs list — controls and filters", () => {
   test.beforeEach(async ({ page }) => {
     test.skip(skipReason !== null, skipReason ?? "");
     await page.goto(`/projects/${projectId}/bugs`);
-    await page.getByRole("button", { name: "List" }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
     await expect(page.getByRole("columnheader", { name: "Severity" })).toBeVisible();
   });
 
@@ -260,7 +267,7 @@ test.describe("bugs list — controls and filters", () => {
   test("BUG-U-09 the severity filter is available on the board too", async ({ page }) => {
     // The board groups by status, so the status filter is deliberately list-only — but "show me the
     // Critical ones" is exactly what the board is for, which is why this one is not gated on the view.
-    await page.getByRole("button", { name: "Board" }).click();
+    await page.getByRole("button", { name: "Board", exact: true }).click();
     const severity = page.getByLabel("Filter by severity");
     await expect(severity).toBeVisible();
 
@@ -329,7 +336,7 @@ test.describe("bug priority", () => {
   test.beforeEach(async ({ page }) => {
     test.skip(skipReason !== null, skipReason ?? "");
     await page.goto(`/projects/${projectId}/bugs`);
-    await page.getByRole("button", { name: "List" }).click();
+    await page.getByRole("button", { name: "List", exact: true }).click();
     await expect(page.getByRole("columnheader", { name: "Priority" })).toBeVisible();
   });
 

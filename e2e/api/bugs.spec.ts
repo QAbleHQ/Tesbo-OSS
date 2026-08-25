@@ -304,6 +304,7 @@ test.describe("linking a bug fails the execution", () => {
 
   test("a passed result is overridden, and the override is recorded in the activity stream", async ({ request }) => {
     const suffix = `${Date.now()}`;
+    const startedAt = new Date(Date.now() - 60_000).toISOString();
     const { cycle, testcase, execution } = await seedRunWithCase(request, `override ${suffix}`);
     await request.patch(`/api/cycles/${cycle.id}/executions/${execution.id}`, { data: { status: "Passed" } });
     expect(await executionStatus(request, cycle.id, execution.id)).toBe("Passed");
@@ -322,7 +323,16 @@ test.describe("linking a bug fails the execution", () => {
 
       // Overwriting somebody's recorded result silently would be worse than not doing it at all —
       // the previous value has to be recoverable from the activity stream.
-      const activity = await (await request.get(`/api/projects/${ctx.projectId}/activity`)).json();
+      //
+      // Filtered rather than read off page 1: this project is account A's shared fixture, and during
+      // a full run it takes ~70 audit rows a minute, so the default 30-row page had scrolled past
+      // this entry before the assertion ran. entityType + since + the maximum page size narrows it
+      // to the handful of execution events from this test's own window.
+      const activity = await (
+        await request.get(`/api/projects/${ctx.projectId}/activity`, {
+          params: { entityType: "execution", since: startedAt, limit: 100 },
+        })
+      ).json();
       const rows = activity.list ?? activity.items ?? activity;
       const entry = rows.find(
         (a: { entityId?: string; diff?: any }) => a.entityId === execution.id && a.diff?.reason === "bug_linked",

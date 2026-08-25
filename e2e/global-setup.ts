@@ -180,7 +180,16 @@ function provisionUserViaDatabaseSeed(account: Account): void {
 }
 
 async function provisionUser(api: APIRequestContext, account: Account): Promise<void> {
-  const provisionedViaOtp = account.seedDirectly ? false : await provisionUserViaOtp(api, account);
+  /*
+   * The OTP path reads the code out of the backend container's stdout, so it exists only against
+   * this machine's compose stack. Against a deployed target there is no such log: the attempt would
+   * spend one of signup/start's five rate-limited attempts, wait out waitForOtpInLogs' 8s deadline,
+   * and then fall through to the database seed anyway — per tenant, seven times over. Skip straight
+   * to the seed, which is what actually works there now that psql.ts can reach a remote database
+   * without Docker.
+   */
+  const canScrapeOtp = env.targetIsLocal && !account.seedDirectly;
+  const provisionedViaOtp = canScrapeOtp ? await provisionUserViaOtp(api, account) : false;
   if (!provisionedViaOtp) {
     provisionUserViaDatabaseSeed(account);
   }

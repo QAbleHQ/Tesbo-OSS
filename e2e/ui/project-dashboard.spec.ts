@@ -341,14 +341,15 @@ test.describe("project dashboard — the stat cards", () => {
    * The workspace dashboard at /dashboard carries the same count cards and had the same problem,
    * reported separately as Basecamp 10226480729 ("[workspace Dashboard] need to update lables").
    *
-   * The card asked for "Total Suites", "Test Plans" and "Test Runs". The tiles read Test cases /
-   * Test suites / Test plans / Test runs instead: no other tile is prefixed with "Total", and this
-   * way the four read as one family in the product's own sentence case. "Cycles" was the real
-   * offender — internal vocabulary on screen, when every other surface calls them runs.
+   * The card asked for "Total Suites", "Test Plans" and "Test Runs", and it was right to: the
+   * projects list has used "Total Suites" all along, so that is the product's existing vocabulary
+   * and the inconsistency the reporter hit. An earlier pass here used "Test suites" for family
+   * consistency, which just moved the inconsistency somewhere else. "Cycles" was the real offender
+   * either way — internal vocabulary on screen, when every other surface calls them runs.
    */
-  test("DSH-U-15 the workspace dashboard tiles read as one Test … family", async ({ page }) => {
+  test("DSH-U-15 the workspace dashboard tiles match the vocabulary the rest of the app uses", async ({ page }) => {
     await page.goto("/dashboard");
-    for (const label of ["Test cases", "Test suites", "Test plans", "Test runs"]) {
+    for (const label of ["Test cases", "Total Suites", "Test plans", "Test runs"]) {
       await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
     }
     // None of the pre-fix wording survives anywhere on the screen.
