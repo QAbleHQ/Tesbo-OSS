@@ -226,7 +226,8 @@ test.describe("theme toggle", () => {
     await page.goto("/projects");
     expect((await readAppliedTheme(page)).dataset).toBe("dark");
 
-    await page.getByRole("button", { name: /Log out/ }).click();
+    await page.getByRole("button", { name: /Logout/ }).click();
+    await page.getByRole("button", { name: "Yes" }).click();
     await page.waitForURL("**/login");
     // Still dark with nobody signed in — the login screen follows the same stored choice.
     expect((await readAppliedTheme(page)).dataset).toBe("dark");

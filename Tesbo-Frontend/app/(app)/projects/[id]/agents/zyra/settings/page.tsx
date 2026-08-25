@@ -14,7 +14,7 @@ import {
   IconSparkles,
 } from "@tabler/icons-react";
 import { authMe, getZyraAgent, updateZyraSettings, testZyraAiConnection, type ZyraAgentState, type ZyraCapabilities } from "@/lib/api";
-import { Button, Card, StatusChip } from "@/components/ui";
+import { Button, Card, PageLoader, StatusChip } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
 type ConnectionResult = { ok: boolean; provider: string; model: string; error?: string; latencyMs: number } | null;
@@ -171,9 +171,11 @@ export default function ZyraSettingsPage() {
   if (loading || !state) {
     return (
       <StandardPageLayout header={header}>
-        <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">
-          {error || "Loading Zyra settings..."}
-        </div>
+        {error ? (
+          <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">{error}</div>
+        ) : (
+          <PageLoader label="Loading Zyra settings…" />
+        )}
       </StandardPageLayout>
     );
   }

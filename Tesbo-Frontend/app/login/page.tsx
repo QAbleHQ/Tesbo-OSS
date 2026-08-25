@@ -12,16 +12,9 @@ import {
 } from "@/lib/redirect";
 import { AuthSplitShell } from "@/components/auth/AuthSplitShell";
 import { AuthModeToggle } from "@/components/auth/AuthModeToggle";
+import { AuthLoadingScreen } from "@/components/auth/AuthLoadingScreen";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
 import { validateEmailValue } from "@/lib/validation";
-
-function AuthLoadingScreen() {
-  return (
-    <div className="dark flex min-h-screen items-center justify-center bg-[#0d0d1a]" style={{ colorScheme: "dark" }}>
-      <p className="text-sm text-white/40">Loading...</p>
-    </div>
-  );
-}
 
 function unreachableDestinationMessage(target: string): string {
   return `Signed in, but we could not open ${target}. Sign in again to continue.`;
@@ -207,11 +200,12 @@ function LoginForm() {
               }}
               placeholder="you@company.com"
               disabled={loading || isInviteEmailLocked}
+              aria-invalid={Boolean(emailError)}
             />
+            {emailError && <FieldError>{emailError}</FieldError>}
             {isInviteEmailLocked && (
               <FieldHint>This invitation can only be accepted with this email address.</FieldHint>
             )}
-            {emailError && <FieldError>{emailError}</FieldError>}
           </Field>
 
           {!otpMode && (
@@ -233,9 +227,10 @@ function LoginForm() {
                 }}
                 placeholder="Your password"
                 disabled={loading}
+                aria-invalid={Boolean(passwordError)}
               />
-              <FieldHint>Use the password created during initial setup.</FieldHint>
               {passwordError && <FieldError>{passwordError}</FieldError>}
+              <FieldHint>Use the password created during initial setup.</FieldHint>
             </Field>
           )}
 

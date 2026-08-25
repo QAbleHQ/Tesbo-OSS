@@ -26,6 +26,7 @@ import {
   Field,
   FieldLabel,
   Modal,
+  PageLoader,
   Textarea,
   Select,
   StatusChip,
@@ -588,11 +589,7 @@ export default function BugsPage() {
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   return (

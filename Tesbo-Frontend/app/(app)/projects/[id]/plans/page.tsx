@@ -18,6 +18,7 @@ import {
   FieldLabel,
   Card,
   EmptyStateBlock,
+  PageLoader,
 } from "@/components/ui";
 import { PageHeader, ListWorkspaceLayout } from "@/components/workflows";
 import { PlanCard, planStatus, type PlanStatus } from "@/components/testplans/PlanCard";
@@ -233,14 +234,7 @@ export default function PlansPage() {
   const passRate = overallPassRate(plans);
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--ink-200)] border-t-[var(--denim)]" />
-          <p className="text-[13px] text-[var(--ink-400)]">Loading plans…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading plans…" />;
   }
 
   return (

@@ -63,7 +63,7 @@ import {
   type IssueSearchResult,
   type TestRunListItem,
 } from "@/lib/api";
-import { Button, StatusChip, Input, Select, Textarea, Drawer } from "@/components/ui";
+import { Button, StatusChip, Input, PageLoader, Select, Textarea, Drawer } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
 import IssuePickerModal from "@/components/IssuePickerModal";
 import TrackingDestinationField, { type TrackingDestination } from "@/components/TrackingDestinationField";
@@ -882,11 +882,7 @@ export default function TestRunDetailPage() {
 
 
   if (loading || !run) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   const isInProgress = run.status === "In Progress";

@@ -18,7 +18,7 @@ import {
   type SuiteNode,
   type ZyraTask,
 } from "@/lib/api";
-import { Button, Card, Field, FieldLabel, Input, Modal, Select, StatusChip, Textarea } from "@/components/ui";
+import { Button, Card, Field, FieldLabel, Input, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
 type SaveMode = "existing" | "new";
@@ -230,7 +230,7 @@ export default function ZyraTaskDetailPage() {
   if (loading || !task) {
     return (
       <StandardPageLayout header={<PageHeader title="Zyra task" />}>
-        <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">Loading task...</div>
+        <PageLoader label="Loading task…" />
       </StandardPageLayout>
     );
   }
