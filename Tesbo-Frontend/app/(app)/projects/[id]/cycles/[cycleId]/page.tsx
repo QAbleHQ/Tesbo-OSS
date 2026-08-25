@@ -774,12 +774,19 @@ export default function TestRunDetailPage() {
     });
   }
 
-  // Covers every case the current filter matches, not just the visible page — the run keeps all
-  // executions in memory, so there is nothing to fetch.
+  // Only the rows on the current page — selecting "all" must not reach into other pages, and
+  // toggling it off must not drop selections made on a page the user has since left.
   function toggleSelectAllRunCases() {
-    setSelectedRunCaseIds((prev) =>
-      prev.size === filteredExecutions.length ? new Set() : new Set(filteredExecutions.map((e) => e.testcaseId))
-    );
+    setSelectedRunCaseIds((prev) => {
+      const pageIds = pagedExecutions.map((e) => e.testcaseId);
+      const allPageSelected = pageIds.length > 0 && pageIds.every((id) => prev.has(id));
+      const next = new Set(prev);
+      for (const id of pageIds) {
+        if (allPageSelected) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
   }
 
   /* ───── Change run status ───── */
@@ -1203,10 +1210,11 @@ export default function TestRunDetailPage() {
                       <th className="w-9 px-3 py-2.5">
                         <input
                           type="checkbox"
-                          aria-label="Select all matching test cases in this run"
+                          aria-label="Select all test cases on this page"
                           data-testid="run-select-all"
                           checked={
-                            filteredExecutions.length > 0 && selectedRunCaseIds.size === filteredExecutions.length
+                            pagedExecutions.length > 0 &&
+                            pagedExecutions.every((e) => selectedRunCaseIds.has(e.testcaseId))
                           }
                           onChange={toggleSelectAllRunCases}
                           className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-primary)]"
