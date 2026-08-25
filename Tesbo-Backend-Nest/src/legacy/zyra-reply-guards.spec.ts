@@ -52,6 +52,8 @@ type Statics = {
     suiteName?: string | null;
   }) => string;
   zyraUngroundedNote: (count: number) => string;
+  zyraDraftFilingHint: (suiteName: string | null) => string;
+  ZYRA_DRAFT_SUITE_NAME: string;
 };
 
 function statics(): Statics {
@@ -270,6 +272,36 @@ describe("Zyra reply guards", () => {
       const out = statics().zyraUngroundedNote(3);
       expect(out).toMatch(/add the requirement, spec or acceptance criteria/i);
       expect(out).toContain("ask me again");
+    });
+  });
+  /*
+   * Drafts, and where they are staged.
+   *
+   * Zyra's generations were already written with status Draft, but the reply called them created and
+   * they landed with no suite — so "created" meant both "the row exists" and "the work is done", and
+   * only the first was true. Asked for directly: draft language, a default suite of their own, and a
+   * save step that files them.
+   */
+  describe("draft filing", () => {
+    it("names the staging suite and how to file them when no suite was asked for", () => {
+      const out = statics().zyraDraftFilingHint(statics().ZYRA_DRAFT_SUITE_NAME);
+      expect(out).toContain("staged as drafts");
+      expect(out).toContain("Zyra generated test cases");
+      expect(out).toContain('say "save them to <suite>"');
+    });
+
+    it("does not call a named suite a staging area", () => {
+      const out = statics().zyraDraftFilingHint("Login");
+      expect(out).toContain("drafts in **Login**");
+      expect(out).not.toContain("staged as drafts");
+    });
+
+    it("never describes a draft as saved or filed", () => {
+      for (const suite of [statics().ZYRA_DRAFT_SUITE_NAME, "Login"]) {
+        const out = statics().zyraDraftFilingHint(suite).toLowerCase();
+        expect(out).not.toContain("saved");
+        expect(out).not.toMatch(/\bfiled\b(?! them)/);
+      }
     });
   });
 });

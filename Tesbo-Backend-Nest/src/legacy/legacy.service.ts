@@ -8698,7 +8698,9 @@ export class LegacyService implements OnModuleInit {
       "- archive: archive an existing testcase when the user asks to remove/delete/archive testcase coverage. IMPORTANT: before archiving, always describe which testcases will be archived and explicitly ask the user to confirm (e.g. 'I found TC-5 Login Test. Should I archive it? Reply yes to confirm.'). Only include archive operations if the user's current message is a clear confirmation (yes, confirm, go ahead, proceed) after you already proposed what would be archived in the prior assistant turn.",
       "- create_suite: create a new test suite (a folder/group for testcases) when the user asks to create/add a suite, folder, or group. Put the suite name in operation.suiteName.",
       "- move_to_suite: move/assign EXISTING testcases into a suite when the user asks to move/assign/organize/group/put existing testcases into a suite. The target suite goes in operation.suiteName (it is created automatically if it does not already exist, so you do not need a separate create_suite op for the same suite). List the testcases to move in operation.externalIds (use the external IDs shown under 'Existing suites' / 'Existing testcases'), set operation.allExisting=true when the user means every existing testcase, or set operation.fromLastPlan=true when the user refers to 'all'/'the N cases' from a recent generation batch (see 'Most recently generated batch' below) — fromLastPlan is exact and does not depend on you correctly recalling every external ID from earlier in the conversation, so prefer it over externalIds whenever the user is clearly referring to a just-generated batch rather than naming specific unrelated testcases.",
-      "CRITICAL: there is no draft buffer in this system. Choosing 'create' writes the testcases to the repository immediately; choosing 'answer' stores NOTHING, however many testcases your reply text lists. So never present testcases as 'ready to save' or 'pending', and never ask 'would you like me to save these?' — if the user wants testcases, choose 'create' now and say they are saved, otherwise do not enumerate them at all.",
+      "CRITICAL: there is no draft buffer in this system. Choosing 'create' writes the testcases to the repository immediately as real, openable rows; choosing 'answer' stores NOTHING, however many testcases your reply text lists. So never present testcases as 'ready to save' or 'pending', and never ask 'would you like me to save these?' — if the user wants testcases, choose 'create' now, otherwise do not enumerate them at all.",
+      `What you create is written with status Draft. If the request names a suite it lands there; if it names none it is staged in the "${LegacyService.ZYRA_DRAFT_SUITE_NAME}" suite. So describe what you created as DRAFTED and say where it is staged — do not say "saved" or "filed" for something sitting in the staging suite, and never imply a person has reviewed it.`,
+      `"Save them" / "save them to <suite>" AFTER you have already drafted testcases is a move, not a create: emit move_to_suite with fromLastPlan=true and the target suiteName. Re-creating them would duplicate every case. Use the transcript annotations to tell the two apart — if the previous turn saved rows, they exist and must be moved; if it saved nothing, they do not exist yet and 'save them' means create.`,
       "A short confirmation of an offer you made in your previous turn ('yes', 'yes please', 'go ahead', 'do it', 'please start generating', 'save it', 'save them into <suite>') is a create request: choose 'create', and set suiteName/suiteId on the create operation when a suite is named.",
       "Only use move_to_suite for testcases that appear under 'Existing suites'/'Existing testcases' below, or in the most recently generated batch. If the user asks you to save or file testcases that so far only appeared as text in this chat, those testcases DO NOT EXIST yet — choose 'create' with the suite named on the create operation, never move_to_suite.",
       "CRITICAL: moving or assigning existing testcases into a suite is NEVER a create action. Do not generate, draft, or duplicate testcases for a move/assign/organize request — only emit move_to_suite operations that reference the existing testcases. Use create only when the user explicitly asks to author brand-new testcases.",
@@ -8723,7 +8725,7 @@ export class LegacyService implements OnModuleInit {
       "  - Be direct — skip filler openers like 'Certainly!', 'Sure!', or 'Here is your answer:'.",
       "  - For analytical responses (coverage gaps, test strategy, explanations) use structured headings and bullets so the answer is easy to scan.",
       "",
-      "Existing suites (use these names/ids for move_to_suite; reuse an existing suite instead of duplicating it):",
+      `Existing suites (use these names/ids for move_to_suite; reuse an existing suite instead of duplicating it). "${LegacyService.ZYRA_DRAFT_SUITE_NAME}" is where your own unfiled drafts are staged — its count is how many test cases you have generated that nobody has filed yet, so use it when asked how many you have created:`,
       projectSnapshot.suites.length ? projectSnapshot.suites.map((s) => `${s.name} (id: ${s.id}, ${s.testCaseCount} testcase(s))`).join("\n") : "No suites yet.",
       "",
       "Most recently generated batch (already saved to the repository; use move_to_suite with fromLastPlan=true to reference all of these together):",
@@ -8939,8 +8941,13 @@ export class LegacyService implements OnModuleInit {
         if (op.suiteId) {
           const suite = await this.getProjectSuite(projectId, op.suiteId);
           suiteId = suite ? suite.id : null;
-        } else if (op.suiteName) {
-          const suite = await this.resolveOrCreateSuiteByName(projectId, op.suiteName);
+        }
+        // No suite named — or one named that no longer resolves — stages in Zyra's own suite rather
+        // than landing unassigned. The case is a real, openable, runnable row either way; what
+        // changes is that it is now identifiable as an unfiled agent draft.
+        const suiteName = op.suiteName || (suiteId ? null : LegacyService.ZYRA_DRAFT_SUITE_NAME);
+        if (!suiteId && suiteName) {
+          const suite = await this.resolveOrCreateSuiteByName(projectId, suiteName);
           suiteId = suite.id;
           if (suite.created) {
             activity.push({ actor: "agent", title: "Created suite", detail: suite.name, createdAt: new Date().toISOString() });
@@ -9163,23 +9170,19 @@ export class LegacyService implements OnModuleInit {
     // Nothing in the knowledge base and no Jira ticket matched: these drafts are the model's general
     // knowledge, not this team's requirements, and the reply has to lead with that.
     const ungrounded = params.knowledge.length === 0 && jira.length === 0;
+    const stagedSuiteName = matchedSuite?.name ?? LegacyService.ZYRA_DRAFT_SUITE_NAME;
     const groundedReply = [
-        `I generated ${aiResult.drafts.length} test case(s) after reading`,
+        `I drafted ${aiResult.drafts.length} test case(s) after reading`,
         [
           `${params.knowledge.length} knowledge-base item(s)${jiraFromKnowledge ? ` (${jiraFromKnowledge} mirrored from Jira)` : ""}`,
           `${jira.length} Jira ticket(s) read directly`,
           `${params.existingTestcases.length} existing test case(s) to avoid duplicating coverage`
         ].join(", "),
-        `.${matchedSuite ? ` Placing them in the "${matchedSuite.name}" suite.` : ""}`
-    ].join(" ").replace(" .", ".");
+        "."
+    ].join(" ").replace(" .", ".") + `\n\n${LegacyService.zyraDraftFilingHint(stagedSuiteName)}`;
     return {
       reply: ungrounded
-        ? [
-            LegacyService.zyraUngroundedNote(aiResult.drafts.length),
-            matchedSuite ? `Placing them in the "${matchedSuite.name}" suite.` : ""
-          ]
-            .filter(Boolean)
-            .join("\n\n")
+        ? [LegacyService.zyraUngroundedNote(aiResult.drafts.length), LegacyService.zyraDraftFilingHint(stagedSuiteName)].join("\n\n")
         : groundedReply,
       reasoningSummary: `AI generation used ${params.provider}/${params.model}. It considered Jira keys ${params.jiraIssueKeys.length ? params.jiraIssueKeys.join(", ") : "none explicitly mentioned"}, knowledge-base context, existing coverage for duplicate avoidance, and Zyra memory. Tokens: input ${aiResult.usage.input}, output ${aiResult.usage.output}.`,
       actionType: "create",
@@ -11435,6 +11438,20 @@ export class LegacyService implements OnModuleInit {
    * them specific. The cases are still written to the repository, as every other create is — Zyra has
    * no draft state, and a case the user can read but not open or run is its own bug (2026-07-31).
    */
+  /*
+   * Drafts, not "created".
+   *
+   * Zyra's generations are written with status Draft (they always were), but the reply called them
+   * created and they landed with no suite — so "created" was doing two jobs at once: the row exists,
+   * and the work is done. Only the first was true. The wording says drafted, names where they are
+   * staged, and says how to file them, so the state on screen and the state in the sentence agree.
+   */
+  private static zyraDraftFilingHint(suiteName: string | null): string {
+    return suiteName === LegacyService.ZYRA_DRAFT_SUITE_NAME
+      ? `They're staged as drafts in **${LegacyService.ZYRA_DRAFT_SUITE_NAME}** — say "save them to <suite>" and I'll file them where they belong.`
+      : `They're drafts in **${suiteName}** — review them there, or say "save them to <suite>" to move them.`;
+  }
+
   private static zyraUngroundedNote(count: number): string {
     return [
       "ℹ️ I don't have anything about this in the project's knowledge base, and no Jira ticket matched it either.",
@@ -11444,6 +11461,19 @@ export class LegacyService implements OnModuleInit {
       "Add the requirement, spec or acceptance criteria to the knowledge base (or link the Jira ticket) and ask me again — I'll regenerate them against how your feature really works, with your own terminology and edge cases."
     ].join("\n");
   }
+
+  /*
+   * Where Zyra's own generations land when the request named no suite.
+   *
+   * Chat creates used to be written with suite_id NULL, so they fell into the repository's "No
+   * suite" bucket alongside anything else that had never been filed — indistinguishable from a case
+   * someone created by hand and forgot to sort. They are drafts produced by an agent, and they need
+   * somewhere identifiable to sit until a person decides where they belong.
+   *
+   * A named suite still wins: "generate 10 for Login" puts them in Login, as it always has. This is
+   * only the default for a request that named nowhere.
+   */
+  static readonly ZYRA_DRAFT_SUITE_NAME = "Zyra generated test cases";
 
   /** The narrowed second attempt's batch size — small enough that a truncated response is unlikely. */
   private static readonly ZYRA_RETRY_BATCH = 5;
