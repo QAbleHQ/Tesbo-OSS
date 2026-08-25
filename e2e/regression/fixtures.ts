@@ -66,6 +66,25 @@ export async function apiContext(): Promise<APIRequestContext> {
   });
 }
 
+/**
+ * An API context carrying ACCOUNT B's session — a genuinely separate workspace.
+ *
+ * Only for proving that a second tenant cannot reach account A's data. global-setup hard-fails the
+ * run if account B cannot log in, so unlike the optional tenants this is always available wherever
+ * the suite runs at all. Callers must dispose it.
+ */
+export async function apiContextB(): Promise<APIRequestContext> {
+  return pwRequest.newContext({
+    baseURL: env.apiBaseUrl,
+    storageState: path.join(AUTH_DIR, "state-b.json"),
+  });
+}
+
+/** An API context with no session at all, for the unauthenticated edge. */
+export async function anonymousApiContext(): Promise<APIRequestContext> {
+  return pwRequest.newContext({ baseURL: env.apiBaseUrl });
+}
+
 /*
  * A name no other run, worker or spec will have produced.
  *
@@ -181,4 +200,112 @@ export async function cleanup(api: APIRequestContext, paths: string[]): Promise<
   for (const p of paths) {
     await api.delete(p, { failOnStatusCode: false });
   }
+}
+
+// ─── Runs, executions and bugs ──────────────────────────────────────────────
+//
+// Ported from utils/screens-tenant.ts, which several of the reported tickets are covered by but
+// which this folder cannot import: that module builds its own disposable tenant and puts it on Pro
+// through psql, so everything downstream of it skips on an environment where the database is not
+// handed out — which is exactly the deployed environment these regressions are wanted on.
+//
+// The seeding itself was already pure HTTP there, so only the tenant plumbing is dropped. The one
+// behavioural difference is where the fixtures land: account A's existing project rather than a
+// freshly created one, because creating a project would hit the Launch plan's 2-project ceiling on
+// a workspace that already owns one. That makes the project SHARED, so nothing below may be used to
+// assert a project-wide absolute count — filter the screen down to the fixture first.
+
+export type ExecStatus = "Untested" | "Passed" | "Failed" | "Blocked" | "Skipped" | "Retest";
+
+export interface SeededRun {
+  cycleId: string;
+  name: string;
+  testcaseIds: string[];
+  executionIds: string[];
+}
+
+/**
+ * A run holding one test case per entry in `statuses`, each execution set to that status.
+ *
+ * Statuses are applied by matching each execution back to the test case it was created for rather
+ * than by list position — GET /api/cycles/:id/executions has no ordering guarantee to lean on.
+ * "Untested" entries are left alone, since adding a case to a run already produces exactly that.
+ */
+export async function seedRun(
+  api: APIRequestContext,
+  projectId: string,
+  options: { statuses?: ExecStatus[]; name?: string; status?: string; planId?: string } = {},
+): Promise<SeededRun> {
+  const statuses = options.statuses ?? [];
+  const name = options.name ?? unique("Run");
+
+  const cycleRes = await api.post(`/api/projects/${projectId}/cycles`, {
+    data: { name, ...(options.planId ? { planId: options.planId } : {}) },
+  });
+  if (!cycleRes.ok()) throw new Error(`seedRun: cycle create failed ${cycleRes.status()} ${await cycleRes.text()}`);
+  const cycle = await cycleRes.json();
+
+  const testcaseIds: string[] = [];
+  for (let i = 0; i < statuses.length; i++) {
+    const testcase = await createTestCase(api, projectId, {
+      title: `${name} Case ${i + 1}`,
+      status: "Approved",
+    });
+    testcaseIds.push(testcase.id);
+  }
+
+  if (testcaseIds.length > 0) {
+    await api.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds } });
+  }
+
+  const executions: { id: string; testcaseId: string }[] = await (
+    await api.get(`/api/cycles/${cycle.id}/executions`)
+  ).json();
+
+  const executionIds: string[] = [];
+  for (let i = 0; i < testcaseIds.length; i++) {
+    const execution = executions.find((e) => e.testcaseId === testcaseIds[i]);
+    if (!execution) continue;
+    executionIds.push(execution.id);
+    if (statuses[i] !== "Untested") {
+      await api.patch(`/api/cycles/${cycle.id}/executions/${execution.id}`, {
+        data: { status: statuses[i] },
+      });
+    }
+  }
+
+  if (options.status) {
+    await api.patch(`/api/cycles/${cycle.id}`, { data: { status: options.status } });
+  }
+
+  return { cycleId: cycle.id, name, testcaseIds, executionIds };
+}
+
+/** Deletes a seeded run and the test cases created for it. Safe to call with `undefined`. */
+export async function cleanupRun(
+  api: APIRequestContext,
+  projectId: string,
+  run: SeededRun | undefined,
+): Promise<void> {
+  if (!run) return;
+  await api.delete(`/api/cycles/${run.cycleId}`, { failOnStatusCode: false });
+  for (const id of run.testcaseIds) {
+    await api.delete(`/api/projects/${projectId}/testcases/${id}`, { failOnStatusCode: false });
+  }
+}
+
+export async function createBug(
+  api: APIRequestContext,
+  projectId: string,
+  data: { title?: string; severity?: string; status?: string; priority?: string } = {},
+): Promise<{ id: string; title: string }> {
+  const title = data.title ?? unique("Bug");
+  const res = await api.post(`/api/projects/${projectId}/bugs`, { data: { ...data, title } });
+  if (!res.ok()) throw new Error(`createBug failed: ${res.status()} ${await res.text()}`);
+  const created = await res.json();
+  if (data.status && data.status !== created.status) {
+    // Bugs are always created Open; anything else is a follow-up PATCH.
+    await api.patch(`/api/bugs/${created.id}`, { data: { status: data.status } });
+  }
+  return { id: created.id, title };
 }
