@@ -163,7 +163,7 @@ export async function changePassword(currentPassword: string | null, newPassword
   });
 }
 
-export async function startSignup(data: { name: string; email: string; password: string }): Promise<void> {
+export async function startSignup(data: { firstName: string; lastName: string; email: string; password: string }): Promise<void> {
   await api("/api/auth/signup/start", { method: "POST", body: data });
 }
 

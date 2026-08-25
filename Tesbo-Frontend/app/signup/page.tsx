@@ -12,7 +12,7 @@ import { OtpBoxInput } from "@/components/auth/OtpBoxInput";
 import { Button, Field, FieldError, FieldHint, FieldLabel, Input, PasswordInput } from "@/components/ui";
 import {
   EMAIL_MAX_LENGTH,
-  NAME_MAX_LENGTH,
+  SIGNUP_NAME_MAX_LENGTH,
   PASSWORD_MAX_LENGTH,
   PASSWORD_RULES_HINT,
   validateEmailValue,
@@ -59,8 +59,8 @@ export default function SignupPage() {
     clearFormErrors();
     // All four are checked together (not stopping at the first) so the user sees every field that
     // needs fixing in one pass instead of one error at a time.
-    const firstNameValidationError = validateName(firstName, "First name") || "";
-    const lastNameValidationError = validateName(lastName, "Last name") || "";
+    const firstNameValidationError = validateName(firstName, "First name", SIGNUP_NAME_MAX_LENGTH) || "";
+    const lastNameValidationError = validateName(lastName, "Last name", SIGNUP_NAME_MAX_LENGTH) || "";
     const emailValidationError = validateEmailValue(email) || "";
     const passwordValidationError = validatePasswordValue(password) || "";
     if (firstNameValidationError || lastNameValidationError || emailValidationError || passwordValidationError) {
@@ -74,7 +74,8 @@ export default function SignupPage() {
     setSubmitting(true);
     try {
       await startSignup({
-        name: `${firstName.trim()} ${lastName.trim()}`,
+        firstName: firstName.trim(),
+        lastName: lastName.trim(),
         email: email.trim().toLowerCase(),
         password,
       });
@@ -172,11 +173,11 @@ export default function SignupPage() {
                   onChange={(e) => {
                     const value = e.target.value;
                     setFirstName(value);
-                    if (firstNameError && !validateName(value, "First name")) setFirstNameError("");
+                    if (firstNameError && !validateName(value, "First name", SIGNUP_NAME_MAX_LENGTH)) setFirstNameError("");
                   }}
                   placeholder="Jane"
                   disabled={submitting}
-                  maxLength={NAME_MAX_LENGTH}
+                  maxLength={SIGNUP_NAME_MAX_LENGTH}
                   autoFocus
                   aria-invalid={Boolean(firstNameError)}
                 />
@@ -191,12 +192,11 @@ export default function SignupPage() {
                   onChange={(e) => {
                     const value = e.target.value;
                     setLastName(value);
-                    if (lastNameError && !validateName(value, "Last name")) setLastNameError("");
+                    if (lastNameError && !validateName(value, "Last name", SIGNUP_NAME_MAX_LENGTH)) setLastNameError("");
                   }}
                   placeholder="Smith"
                   disabled={submitting}
-                  maxLength={NAME_MAX_LENGTH}
-                  aria-invalid={Boolean(lastNameError)}
+                  maxLength={SIGNUP_NAME_MAX_LENGTH}
                 />
                 {lastNameError && <FieldError>{lastNameError}</FieldError>}
               </Field>

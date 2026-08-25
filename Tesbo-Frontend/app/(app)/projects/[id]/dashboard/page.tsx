@@ -222,6 +222,10 @@ export default function ProjectDashboardPage() {
     { label: "Medium", count: bySeverity.Medium, text: "var(--muted)", bg: "var(--surface-secondary)", bar: "var(--muted-soft)" },
     { label: "Low", count: bySeverity.Low, text: "var(--success-foreground)", bg: "var(--success-soft)", bar: "var(--success)" },
   ];
+  // The "Open bugs" stat card's badge used to only ever show Critical's count — so a project with,
+  // say, 5 High bugs and 0 Critical showed no count badge at all, even though a non-zero count
+  // existed. Falls through in severity order to the first non-zero row instead.
+  const topSeverityRow = SEVERITY_ROWS.find((row) => row.count > 0);
 
   return (
     <StandardPageLayout
@@ -319,14 +323,29 @@ export default function ProjectDashboardPage() {
           icon={<IconBug size={18} stroke={1.75} />}
           iconBg="var(--error-soft)"
           iconColor="var(--error-foreground)"
-          badge={bySeverity.Critical > 0 ? <StatusChip tone="error">{bySeverity.Critical} critical</StatusChip> : undefined}
+          badge={
+            topSeverityRow ? (
+              <StatusChip
+                tone={
+                  topSeverityRow.label === "Critical" ? "error" : topSeverityRow.label === "High" ? "warning" : "neutral"
+                }
+              >
+                {topSeverityRow.count} {topSeverityRow.label.toLowerCase()}
+              </StatusChip>
+            ) : undefined
+          }
           value={openBugsTotal}
           label="Open bugs"
           bar={
             openBugsTotal > 0 ? (
               <ThinBar>
                 {SEVERITY_ROWS.filter((r) => r.count > 0).map((r) => (
-                  <div key={r.label} className="h-full" style={{ width: `${severityPct(r.count)}%`, background: r.bar }} />
+                  <div
+                    key={r.label}
+                    className="h-full"
+                    title={`${r.count} ${r.label}`}
+                    style={{ width: `${severityPct(r.count)}%`, background: r.bar }}
+                  />
                 ))}
               </ThinBar>
             ) : undefined

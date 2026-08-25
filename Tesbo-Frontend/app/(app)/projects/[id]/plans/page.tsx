@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   authMe,
   listPlans,
@@ -25,6 +25,7 @@ import { PlanCard, planStatus, type PlanStatus } from "@/components/testplans/Pl
 import { readStoredValue, writeStoredValue } from "@/lib/storage";
 import {
   IconArrowsSort,
+  IconChevronDown,
   IconClipboardList,
   IconFilter,
   IconLayoutGrid,
@@ -34,11 +35,67 @@ import {
 } from "@tabler/icons-react";
 
 type StatusFilter = "all" | PlanStatus;
-type SortBy = "recent" | "name" | "status";
+// Exact same option set as the Projects list's sort menu (app/(app)/projects/page.tsx).
+type SortBy = "updated" | "created" | "name_asc" | "name_desc";
 
 const VIEW_STORAGE_KEY = "tesbo_plans_view";
-const SORT_LABELS: Record<SortBy, string> = { recent: "Recent", name: "Name", status: "Status" };
-const NEXT_SORT: Record<SortBy, SortBy> = { recent: "name", name: "status", status: "recent" };
+const SORT_OPTIONS: Array<{ value: SortBy; label: string }> = [
+  { value: "updated", label: "Last updated" },
+  { value: "created", label: "Newest created" },
+  { value: "name_asc", label: "Name (A–Z)" },
+  { value: "name_desc", label: "Name (Z–A)" },
+];
+
+// Same dropdown interaction as the Projects list's sort control (click to open, pick directly)
+// instead of a single button that silently cycled through options one click at a time.
+function PlanSortMenu({ sortBy, onSortChange }: { sortBy: SortBy; onSortChange: (v: SortBy) => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const currentLabel = SORT_OPTIONS.find((o) => o.value === sortBy)?.label ?? "Last updated";
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleOutsideClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setIsOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [isOpen]);
+
+  return (
+    <div ref={menuRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setIsOpen((prev) => !prev)}
+        aria-expanded={isOpen}
+        className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
+      >
+        <IconArrowsSort size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+        Sort: {currentLabel}
+        <IconChevronDown size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
+      </button>
+      {isOpen && (
+        <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
+          {SORT_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => {
+                onSortChange(option.value);
+                setIsOpen(false);
+              }}
+              className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-[var(--surface-secondary)] ${
+                option.value === sortBy ? "text-[var(--brand-primary)]" : "text-[var(--foreground)]"
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function overallPassRate(plans: PlanListItem[]): number {
   const passed = plans.reduce((sum, p) => sum + p.passed, 0);
@@ -65,7 +122,7 @@ export default function PlansPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [statusFilterOpen, setStatusFilterOpen] = useState(false);
-  const [sortBy, setSortBy] = useState<SortBy>("recent");
+  const [sortBy, setSortBy] = useState<SortBy>("updated");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
 
   useEffect(() => {
@@ -148,9 +205,27 @@ export default function PlansPage() {
       return matchesSearch && matchesStatus;
     });
     const sorted = [...filtered];
-    if (sortBy === "name") sorted.sort((a, b) => a.name.localeCompare(b.name));
-    else if (sortBy === "status") sorted.sort((a, b) => planStatus(a).localeCompare(planStatus(b)));
-    else sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // Same four options, same tie-break logic as Projects' sortProjects() —
+    // lastRunAt is this list's equivalent of a project's lastActivityAt.
+    switch (sortBy) {
+      case "name_asc":
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case "name_desc":
+        sorted.sort((a, b) => b.name.localeCompare(a.name));
+        break;
+      case "created":
+        sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        break;
+      case "updated":
+      default:
+        sorted.sort((a, b) => {
+          const aTime = new Date(a.lastRunAt ?? a.createdAt).getTime();
+          const bTime = new Date(b.lastRunAt ?? b.createdAt).getTime();
+          return bTime - aTime;
+        });
+        break;
+    }
     return sorted;
   }, [plans, searchQuery, statusFilter, sortBy]);
 
@@ -306,14 +381,7 @@ export default function PlansPage() {
                 <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--brand-primary)] text-[9px] font-semibold text-white">1</span>
               )}
             </button>
-            <button
-              type="button"
-              onClick={() => setSortBy(NEXT_SORT[sortBy])}
-              className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[12px] font-medium text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
-            >
-              <IconArrowsSort size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
-              Sort: {SORT_LABELS[sortBy]}
-            </button>
+            <PlanSortMenu sortBy={sortBy} onSortChange={setSortBy} />
             <div className="flex-1" />
             <div className="flex items-center gap-0.5 rounded-[6px] bg-[var(--surface-secondary)] p-[3px]">
               <button
