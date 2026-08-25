@@ -286,7 +286,8 @@ function ProjectsToolbar({
             type="text"
             value={searchQuery}
             onChange={(e) => onSearchChange(e.target.value)}
-            placeholder="Search projects by name or keyword"
+            placeholder="Search projects"
+            aria-label="Search projects by name or keyword"
             className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
           />
         </label>

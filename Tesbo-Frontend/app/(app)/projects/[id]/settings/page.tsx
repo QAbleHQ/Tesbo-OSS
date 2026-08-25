@@ -39,8 +39,12 @@ import {
 import {
   PROJECT_DESCRIPTION_MAX_LENGTH,
   PROJECT_NAME_MAX_LENGTH,
+  ENVIRONMENT_NAME_MAX_LENGTH,
+  ENVIRONMENT_URL_MAX_LENGTH,
   validateProjectDescription,
   validateProjectName,
+  validateEnvironmentName,
+  validateEnvironmentUrl,
 } from "@/lib/validation";
 
 type ProjectSettingsPayload = {
@@ -93,6 +97,8 @@ export default function ProjectSettingsPage() {
   const [testRunEnvironments, setTestRunEnvironments] = useState<TestEnvironmentSetting[]>([]);
   const [newEnvironmentName, setNewEnvironmentName] = useState("");
   const [newEnvironmentUrl, setNewEnvironmentUrl] = useState("");
+  const [newEnvironmentNameError, setNewEnvironmentNameError] = useState("");
+  const [newEnvironmentUrlError, setNewEnvironmentUrlError] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [jiraStatus, setJiraStatus] = useState<JiraConnection | null>(null);
@@ -262,19 +268,21 @@ export default function ProjectSettingsPage() {
     try {
       const draftName = newEnvironmentName.trim();
       const draftUrl = newEnvironmentUrl.trim();
-      if (activeTab === "testRuns" && (draftName || draftUrl)) {
-        if (!draftName || !draftUrl) {
-          setMessage("Environment name and URL are required.");
+      // Only blocks the save (and only looks at these two fields) while the Test Environments tab
+      // is active — leftover text left in an unrelated, hidden tab's inputs shouldn't stop someone
+      // from saving a name/description change on the General tab.
+      const hasDraftEnvironment = activeTab === "testRuns" && Boolean(draftName || draftUrl);
+      if (hasDraftEnvironment) {
+        const draftNameError = validateEnvironmentName(newEnvironmentName, testRunEnvironments);
+        const draftUrlError = validateEnvironmentUrl(newEnvironmentUrl, testRunEnvironments);
+        if (draftNameError || draftUrlError) {
+          setNewEnvironmentNameError(draftNameError);
+          setNewEnvironmentUrlError(draftUrlError);
           return;
         }
       }
       const environmentsToSave = [...testRunEnvironments];
-      if (
-        activeTab === "testRuns" &&
-        draftName &&
-        draftUrl &&
-        !environmentsToSave.some((item) => item.name.toLowerCase() === draftName.toLowerCase())
-      ) {
+      if (hasDraftEnvironment) {
         environmentsToSave.push({ name: draftName, url: draftUrl });
       }
       const currentSettings = parseProjectSettings(project?.settings);
@@ -334,20 +342,16 @@ export default function ProjectSettingsPage() {
   }
 
   function handleAddEnvironment() {
-    const name = newEnvironmentName.trim();
-    const url = newEnvironmentUrl.trim();
-    if (!name || !url) {
-      setMessage("Environment name and URL are required.");
-      return;
-    }
-    if (testRunEnvironments.some((item) => item.name.toLowerCase() === name.toLowerCase())) {
-      setMessage("Environment name already exists.");
-      return;
-    }
-    setTestRunEnvironments((prev) => [...prev, { name, url }]);
+    const nameValidationError = validateEnvironmentName(newEnvironmentName, testRunEnvironments);
+    const urlValidationError = validateEnvironmentUrl(newEnvironmentUrl, testRunEnvironments);
+    setNewEnvironmentNameError(nameValidationError);
+    setNewEnvironmentUrlError(urlValidationError);
+    if (nameValidationError || urlValidationError) return;
+    setTestRunEnvironments((prev) => [...prev, { name: newEnvironmentName.trim(), url: newEnvironmentUrl.trim() }]);
     setNewEnvironmentName("");
     setNewEnvironmentUrl("");
-    setMessage(null);
+    setNewEnvironmentNameError("");
+    setNewEnvironmentUrlError("");
   }
 
   function handleRemoveEnvironment(index: number) {
@@ -506,7 +510,10 @@ export default function ProjectSettingsPage() {
           <div className="min-w-0 flex-1 overflow-y-auto p-6">
             <div className="max-w-3xl space-y-5">
       {(activeTab === "general" || activeTab === "testRuns") && (
-        <form onSubmit={handleSubmit} className="space-y-5">
+        // noValidate: without it, the environment URL input's native type="url" constraint
+        // intercepts Save's submit before handleSubmit ever runs, so the styled inline validation
+        // above never gets a chance to show (same class of bug as the login/signup email fields).
+        <form onSubmit={handleSubmit} className="space-y-5" noValidate>
           {activeTab === "general" && (
             <>
               <Card className="p-4 space-y-4">
@@ -637,19 +644,39 @@ export default function ProjectSettingsPage() {
                   </div>
                 )}
               </div>
-              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-                <Input
-                  type="text"
-                  value={newEnvironmentName}
-                  onChange={(e) => setNewEnvironmentName(e.target.value)}
-                  placeholder="Environment name"
-                />
-                <Input
-                  type="url"
-                  value={newEnvironmentUrl}
-                  onChange={(e) => setNewEnvironmentUrl(e.target.value)}
-                  placeholder="https://staging.example.com"
-                />
+              <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-start">
+                <div>
+                  <Input
+                    type="text"
+                    value={newEnvironmentName}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEnvironmentName(value);
+                      if (newEnvironmentNameError && !validateEnvironmentName(value, testRunEnvironments)) {
+                        setNewEnvironmentNameError("");
+                      }
+                    }}
+                    placeholder="Environment name"
+                    maxLength={ENVIRONMENT_NAME_MAX_LENGTH}
+                  />
+                  {newEnvironmentNameError && <FieldError>{newEnvironmentNameError}</FieldError>}
+                </div>
+                <div>
+                  <Input
+                    type="url"
+                    value={newEnvironmentUrl}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setNewEnvironmentUrl(value);
+                      if (newEnvironmentUrlError && !validateEnvironmentUrl(value, testRunEnvironments)) {
+                        setNewEnvironmentUrlError("");
+                      }
+                    }}
+                    placeholder="https://staging.example.com"
+                    maxLength={ENVIRONMENT_URL_MAX_LENGTH}
+                  />
+                  {newEnvironmentUrlError && <FieldError>{newEnvironmentUrlError}</FieldError>}
+                </div>
                 <Button
                   type="button"
                   variant="secondary"

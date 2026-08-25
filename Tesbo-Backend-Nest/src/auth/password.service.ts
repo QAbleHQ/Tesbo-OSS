@@ -3,7 +3,7 @@ import { pbkdf2Sync, randomBytes, timingSafeEqual } from "crypto";
 import { DatabaseService } from "../database/database.service";
 
 const MIN_LENGTH = 8;
-const MAX_LENGTH = 128;
+const MAX_LENGTH = 16;
 
 @Injectable()
 export class PasswordService {
