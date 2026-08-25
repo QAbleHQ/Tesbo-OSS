@@ -254,6 +254,40 @@ test.describe("test plans — list, search and empty states", () => {
       await deleteProjects(api, [project.id]);
     }
   });
+
+  test("PLN-U-08 the search box's inline clear button resets the query and only shows while it has text", async ({ page }) => {
+    const project = await createProject(api);
+    try {
+      const wanted = await createPlan(api, project.id, { name: `E2E Searchable Plan ${uniqueSuffix()}` });
+      const other = await createPlan(api, project.id, { name: `E2E Other Plan ${uniqueSuffix()}` });
+
+      await page.goto(`/projects/${project.id}/plans`);
+      const search = page.getByPlaceholder("Search plans...");
+      const clearButton = page.getByRole("button", { name: "Clear search" });
+
+      // Edge case: no text yet — the clear affordance must not render as an empty search reads as "no query".
+      await expect(clearButton).toHaveCount(0);
+
+      await search.fill("Searchable");
+      await expect(clearButton).toBeVisible();
+      await expect(planCard(page, other.name)).toHaveCount(0);
+
+      await clearButton.click();
+      await expect(search).toHaveValue("");
+      await expect(clearButton).toHaveCount(0);
+      await expect(planCard(page, wanted.name)).toBeVisible();
+      await expect(planCard(page, other.name)).toBeVisible();
+
+      // Edge case: whitespace-only input is not a real query — it should still match everything (the
+      // filter trims it) even though the clear button renders, since the box itself has content.
+      await search.fill("   ");
+      await expect(clearButton).toBeVisible();
+      await expect(planCard(page, wanted.name)).toBeVisible();
+      await expect(planCard(page, other.name)).toBeVisible();
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
 });
 
 /*

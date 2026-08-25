@@ -289,6 +289,16 @@ export default function PlansPage() {
                 placeholder="Search plans..."
                 className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  aria-label="Clear search"
+                  className="shrink-0 rounded-full p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                >
+                  <IconX size={12} stroke={2} />
+                </button>
+              )}
             </label>
             <button
               type="button"
