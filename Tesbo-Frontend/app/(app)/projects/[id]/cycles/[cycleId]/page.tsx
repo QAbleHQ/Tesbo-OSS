@@ -60,6 +60,7 @@ import {
   type TestCaseListItem,
   type SuiteNode,
   type BugItem,
+  type BugSeverity,
   type IssueSearchResult,
   type TestRunListItem,
 } from "@/lib/api";
@@ -81,6 +82,7 @@ type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
 import { AVATAR_COLORS } from "@/lib/avatarColors";
 const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
+const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
 
 /* ───── Status tone helpers ───── */
 function statusToTone(status: string) {
@@ -276,6 +278,14 @@ function priorityColor(priority: string): string {
   return "var(--muted-soft)";
 }
 
+/* The neutral ("Untested") palette — also the fallback in execSelectStyle for any status the
+ * map below doesn't name. Pulled out so the dropdown's option list (EXEC_OPTION_STYLE) can pin
+ * every option to this one theme instead of inheriting whichever status color the closed
+ * <select> currently has: a native <option> with no style of its own inherits its parent
+ * <select>'s color/background, so without this the whole popup re-themed to match the row's
+ * current status (e.g. all-red when Failed was selected) instead of staying consistent. */
+const EXEC_STATUS_NEUTRAL = { border: "var(--border)", bg: "var(--surface-secondary)", color: "var(--muted)" };
+
 function execSelectStyle(status: string): React.CSSProperties {
   const map: Record<string, { border: string; bg: string; color: string }> = {
     Passed: { border: "var(--success-border)", bg: "var(--success-soft)", color: "var(--success-foreground)" },
@@ -284,9 +294,16 @@ function execSelectStyle(status: string): React.CSSProperties {
     Blocked: { border: "var(--warning-border)", bg: "var(--warning-soft)", color: "var(--warning-foreground)" },
     Retest: { border: "var(--info-border)", bg: "var(--info-soft)", color: "var(--info-foreground)" },
   };
-  const s = map[status] || { border: "var(--border)", bg: "var(--surface-secondary)", color: "var(--muted)" };
+  const s = map[status] || EXEC_STATUS_NEUTRAL;
   return { borderColor: s.border, background: s.bg, color: s.color };
 }
+
+/* Fixed style for every <option> in the execution status dropdown, so the open popup always
+ * reads the same regardless of which status is currently selected. */
+const EXEC_OPTION_STYLE: React.CSSProperties = {
+  backgroundColor: EXEC_STATUS_NEUTRAL.bg,
+  color: EXEC_STATUS_NEUTRAL.color,
+};
 
 function tabBadgeStyle(tab: RunTab): { bg: string; color: string } {
   const map: Partial<Record<RunTab, { bg: string; color: string }>> = {
@@ -422,6 +439,7 @@ export default function TestRunDetailPage() {
   const [bugExecution, setBugExecution] = useState<ExecutionItem | null>(null);
   const [bugTitle, setBugTitle] = useState("");
   const [bugDesc, setBugDesc] = useState("");
+  const [bugSeverity, setBugSeverity] = useState<BugSeverity>("Medium");
   const [bugAlreadyLogged, setBugAlreadyLogged] = useState(false);
   const [bugExistingChoice, setBugExistingChoice] = useState<"JIRA" | "LINEAR" | "TESBO">("TESBO");
   const [bugDestination, setBugDestination] = useState<TrackingDestination>("TESBO");
@@ -589,6 +607,7 @@ export default function TestRunDetailPage() {
     setBugExecution(exec);
     setBugTitle(`${titlePrefix}: ${exec.title || exec.snapshotTitle || "Untitled test case"}`);
     setBugDesc("");
+    setBugSeverity("Medium");
     setBugAlreadyLogged(false);
     setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
     setBugDestination("TESBO");
@@ -671,6 +690,7 @@ export default function TestRunDetailPage() {
     setBugExecution(null);
     setBugTitle("");
     setBugDesc("");
+    setBugSeverity("Medium");
     setBugAlreadyLogged(false);
     setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
     setBugDestination("TESBO");
@@ -685,13 +705,14 @@ export default function TestRunDetailPage() {
 
   /* ───── Submit bug from dialog (new bug, optionally noting where it's tracked elsewhere) ───── */
   async function handleBugSubmit() {
-    if (!bugExecution || !bugTitle.trim()) return;
+    if (!bugExecution || !bugTitle.trim() || !bugSeverity) return;
     const selfLogged = (jiraConnected || linearConnected) && bugDestination === "SELF";
     setBugSaving(true);
     try {
       const bug = await createBug(projectId, {
         title: bugTitle.trim(),
         description: bugDesc.trim(),
+        severity: bugSeverity,
         externalUrl: selfLogged ? bugUrl.trim() : undefined,
         integrationProvider: selfLogged && bugSelfSystem !== "OTHER" ? bugSelfSystem : null,
         integrationIssueKey: null,
@@ -1312,7 +1333,7 @@ export default function TestRunDetailPage() {
                                 style={execSelectStyle(e.status)}
                               >
                                 {EXEC_STATUSES.map((s) => (
-                                  <option key={s} value={s}>
+                                  <option key={s} value={s} style={EXEC_OPTION_STYLE}>
                                     {s}
                                   </option>
                                 ))}
@@ -1685,14 +1706,32 @@ export default function TestRunDetailPage() {
                   placeholder="Steps to reproduce, expected vs actual behavior…"
                 />
               </div>
-              <BugEvidenceField
-                mode={bugEvidenceMode}
-                onModeChange={setBugEvidenceMode}
-                stagedFiles={bugStagedFiles}
-                onStagedFilesChange={setBugStagedFiles}
-                betterbugsUrl={bugBetterbugsUrl}
-                onBetterbugsUrlChange={setBugBetterbugsUrl}
-              />
+              <div className="grid grid-cols-2 gap-4 items-start">
+                <BugEvidenceField
+                  mode={bugEvidenceMode}
+                  onModeChange={setBugEvidenceMode}
+                  stagedFiles={bugStagedFiles}
+                  onStagedFilesChange={setBugStagedFiles}
+                  betterbugsUrl={bugBetterbugsUrl}
+                  onBetterbugsUrlChange={setBugBetterbugsUrl}
+                />
+                <div>
+                  <label className="block text-sm font-medium text-[var(--muted)] mb-1">
+                    Severity <span className="text-[var(--error-foreground)]">*</span>
+                  </label>
+                  <Select
+                    aria-label="Severity"
+                    value={bugSeverity}
+                    onChange={(e) => setBugSeverity(e.target.value as BugSeverity)}
+                  >
+                    {BUG_SEVERITIES.map((s) => (
+                      <option key={s} value={s}>
+                        {s}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
               {bugAlreadyLogged ? (
                 <div>
                   <label className="block text-sm font-medium text-[var(--muted)] mb-1">Ticket</label>
@@ -1750,7 +1789,7 @@ export default function TestRunDetailPage() {
               <Button
                 variant="destructive"
                 onClick={handleBugSubmit}
-                disabled={bugSaving || !bugTitle.trim()}
+                disabled={bugSaving || !bugTitle.trim() || !bugSeverity}
               >
                 {bugSaving ? (
                   "Filing…"
