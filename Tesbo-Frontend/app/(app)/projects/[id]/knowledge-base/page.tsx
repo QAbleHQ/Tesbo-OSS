@@ -48,7 +48,7 @@ import {
   type KnowledgeFile,
   type KnowledgeBaseSummary,
 } from "@/lib/api";
-import { Button, Input, Textarea, Modal, Field, FieldLabel, FieldError, StatusChip, EmptyStateBlock } from "@/components/ui";
+import { Button, Input, Textarea, Modal, Field, FieldLabel, FieldError, PageLoader, StatusChip, EmptyStateBlock } from "@/components/ui";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import FileViewerModal from "@/components/knowledge-base/FileViewerModal";
 import { Menu, MenuItem } from "@/components/knowledge-base/Menu";
@@ -1006,11 +1006,7 @@ function KnowledgeBasePageInner() {
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[60vh] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   const baseItems = searchResults ?? items;

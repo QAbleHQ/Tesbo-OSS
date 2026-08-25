@@ -57,6 +57,7 @@ import {
   Textarea,
   Modal,
   EmptyStateBlock,
+  PageLoader,
   StatusChip,
   Field,
   FieldLabel,
@@ -1060,9 +1061,10 @@ export default function TestCasesPage() {
         </div>
 
         {loading ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)] text-sm text-[var(--muted)]">
-            Loading…
-          </div>
+          <PageLoader
+            variant="inline"
+            className="min-h-0 flex-1 rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]"
+          />
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
             {/* ── Suite panel ── */}

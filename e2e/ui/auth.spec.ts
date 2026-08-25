@@ -14,7 +14,7 @@ test.describe("login", () => {
     await page.getByRole("button", { name: "Sign in" }).click();
 
     await page.waitForURL(/\/projects/);
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
   test("rejects an incorrect password", async ({ page }) => {
@@ -139,7 +139,7 @@ test.describe("otp login", () => {
     await page.getByRole("button", { name: "Verify and sign in" }).click();
 
     await page.waitForURL(/\/projects/);
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
   test("auto-creates an account for a brand-new email", async ({ page }) => {

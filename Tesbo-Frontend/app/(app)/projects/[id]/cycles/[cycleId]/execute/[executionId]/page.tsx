@@ -9,7 +9,7 @@ import {
   updateExecution,
   type ExecutionItem,
 } from "@/lib/api";
-import { Button, StatusChip, Input, Textarea } from "@/components/ui";
+import { Button, StatusChip, Input, PageLoader, Textarea } from "@/components/ui";
 
 const STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"];
 
@@ -101,11 +101,7 @@ export default function ExecutionDetailPage() {
   }
 
   if (!execution) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   const steps = normalizeSteps(execution.steps);

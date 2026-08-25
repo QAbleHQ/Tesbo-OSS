@@ -48,7 +48,7 @@ import {
   type TestRunListItem,
   type TestEnvironmentSetting,
 } from "@/lib/api";
-import { Button, StatusChip, StatusBadge, PriorityBadge, Input, Select, type TestStatus, type Priority } from "@/components/ui";
+import { Button, StatusChip, StatusBadge, PriorityBadge, Input, PageLoader, Select, type TestStatus, type Priority } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import { planStatus, formatLastRun, OwnerAvatar, PlanStatusBadge } from "@/components/testplans/PlanCard";
@@ -370,14 +370,7 @@ export default function PlanDetailPage() {
   }, [runs, progress]);
 
   if (loading || !plan) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
-          <p className="text-sm text-[var(--muted)]">Loading plan…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading plan…" />;
   }
 
   const total = derivedProgress?.totalCases || 0;

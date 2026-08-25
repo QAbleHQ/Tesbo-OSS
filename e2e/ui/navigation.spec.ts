@@ -277,16 +277,51 @@ test.describe("side navigation — behaviour", () => {
     await expect(sidebar(page)).toHaveCSS("width", "260px");
   });
 
-  test("NAV-B-05 the theme toggle and log out stay usable in the collapsed rail", async ({ page }) => {
+  test("NAV-B-05 the theme toggle and logout stay usable in the collapsed rail", async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
 
     await expect(page.getByRole("button", { name: "Use dark theme" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Use light theme" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
-  test("NAV-B-06/09 logging out ends the session and Back cannot resurrect it", async ({ browser }) => {
+  test("NAV-B-05b clicking Logout opens a Yes/No confirmation instead of logging out immediately", async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+
+    // Modal.tsx renders without role="dialog" (see its own comment on this) — asserting on the
+    // title text and the Yes/No controls is the reliable signal that it's actually open.
+    await expect(page.getByRole("heading", { name: "Logout" })).toBeVisible();
+    await expect(page.getByText("Are you sure you want to logout?")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Yes" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "No" })).toBeVisible();
+    // No network call yet — confirming is a separate, deliberate step.
+    await expect(page).toHaveURL(/\/projects/);
+  });
+
+  test("NAV-B-05c No dismisses the confirmation and keeps the session", async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "No" }).click();
+
+    await expect(page.getByText("Are you sure you want to logout?")).toBeHidden();
+    await expect(page).toHaveURL(/\/projects/);
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
+  });
+
+  test("NAV-B-05d pressing Escape on the confirmation keeps the session, same as No", async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+    await expect(page.getByText("Are you sure you want to logout?")).toBeVisible();
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.getByText("Are you sure you want to logout?")).toBeHidden();
+    await expect(page).toHaveURL(/\/projects/);
+  });
+
+  test("NAV-B-06/09 confirming with Yes ends the session and Back cannot resurrect it", async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a disposable user to log out with");
     // Its own user: logout invalidates the session server-side, and the shared screens storage
     // state would be left holding a dead cookie for every other spec in the run.
@@ -295,7 +330,8 @@ test.describe("side navigation — behaviour", () => {
     const page = await context.newPage();
     try {
     await page.goto("/projects");
-    await page.getByRole("button", { name: "Log out" }).click();
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "Yes" }).click();
     // Generous: this test shares the stack with the rest of the suite, and the redirect waits on a
     // real round trip to the backend.
     await page.waitForURL("**/login", { timeout: 30_000 });
@@ -314,20 +350,23 @@ test.describe("side navigation — behaviour", () => {
     }
   });
 
-  test("NAV-B-07 a failed logout says so and leaves the button usable", async ({ page }) => {
+  test("NAV-B-07 a failed logout says so inside the confirmation and leaves Yes usable to retry", async ({ page }) => {
     await page.goto("/projects");
     // Matched by predicate, not glob: the frontend posts to the backend origin (:1021) while the
     // page sits on :1020, and a relative glob is resolved against baseURL, so it never matches.
     await page.route((url) => url.pathname === "/api/auth/logout", (route) => route.abort("failed"));
 
-    await page.getByRole("button", { name: "Log out" }).click();
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "Yes" }).click();
 
+    // Left open on failure, not dismissed, so the user can retry without reopening the confirmation.
     await expect(page.getByText("Could not log out. Please try again.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Log out" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Yes" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "No" })).toBeEnabled();
     await expect(page).toHaveURL(/\/projects/);
   });
 
-  test("NAV-B-08 a double-click sends exactly one logout request", async ({ browser }) => {
+  test("NAV-B-08 a double-click on Yes sends exactly one logout request", async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a disposable user to log out with");
     const member = await seedWorkspaceMember(tenant!.organizationId, "member");
     const context = await browser.newContext({ storageState: member.storageStatePath });
@@ -342,9 +381,10 @@ test.describe("side navigation — behaviour", () => {
       await route.continue();
     });
 
-    const logout = page.getByRole("button", { name: /Log out|Logging out/ });
-    await logout.click();
-    await logout.click({ force: true }).catch(() => undefined);
+    await page.getByRole("button", { name: "Logout" }).click();
+    const confirm = page.getByRole("button", { name: /^(Yes|Logging out…)$/ });
+    await confirm.click();
+    await confirm.click({ force: true }).catch(() => undefined);
     await page.waitForURL("**/login");
 
     expect(logoutCalls).toBe(1);
@@ -358,7 +398,7 @@ test.describe("side navigation — behaviour", () => {
     await page.setViewportSize({ width: 1280, height: 500 });
     await page.goto(`/projects/${tenant!.projectId}/dashboard`);
 
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
     await expect(navLink(page, "Project settings")).toBeVisible();
   });
 

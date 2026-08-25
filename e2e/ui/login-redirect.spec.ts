@@ -103,7 +103,7 @@ test.describe("login redirect loop", () => {
     await page.goto("/login?redirect=%2Fprojects");
 
     await page.waitForURL(/\/projects/);
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
   test("an auth check that never answers still ends up showing the form", async ({ page }) => {
