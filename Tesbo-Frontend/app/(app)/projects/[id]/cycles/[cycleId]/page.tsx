@@ -869,7 +869,9 @@ export default function TestRunDetailPage() {
     return { total, passed, failed, skipped, blocked, pending };
   }, [executions]);
 
-  const passRate = stats.total ? Math.round((stats.passed / stats.total) * 100) : 0;
+  // null (rendered as "—") for a run with zero cases, so an empty run is never shown as a
+  // misleading "0% pass rate" — mirrors the Test Runs list summary tile's zero-case handling.
+  const passRate = stats.total ? Math.round((stats.passed / stats.total) * 100) : null;
 
   /* ───── Test cases table: tab counts, filter, search, pagination ───── */
   const tabCounts = useMemo(() => {
@@ -1129,7 +1131,7 @@ export default function TestRunDetailPage() {
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="text-[12px] text-[var(--muted-soft)]">Progress</span>
                     <span className="text-[12px] font-semibold" style={{ color: "var(--success-foreground)" }}>
-                      {passRate}% pass rate
+                      {passRate !== null ? `${passRate}% pass rate` : "No cases executed yet"}
                     </span>
                   </div>
                   <RunProgressBar passed={stats.passed} failed={stats.failed} other={stats.blocked + stats.skipped + stats.pending} total={stats.total} />

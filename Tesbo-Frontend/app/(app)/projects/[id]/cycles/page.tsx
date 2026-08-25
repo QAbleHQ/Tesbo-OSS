@@ -15,6 +15,7 @@ import {
   IconDeviceDesktop,
   IconPencil,
   IconPlayerPlay,
+  IconPlayerSkipForward,
   IconPlus,
   IconTrash,
 } from "@tabler/icons-react";
@@ -127,13 +128,26 @@ function OwnerAvatar({ name, seed }: { name: string; seed?: string | null }) {
   );
 }
 
-function RunProgressBar({ passed, failed, blocked, total }: { passed: number; failed: number; blocked: number; total: number }) {
+function RunProgressBar({
+  passed,
+  failed,
+  blocked,
+  skipped,
+  total,
+}: {
+  passed: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  total: number;
+}) {
   const pct = (n: number) => `${total ? (n / total) * 100 : 0}%`;
   return (
     <div className="flex h-[5px] gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
       {passed > 0 && <div className="h-full" style={{ width: pct(passed), background: "var(--status-pass-dot)" }} />}
       {failed > 0 && <div className="h-full" style={{ width: pct(failed), background: "var(--status-fail-dot)" }} />}
       {blocked > 0 && <div className="h-full" style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
+      {skipped > 0 && <div className="h-full" style={{ width: pct(skipped), background: "var(--status-skipped-dot)" }} />}
     </div>
   );
 }
@@ -243,21 +257,6 @@ export default function TestRunsPage() {
     });
   }, [router, load]);
 
-  const summary = useMemo(() => {
-    const totalRuns = runs.length;
-    const inProgress = runs.filter((r) => r.status === "In Progress").length;
-    let totalExecuted = 0;
-    let totalPassed = 0;
-    let openFailures = 0;
-    for (const r of runs) {
-      totalExecuted += r.passed + r.failed + r.blocked + r.skipped;
-      totalPassed += r.passed;
-      openFailures += r.failed;
-    }
-    const passRate = totalExecuted > 0 ? Math.round((totalPassed / totalExecuted) * 100) : null;
-    return { totalRuns, inProgress, passRate, openFailures };
-  }, [runs]);
-
   const visibleRuns = useMemo(() => {
     const filtered = statusFilter === "all" ? runs : runs.filter((r) => r.status === statusFilter);
     const sorted = [...filtered];
@@ -277,6 +276,24 @@ export default function TestRunsPage() {
     }
     return sorted;
   }, [runs, statusFilter, sortBy]);
+
+  // Pass Rate = passed / totalCases (all assigned cases), the same denominator as the "X / Y cases"
+  // fraction on each run card and the Test Run Details page — so the three numbers always reconcile.
+  // Scoped to visibleRuns so the tiles match whatever status filter is applied below them.
+  const summary = useMemo(() => {
+    const totalRuns = visibleRuns.length;
+    const inProgress = visibleRuns.filter((r) => r.status === "In Progress").length;
+    let totalCases = 0;
+    let totalPassed = 0;
+    let openFailures = 0;
+    for (const r of visibleRuns) {
+      totalCases += r.totalCases;
+      totalPassed += r.passed;
+      openFailures += r.failed;
+    }
+    const passRate = totalCases > 0 ? Math.round((totalPassed / totalCases) * 100) : null;
+    return { totalRuns, inProgress, passRate, openFailures };
+  }, [visibleRuns]);
 
   /* create */
   async function handleCreate(e: React.FormEvent) {
@@ -526,7 +543,7 @@ export default function TestRunsPage() {
 
                   {total > 0 && (
                     <div className="border-t border-[var(--border-subtle)] px-4 py-3">
-                      <RunProgressBar passed={r.passed} failed={r.failed} blocked={r.blocked} total={total} />
+                      <RunProgressBar passed={r.passed} failed={r.failed} blocked={r.blocked} skipped={r.skipped} total={total} />
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-4">
                           <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-pass-text)]">
@@ -540,6 +557,10 @@ export default function TestRunsPage() {
                           <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-blocked-text)]">
                             <IconCircleMinus size={13} stroke={1.75} />
                             {r.blocked} blocked
+                          </span>
+                          <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-skipped-text)]">
+                            <IconPlayerSkipForward size={13} stroke={1.75} />
+                            {r.skipped} skipped
                           </span>
                           <span className="flex items-center gap-1 text-[11.5px] text-[var(--muted-soft)]">
                             <IconCircleDashed size={13} stroke={1.75} />

@@ -483,3 +483,50 @@ test.describe("adding test cases to a run", () => {
     }
   });
 });
+
+test.describe("list-cycles bucket counts", () => {
+  // Regression for the Test Runs Pass Rate mismatch: the frontend's summary tile and the run
+  // details page each compute their own pass rate from these bucket fields, and both now assume
+  // passed + failed + blocked + skipped + untested === totalCases for every status a case can be
+  // in. If a new status is ever added to EXECUTION_STATUSES without a matching bucket, this drifts
+  // silently and the two pages diverge again exactly as they did before the fix.
+  test("passed, failed, blocked, skipped and untested buckets always sum to totalCases", async ({ request }) => {
+    const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const cycle = await (
+      await request.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `E2E Bucket Sum ${stamp}` } })
+    ).json();
+
+    const statuses = ["Passed", "Failed", "Blocked", "Skipped", "Retest", "Untested"];
+    const created = await (
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-create`, {
+        data: { testcases: statuses.map((_, i) => ({ title: `E2E Bucket Sum Case ${stamp}-${i}`, status: "Approved" })) },
+      })
+    ).json();
+    const testcaseIds: string[] = created.created.map((c: { id: string }) => c.id);
+
+    try {
+      await request.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds } });
+      const executions = await (await request.get(`/api/cycles/${cycle.id}/executions`)).json();
+      for (let i = 0; i < statuses.length; i++) {
+        if (statuses[i] === "Untested") continue;
+        await request.patch(`/api/cycles/${cycle.id}/executions/${executions[i].id}`, { data: { status: statuses[i] } });
+      }
+
+      const runs = await (await request.get(`/api/projects/${ctx.projectId}/cycles`)).json();
+      const thisRun = runs.find((r: { id: string }) => r.id === cycle.id);
+      expect(thisRun.totalCases).toBe(statuses.length);
+      // Retest has no dedicated bucket of its own and is folded into "untested" alongside the
+      // literal Untested case, so untested is 2 (Retest + Untested) here, not 1.
+      expect(thisRun.passed + thisRun.failed + thisRun.blocked + thisRun.skipped + thisRun.untested).toBe(
+        thisRun.totalCases,
+      );
+      expect(thisRun.untested).toBe(2);
+    } finally {
+      await request.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-delete`, {
+        data: { testcaseIds },
+        failOnStatusCode: false,
+      });
+    }
+  });
+});
