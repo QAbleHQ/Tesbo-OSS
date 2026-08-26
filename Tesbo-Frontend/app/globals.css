@@ -909,6 +909,19 @@ textarea:focus-visible {
   outline-offset: 1px;
 }
 
+/* Tailwind's preflight resets `button { cursor: default }`; restore the pointer affordance for
+   every clickable control, including ARIA-only pseudo-buttons, and fall back to the disabled
+   cursor so callers don't have to repeat this per component. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+button:disabled,
+[role="button"][aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
 /* ── Zyra chat prose ─────────────────────────────────────────────────────── */
 .zyra-prose { line-height: 1.65; }
 .zyra-prose h1 { font-size: 1.0625rem; font-weight: 700; margin: 1rem 0 0.4rem; color: var(--foreground); }
