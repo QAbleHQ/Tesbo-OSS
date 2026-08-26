@@ -382,6 +382,7 @@ export default function BugsPage() {
    * everywhere.
    */
   const [filterSeverity, setFilterSeverity] = useState("");
+  const [filterPriority, setFilterPriority] = useState("");
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("kanban");
   const [page, setPage] = useState(1);
@@ -470,6 +471,7 @@ export default function BugsPage() {
     return bugs.filter((b) => {
       if (filterStatus && b.status !== filterStatus) return false;
       if (filterSeverity && b.severity !== filterSeverity) return false;
+      if (filterPriority && b.priority !== filterPriority) return false;
       if (
         term &&
         !b.title.toLowerCase().includes(term) &&
@@ -482,7 +484,7 @@ export default function BugsPage() {
         return false;
       return true;
     });
-  }, [bugs, filterStatus, filterSeverity, search]);
+  }, [bugs, filterStatus, filterSeverity, filterPriority, search]);
 
   /* reset page when filters change */
   useEffect(() => {
@@ -724,6 +726,18 @@ export default function BugsPage() {
                 {BUG_SEVERITIES.map((severity) => (
                   <option key={severity} value={severity}>
                     {severity}
+                  </option>
+                ))}
+              </Select>
+              <Select
+                value={filterPriority}
+                onChange={(e) => setFilterPriority(e.target.value)}
+                aria-label="Filter by priority"
+              >
+                <option value="">All Priorities</option>
+                {BUG_PRIORITIES.map((priority) => (
+                  <option key={priority} value={priority}>
+                    {priority}
                   </option>
                 ))}
               </Select>
