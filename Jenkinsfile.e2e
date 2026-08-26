@@ -91,8 +91,14 @@ pipeline {
     // to launch with "Executable doesn't exist". The image also carries Node 22 and Chromium's shared
     // libraries, which is why this job needs neither on the host.
     RUNNER_IMAGE      = 'mcr.microsoft.com/playwright:v1.61.1-noble'
-    E2E_SPECS         = "${params.SPECS}"
-    E2E_WORKERS       = "${params.WORKERS}"
+    // Declarative registers a job's parameters only AFTER a build has evaluated the Jenkinsfile, so
+    // on the very first build of a new job every params.* is null — and referencing one from `sh`
+    // under `set -u` aborts the stage. That is exactly how build #1 of this job died. Each is
+    // resolved here instead, with an explicit null test rather than Groovy's elvis operator:
+    // `false ?: 'true'` would quietly switch a deliberately unticked checkbox back on.
+    E2E_SPECS         = "${params.SPECS ?: 'api/ ui/'}"
+    E2E_WORKERS       = "${params.WORKERS ?: '4'}"
+    E2E_USE_STAGE_DB  = "${params.USE_STAGE_DATABASE == null ? 'true' : params.USE_STAGE_DATABASE}"
     // Pinned rather than probed. utils/psql.ts falls back to `docker compose exec` when a direct
     // connection fails; inside the runner container there is no compose stack, so that fallback would
     // turn a bad connection string into 46 silently skipped files while the build went green.
@@ -153,13 +159,20 @@ pipeline {
           umask 077
           : > "$WORKSPACE/.e2e-db.env"
 
-          if [ "$USE_STAGE_DATABASE" != "true" ]; then
+          if [ "$E2E_USE_STAGE_DB" != "true" ]; then
             echo "==> stage database NOT bound - the DB-backed spec files will skip themselves"
             exit 0
           fi
 
           env_file="$STAGE_DEPLOY_PATH/.env"
           test -f "$env_file" || { echo "ERROR: no .env at $env_file - cannot reach the stage database"; exit 1; }
+
+          # Jenkins runs `sh` with -x, which echoes not just each command but each ASSIGNMENT and
+          # its value. Reading a connection string with tracing on would print it straight into a
+          # build log kept for 45 builds. Tracing goes off for exactly the span that holds the
+          # value; it reaches the container through a private --env-file rather than a command line
+          # or an -e flag, so it never lands in a process list either.
+          set +x
 
           # Parsed, not sourced. A .env is not a shell script: an unquoted value containing a space
           # would be run as a command, and a backtick in a password would be executed. Only
@@ -171,10 +184,21 @@ pipeline {
             "$dq"*"$dq") url="${url#"$dq"}"; url="${url%"$dq"}" ;;
             "$sq"*"$sq") url="${url#"$sq"}"; url="${url%"$sq"}" ;;
           esac
-          test -n "$url" || { echo "ERROR: DATABASE_URL not found in $env_file"; exit 1; }
+          if [ -z "$url" ]; then
+            set -x
+            echo "ERROR: DATABASE_URL not found in $env_file"
+            exit 1
+          fi
 
           printf 'E2E_DATABASE_URL=%s\\n' "$url" > "$WORKSPACE/.e2e-db.env"
-          echo "==> stage DATABASE_URL read from the stack under test (${#url} chars, host $(printf '%s' "$url" | sed -e 's|.*@||' -e 's|/.*||' -e 's|:.*||'))"
+          # Host only — enough to confirm the run is aimed at the right database, with no
+          # credentials in it. Then drop the value itself before tracing comes back on.
+          db_host="$(printf '%s' "$url" | sed -e 's|.*@||' -e 's|/.*||' -e 's|:.*||')"
+          url_len="${#url}"
+          url=""
+          set -x
+
+          echo "==> stage DATABASE_URL read from the stack under test ($url_len chars, host $db_host)"
         '''
       }
     }
