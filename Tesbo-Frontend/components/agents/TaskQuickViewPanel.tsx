@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconSparkles, IconUser, IconX } from "@tabler/icons-react";
 import { closeZyraTask, type ZyraTask } from "@/lib/api";
-import { Button, StatusChip } from "@/components/ui";
+import { Button, CopyButton, StatusChip } from "@/components/ui";
+import { toTsv } from "@/lib/tsv";
 
 export const JIRA_BADGE_CLASS =
   "rounded border border-[var(--border)] bg-[var(--surface-secondary)] px-2 py-0.5 font-mono text-[11px] font-medium text-[var(--muted)]";
@@ -22,6 +23,18 @@ export function taskStatusTone(status: string): "neutral" | "info" | "success" |
   if (normalized === "in_review") return "info";
   if (normalized === "in_progress") return "warning";
   return "neutral";
+}
+
+const TASK_STATUS_LABELS: Record<string, string> = {
+  todo: "Pending",
+  in_progress: "In Progress",
+  in_review: "In Review",
+  done: "Done",
+};
+
+export function taskStatusLabel(status: string): string {
+  const normalized = normalizeTaskStatus(status);
+  return TASK_STATUS_LABELS[normalized] ?? normalized.replaceAll("_", " ");
 }
 
 function priorityTone(priority: string): "error" | "warning" | "confidenceHigh" | "neutral" {
@@ -43,6 +56,28 @@ function firstStepText(stepsJson: string): string | null {
     return null;
   } catch {
     return null;
+  }
+}
+
+function stepsText(stepsJson: string): string {
+  try {
+    const parsed = JSON.parse(stepsJson);
+    if (!Array.isArray(parsed)) return "";
+    return parsed
+      .map((step, index) => {
+        if (typeof step === "string") return `${index + 1}. ${step}`;
+        if (step && typeof step === "object") {
+          const action = step.action || step.step || step.description || "";
+          const expected = step.expectedResult || step.expected || "";
+          if (!action && !expected) return "";
+          return expected ? `${index + 1}. ${action} -> ${expected}` : `${index + 1}. ${action}`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join(" | ");
+  } catch {
+    return "";
   }
 }
 
@@ -77,6 +112,17 @@ export default function TaskQuickViewPanel({ task, projectId, onClose, onTaskUpd
 
   const done = normalizeTaskStatus(task.taskStatus) === "done";
   const approvalRate = task.generatedCount > 0 ? Math.round((task.savedCount / task.generatedCount) * 100) : null;
+  const draftsTsv = toTsv(
+    ["Title", "Priority", "Preconditions", "Steps", "Expected Result", "Tags"],
+    task.drafts.map((draft) => [
+      draft.title,
+      draft.priority,
+      draft.preconditions,
+      stepsText(draft.stepsJson),
+      draft.expectedSummary,
+      draft.tags?.join(", ") ?? "",
+    ])
+  );
 
   async function handleCloseTask() {
     setWorking(true);
@@ -107,9 +153,10 @@ export default function TaskQuickViewPanel({ task, projectId, onClose, onTaskUpd
           <div className="min-w-0">
             <div className="mb-1.5 flex items-center gap-2">
               <span className="font-mono text-xs text-[var(--muted-soft)]">{task.jiraIssueKeys[0] || "—"}</span>
-              <StatusChip tone={taskStatusTone(task.taskStatus)}>{normalizeTaskStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
+              <StatusChip tone={taskStatusTone(task.taskStatus)}>{taskStatusLabel(task.taskStatus)}</StatusChip>
             </div>
             <h2 className="line-clamp-2 text-[15px] font-semibold leading-snug text-[var(--foreground)]">{task.userStory}</h2>
+            {task.context && <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--muted)]">{task.context}</p>}
           </div>
           <button
             type="button"
@@ -169,6 +216,13 @@ export default function TaskQuickViewPanel({ task, projectId, onClose, onTaskUpd
 
           {activeTab === "testcases" && (
             <div className="flex flex-col gap-2.5">
+              {task.drafts.length > 0 && (
+                <div className="flex justify-end">
+                  <span title="Copy every generated testcase as tab-separated values, ready to paste into Excel.">
+                    <CopyButton value={draftsTsv} label="Copy all" copiedLabel="Copied" />
+                  </span>
+                </div>
+              )}
               {task.drafts.map((draft, index) => {
                 const step = firstStepText(draft.stepsJson);
                 return (

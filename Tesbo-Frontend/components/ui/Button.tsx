@@ -54,7 +54,7 @@ export default function Button({
       className={cx(
         "inline-flex items-center justify-center gap-1.5 whitespace-nowrap transition-[background-color,border-color,color,opacity] duration-150",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-[color-mix(in_oklab,var(--denim)_30%,transparent)] focus-visible:ring-offset-1",
-        "disabled:cursor-not-allowed disabled:opacity-50",
+        "cursor-pointer disabled:cursor-not-allowed disabled:opacity-50",
         variantClasses[variant],
         sizeClasses[size],
         fullWidth && "w-full",

@@ -127,7 +127,7 @@ function WorkspaceSettingsContent() {
                     key={tab.key}
                     type="button"
                     onClick={() => handleTabChange(tab.key)}
-                    className={`rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
+                    className={`cursor-pointer rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
                       activeTab === tab.key
                         ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
                         : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
@@ -147,7 +147,7 @@ function WorkspaceSettingsContent() {
                   <button
                     type="button"
                     onClick={() => handleTabChange("admins")}
-                    className={`rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
+                    className={`cursor-pointer rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
                       activeTab === "admins"
                         ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
                         : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
