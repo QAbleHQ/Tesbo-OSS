@@ -18,8 +18,9 @@ import {
   type SuiteNode,
   type ZyraTask,
 } from "@/lib/api";
-import { Button, Card, Field, FieldLabel, Input, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
+import { Button, Card, CopyButton, Field, FieldLabel, Input, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
+import { toTsv } from "@/lib/tsv";
 
 type SaveMode = "existing" | "new";
 type DetailTab = "testcases" | "activities" | "sources";
@@ -56,6 +57,28 @@ function stepCount(stepsJson: string): number {
     return Array.isArray(parsed) ? parsed.length : 0;
   } catch {
     return 0;
+  }
+}
+
+function stepsText(stepsJson: string): string {
+  try {
+    const parsed = JSON.parse(stepsJson);
+    if (!Array.isArray(parsed)) return "";
+    return parsed
+      .map((step, index) => {
+        if (typeof step === "string") return `${index + 1}. ${step}`;
+        if (step && typeof step === "object") {
+          const action = step.action || step.step || step.description || "";
+          const expected = step.expectedResult || step.expected || "";
+          if (!action && !expected) return "";
+          return expected ? `${index + 1}. ${action} -> ${expected}` : `${index + 1}. ${action}`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join(" | ");
+  } catch {
+    return "";
   }
 }
 
@@ -249,6 +272,18 @@ export default function ZyraTaskDetailPage() {
 
   const done = normalizeStatus(task.taskStatus) === "done";
   const allDraftsSelected = task.drafts.length > 0 && selectedDrafts.length === task.drafts.length;
+  const copyableDrafts = selectedDrafts.length > 0 ? selectedDrafts.map((i) => task.drafts[i]) : task.drafts;
+  const draftsTsv = toTsv(
+    ["Title", "Priority", "Preconditions", "Steps", "Expected Result", "Tags"],
+    copyableDrafts.map((draft) => [
+      draft.title,
+      draft.priority,
+      draft.preconditions,
+      stepsText(draft.stepsJson),
+      draft.expectedSummary,
+      draft.tags?.join(", ") ?? "",
+    ])
+  );
   const tabItems: Array<{ key: DetailTab; label: string; count?: number }> = [
     { key: "testcases", label: "Generated Testcases", count: task.drafts.length },
     { key: "activities", label: "Activities", count: task.activities.length },
@@ -318,6 +353,15 @@ export default function ZyraTaskDetailPage() {
                   {allDraftsSelected ? "Unselect all" : "Select all"}
                 </Button>
                 <Button variant="secondary" onClick={clearDraftSelection} disabled={done || selectedDrafts.length === 0}>Clear selection</Button>
+                {task.drafts.length > 0 && (
+                  <span title={selectedDrafts.length > 0 ? "Copy the selected testcases as tab-separated values, ready to paste into Excel." : "Copy every generated testcase as tab-separated values, ready to paste into Excel."}>
+                    <CopyButton
+                      value={draftsTsv}
+                      label={selectedDrafts.length > 0 ? `Copy ${selectedDrafts.length} selected` : "Copy all"}
+                      copiedLabel="Copied"
+                    />
+                  </span>
+                )}
                 <Button variant="secondary" onClick={() => openSaveModal()} disabled={done || selectedDrafts.length === 0}>Save selected</Button>
                 <Button variant="secondary" onClick={() => void handleDeleteSelectedDrafts()} disabled={done || working || selectedDrafts.length === 0}>Delete selected</Button>
               </div>

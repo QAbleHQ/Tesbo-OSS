@@ -20,8 +20,9 @@ import {
   type ZyraChatSession,
   type ZyraChatTestcaseRow,
 } from "@/lib/api";
-import { Button, PageLoader, StatusChip, Textarea } from "@/components/ui";
+import { Button, CopyButton, PageLoader, StatusChip, Textarea } from "@/components/ui";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { toTsv } from "@/lib/tsv";
 
 // ─── Zyra icon badge — gradient sparkle mark used in the header and per-message ──
 function ZyraMark({ size = 24 }: { size?: number }) {
@@ -159,8 +160,27 @@ function summarizeTestcaseActions(rows: ZyraChatTestcaseRow[]): string | null {
 // ─── TestcaseTable ────────────────────────────────────────────────────────────
 function TestcaseTable({ rows }: { rows: ZyraChatTestcaseRow[] }) {
   if (!rows.length) return null;
+  const tsv = toTsv(
+    ["ID", "Title", "Priority", "Status", "First step", "Source"],
+    rows.map((row) => [
+      row.externalId || row.id || "",
+      row.title,
+      row.priority || "P2",
+      row.status || "Draft",
+      firstStepPreview(row.stepsJson),
+      row.action || "suggested",
+    ])
+  );
   return (
     <div className="mt-3 overflow-hidden rounded-lg border border-[var(--border)]">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--background)] px-3 py-1.5">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+          {rows.length} test case{rows.length === 1 ? "" : "s"}
+        </span>
+        <span title="Copy these test cases as tab-separated values, ready to paste into Excel.">
+          <CopyButton value={tsv} label="Copy" copiedLabel="Copied" size="sm" />
+        </span>
+      </div>
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-[var(--border)] text-sm">
           <thead className="bg-[var(--background)]">
