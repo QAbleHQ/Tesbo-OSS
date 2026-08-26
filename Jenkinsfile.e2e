@@ -1,80 +1,110 @@
-// Standalone e2e job. NOT part of a deploy pipeline — point a new Jenkins job at this file.
+// Nightly end-to-end regression against STAGE. Runs tests only — it deploys nothing.
 //
-// Deliberately separate from Jenkinsfile / Jenkinsfile.stage so that a red test can never leave a
-// blue/green cutover half-finished, and so this can be re-run against an environment without
-// redeploying anything. Trigger it however suits: manually, on a schedule, or from the tail of a
-// stage deploy with `build job: 'tesbo-e2e', wait: false`.
+// Deliberately separate from Jenkinsfile / Jenkinsfile.stage so that a red suite can never leave a
+// blue/green cutover half-finished, and so a run can be repeated against the deployed environment
+// without rebuilding it. Tesbo-stage-deploy may trigger it at the tail with
+// `build job: 'Tesbo-e2e-stage', wait: false`; the nightly cron below is the primary schedule.
 //
 // ─── Creating the job (http://208.87.133.122:8081/) ──────────────────────────────────────────
 //
-//   New Item -> Pipeline -> name it e.g. "tesbo-e2e"
+//   New Item -> Pipeline -> "Tesbo-e2e-stage", inside the Tesbo-Test-Manager folder
 //   Pipeline -> Definition: "Pipeline script from SCM"
 //     SCM:            Git
 //     Repository URL: https://github.com/QAbleHQ/Tesbo-Test-Manager-Private.git
-//     Credentials:    the same one Jenkinsfile.stage uses
-//     Branch:         */BugFixes   (or whichever branch carries e2e/)
+//     Credentials:    github-creds   (the same one Jenkinsfile.stage uses)
+//     Branch:         */dev          (stage is built from dev — the specs must match the build)
 //     Script Path:    Jenkinsfile.e2e
-//   Save. The first build populates the parameters below; the second run onwards they are selectable.
+//   Save, then build once so the parameters and the cron trigger register.
 //
-// ─── Credentials this job expects ────────────────────────────────────────────────────────────
+// ─── Why this job needs no test-account credentials ──────────────────────────────────────────
 //
-// Add these under Manage Jenkins -> Credentials. All are "Secret text" unless noted. They are
-// injected as environment variables, and utils/env-file.ts gives process.env precedence over the
-// committed e2e/environments/<env>.env file — so secrets never live in the repo.
+// The test data belongs to the Playwright framework, not to Jenkins. Every tenant the suite needs —
+// account A, account B, and the five sacrificial ones for billing, workspaces and the screen-level
+// suites — has a deterministic identity in e2e/utils/env.ts (`e2e-smoke@mailinator.com` and friends)
+// and is created by e2e/global-setup.ts on first use. Against a deployed target it seeds each user
+// straight into Postgres with a correctly hashed password, which sidesteps OTP delivery entirely,
+// then bootstraps that user's workspace and project over HTTP.
 //
-//   tesbo-e2e-stage-email        account A's email        -> E2E_TEST_EMAIL
-//   tesbo-e2e-stage-password     account A's password     -> E2E_TEST_PASSWORD
-//   tesbo-e2e-stage-email-b      account B's email        -> E2E_TEST_EMAIL_B
-//   tesbo-e2e-stage-password-b   account B's password     -> E2E_TEST_PASSWORD_B
-//   tesbo-e2e-stage-database-url stage DATABASE_URL       -> E2E_DATABASE_URL
+// So the only thing this job has to be told is the connection string, and it does not need a
+// credential for that either: Jenkins runs as root on the box that hosts stage, so the stage stack's
+// own .env is readable at STAGE_DEPLOY_PATH. Reading DATABASE_URL from there is not a convenience —
+// it is the only way to be certain the fixtures land in the database the stage backend actually
+// reads. CLAUDE.md carries the day this rule cost when it was violated.
 //
-// The database URL is optional but changes the job's reach enormously: without it the ~46 DB-backed
-// spec files skip themselves and only the HTTP-only specs run. With it, all 1216 tests are reachable
-// and tenants are provisioned automatically. It also means the run WRITES to the stage database —
-// scoped to the disposable tenants the suite creates, but real writes to shared infrastructure.
+// ─── What this run does to stage ─────────────────────────────────────────────────────────────
+//
+// It WRITES. Users are inserted, workspaces and projects are created, plan/grace/dunning columns are
+// rewritten for the billing tenants, and fixture rows are deleted on teardown. All of it is scoped to
+// the disposable tenants the suite provisions, but stage is shared infrastructure and these are real
+// writes to it. Stripe write APIs are refused outright by scripts/e2e-ci.sh — a deployment's key is
+// frequently a live one, and a Checkout Session would create a real Customer.
 
 pipeline {
   agent any
 
   options {
     timestamps()
-    // One at a time: e2e/.auth/state.json holds the shared session, so two concurrent builds would
-    // rewrite it under each other. This is the same hazard scripts/e2e-run.sh guards with pgrep.
+    // One at a time. e2e/.auth/state.json holds the shared session for every tenant, so two
+    // concurrent builds would rewrite it under each other — the same hazard scripts/e2e-run.sh
+    // guards with pgrep.
     disableConcurrentBuilds()
-    buildDiscarder(logRotator(numToKeepStr: '30'))
-    timeout(time: 90, unit: 'MINUTES')
+    // A nightly at 45 builds is roughly six weeks of history, which is what makes the JUnit trend
+    // worth reading. Traces are the bulky part, so they rotate out sooner.
+    buildDiscarder(logRotator(numToKeepStr: '45', artifactNumToKeepStr: '15'))
+    // The full suite is 1216 tests against a hosted database, on a two-executor box that is also
+    // running the stage stack under test. 90 minutes was not enough for that.
+    timeout(time: 4, unit: 'HOURS')
+  }
+
+  triggers {
+    // Nightly, in the quiet hours, so the result is waiting in the morning. H hashes the exact
+    // minute from the job name rather than firing every job on the controller at 02:00 sharp.
+    cron('H 2 * * *')
   }
 
   parameters {
-    choice(
-      name: 'TARGET_ENV',
-      choices: ['stage'],
-      description: 'Which e2e/environments/<name>.env to load. Add a choice here when you add a file there.'
-    )
     string(
       name: 'SPECS',
-      defaultValue: 'regression/',
-      description: 'Spec paths to run, space separated. "regression/" is the reported-ticket suite (fast). "api/ ui/" is everything (tens of minutes — every statement is a round trip to the database).'
+      defaultValue: 'api/ ui/',
+      description: 'Spec paths, space separated. "api/ ui/" is the whole suite (~1216 tests). "regression/" is the reported-ticket folder only, which is the subset written to be portable to a deployed environment. A single file also works: api/testcases.spec.ts'
     )
     string(
       name: 'WORKERS',
-      defaultValue: '10',
-      description: 'Playwright workers. API specs are network-bound so 10 costs little; a UI-heavy selection on a small agent may want fewer.'
+      defaultValue: '4',
+      description: 'Playwright workers. Deliberately not 10: this controller has two executors and is also hosting the stage stack being tested, so a UI-heavy selection at 10 contends with the app under test and manufactures flakes. Raise it only for an API-only selection, which is network-bound on the database.'
     )
     booleanParam(
-      name: 'USE_DATABASE',
+      name: 'USE_STAGE_DATABASE',
       defaultValue: true,
-      description: 'Bind the stage DATABASE_URL, unlocking the ~46 DB-backed spec files. Unticked, those skip themselves and only HTTP-only specs run.'
+      description: "Read the stage stack's own DATABASE_URL and let the suite provision its tenants. Unticked, the ~46 DB-backed spec files skip themselves, every tenant must already exist, and the run cannot create account A at all — so leave this on for a full-suite run."
     )
   }
 
   environment {
-    E2E_ENV     = "${params.TARGET_ENV}"
-    E2E_WORKERS = "${params.WORKERS}"
+    API_BASE_URL      = 'https://api-app-stage.tesbo.io'
+    WEB_BASE_URL      = 'https://app-stage.tesbo.io'
+    // Where Jenkinsfile.stage deploys the stage stack on this same host. Its .env is the source of
+    // the connection string, and .active-color names the live half of the blue/green pair.
+    STAGE_DEPLOY_PATH = '/root/devops/tesbo-test-manager-private-stage/Tesbo-Test-Manager-Private'
+    // Pinned to the version e2e/package-lock.json installs (1.61.1), so the browsers baked into the
+    // image are the ones that Playwright build expects. Bump both together or Playwright will refuse
+    // to launch with "Executable doesn't exist". The image also carries Node 22 and Chromium's shared
+    // libraries, which is why this job needs neither on the host.
+    RUNNER_IMAGE      = 'mcr.microsoft.com/playwright:v1.61.1-noble'
+    // Declarative registers a job's parameters only AFTER a build has evaluated the Jenkinsfile, so
+    // on the very first build of a new job every params.* is null — and referencing one from `sh`
+    // under `set -u` aborts the stage. That is exactly how build #1 of this job died. Each is
+    // resolved here instead, with an explicit null test rather than Groovy's elvis operator:
+    // `false ?: 'true'` would quietly switch a deliberately unticked checkbox back on.
+    E2E_SPECS         = "${params.SPECS ?: 'api/ ui/'}"
+    E2E_WORKERS       = "${params.WORKERS ?: '4'}"
+    E2E_USE_STAGE_DB  = "${params.USE_STAGE_DATABASE == null ? 'true' : params.USE_STAGE_DATABASE}"
     // Pinned rather than probed. utils/psql.ts falls back to `docker compose exec` when a direct
-    // connection fails; on an agent with no compose stack that turns a bad connection string into 46
-    // silently skipped files while the build still goes green. Pinning makes it a loud failure.
-    E2E_DB_TRANSPORT = 'direct'
+    // connection fails; inside the runner container there is no compose stack, so that fallback would
+    // turn a bad connection string into 46 silently skipped files while the build went green.
+    E2E_DB_TRANSPORT  = 'direct'
+    // RUNNER_IMAGE already ships Chromium and its apt dependencies.
+    E2E_SKIP_BROWSER_INSTALL = 'yes'
   }
 
   stages {
@@ -85,41 +115,116 @@ pipeline {
       }
     }
 
-    stage('Node') {
+    stage('Preflight') {
       steps {
-        // The suite needs a modern Node for Playwright and for the type-stripping the coverage
-        // scripts use. Fail early and clearly rather than midway through a run.
+        // Check the live color through host nginx rather than the public URL. Cloudflare fronts stage
+        // and answers curl with 403 "error code: 1010" for every path, existing or not, so a curl
+        // against https://api-app-stage.tesbo.io/health can only ever look broken. Playwright's own
+        // request context does get through, which is why the tests themselves use the public URLs.
         sh '''
           set -eu
-          node --version
-          npm --version
-          major="$(node -p 'process.versions.node.split(".")[0]')"
-          test "$major" -ge 20 || { echo "Node 20+ required, found $(node --version)"; exit 1; }
+          test -d "$STAGE_DEPLOY_PATH" || { echo "no stage deployment at $STAGE_DEPLOY_PATH"; exit 1; }
+
+          color="blue"
+          if [ -f "$STAGE_DEPLOY_PATH/.active-color" ]; then
+            color="$(cat "$STAGE_DEPLOY_PATH/.active-color")"
+          fi
+          case "$color" in
+            green) be_port=1021; fe_port=1020 ;;
+            *)     be_port=1011; fe_port=1010 ;;
+          esac
+          echo "==> stage live color: $color (fe $fe_port / be $be_port)"
+
+          be="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${be_port}/health" || true)"
+          fe="$(curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:${fe_port}/" || true)"
+          echo "==> direct   backend:${be} frontend:${fe}"
+
+          edge_be="$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: api-app-stage.tesbo.io" "http://127.0.0.1:1081/health" || true)"
+          edge_fe="$(curl -sS -o /dev/null -w "%{http_code}" -H "Host: app-stage.tesbo.io" "http://127.0.0.1:1080/" || true)"
+          echo "==> via edge backend:${edge_be} frontend:${edge_fe}"
+
+          # Fail here rather than spending four hours turning one outage into 1216 test failures.
+          test "$be" = "200" || { echo "ERROR: stage backend is not healthy - not running the suite"; exit 1; }
+          test "$edge_be" = "200" || { echo "ERROR: stage backend unreachable through host nginx - not running the suite"; exit 1; }
+        '''
+      }
+    }
+
+    stage('Stage database') {
+      steps {
+        // The connection string is parsed out and written to a private env file, never echoed and
+        // never placed on a command line. `docker run --env-file` keeps it off the process list too.
+        sh '''
+          set -eu
+          umask 077
+          : > "$WORKSPACE/.e2e-db.env"
+
+          if [ "$E2E_USE_STAGE_DB" != "true" ]; then
+            echo "==> stage database NOT bound - the DB-backed spec files will skip themselves"
+            exit 0
+          fi
+
+          env_file="$STAGE_DEPLOY_PATH/.env"
+          test -f "$env_file" || { echo "ERROR: no .env at $env_file - cannot reach the stage database"; exit 1; }
+
+          # Jenkins runs `sh` with -x, which echoes not just each command but each ASSIGNMENT and
+          # its value. Reading a connection string with tracing on would print it straight into a
+          # build log kept for 45 builds. Tracing goes off for exactly the span that holds the
+          # value; it reaches the container through a private --env-file rather than a command line
+          # or an -e flag, so it never lands in a process list either.
+          set +x
+
+          # Parsed, not sourced. A .env is not a shell script: an unquoted value containing a space
+          # would be run as a command, and a backtick in a password would be executed. Only
+          # DATABASE_URL is taken, so the stack's live Stripe keys never enter this build.
+          url="$(awk '/^[[:space:]]*DATABASE_URL[[:space:]]*=/ { sub(/^[^=]*=/, ""); print; exit }' "$env_file")"
+          dq='"'
+          sq="'"
+          case "$url" in
+            "$dq"*"$dq") url="${url#"$dq"}"; url="${url%"$dq"}" ;;
+            "$sq"*"$sq") url="${url#"$sq"}"; url="${url%"$sq"}" ;;
+          esac
+          if [ -z "$url" ]; then
+            set -x
+            echo "ERROR: DATABASE_URL not found in $env_file"
+            exit 1
+          fi
+
+          printf 'E2E_DATABASE_URL=%s\\n' "$url" > "$WORKSPACE/.e2e-db.env"
+          # Host only — enough to confirm the run is aimed at the right database, with no
+          # credentials in it. Then drop the value itself before tracing comes back on.
+          db_host="$(printf '%s' "$url" | sed -e 's|.*@||' -e 's|/.*||' -e 's|:.*||')"
+          url_len="${#url}"
+          url=""
+          set -x
+
+          echo "==> stage DATABASE_URL read from the stack under test ($url_len chars, host $db_host)"
         '''
       }
     }
 
     stage('E2E') {
       steps {
-        script {
-          // Account B is bound unconditionally — api/authorization.spec.ts needs it, and global-setup
-          // fails the whole run without it unless a database is available to seed it.
-          def creds = [
-            string(credentialsId: 'tesbo-e2e-stage-email',      variable: 'E2E_TEST_EMAIL'),
-            string(credentialsId: 'tesbo-e2e-stage-password',   variable: 'E2E_TEST_PASSWORD'),
-            string(credentialsId: 'tesbo-e2e-stage-email-b',    variable: 'E2E_TEST_EMAIL_B'),
-            string(credentialsId: 'tesbo-e2e-stage-password-b', variable: 'E2E_TEST_PASSWORD_B'),
-          ]
-          if (params.USE_DATABASE) {
-            creds << string(credentialsId: 'tesbo-e2e-stage-database-url', variable: 'E2E_DATABASE_URL')
-          }
+        // A test failure and an inability to test are different outcomes and should not look the
+        // same on the dashboard. Tests that ran and failed leave the build UNSTABLE (yellow) and the
+        // JUnit trend explains why; a harness problem — image pull, global setup, a 0-test selection
+        // — leaves it FAILURE (red), because then there is no result to read.
+        catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE', message: 'e2e tests failed against stage') {
+          sh '''
+            set -eu
+            echo "==> ${RUNNER_IMAGE}: $E2E_SPECS at ${E2E_WORKERS} workers against ${WEB_BASE_URL}"
 
-          withCredentials(creds) {
-            // scripts/e2e-ci.sh does the rest: validates the inputs, refuses a production-looking
-            // host, refuses a 0-test selection, installs Chromium, announces the count, and exits
-            // non-zero on any failure.
-            sh "scripts/e2e-ci.sh ${params.SPECS}"
-          }
+            # --ipc=host is Playwright's own recommendation: Chromium's default 64MB /dev/shm inside a
+            # container makes tabs crash under parallel load, which reads as random test flake.
+            docker run --rm --ipc=host \\
+              --env-file "$WORKSPACE/.e2e-db.env" \\
+              -e API_BASE_URL -e WEB_BASE_URL \\
+              -e E2E_SPECS -e E2E_WORKERS -e E2E_DB_TRANSPORT -e E2E_SKIP_BROWSER_INSTALL \\
+              -v "$WORKSPACE:/work" \\
+              -w /work \\
+              "$RUNNER_IMAGE" \\
+              scripts/e2e-ci.sh
+          '''
         }
       }
     }
@@ -127,28 +232,39 @@ pipeline {
 
   post {
     always {
-      // allowEmptyResults so an early failure (global setup, a bad selection) reports as a build
-      // failure with readable console output, rather than being masked by "no test results found".
-      junit allowEmptyResults: true, testResults: 'e2e/.run-logs/junit.xml'
+      // The connection string must not survive the build, in the workspace or in an artifact.
+      sh 'rm -f "$WORKSPACE/.e2e-db.env" || true'
+
+      // allowEmptyResults so that a failure before the first test — preflight, global setup, a bad
+      // selection — reports as a red build with a readable console log, rather than being buried
+      // under "no test results found". keepLongStdio keeps each failure's Playwright output attached
+      // to the test in the trend, which is what makes a month of history worth having.
+      junit allowEmptyResults: true, keepLongStdio: true, testResults: 'e2e/.run-logs/junit.xml'
 
       publishHTML(target: [
-        reportDir:            'e2e/playwright-report',
-        reportFiles:          'index.html',
-        reportName:           'Playwright report',
-        keepAll:              true,
+        reportDir:             'e2e/playwright-report',
+        reportFiles:           'index.html',
+        reportName:            'Playwright report',
+        keepAll:               true,
         alwaysLinkToLastBuild: true,
-        allowMissing:         true
+        allowMissing:          true
       ])
 
-      // Traces and screenshots for whatever failed. Capped, because a UI-heavy failure can produce
-      // a lot of trace zips and these are diagnostic aids, not artefacts worth keeping forever.
+      // Traces and screenshots for whatever failed, plus the console log. Diagnostic aids with a
+      // short half-life, which is why artifactNumToKeepStr above rotates them faster than the results.
       archiveArtifacts artifacts: 'e2e/.run-logs/*.log, e2e/test-results/**/trace.zip, e2e/test-results/**/*.png',
                        allowEmptyArchive: true,
                        fingerprint: false
     }
+    unstable {
+      echo "e2e FAILED against stage. Open 'Playwright report' for the failing tests. Before filing a " +
+           "product bug, check the two stage-only traps in e2e/regression/README.md: the BetterBugs " +
+           "recorder SDK adds a second input[type=file] that breaks strict-mode locators, and tests " +
+           "marked test.fail() are EXPECTED to fail until the ticket they cite ships."
+    }
     failure {
-      echo "e2e FAILED against ${params.TARGET_ENV}. Open the Playwright report for the failing tests, " +
-           "and note that tests marked test.fail() are EXPECTED to fail — see e2e/regression/README.md."
+      echo "e2e could not complete against stage — this is a harness or environment failure, not a " +
+           "test result. Check the Preflight and Stage database stages first."
     }
   }
 }

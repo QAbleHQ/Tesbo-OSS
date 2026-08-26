@@ -15,8 +15,10 @@
 #   Required:
 #     API_BASE_URL          https://api-app-stage.tesbo.io
 #     WEB_BASE_URL          https://app-stage.tesbo.io
-#     E2E_TEST_EMAIL        account A — must already exist on the target, or E2E_DATABASE_URL must be
-#     E2E_TEST_PASSWORD     set so global-setup can create it
+#
+#   Required ONLY when E2E_DATABASE_URL is absent (with it, the suite provisions these itself):
+#     E2E_TEST_EMAIL        account A — must already exist on the target
+#     E2E_TEST_PASSWORD
 #
 #   Strongly recommended:
 #     E2E_DATABASE_URL      the target environment's own DATABASE_URL. Without it every spec that
@@ -45,8 +47,15 @@ die() { echo "error: $*" >&2; exit 1; }
 # ─── Inputs ──────────────────────────────────────────────────────────────────
 : "${API_BASE_URL:?set API_BASE_URL to the API origin of the target environment}"
 : "${WEB_BASE_URL:?set WEB_BASE_URL to the web origin of the target environment}"
-: "${E2E_TEST_EMAIL:?set E2E_TEST_EMAIL — account A must exist on the target, or set E2E_DATABASE_URL so it can be created}"
-: "${E2E_TEST_PASSWORD:?set E2E_TEST_PASSWORD}"
+# Account A is only an INPUT when there is no database to build it from. With E2E_DATABASE_URL set,
+# global-setup seeds every tenant it needs — account A, account B and the five sacrificial ones —
+# from the deterministic identities in utils/env.ts, so demanding them here would force a CI job to
+# carry credentials for data the framework already owns. Without a database they cannot be created,
+# and a missing account A is then a fatal misconfiguration rather than a detail.
+if [ -z "${E2E_DATABASE_URL:-}" ]; then
+  : "${E2E_TEST_EMAIL:?no E2E_DATABASE_URL, so account A cannot be provisioned — set E2E_TEST_EMAIL to an account that already exists on the target, or supply E2E_DATABASE_URL and let the suite create it}"
+  : "${E2E_TEST_PASSWORD:?set E2E_TEST_PASSWORD}"
+fi
 
 api_host="${API_BASE_URL#*://}"; api_host="${api_host%%/*}"
 web_host="${WEB_BASE_URL#*://}"; web_host="${web_host%%/*}"
@@ -96,7 +105,15 @@ cd "$E2E"
 [ -d node_modules ] || npm ci --no-audit --no-fund
 # Chromium only — the ui project is the sole browser project (playwright.config.ts). --with-deps is
 # what pulls the shared libraries a bare container lacks.
-npx playwright install --with-deps chromium
+#
+# The official mcr.microsoft.com/playwright image already carries both, pinned to the same Playwright
+# version this lockfile installs, so re-running the installer there spends minutes on an apt-get that
+# can only fail — and on a stale apt mirror it fails the whole job before a test has run.
+if [ "${E2E_SKIP_BROWSER_INSTALL:-no}" = "yes" ]; then
+  echo "browser install skipped — E2E_SKIP_BROWSER_INSTALL=yes (the runner image is expected to ship them)"
+else
+  npx playwright install --with-deps chromium
+fi
 
 # ─── Selection ───────────────────────────────────────────────────────────────
 if [ "$#" -gt 0 ]; then
@@ -109,21 +126,46 @@ fi
 SELECTED="$(npx playwright test "${SPECS[@]}" --list 2>/dev/null | tail -1 || true)"
 TOTAL="$(npx playwright test --list 2>/dev/null | tail -1 || true)"
 
+# Can the selection be counted at all yet?
+#
+# `--list` does not run globalSetup, and a great many specs read .auth/context.json at module scope
+# (api/bugs.spec.ts:5, api/authorization.spec.ts:22, …). So on a workspace that has never run the
+# suite, collection throws for every one of those files and --list reports the literal
+# "Total: 0 tests in 0 files" with exit 1.
+#
+# A real run is not affected: globalSetup runs BEFORE the spec files are loaded and writes those
+# context files first, so the run bootstraps itself. Treating this zero as a failed selection would
+# therefore kill the first build on every fresh CI agent with a message about a mistyped path — the
+# opposite of what happened. Only a zero on a workspace that HAS been bootstrapped is real evidence
+# of a bad selection.
+COUNTABLE=yes
+[ -f .auth/context.json ] || COUNTABLE=no
+
 echo "─────────────────────────────────────────────────────────────"
 echo "Target:    $WEB_BASE_URL (api $API_BASE_URL)"
-echo "Account A: $E2E_TEST_EMAIL"
+echo "Account A: ${E2E_TEST_EMAIL:-<provisioned by the suite from utils/env.ts defaults>}"
 echo "Database:  $DB_NOTE"
 echo "Specs:     ${SPECS[*]}"
-echo "Selection: $SELECTED"
-echo "Suite:     $TOTAL"
+if [ "$COUNTABLE" = "yes" ]; then
+  echo "Selection: $SELECTED"
+  echo "Suite:     $TOTAL"
+else
+  echo "Selection: not countable yet — e2e/.auth/context.json does not exist, so --list cannot"
+  echo "           collect the specs that read it at import time. globalSetup writes it before the"
+  echo "           spec files load, so the run itself is unaffected; the JUnit report carries the"
+  echo "           real counts, and the next run on this workspace will announce them up front."
+fi
 echo "Workers:   $WORKERS"
 echo "─────────────────────────────────────────────────────────────"
 
 # A selection that resolved to nothing is a broken job definition, not a green run — a mistyped path
-# would otherwise report success having tested nothing at all.
-case "$SELECTED" in
-  *"Total: 0 "*|"") die "selection resolved to 0 tests. That is a failed selection, not a pass." ;;
-esac
+# would otherwise report success having tested nothing at all. Only enforced where the count means
+# something; see COUNTABLE above.
+if [ "$COUNTABLE" = "yes" ]; then
+  case "$SELECTED" in
+    *"Total: 0 "*|"") die "selection resolved to 0 tests. That is a failed selection, not a pass." ;;
+  esac
+fi
 
 # ─── Run ─────────────────────────────────────────────────────────────────────
 mkdir -p .run-logs
