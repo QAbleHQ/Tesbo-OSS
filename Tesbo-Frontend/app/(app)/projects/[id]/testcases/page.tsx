@@ -954,7 +954,7 @@ export default function TestCasesPage() {
                 onClick={() => setIsImportModalOpen(true)}
                 className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
               >
-                <IconUpload size={13} stroke={1.75} />
+                <IconDownload size={13} stroke={1.75} />
                 Import
               </button>
               <div ref={importExportMenuRef} className="relative">
@@ -963,7 +963,7 @@ export default function TestCasesPage() {
                   onClick={() => setIsImportExportMenuOpen((v) => !v)}
                   className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
                 >
-                  <IconDownload size={13} stroke={1.75} />
+                  <IconUpload size={13} stroke={1.75} />
                   Export
                   <IconChevronDown size={12} stroke={1.75} className="text-[var(--muted-soft)]" />
                 </button>
@@ -976,7 +976,7 @@ export default function TestCasesPage() {
                       onClick={() => setIsImportExportMenuOpen(false)}
                       className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
                     >
-                      <IconDownload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+                      <IconUpload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
                       Export as CSV
                     </a>
                     <a
@@ -986,7 +986,7 @@ export default function TestCasesPage() {
                       onClick={() => setIsImportExportMenuOpen(false)}
                       className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
                     >
-                      <IconDownload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+                      <IconUpload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
                       Export as Excel
                     </a>
                     <div className="my-1 border-t border-[var(--border)]" />
