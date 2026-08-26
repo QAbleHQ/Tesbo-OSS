@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   authMe,
   closeZyraTask,
@@ -77,6 +77,7 @@ export default function ZyraTaskDetailPage() {
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const pollInFlightRef = useRef(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -108,6 +109,33 @@ export default function ZyraTaskDetailPage() {
       else void loadData();
     });
   }, [loadData, router]);
+
+  // Lighter than loadData (skips suites/Jira) — just re-reads this task so Zyra finishing (or
+  // failing) generation server-side shows up here without a manual reload.
+  const refreshTask = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
+    try {
+      const taskData = await getZyraTask(projectId, taskId);
+      setTask(taskData);
+      setSelectedDrafts((prev) => prev.filter((index) => index < taskData.drafts.length));
+    } catch {
+      // A missed poll tick isn't worth surfacing; the next one usually succeeds.
+    } finally {
+      pollInFlightRef.current = false;
+    }
+  }, [projectId, taskId]);
+
+  useEffect(() => {
+    if (!task) return;
+    const status = normalizeStatus(task.taskStatus);
+    if (status !== "todo" && status !== "in_progress") return;
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void refreshTask();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [task, refreshTask]);
 
   function toggleDraft(index: number) {
     setSelectedDrafts((prev) => prev.includes(index) ? prev.filter((item) => item !== index) : [...prev, index]);
@@ -244,6 +272,11 @@ export default function ZyraTaskDetailPage() {
   }
 
   const done = normalizeStatus(task.taskStatus) === "done";
+  const taskStatusNow = normalizeStatus(task.taskStatus);
+  // Mirrors the backend guard in zyraFeedback: feedback only makes sense once there's something
+  // to review, or to retry after a failure. Disabling it here for todo/in_progress avoids a
+  // pointless round trip that the server would reject with a 409 anyway.
+  const canGiveFeedback = taskStatusNow === "in_review" || taskStatusNow === "failed";
   const allDraftsSelected = task.drafts.length > 0 && selectedDrafts.length === task.drafts.length;
   const tabItems: Array<{ key: DetailTab; label: string; count?: number }> = [
     { key: "testcases", label: "Generated Testcases", count: task.drafts.length },
@@ -422,7 +455,14 @@ export default function ZyraTaskDetailPage() {
                 )}
               </Field>
             )}
-            <Button variant="secondary" onClick={handleFeedback} disabled={working || done || !feedback.trim()}>{working ? "Sending..." : "Send feedback"}</Button>
+            {!canGiveFeedback && (
+              <p className="text-xs text-[var(--muted)]">
+                {taskStatusNow === "in_progress" || taskStatusNow === "todo"
+                  ? "Feedback opens up once Zyra finishes generating drafts for this task."
+                  : "Feedback isn't available once a task is closed."}
+              </p>
+            )}
+            <Button variant="secondary" onClick={handleFeedback} disabled={working || !canGiveFeedback || !feedback.trim()}>{working ? "Sending..." : "Send feedback"}</Button>
           </Card>
         </div>
       )}

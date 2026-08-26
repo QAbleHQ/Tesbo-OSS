@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconSparkles } from "@tabler/icons-react";
 import {
   authMe,
@@ -49,6 +49,9 @@ export default function ZyraTasksPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [quickViewTask, setQuickViewTask] = useState<ZyraTask | null>(null);
+  // Guards the poll loop below against piling up requests if one tick is still in flight
+  // (a slow response, or the tab waking from sleep) when the next interval fires.
+  const pollInFlightRef = useRef(false);
 
   function handleTaskUpdated(updated: ZyraTask) {
     setQuickViewTask(updated);
@@ -85,6 +88,35 @@ export default function ZyraTasksPage() {
       else void loadData();
     });
   }, [loadData, router]);
+
+  // Refreshes just the task list (cheaper than loadData, which also re-pulls Jira/knowledge-base
+  // data). Zyra picks up and finishes tasks asynchronously server-side, so without this the board
+  // only ever reflected that after a manual reload.
+  const refreshTasks = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
+    try {
+      const agentState = await getZyraAgent(projectId);
+      setState((prev) => (prev ? { ...prev, tasks: agentState.tasks, testcasesCreated: agentState.testcasesCreated, tokenUsage: agentState.tokenUsage, agent: agentState.agent } : agentState));
+      setQuickViewTask((prev) => (prev ? agentState.tasks.find((t) => t.id === prev.id) || prev : prev));
+    } catch {
+      // A missed poll tick isn't worth surfacing as an error — the row itself is the source of
+      // truth, and the next tick usually succeeds.
+    } finally {
+      pollInFlightRef.current = false;
+    }
+  }, [projectId]);
+
+  const hasActiveTask = (state?.tasks || []).some((task) => ["todo", "in_progress"].includes(normalizeStatus(task.taskStatus)));
+
+  useEffect(() => {
+    if (!hasActiveTask) return;
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void refreshTasks();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [hasActiveTask, refreshTasks]);
 
   const tasksByColumn = useMemo(() => {
     const grouped = new Map<string, ZyraTask[]>();

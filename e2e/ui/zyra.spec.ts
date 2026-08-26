@@ -531,4 +531,37 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByRole("heading", { name: "Zyra task", level: 1 })).toBeVisible();
     await expect(page.getByRole("cell", { name: "Sign in with a valid password" })).toBeVisible();
   });
+
+  // ─── Real-time status updates ───────────────────────────────────────────────
+
+  test("ZYU-24 the task board reflects Zyra finishing a task without a page reload", async ({ browser }) => {
+    /*
+     * Regression test for "task status is not updated in real time". Before this fix, the board
+     * fetched task state once on mount and never again — a status change made by the server-side
+     * generation job (or by another tab) only appeared after the user manually reloaded. The board
+     * now polls while any task is todo/in_progress. Simulate the job finishing by writing the
+     * status directly (the real job isn't exercisable here — no AI provider is called, per the
+     * file header) and assert the change lands without ever calling page.reload().
+     */
+    const taskId = seedTask({ status: "in_progress" });
+    const page = await open(browser, "/agents/tasks");
+    await expect(page.getByText("in progress", { exact: true })).toBeVisible();
+
+    exec(`UPDATE ai_generation_requests SET task_status = 'in_review' WHERE id = ${literal(taskId)};`);
+
+    await expect(page.getByText("in review", { exact: true })).toBeVisible({ timeout: 9000 });
+    await expect(page.getByText("in progress", { exact: true })).toHaveCount(0);
+  });
+
+  test("ZYU-25 the task detail page reflects Zyra finishing a task without a page reload", async ({ browser }) => {
+    const taskId = seedTask({ status: "todo" });
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+    await expect(page.getByText("todo", { exact: true })).toBeVisible();
+
+    exec(`UPDATE ai_generation_requests SET task_status = 'failed' WHERE id = ${literal(taskId)};`);
+    seedFailureActivity(taskId, "E2E simulated provider timeout while this page was open");
+
+    await expect(page.getByText("failed", { exact: true })).toBeVisible({ timeout: 9000 });
+    await expect(page.getByText("E2E simulated provider timeout while this page was open")).toBeVisible();
+  });
 });

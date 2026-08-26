@@ -541,7 +541,12 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
   });
 
   test("ZYR-A-21 feedback on a task is recorded against it", async () => {
-    const taskId = seedTask();
+    // Explicitly 'in_review': zyraFeedback now guards on the task's current status (ZYR-A-34), and
+    // the suite's default seed status ("awaiting_review") is not one of the two statuses that
+    // guard accepts. Seeding the real status keeps this test on the "task legitimately can take
+    // feedback, but no AI key is configured" path its comment describes, rather than accidentally
+    // exercising the new status guard instead.
+    const taskId = seedTask({ status: "in_review" });
     const res = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/feedback`), {
       data: { feedback: "Cover the locked-account case too" },
       failOnStatusCode: false,
@@ -921,5 +926,99 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
     });
     expect(closed.status(), `closing a failed task — ${await closed.text()}`).toBe(201);
     expect(scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe("done");
+  });
+
+  // ─── Status races (fix for "task status is not updated in real time / async generation
+  // failure can override user actions") ───────────────────────────────────────────────
+
+  test("ZYR-A-34 feedback is refused while a task is todo, in_progress, or done — not a status Zyra can regenerate from", async () => {
+    /*
+     * Regression test. zyraFeedback used to move any task straight to 'todo' and start
+     * regenerating, whatever its current status. That let feedback race processZyraTask (both
+     * writing task_status for the same row with no coordination) and let feedback be submitted on
+     * a task that had never been generated, or was already closed. It now requires the task to be
+     * 'in_review' or 'failed' before accepting feedback.
+     */
+    for (const status of ["todo", "in_progress", "done"]) {
+      const taskId = seedTask({ status });
+      const res = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/feedback`), {
+        data: { feedback: "Cover the locked-account case too" },
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `feedback on a '${status}' task answered ${res.status()}: ${await res.text()}`).toBe(409);
+      const body = await res.json();
+      expect(body.error, `feedback on a '${status}' task`).toContain(status);
+      // Refused before any write — the row must be untouched, not just refused with a stale echo.
+      expect(scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe(status);
+      expect(scalar(`SELECT coalesce(feedback, '') FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe("");
+    }
+  });
+
+  test("ZYR-A-35 feedback on an in_review or failed task passes the status guard (fails later only for lack of an AI key)", async () => {
+    // Proves the guard discriminates correctly: these two statuses must NOT get the "can't accept
+    // feedback right now" conflict — they should reach the (pre-existing, allocation-missing)
+    // "Zyra is inactive" refusal instead, same as ZYR-A-21.
+    for (const status of ["in_review", "failed"]) {
+      const taskId = seedTask({ status });
+      const res = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/feedback`), {
+        data: { feedback: "Cover the locked-account case too" },
+        failOnStatusCode: false,
+      });
+      expect(res.status(), `feedback on a '${status}' task — ${await res.text()}`).not.toBe(409);
+      expect(res.status(), `feedback on a '${status}' task — ${await res.text()}`).toBeLessThan(500);
+    }
+  });
+
+  test("ZYR-A-36 saving is refused while a task is still generating", async () => {
+    /*
+     * Regression test. zyraSave used to accept a save for any status, including 'in_progress' —
+     * before processZyraTask has written any drafts, or while it is about to replace them. The
+     * client's own selectedDraftIndexes could reference drafts that no longer match the row by
+     * the time this runs. It now refuses that status outright.
+     */
+    const taskId = seedTask({ status: "in_progress" });
+    const res = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/save`), {
+      data: { selectedDraftIndexes: [0] },
+      failOnStatusCode: false,
+    });
+    expect(res.status(), `saving an in-progress task — ${await res.text()}`).toBe(409);
+    const body = await res.json();
+    expect(body.error).toContain("generating");
+    expect(scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe(
+      "in_progress",
+    );
+  });
+
+  test("ZYR-A-37 closing an already-closed task is a true no-op, not a duplicate activity entry", async () => {
+    const taskId = seedTask();
+    const first = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`), { data: {}, failOnStatusCode: false });
+    expect(first.status()).toBe(201);
+
+    const second = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`), { data: {}, failOnStatusCode: false });
+    expect(second.status(), `closing an already-closed task — ${await second.text()}`).toBe(201);
+
+    const closedEntries = JSON.parse(
+      scalar(`SELECT activity_log::text FROM ai_generation_requests WHERE id = ${literal(taskId)};`),
+    ).filter((entry: { title: string }) => entry.title === "Closed task");
+    expect(closedEntries.length, "closing twice must not double the activity log").toBe(1);
+  });
+
+  test("ZYR-A-38 two concurrent close requests for the same task don't race each other into a bad state", async () => {
+    // Two tabs / a double-click before the button disables — both requests reach the server before
+    // either commits. Every writer in this flow guards its UPDATE with the row's current status
+    // rather than writing blindly, so this must land on exactly one recorded close, not two, and
+    // never a 500.
+    const taskId = seedTask();
+    const [a, b] = await Promise.all([
+      asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`), { data: {}, failOnStatusCode: false }),
+      asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`), { data: {}, failOnStatusCode: false }),
+    ]);
+    expect(a.status(), `first concurrent close — ${await a.text()}`).toBeLessThan(500);
+    expect(b.status(), `second concurrent close — ${await b.text()}`).toBeLessThan(500);
+    expect(scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe("done");
+    const closedEntries = JSON.parse(
+      scalar(`SELECT activity_log::text FROM ai_generation_requests WHERE id = ${literal(taskId)};`),
+    ).filter((entry: { title: string }) => entry.title === "Closed task");
+    expect(closedEntries.length, "a race between two closes must not be recorded twice").toBe(1);
   });
 });

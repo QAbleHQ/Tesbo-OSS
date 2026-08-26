@@ -9893,32 +9893,73 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  private async processZyraTask(projectId: string, taskId: string, options: { userId: string; knowledgeItemIds?: string[] }) {
-    const taskRes = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
-    const task = taskRes.rows[0];
-    if (!task) return;
-    const allocation = await this.db.query(
-      `SELECT k.provider, k.default_model, k.api_key, k.base_url, k.auth_header_name, k.auth_scheme
-       FROM project_ai_key_allocations a
-       JOIN workspace_ai_keys k ON k.id = a.workspace_ai_key_id
-       WHERE a.project_id = $1 AND k.is_active = true`,
-      [projectId]
+  // Records a terminal failure, but only if the row is still where processZyraTask left it
+  // ('todo' if it never even got to the start UPDATE below, 'in_progress' otherwise). If the
+  // user already closed/saved/resubmitted the task in the meantime, that action already moved
+  // task_status past this point and must win — we only append a note to the activity log so the
+  // failure isn't lost, without resurrecting or overwriting whatever the user set.
+  private async markZyraTaskFailed(projectId: string, taskId: string, detail: string) {
+    const failedAt = new Date().toISOString();
+    const activity = [{ actor: "agent", stage: "failed", title: "Generation failed", detail, createdAt: failedAt }];
+    const res = await this.db.query(
+      `UPDATE ai_generation_requests SET task_status = 'failed', activity_log = activity_log || $3::jsonb, updated_at = now()
+       WHERE id = $1 AND project_id = $2 AND task_status IN ('todo', 'in_progress') RETURNING id`,
+      [taskId, projectId, JSON.stringify(activity)]
     );
-    if (!allocation.rows[0]) return;
-    const now = new Date().toISOString();
-    const startedActivity = [{
-      actor: "agent",
-      stage: "in_progress",
-      title: "Picked up task",
-      detail: "Zyra moved this task from Todo to In Progress.",
-      createdAt: now
-    }];
-    await this.db.query(
-      "UPDATE ai_generation_requests SET task_status = 'in_progress', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
-      [taskId, projectId, JSON.stringify(startedActivity)]
-    );
+    if (res.rowCount === 0) {
+      const note = [{
+        actor: "agent",
+        stage: "failed",
+        title: "Generation failed after task was already updated",
+        detail: `${detail} (the task had already moved on by the time this was recorded, so its status was left as-is)`,
+        createdAt: failedAt
+      }];
+      await this.db.query(
+        "UPDATE ai_generation_requests SET activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
+        [taskId, projectId, JSON.stringify(note)]
+      );
+    }
+  }
 
+  private async processZyraTask(projectId: string, taskId: string, options: { userId: string; knowledgeItemIds?: string[] }) {
     try {
+      const taskRes = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
+      const task = taskRes.rows[0];
+      if (!task) return;
+      const allocation = await this.db.query(
+        `SELECT k.provider, k.default_model, k.api_key, k.base_url, k.auth_header_name, k.auth_scheme
+         FROM project_ai_key_allocations a
+         JOIN workspace_ai_keys k ON k.id = a.workspace_ai_key_id
+         WHERE a.project_id = $1 AND k.is_active = true`,
+        [projectId]
+      );
+      if (!allocation.rows[0]) {
+        // aiGenerate already checks this before inserting the row, so this only fires if the
+        // allocation was revoked in the window between that check and this fire-and-forget job
+        // running. It used to just `return` here, leaving the task stuck at 'todo' forever with
+        // no error and no trace — indistinguishable from a task that was never picked up.
+        await this.markZyraTaskFailed(projectId, taskId, "No active AI provider key is allocated to this project.");
+        return;
+      }
+      const now = new Date().toISOString();
+      const startedActivity = [{
+        actor: "agent",
+        stage: "in_progress",
+        title: "Picked up task",
+        detail: "Zyra moved this task from Todo to In Progress.",
+        createdAt: now
+      }];
+      const startRes = await this.db.query(
+        `UPDATE ai_generation_requests SET task_status = 'in_progress', activity_log = activity_log || $3::jsonb, updated_at = now()
+         WHERE id = $1 AND project_id = $2 AND task_status = 'todo' RETURNING id`,
+        [taskId, projectId, JSON.stringify(startedActivity)]
+      );
+      if (startRes.rowCount === 0) {
+        // The task was already closed/updated by the user before Zyra could pick it up — don't
+        // spend a provider call generating drafts nobody will see.
+        return;
+      }
+
       const story = String(task.user_story || "");
       const context = String(task.context || task.custom_prompt || "");
       const acceptanceCriteria = String(task.acceptance_criteria || "");
@@ -9971,15 +10012,34 @@ export class LegacyService implements OnModuleInit {
         { actor: "agent", stage: "in_progress", title: "Generation plan", detail: this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length }), createdAt: finishedAt },
         { actor: "agent", stage: "in_review", title: "Generated testcase drafts", detail: `Generated ${drafts.length} testcase draft(s) with ${provider}${aiResult.requestId ? ` request ${aiResult.requestId}` : ""}. Cached input tokens: ${aiResult.usage.cached}.`, createdAt: finishedAt }
       ];
-      await this.db.query(
+      const successRes = await this.db.query(
         `UPDATE ai_generation_requests
          SET generated_count = $3, generated_payload = $4::jsonb,
              token_input = $5, token_output = $6, token_total = $7,
              source_summary = $8::jsonb, activity_log = activity_log || $9::jsonb,
              task_status = 'in_review', updated_at = now()
-         WHERE id = $1 AND project_id = $2`,
+         WHERE id = $1 AND project_id = $2 AND task_status = 'in_progress' RETURNING id`,
         [taskId, projectId, drafts.length, JSON.stringify(drafts), tokenInput, tokenOutput, tokenInput + tokenOutput, JSON.stringify(sourceSummary), JSON.stringify(activity)]
       );
+      if (successRes.rowCount === 0) {
+        // The user closed/saved/resubmitted the task while generation was still running. Their
+        // action already reflects the current truth, so don't resurrect it into 'in_review' or
+        // silently replace generated_payload out from under whatever they already accepted —
+        // just leave a trace that the drafts were produced but dropped.
+        const droppedAt = new Date().toISOString();
+        const note = [{
+          actor: "agent",
+          stage: "in_review",
+          title: "Generated drafts discarded",
+          detail: `Zyra finished generating ${drafts.length} testcase draft(s), but the task had already been updated in the meantime, so these drafts were not applied.`,
+          createdAt: droppedAt
+        }];
+        await this.db.query(
+          "UPDATE ai_generation_requests SET activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
+          [taskId, projectId, JSON.stringify(note)]
+        );
+        return;
+      }
       await this.rememberZyraTurn({
         projectId,
         userId: options.userId,
@@ -9990,7 +10050,6 @@ export class LegacyService implements OnModuleInit {
         outcome: `Generated ${drafts.length} testcase draft(s) using ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), and ${linear.length} Linear ticket(s). Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length })}`
       });
     } catch (error) {
-      const failedAt = new Date().toISOString();
       // Nest builds HttpExceptions from an object payload, so `error.message` is the generic
       // status text ("Bad Request Exception") and the real cause — provider status, invalid
       // JSON, revoked key — is only in getResponse(). Reading `.message` here made every
@@ -10006,16 +10065,13 @@ export class LegacyService implements OnModuleInit {
         ? String((payload as Record<string, unknown>).detail || "")
         : "";
       const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
-      // Nothing logged this before, so a failed task left no server-side trace at all.
       this.logger.error(`Zyra task ${taskId} (project ${projectId}) failed: ${detail}`, error instanceof Error ? error.stack : undefined);
       // task_status used to revert to 'todo' here — identical to a task that was never started,
       // so a failed generation was indistinguishable from a queued one anywhere the Kanban board
       // reads task_status. 'failed' is a dedicated terminal state the UI can badge distinctly.
-      const activity = [{ actor: "agent", stage: "failed", title: "Generation failed", detail, createdAt: failedAt }];
-      await this.db.query(
-        "UPDATE ai_generation_requests SET task_status = 'failed', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
-        [taskId, projectId, JSON.stringify(activity)]
-      );
+      // markZyraTaskFailed only applies it if the row is still where this job left it (see the
+      // comment on that method) — a user action that already moved the task on wins instead.
+      await this.markZyraTaskFailed(projectId, taskId, detail);
     }
   }
 
@@ -10057,6 +10113,15 @@ export class LegacyService implements OnModuleInit {
     if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
+    const statusBeforeFeedback = String(existing.rows[0].task_status || "");
+    // Feedback only makes sense once there is something to review, or to retry after a failure.
+    // Without this guard, feedback could be sent while processZyraTask was still mid-flight for
+    // the same row — both would then race to write task_status/generated_payload for the same
+    // task, and the "todo" this endpoint sets below could stomp the running job's own 'in_progress'
+    // write (or vice versa) with neither side aware of the other.
+    if (!["in_review", "failed"].includes(statusBeforeFeedback)) {
+      throw new ConflictException({ error: `This task is currently "${statusBeforeFeedback}" and can't accept feedback right now. Wait for generation to finish first.` });
+    }
     const feedbackText = String(body.feedback || "").trim();
     const referenceNote = String(body.referenceNote || "").trim();
     const additionalJiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String).filter(Boolean);
@@ -10086,10 +10151,17 @@ export class LegacyService implements OnModuleInit {
       ].filter(Boolean).join("\n"),
       createdAt: new Date().toISOString()
     }];
-    await this.db.query(
-      "UPDATE ai_generation_requests SET task_status = 'todo', feedback = $3, activity_log = activity_log || $4::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
-      [taskId, projectId, feedback, JSON.stringify(feedbackActivity)]
+    const claimRes = await this.db.query(
+      `UPDATE ai_generation_requests SET task_status = 'todo', feedback = $3, activity_log = activity_log || $4::jsonb, updated_at = now()
+       WHERE id = $1 AND project_id = $2 AND task_status = $5 RETURNING id`,
+      [taskId, projectId, feedback, JSON.stringify(feedbackActivity), statusBeforeFeedback]
     );
+    if (claimRes.rowCount === 0) {
+      // Lost the race: something else (another feedback submission, a close, a save) changed the
+      // task's status between the read above and this write. Reject rather than blindly proceeding
+      // against a row that has already moved on.
+      throw new ConflictException({ error: "This task was just updated by another action. Reload and try again." });
+    }
     const story = existing.rows[0].user_story;
     const context = existing.rows[0].context || existing.rows[0].custom_prompt || "";
     const acceptanceCriteria = existing.rows[0].acceptance_criteria || "";
@@ -10139,7 +10211,7 @@ export class LegacyService implements OnModuleInit {
              token_input = token_input + $6, token_output = token_output + $7, token_total = token_total + $8,
              activity_log = activity_log || $9::jsonb, source_summary = $10::jsonb, jira_issue_keys = $11::jsonb,
              linear_issue_keys = $12::jsonb, task_status = 'in_review', updated_at = now()
-         WHERE id = $1 AND project_id = $2
+         WHERE id = $1 AND project_id = $2 AND task_status = 'todo'
          RETURNING *`,
         [
           taskId,
@@ -10156,23 +10228,45 @@ export class LegacyService implements OnModuleInit {
           JSON.stringify(linearIssueKeys)
         ]
       );
-      await this.rememberZyraTurn({
-        projectId,
-        userId: uid,
-        provider,
-        model,
-        key: allocation.rows[0],
-        userMessage: `${story}\nReviewer feedback: ${feedbackText}`,
-        outcome: [
-          `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
-          referenceNote ? `Reviewer references: ${referenceNote}` : "",
-          additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
-          additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
-        ].filter(Boolean).join(" ")
-      });
+      let responseRow = res.rows[0];
+      if (!responseRow) {
+        // Something else (a close/save from another tab) changed the task's status while the
+        // provider call was in flight. The caller's own request still succeeded — they should
+        // still see the drafts they asked for — but don't resurrect the row into 'in_review' out
+        // from under whatever the concurrent action already set; just record that this happened
+        // and return the task's current, true state.
+        const droppedAt = new Date().toISOString();
+        const note = [{
+          actor: "agent",
+          stage: "in_review",
+          title: "Regenerated drafts discarded",
+          detail: `Zyra regenerated ${aiResult.drafts.length} testcase draft(s) after this feedback, but the task had already been updated elsewhere in the meantime, so the regenerated drafts were not applied.`,
+          createdAt: droppedAt
+        }];
+        const fresh = await this.db.query(
+          "UPDATE ai_generation_requests SET activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2 RETURNING *",
+          [taskId, projectId, JSON.stringify(note)]
+        );
+        responseRow = fresh.rows[0];
+      } else {
+        await this.rememberZyraTurn({
+          projectId,
+          userId: uid,
+          provider,
+          model,
+          key: allocation.rows[0],
+          userMessage: `${story}\nReviewer feedback: ${feedbackText}`,
+          outcome: [
+            `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
+            referenceNote ? `Reviewer references: ${referenceNote}` : "",
+            additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
+            additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
+          ].filter(Boolean).join(" ")
+        });
+      }
       return {
         generationRequestId: taskId,
-        task: this.formatAiTask(res.rows[0]),
+        task: this.formatAiTask(responseRow),
         provider,
         drafts: aiResult.drafts,
         generatedCount: aiResult.drafts.length,
@@ -10184,7 +10278,6 @@ export class LegacyService implements OnModuleInit {
       // calling the provider, with no catch here at all. A provider failure threw straight to
       // the controller as a raw 500 and left the task stuck showing "Pending" with no record of
       // what happened, same failure mode as the initial-generation bug this mirrors.
-      const failedAt = new Date().toISOString();
       const summary = this.extractAiErrorMessage(error) || "Zyra failed to regenerate testcase drafts.";
       const payload = typeof (error as { getResponse?: () => unknown })?.getResponse === "function"
         ? (error as { getResponse: () => unknown }).getResponse()
@@ -10194,11 +10287,9 @@ export class LegacyService implements OnModuleInit {
         : "";
       const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
       this.logger.error(`Zyra task ${taskId} (project ${projectId}) feedback regeneration failed: ${detail}`, error instanceof Error ? error.stack : undefined);
-      const activity = [{ actor: "agent", stage: "failed", title: "Regeneration failed", detail, createdAt: failedAt }];
-      await this.db.query(
-        "UPDATE ai_generation_requests SET task_status = 'failed', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
-        [taskId, projectId, JSON.stringify(activity)]
-      );
+      // markZyraTaskFailed only marks 'failed' if the row is still 'todo'/'in_progress' — if a
+      // concurrent close/save already moved it on, that action wins and this only leaves a note.
+      await this.markZyraTaskFailed(projectId, taskId, detail);
       throw error;
     }
   }
@@ -10235,8 +10326,13 @@ export class LegacyService implements OnModuleInit {
   async zyraCloseTask(projectId: string, userId: string | null | undefined, taskId: string) {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
     if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
-    const existing = await this.db.query("SELECT id, task_status FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
+    const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
+    if (existing.rows[0].task_status === "done") {
+      // Already closed — a double-click or a second tab landing here after the first request
+      // already won should be a harmless no-op, not a duplicate "Closed task" activity entry.
+      return this.formatAiTask(existing.rows[0]);
+    }
     const now = new Date().toISOString();
     const activity = [{
       actor: "user",
@@ -10248,10 +10344,16 @@ export class LegacyService implements OnModuleInit {
     const res = await this.db.query(
       `UPDATE ai_generation_requests
        SET task_status = 'done', activity_log = activity_log || $3::jsonb, updated_at = now()
-       WHERE id = $1 AND project_id = $2
+       WHERE id = $1 AND project_id = $2 AND task_status <> 'done'
        RETURNING *`,
       [taskId, projectId, JSON.stringify(activity)]
     );
+    if (!res.rows[0]) {
+      // Lost a race to a concurrent close (two tabs, double-click before the button disabled) —
+      // return the current state instead of erroring on an action that already succeeded.
+      const fresh = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
+      return this.formatAiTask(fresh.rows[0]);
+    }
     return this.formatAiTask(res.rows[0]);
   }
 
@@ -10260,6 +10362,11 @@ export class LegacyService implements OnModuleInit {
     if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
+    if (existing.rows[0].task_status === "in_progress") {
+      // Nothing generated yet for this row — saving now would either save nothing or save
+      // drafts from a stale client-side cache that the still-running job is about to replace.
+      throw new ConflictException({ error: "Zyra is still generating drafts for this task. Wait for it to finish before saving." });
+    }
     let suiteId = body.suiteId || null;
     if (!suiteId && body.suiteName) {
       const suite = await this.createSuite(projectId, { name: body.suiteName });
