@@ -7,12 +7,15 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/**/*.test.js\""
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/**/*.test.js\"",
+    "clean": "rm -rf dist dist-test",
+    "prepublishOnly": "npm run clean && npm run build && npm test"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.42.0 <2.0.0"
@@ -30,5 +33,21 @@
     "playwright-reporter",
     "tesbo",
     "test-management"
-  ]
+  ],
+  "bin": {
+    "playwright-reporter": "dist/cli.js",
+    "tesbo-playwright": "dist/cli.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QAbleHQ/Tesbo-Test-Manager.git",
+    "directory": "sdk/playwright-reporter"
+  },
+  "homepage": "https://github.com/QAbleHQ/Tesbo-Test-Manager/tree/main/sdk/playwright-reporter#readme",
+  "bugs": {
+    "url": "https://github.com/QAbleHQ/Tesbo-Test-Manager/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }
