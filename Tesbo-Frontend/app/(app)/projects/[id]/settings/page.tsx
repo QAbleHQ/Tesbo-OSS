@@ -457,7 +457,7 @@ export default function ProjectSettingsPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
+                    className="cursor-pointer truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
@@ -490,7 +490,7 @@ export default function ProjectSettingsPage() {
                   key={tab.key}
                   type="button"
                   onClick={() => handleTabChange(tab.key)}
-                  className={`rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
+                  className={`cursor-pointer rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
                     activeTab === tab.key
                       ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
                       : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
@@ -812,7 +812,7 @@ export default function ProjectSettingsPage() {
                             onClick={() => setPendingMemberRemoval({ userId: member.userId, label: member.name || member.email })}
                             disabled={removingMemberId === member.userId}
                             title="Remove from project"
-                            className="inline-flex items-center justify-center rounded-md p-1.5 text-[var(--error-foreground)] transition-colors hover:bg-[var(--error-soft)] disabled:opacity-50"
+                            className="inline-flex cursor-pointer items-center justify-center rounded-md p-1.5 text-[var(--error-foreground)] transition-colors hover:bg-[var(--error-soft)] disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             <IconTrash size={15} />
                           </button>

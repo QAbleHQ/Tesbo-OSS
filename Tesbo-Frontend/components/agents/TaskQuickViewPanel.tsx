@@ -24,6 +24,18 @@ export function taskStatusTone(status: string): "neutral" | "info" | "success" |
   return "neutral";
 }
 
+const TASK_STATUS_LABELS: Record<string, string> = {
+  todo: "Pending",
+  in_progress: "In Progress",
+  in_review: "In Review",
+  done: "Done",
+};
+
+export function taskStatusLabel(status: string): string {
+  const normalized = normalizeTaskStatus(status);
+  return TASK_STATUS_LABELS[normalized] ?? normalized.replaceAll("_", " ");
+}
+
 function priorityTone(priority: string): "error" | "warning" | "confidenceHigh" | "neutral" {
   if (priority === "P0") return "error";
   if (priority === "P1") return "warning";
@@ -107,9 +119,10 @@ export default function TaskQuickViewPanel({ task, projectId, onClose, onTaskUpd
           <div className="min-w-0">
             <div className="mb-1.5 flex items-center gap-2">
               <span className="font-mono text-xs text-[var(--muted-soft)]">{task.jiraIssueKeys[0] || "—"}</span>
-              <StatusChip tone={taskStatusTone(task.taskStatus)}>{normalizeTaskStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
+              <StatusChip tone={taskStatusTone(task.taskStatus)}>{taskStatusLabel(task.taskStatus)}</StatusChip>
             </div>
             <h2 className="line-clamp-2 text-[15px] font-semibold leading-snug text-[var(--foreground)]">{task.userStory}</h2>
+            {task.context && <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--muted)]">{task.context}</p>}
           </div>
           <button
             type="button"

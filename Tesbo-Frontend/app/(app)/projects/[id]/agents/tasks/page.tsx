@@ -18,7 +18,7 @@ import {
 } from "@/lib/api";
 import { Button, Field, FieldLabel, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
-import TaskQuickViewPanel, { JIRA_BADGE_CLASS, normalizeTaskStatus as normalizeStatus, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
+import TaskQuickViewPanel, { JIRA_BADGE_CLASS, normalizeTaskStatus as normalizeStatus, taskStatusLabel, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
 
 const columns = [
   { key: "todo", label: "Pending", dot: "var(--muted-soft)" },
@@ -243,7 +243,7 @@ export default function ZyraTasksPage() {
                   <h2 className="line-clamp-2 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h2>
                   {task.context && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{task.context}</p>}
                 </div>
-                <div><StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip></div>
+                <div><StatusChip tone={tone(task.taskStatus)}>{taskStatusLabel(task.taskStatus)}</StatusChip></div>
                 <div className="flex flex-wrap gap-1.5">
                   {task.jiraIssueKeys.slice(0, 2).map((key) => (
                     <span key={key} className={JIRA_BADGE_CLASS}>{key}</span>
@@ -280,8 +280,9 @@ export default function ZyraTasksPage() {
                       onClick={() => setQuickViewTask(task)}
                       className={`block w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition-[opacity,border-color] hover:border-[var(--brand-primary)] ${isDone ? "opacity-75 hover:opacity-100" : ""}`}
                     >
-                      <StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
+                      <StatusChip tone={tone(task.taskStatus)}>{taskStatusLabel(task.taskStatus)}</StatusChip>
                       <h3 className="mt-2 line-clamp-3 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h3>
+                      {task.context && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{task.context}</p>}
                       {task.jiraIssueKeys.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {task.jiraIssueKeys.slice(0, 3).map((key) => (

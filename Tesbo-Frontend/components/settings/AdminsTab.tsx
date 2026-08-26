@@ -129,7 +129,7 @@ export default function AdminsTab() {
               type="button"
               onClick={handleAdd}
               disabled={adding || !email.trim()}
-              className="rounded-xl bg-[var(--brand-primary)] px-5 py-2.5 text-[14px] font-semibold text-white hover:bg-[var(--brand-hover)] transition-colors disabled:opacity-60 whitespace-nowrap"
+              className="cursor-pointer rounded-xl bg-[var(--brand-primary)] px-5 py-2.5 text-[14px] font-semibold text-white hover:bg-[var(--brand-hover)] transition-colors disabled:cursor-not-allowed disabled:opacity-60 whitespace-nowrap"
             >
               {adding ? "Adding..." : "Add Admin"}
             </button>
@@ -215,7 +215,7 @@ export default function AdminsTab() {
                   type="button"
                   onClick={() => handleRemove(admin.id)}
                   disabled={removingId === admin.id}
-                  className="rounded-xl border border-[var(--error)]/30 px-3 py-1.5 text-[13px] font-semibold text-[var(--error-foreground)] hover:bg-[var(--error-soft)] transition-colors disabled:opacity-60"
+                  className="cursor-pointer rounded-xl border border-[var(--error)]/30 px-3 py-1.5 text-[13px] font-semibold text-[var(--error-foreground)] hover:bg-[var(--error-soft)] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {removingId === admin.id ? "Removing..." : "Remove"}
                 </button>

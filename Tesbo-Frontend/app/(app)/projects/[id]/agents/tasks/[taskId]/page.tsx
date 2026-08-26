@@ -38,6 +38,18 @@ function tone(status: string): "neutral" | "info" | "success" | "warning" {
   return "neutral";
 }
 
+const TASK_STATUS_LABELS: Record<string, string> = {
+  todo: "Pending",
+  in_progress: "In Progress",
+  in_review: "In Review",
+  done: "Done",
+};
+
+function statusLabel(status: string): string {
+  const normalized = normalizeStatus(status);
+  return TASK_STATUS_LABELS[normalized] ?? normalized.replaceAll("_", " ");
+}
+
 function stepCount(stepsJson: string): number {
   try {
     const parsed = JSON.parse(stepsJson);
@@ -259,7 +271,7 @@ export default function ZyraTaskDetailPage() {
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
+            <StatusChip tone={tone(task.taskStatus)}>{statusLabel(task.taskStatus)}</StatusChip>
             <h2 className="mt-3 text-lg font-semibold text-[var(--foreground)]">{task.userStory}</h2>
             <p className="mt-2 text-sm text-[var(--muted)]">
               {task.generatedCount} testcase{task.generatedCount === 1 ? "" : "s"} generated, {task.savedCount} saved, {task.tokenUsage.total} tokens, updated {new Date(task.updatedAt).toLocaleString()}
