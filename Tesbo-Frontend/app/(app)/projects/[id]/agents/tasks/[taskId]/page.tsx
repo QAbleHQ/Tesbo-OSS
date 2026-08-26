@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   authMe,
   closeZyraTask,
@@ -31,12 +31,20 @@ function normalizeStatus(status: string): string {
   return status || "todo";
 }
 
-function tone(status: string): "neutral" | "info" | "success" | "warning" {
+function tone(status: string): "neutral" | "info" | "success" | "warning" | "error" {
   const normalized = normalizeStatus(status);
   if (normalized === "done") return "success";
   if (normalized === "in_review") return "info";
   if (normalized === "in_progress") return "warning";
+  if (normalized === "failed") return "error";
   return "neutral";
+}
+
+function latestFailureDetail(activities: ZyraTask["activities"]): string | null {
+  for (let i = activities.length - 1; i >= 0; i -= 1) {
+    if (activities[i].stage === "failed") return activities[i].detail || "Zyra failed to generate testcase drafts.";
+  }
+  return null;
 }
 
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -104,6 +112,7 @@ export default function ZyraTaskDetailPage() {
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const pollInFlightRef = useRef(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -135,6 +144,33 @@ export default function ZyraTaskDetailPage() {
       else void loadData();
     });
   }, [loadData, router]);
+
+  // Lighter than loadData (skips suites/Jira) — just re-reads this task so Zyra finishing (or
+  // failing) generation server-side shows up here without a manual reload.
+  const refreshTask = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
+    try {
+      const taskData = await getZyraTask(projectId, taskId);
+      setTask(taskData);
+      setSelectedDrafts((prev) => prev.filter((index) => index < taskData.drafts.length));
+    } catch {
+      // A missed poll tick isn't worth surfacing; the next one usually succeeds.
+    } finally {
+      pollInFlightRef.current = false;
+    }
+  }, [projectId, taskId]);
+
+  useEffect(() => {
+    if (!task) return;
+    const status = normalizeStatus(task.taskStatus);
+    if (status !== "todo" && status !== "in_progress") return;
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void refreshTask();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [task, refreshTask]);
 
   function toggleDraft(index: number) {
     setSelectedDrafts((prev) => prev.includes(index) ? prev.filter((item) => item !== index) : [...prev, index]);
@@ -271,6 +307,11 @@ export default function ZyraTaskDetailPage() {
   }
 
   const done = normalizeStatus(task.taskStatus) === "done";
+  const taskStatusNow = normalizeStatus(task.taskStatus);
+  // Mirrors the backend guard in zyraFeedback: feedback only makes sense once there's something
+  // to review, or to retry after a failure. Disabling it here for todo/in_progress avoids a
+  // pointless round trip that the server would reject with a 409 anyway.
+  const canGiveFeedback = taskStatusNow === "in_review" || taskStatusNow === "failed";
   const allDraftsSelected = task.drafts.length > 0 && selectedDrafts.length === task.drafts.length;
   const copyableDrafts = selectedDrafts.length > 0 ? selectedDrafts.map((i) => task.drafts[i]) : task.drafts;
   const draftsTsv = toTsv(
@@ -308,6 +349,11 @@ export default function ZyraTaskDetailPage() {
           <div className="min-w-0">
             <StatusChip tone={tone(task.taskStatus)}>{statusLabel(task.taskStatus)}</StatusChip>
             <h2 className="mt-3 text-lg font-semibold text-[var(--foreground)]">{task.userStory}</h2>
+            {normalizeStatus(task.taskStatus) === "failed" && (
+              <p className="mt-2 rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
+                {latestFailureDetail(task.activities)}
+              </p>
+            )}
             <p className="mt-2 text-sm text-[var(--muted)]">
               {task.generatedCount} testcase{task.generatedCount === 1 ? "" : "s"} generated, {task.savedCount} saved, {task.tokenUsage.total} tokens, updated {new Date(task.updatedAt).toLocaleString()}
             </p>
@@ -465,7 +511,14 @@ export default function ZyraTaskDetailPage() {
                 )}
               </Field>
             )}
-            <Button variant="secondary" onClick={handleFeedback} disabled={working || done || !feedback.trim()}>{working ? "Sending..." : "Send feedback"}</Button>
+            {!canGiveFeedback && (
+              <p className="text-xs text-[var(--muted)]">
+                {taskStatusNow === "in_progress" || taskStatusNow === "todo"
+                  ? "Feedback opens up once Zyra finishes generating drafts for this task."
+                  : "Feedback isn't available once a task is closed."}
+              </p>
+            )}
+            <Button variant="secondary" onClick={handleFeedback} disabled={working || !canGiveFeedback || !feedback.trim()}>{working ? "Sending..." : "Send feedback"}</Button>
           </Card>
         </div>
       )}

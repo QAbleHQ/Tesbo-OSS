@@ -17,12 +17,23 @@ export function normalizeTaskStatus(status: string): string {
   return status || "todo";
 }
 
-export function taskStatusTone(status: string): "neutral" | "info" | "success" | "warning" {
+export function taskStatusTone(status: string): "neutral" | "info" | "success" | "warning" | "error" {
   const normalized = normalizeTaskStatus(status);
   if (normalized === "done") return "success";
   if (normalized === "in_review") return "info";
   if (normalized === "in_progress") return "warning";
+  if (normalized === "failed") return "error";
   return "neutral";
+}
+
+// The latest "Generation failed" / "Regeneration failed" activity entry, if any — the only
+// place the real failure reason exists server-side. Used to surface it directly on the card
+// instead of making the user open the Activity tab to find out what happened.
+export function latestFailureDetail(activities: ZyraTask["activities"]): string | null {
+  for (let i = activities.length - 1; i >= 0; i -= 1) {
+    if (activities[i].stage === "failed") return activities[i].detail || "Zyra failed to generate testcase drafts.";
+  }
+  return null;
 }
 
 const TASK_STATUS_LABELS: Record<string, string> = {
@@ -110,7 +121,10 @@ export default function TaskQuickViewPanel({ task, projectId, onClose, onTaskUpd
 
   if (typeof document === "undefined") return null;
 
-  const done = normalizeTaskStatus(task.taskStatus) === "done";
+  const normalizedStatus = normalizeTaskStatus(task.taskStatus);
+  const done = normalizedStatus === "done";
+  const failed = normalizedStatus === "failed";
+  const failureDetail = failed ? latestFailureDetail(task.activities) : null;
   const approvalRate = task.generatedCount > 0 ? Math.round((task.savedCount / task.generatedCount) * 100) : null;
   const draftsTsv = toTsv(
     ["Title", "Priority", "Preconditions", "Steps", "Expected Result", "Tags"],
@@ -156,6 +170,9 @@ export default function TaskQuickViewPanel({ task, projectId, onClose, onTaskUpd
               <StatusChip tone={taskStatusTone(task.taskStatus)}>{taskStatusLabel(task.taskStatus)}</StatusChip>
             </div>
             <h2 className="line-clamp-2 text-[15px] font-semibold leading-snug text-[var(--foreground)]">{task.userStory}</h2>
+            {failureDetail && (
+              <p className="mt-1.5 line-clamp-2 text-[12px] text-[var(--error-foreground)]">{failureDetail}</p>
+            )}
             {task.context && <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--muted)]">{task.context}</p>}
           </div>
           <button
