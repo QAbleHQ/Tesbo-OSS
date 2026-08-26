@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import {
@@ -460,6 +460,11 @@ export default function TestRunDetailPage() {
   const [filterSuiteId, setFilterSuiteId] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  /* synchronous double-submit guard: `adding` state only takes effect after a render, so two
+     click events dispatched in the same tick (fast double-click, or a stuck key) would both
+     read adding === false and both fire the request. */
+  const addInFlightRef = useRef(false);
 
   /* inline status editing */
   const [statusSaving, setStatusSaving] = useState<string | null>(null);
@@ -582,6 +587,8 @@ export default function TestRunDetailPage() {
     setShowPicker(true);
     setCasesLoading(true);
     setSelectedCases(new Set());
+    setAddError(null);
+    addInFlightRef.current = false;
     try {
       const [casesResult, suitesResult] = await Promise.all([
         listTestCases(projectId, { limit: 1000 }),
@@ -621,8 +628,22 @@ export default function TestRunDetailPage() {
     [filteredCases]
   );
 
+  /*
+   * Selections are cumulative across filter changes (a case picked under one Module filter stays
+   * picked after switching to another), which the per-row checkbox already reflects correctly via
+   * `selectedCases.has(tc.id)`. But the header "select all" checkbox and the summary line need a
+   * count scoped to what the *current* filter shows — comparing the raw `selectedCases.size`
+   * (cumulative, can include hidden rows) against `selectableCases.length` (filtered) produced
+   * nonsense like "37 of 3 selectable selected" once a Module filter hid most of a prior selection.
+   */
+  const selectedInView = useMemo(
+    () => selectableCases.filter((tc) => selectedCases.has(tc.id)).length,
+    [selectableCases, selectedCases]
+  );
+
   /* toggle selection (only Approved) */
   function toggleCase(id: string) {
+    if (adding) return;
     const tc = filteredCases.find((c) => c.id === id);
     if (tc && tc.status !== "Approved") return;
     setSelectedCases((prev) => {
@@ -634,21 +655,47 @@ export default function TestRunDetailPage() {
   }
 
   function toggleAll() {
-    if (selectedCases.size === selectableCases.length && selectableCases.length > 0) {
-      setSelectedCases(new Set());
-    } else {
-      setSelectedCases(new Set(selectableCases.map((c) => c.id)));
-    }
+    if (adding || selectableCases.length === 0) return;
+    setSelectedCases((prev) => {
+      // Recompute from `prev`, not the outer `selectedInView`, so two toggle-all clicks fired
+      // before React re-renders still see each other's effect instead of racing on stale state.
+      const allVisibleSelected = selectableCases.every((tc) => prev.has(tc.id));
+      const next = new Set(prev);
+      for (const tc of selectableCases) {
+        if (allVisibleSelected) next.delete(tc.id);
+        else next.add(tc.id);
+      }
+      return next;
+    });
   }
 
   async function handleAddCases() {
+    if (addInFlightRef.current) return;
     if (selectedCases.size === 0) return;
+    addInFlightRef.current = true;
     setAdding(true);
+    setAddError(null);
     try {
-      await addTestCasesToRun(cycleId, Array.from(selectedCases));
-      setShowPicker(false);
+      const idsToAdd = Array.from(selectedCases);
+      const result = await addTestCasesToRun(cycleId, idsToAdd);
+      if (!result || result.added >= result.requested) {
+        setShowPicker(false);
+        load();
+        return;
+      }
+      // Some selected cases were skipped server-side (e.g. another session added one of them to
+      // this run first, or a case was un-approved between selection and submit). Not a failure,
+      // but the modal must not report success while some selections silently didn't land — keep
+      // it open with the discrepancy explained, and refresh so the ones that did land drop out of
+      // the "not yet added" list instead of staying selectable for a re-submit.
+      setAddError(
+        `${result.added} of ${result.requested} case${result.requested !== 1 ? "s" : ""} added — ${result.skipped} already existed in this run or are no longer eligible.`
+      );
       load();
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : "Failed to add test cases to this run. Please try again.");
     } finally {
+      addInFlightRef.current = false;
       setAdding(false);
     }
   }
@@ -1487,7 +1534,14 @@ export default function TestRunDetailPage() {
 
       <Modal
         open={showPicker}
-        onClose={() => setShowPicker(false)}
+        onClose={() => {
+          // Escape/backdrop bypasses the Cancel button's `disabled={adding}` guard — block it too,
+          // otherwise closing (and later reopening) mid-submit lets the in-flight request's result
+          // land on a picker session the user never asked it to affect (stale success/error banner,
+          // or an unexpected re-close of the freshly reopened modal).
+          if (adding) return;
+          setShowPicker(false);
+        }}
         title="Add Test Cases to Run"
         className="!max-w-4xl"
       >
@@ -1556,6 +1610,20 @@ export default function TestRunDetailPage() {
           </p>
         </div>
 
+        {addError && (
+          <div className="flex items-center justify-between gap-2 mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+            <p className="text-xs text-amber-800">{addError}</p>
+            <button
+              type="button"
+              onClick={() => setAddError(null)}
+              className="text-amber-500 hover:text-amber-700 shrink-0"
+              aria-label="Dismiss"
+            >
+              <IconX size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Case list */}
         {casesLoading ? (
           <div className="text-center py-8 text-[var(--muted-soft)] text-sm">Loading test cases…</div>
@@ -1574,10 +1642,10 @@ export default function TestRunDetailPage() {
                     <th className="px-3 py-2 w-8">
                       <input
                         type="checkbox"
-                        checked={selectedCases.size === selectableCases.length && selectableCases.length > 0}
+                        checked={selectedInView === selectableCases.length && selectableCases.length > 0}
                         onChange={toggleAll}
                         className="rounded"
-                        disabled={selectableCases.length === 0}
+                        disabled={selectableCases.length === 0 || adding}
                       />
                     </th>
                     <th className="px-3 py-2 font-medium">ID</th>
@@ -1610,7 +1678,7 @@ export default function TestRunDetailPage() {
                             onChange={() => toggleCase(tc.id)}
                             className={`rounded ${!isApproved ? "cursor-not-allowed" : ""}`}
                             onClick={(e) => e.stopPropagation()}
-                            disabled={!isApproved}
+                            disabled={!isApproved || adding}
                             title={!isApproved ? `Only Approved test cases can be added. This case is "${tc.status}".` : undefined}
                           />
                         </td>
@@ -1639,15 +1707,20 @@ export default function TestRunDetailPage() {
             </div>
             <div className="flex items-center justify-between mt-4">
               <p className="text-sm text-[var(--muted)]">
-                {selectedCases.size} of {selectableCases.length} selectable selected
+                {selectedInView} of {selectableCases.length} selectable selected
                 {selectableCases.length < filteredCases.length && (
                   <span className="text-[var(--muted-soft)] ml-1">
                     ({filteredCases.length - selectableCases.length} non-approved)
                   </span>
                 )}
+                {selectedCases.size > selectedInView && (
+                  <span className="text-[var(--muted-soft)] ml-1">
+                    ({selectedCases.size - selectedInView} more selected outside this filter)
+                  </span>
+                )}
               </p>
               <div className="flex gap-2">
-                <Button variant="secondary" onClick={() => setShowPicker(false)}>
+                <Button variant="secondary" onClick={() => setShowPicker(false)} disabled={adding}>
                   Cancel
                 </Button>
                 <Button
