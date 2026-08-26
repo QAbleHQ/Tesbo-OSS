@@ -871,4 +871,55 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
     expect(after.status(), `a non-uuid audit row broke the agent — ${await after.text()}`).toBe(200);
     expect(Number((await after.json()).testcasesCreated), "a non-uuid audit row changed the count").toBe(before);
   });
+
+  // ─── Generation failure surfaces as a distinct status ──────────────────────
+
+  test("ZYR-A-33 a generation failure is a distinct 'failed' status, not a silent revert to the queue", async () => {
+    /*
+     * Regression test. processZyraTask's catch block used to revert task_status to 'todo' on any
+     * generation failure — identical to a task that was never picked up, so a failed task was
+     * indistinguishable from a freshly queued one anywhere task_status is read (the Kanban board
+     * groups strictly by that column). The only trace of the failure was one activity_log entry,
+     * which forced the user into the Activity tab to discover a generation had failed at all.
+     *
+     * The real provider call can't be exercised here (see the file header — no AI provider is
+     * called in this suite), so the failure is arranged the way the fixed catch block leaves it:
+     * task_status = 'failed' plus a matching activity_log entry with stage 'failed'.
+     */
+    const taskId = seedTask({ status: "failed" });
+    exec(
+      "UPDATE ai_generation_requests SET activity_log = activity_log || " +
+        `${literal(
+          JSON.stringify([
+            {
+              actor: "agent",
+              stage: "failed",
+              title: "Generation failed",
+              detail: "E2E simulated provider timeout",
+              createdAt: new Date().toISOString(),
+            },
+          ]),
+        )}::jsonb WHERE id = ${literal(taskId)};`,
+    );
+
+    const res = await asOwner.get(url(`/agents/zyra/tasks/${taskId}`), { failOnStatusCode: false });
+    expect(res.status(), `reading a failed task — ${await res.text()}`).toBe(200);
+    const task = await res.json();
+    expect(task.taskStatus, "a failed task must read back as 'failed', not its pre-generation status").toBe(
+      "failed",
+    );
+    const failureEntries = (task.activities as Array<{ stage: string; detail: string }>).filter(
+      (a) => a.stage === "failed",
+    );
+    expect(failureEntries.length, "the failure reason must be recorded in the activity log").toBeGreaterThan(0);
+    expect(failureEntries[0].detail).toContain("E2E simulated provider timeout");
+
+    // A terminal failure state must not trap the task — closing it still has to work.
+    const closed = await asOwner.post(url(`/agents/zyra/tasks/${taskId}/close`), {
+      data: {},
+      failOnStatusCode: false,
+    });
+    expect(closed.status(), `closing a failed task — ${await closed.text()}`).toBe(201);
+    expect(scalar(`SELECT task_status FROM ai_generation_requests WHERE id = ${literal(taskId)};`)).toBe("done");
+  });
 });

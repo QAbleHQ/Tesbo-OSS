@@ -10008,9 +10008,12 @@ export class LegacyService implements OnModuleInit {
       const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
       // Nothing logged this before, so a failed task left no server-side trace at all.
       this.logger.error(`Zyra task ${taskId} (project ${projectId}) failed: ${detail}`, error instanceof Error ? error.stack : undefined);
-      const activity = [{ actor: "agent", stage: "todo", title: "Generation failed", detail, createdAt: failedAt }];
+      // task_status used to revert to 'todo' here — identical to a task that was never started,
+      // so a failed generation was indistinguishable from a queued one anywhere the Kanban board
+      // reads task_status. 'failed' is a dedicated terminal state the UI can badge distinctly.
+      const activity = [{ actor: "agent", stage: "failed", title: "Generation failed", detail, createdAt: failedAt }];
       await this.db.query(
-        "UPDATE ai_generation_requests SET task_status = 'todo', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
+        "UPDATE ai_generation_requests SET task_status = 'failed', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
         [taskId, projectId, JSON.stringify(activity)]
       );
     }
@@ -10101,79 +10104,103 @@ export class LegacyService implements OnModuleInit {
     const requestedCount = Number(existing.rows[0].requested_count) || this.testcaseRangeConfig(testcaseRange).requestedCount;
     const provider = String(existing.rows[0].provider || allocation.rows[0].provider || "openai").toLowerCase();
     const model = normalizeProviderModel(provider, existing.rows[0].model || allocation.rows[0].default_model);
-    const knowledge = await this.knowledgeSnapshot(projectId);
-    const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
-    const linear = await this.linearSnapshot(projectId, linearIssueKeys);
-    const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
-    const aiResult = await this.generateZyraWithProvider({
-      provider,
-      model,
-      apiKey: allocation.rows[0].api_key,
-      baseUrl: allocation.rows[0].base_url,
-      authHeaderName: allocation.rows[0].auth_header_name,
-      authScheme: allocation.rows[0].auth_scheme,
-      projectId,
-      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
-    });
-    const now = new Date().toISOString();
-    const activity = [
-      { actor: "agent", stage: "in_progress", title: "Moved task back to Todo", detail: "Zyra queued the task again after reviewer feedback.", createdAt: now },
-      { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
-      { actor: "agent", stage: "in_review", title: "Regenerated testcase drafts", detail: `Updated this task with ${aiResult.drafts.length} regenerated draft(s). Cached input tokens: ${aiResult.usage.cached}.`, createdAt: now }
-    ];
-    const previousSources = normalizeJsonArray(existing.rows[0].source_summary);
-    const nextSources = [
-      ...previousSources,
-      ...(referenceNote ? [{ type: "feedback_reference", title: "Reviewer reference", detail: referenceNote.slice(0, 320) }] : []),
-      ...additionalJiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Referenced by reviewer feedback." })),
-      ...additionalLinearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Referenced by reviewer feedback." })),
-      ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
-    ];
-    const res = await this.db.query(
-      `UPDATE ai_generation_requests
-       SET generated_count = $3, generated_payload = $4::jsonb, feedback = $5,
-           token_input = token_input + $6, token_output = token_output + $7, token_total = token_total + $8,
-           activity_log = activity_log || $9::jsonb, source_summary = $10::jsonb, jira_issue_keys = $11::jsonb,
-           linear_issue_keys = $12::jsonb, task_status = 'in_review', updated_at = now()
-       WHERE id = $1 AND project_id = $2
-       RETURNING *`,
-      [
-        taskId,
+    try {
+      const knowledge = await this.knowledgeSnapshot(projectId);
+      const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
+      const linear = await this.linearSnapshot(projectId, linearIssueKeys);
+      const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
+      const aiResult = await this.generateZyraWithProvider({
+        provider,
+        model,
+        apiKey: allocation.rows[0].api_key,
+        baseUrl: allocation.rows[0].base_url,
+        authHeaderName: allocation.rows[0].auth_header_name,
+        authScheme: allocation.rows[0].auth_scheme,
         projectId,
-        aiResult.drafts.length,
-        JSON.stringify(aiResult.drafts),
-        feedback,
-        aiResult.usage.input,
-        aiResult.usage.output,
-        aiResult.usage.total,
-        JSON.stringify(activity),
-        JSON.stringify(nextSources),
-        JSON.stringify(jiraIssueKeys),
-        JSON.stringify(linearIssueKeys)
-      ]
-    );
-    await this.rememberZyraTurn({
-      projectId,
-      userId: uid,
-      provider,
-      model,
-      key: allocation.rows[0],
-      userMessage: `${story}\nReviewer feedback: ${feedbackText}`,
-      outcome: [
-        `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
-        referenceNote ? `Reviewer references: ${referenceNote}` : "",
-        additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
-        additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
-      ].filter(Boolean).join(" ")
-    });
-    return {
-      generationRequestId: taskId,
-      task: this.formatAiTask(res.rows[0]),
-      provider,
-      drafts: aiResult.drafts,
-      generatedCount: aiResult.drafts.length,
-      tokenUsage: aiResult.usage
-    };
+        input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
+      });
+      const now = new Date().toISOString();
+      const activity = [
+        { actor: "agent", stage: "in_progress", title: "Moved task back to Todo", detail: "Zyra queued the task again after reviewer feedback.", createdAt: now },
+        { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
+        { actor: "agent", stage: "in_review", title: "Regenerated testcase drafts", detail: `Updated this task with ${aiResult.drafts.length} regenerated draft(s). Cached input tokens: ${aiResult.usage.cached}.`, createdAt: now }
+      ];
+      const previousSources = normalizeJsonArray(existing.rows[0].source_summary);
+      const nextSources = [
+        ...previousSources,
+        ...(referenceNote ? [{ type: "feedback_reference", title: "Reviewer reference", detail: referenceNote.slice(0, 320) }] : []),
+        ...additionalJiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Referenced by reviewer feedback." })),
+        ...additionalLinearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Referenced by reviewer feedback." })),
+        ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
+      ];
+      const res = await this.db.query(
+        `UPDATE ai_generation_requests
+         SET generated_count = $3, generated_payload = $4::jsonb, feedback = $5,
+             token_input = token_input + $6, token_output = token_output + $7, token_total = token_total + $8,
+             activity_log = activity_log || $9::jsonb, source_summary = $10::jsonb, jira_issue_keys = $11::jsonb,
+             linear_issue_keys = $12::jsonb, task_status = 'in_review', updated_at = now()
+         WHERE id = $1 AND project_id = $2
+         RETURNING *`,
+        [
+          taskId,
+          projectId,
+          aiResult.drafts.length,
+          JSON.stringify(aiResult.drafts),
+          feedback,
+          aiResult.usage.input,
+          aiResult.usage.output,
+          aiResult.usage.total,
+          JSON.stringify(activity),
+          JSON.stringify(nextSources),
+          JSON.stringify(jiraIssueKeys),
+          JSON.stringify(linearIssueKeys)
+        ]
+      );
+      await this.rememberZyraTurn({
+        projectId,
+        userId: uid,
+        provider,
+        model,
+        key: allocation.rows[0],
+        userMessage: `${story}\nReviewer feedback: ${feedbackText}`,
+        outcome: [
+          `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
+          referenceNote ? `Reviewer references: ${referenceNote}` : "",
+          additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
+          additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
+        ].filter(Boolean).join(" ")
+      });
+      return {
+        generationRequestId: taskId,
+        task: this.formatAiTask(res.rows[0]),
+        provider,
+        drafts: aiResult.drafts,
+        generatedCount: aiResult.drafts.length,
+        tokenUsage: aiResult.usage
+      };
+    } catch (error) {
+      // Regeneration runs synchronously in the request/response cycle, unlike the initial
+      // processZyraTask fire-and-forget — but it moved task_status to 'todo' above *before*
+      // calling the provider, with no catch here at all. A provider failure threw straight to
+      // the controller as a raw 500 and left the task stuck showing "Pending" with no record of
+      // what happened, same failure mode as the initial-generation bug this mirrors.
+      const failedAt = new Date().toISOString();
+      const summary = this.extractAiErrorMessage(error) || "Zyra failed to regenerate testcase drafts.";
+      const payload = typeof (error as { getResponse?: () => unknown })?.getResponse === "function"
+        ? (error as { getResponse: () => unknown }).getResponse()
+        : null;
+      const providerDetail = payload && typeof payload === "object"
+        ? String((payload as Record<string, unknown>).detail || "")
+        : "";
+      const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
+      this.logger.error(`Zyra task ${taskId} (project ${projectId}) feedback regeneration failed: ${detail}`, error instanceof Error ? error.stack : undefined);
+      const activity = [{ actor: "agent", stage: "failed", title: "Regeneration failed", detail, createdAt: failedAt }];
+      await this.db.query(
+        "UPDATE ai_generation_requests SET task_status = 'failed', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
+        [taskId, projectId, JSON.stringify(activity)]
+      );
+      throw error;
+    }
   }
 
   async zyraDeleteDraft(projectId: string, userId: string | null | undefined, taskId: string, draftIndex: number) {

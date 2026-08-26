@@ -30,12 +30,20 @@ function normalizeStatus(status: string): string {
   return status || "todo";
 }
 
-function tone(status: string): "neutral" | "info" | "success" | "warning" {
+function tone(status: string): "neutral" | "info" | "success" | "warning" | "error" {
   const normalized = normalizeStatus(status);
   if (normalized === "done") return "success";
   if (normalized === "in_review") return "info";
   if (normalized === "in_progress") return "warning";
+  if (normalized === "failed") return "error";
   return "neutral";
+}
+
+function latestFailureDetail(activities: ZyraTask["activities"]): string | null {
+  for (let i = activities.length - 1; i >= 0; i -= 1) {
+    if (activities[i].stage === "failed") return activities[i].detail || "Zyra failed to generate testcase drafts.";
+  }
+  return null;
 }
 
 function stepCount(stepsJson: string): number {
@@ -261,6 +269,11 @@ export default function ZyraTaskDetailPage() {
           <div className="min-w-0">
             <StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
             <h2 className="mt-3 text-lg font-semibold text-[var(--foreground)]">{task.userStory}</h2>
+            {normalizeStatus(task.taskStatus) === "failed" && (
+              <p className="mt-2 rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
+                {latestFailureDetail(task.activities)}
+              </p>
+            )}
             <p className="mt-2 text-sm text-[var(--muted)]">
               {task.generatedCount} testcase{task.generatedCount === 1 ? "" : "s"} generated, {task.savedCount} saved, {task.tokenUsage.total} tokens, updated {new Date(task.updatedAt).toLocaleString()}
             </p>

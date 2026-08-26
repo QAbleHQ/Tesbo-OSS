@@ -18,12 +18,13 @@ import {
 } from "@/lib/api";
 import { Button, Field, FieldLabel, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
-import TaskQuickViewPanel, { JIRA_BADGE_CLASS, normalizeTaskStatus as normalizeStatus, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
+import TaskQuickViewPanel, { JIRA_BADGE_CLASS, latestFailureDetail, normalizeTaskStatus as normalizeStatus, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
 
 const columns = [
   { key: "todo", label: "Pending", dot: "var(--muted-soft)" },
   { key: "in_progress", label: "In Progress", dot: "var(--warning)" },
   { key: "in_review", label: "In Review", dot: "var(--accent-light)" },
+  { key: "failed", label: "Failed", dot: "var(--error)" },
   { key: "done", label: "Done", dot: "var(--success)" },
 ] as const;
 
@@ -241,7 +242,11 @@ export default function ZyraTasksPage() {
               >
                 <div className="min-w-0">
                   <h2 className="line-clamp-2 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h2>
-                  {task.context && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{task.context}</p>}
+                  {normalizeStatus(task.taskStatus) === "failed" ? (
+                    <p className="mt-1 line-clamp-2 text-xs text-[var(--error-foreground)]">{latestFailureDetail(task.activities)}</p>
+                  ) : (
+                    task.context && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{task.context}</p>
+                  )}
                 </div>
                 <div><StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip></div>
                 <div className="flex flex-wrap gap-1.5">
@@ -259,7 +264,7 @@ export default function ZyraTasksPage() {
           </div>
         </section>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-4">
+        <div className="grid gap-4 xl:grid-cols-5">
           {columns.map((column) => {
             const columnTasks = tasksByColumn.get(column.key) || [];
             const isDone = column.key === "done";
@@ -282,6 +287,9 @@ export default function ZyraTasksPage() {
                     >
                       <StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
                       <h3 className="mt-2 line-clamp-3 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h3>
+                      {normalizeStatus(task.taskStatus) === "failed" && (
+                        <p className="mt-1 line-clamp-2 text-xs text-[var(--error-foreground)]">{latestFailureDetail(task.activities)}</p>
+                      )}
                       {task.jiraIssueKeys.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {task.jiraIssueKeys.slice(0, 3).map((key) => (

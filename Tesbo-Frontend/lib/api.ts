@@ -803,7 +803,7 @@ export interface ZyraTask {
   requestedCount: number;
   generatedCount: number;
   savedCount: number;
-  taskStatus: "todo" | "in_progress" | "in_review" | "done" | "accepted" | "rejected" | string;
+  taskStatus: "todo" | "in_progress" | "in_review" | "failed" | "done" | "accepted" | "rejected" | string;
   feedback: string;
   context: string;
   jiraIssueKeys: string[];

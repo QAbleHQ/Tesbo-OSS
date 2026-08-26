@@ -159,6 +159,20 @@ test.describe("zyra / agents (UI)", () => {
       .last();
   }
 
+  function kanbanColumn(page: Page, label: string): Locator {
+    return page.locator("section").filter({ has: page.getByRole("heading", { name: label, level: 2 }) });
+  }
+
+  /** Appends a "Generation failed" activity entry the way processZyraTask's catch block writes one. */
+  function seedFailureActivity(taskId: string, detail: string): void {
+    exec(
+      "UPDATE ai_generation_requests SET activity_log = activity_log || " +
+        `${literal(
+          JSON.stringify([{ actor: "agent", stage: "failed", title: "Generation failed", detail, createdAt: new Date().toISOString() }]),
+        )}::jsonb WHERE id = ${literal(taskId)};`,
+    );
+  }
+
   // ─── The agent picker ──────────────────────────────────────────────────────
 
   test("ZYU-01 the agent picker offers Zyra and marks the two planned agents unavailable", async ({
@@ -319,6 +333,44 @@ test.describe("zyra / agents (UI)", () => {
 
     await expect(page.getByRole("tab", { name: "Kanban board" })).toHaveAttribute("aria-selected", "true");
     await expect(page.getByText(userStory)).toBeVisible();
+  });
+
+  test("ZYU-18 a failed task shows a distinct error state on the task window, not a silent 'Pending'", async ({
+    browser,
+  }) => {
+    /*
+     * Regression test for the Kanban bug: a generation failure used to revert task_status to
+     * 'todo', so the task window rendered it exactly like a task that was never picked up — the
+     * user had to open the Activity tab to discover anything failed at all. The real generation
+     * call can't be exercised here (see the file header), so the failure is arranged the way the
+     * fixed backend leaves it: task_status = 'failed' plus a matching activity_log entry.
+     */
+    const userStory = stamp("Failed story");
+    const taskId = seedTask({ userStory, status: "failed" });
+    seedFailureActivity(taskId, "E2E simulated provider timeout");
+
+    const page = await open(browser, "/agents/tasks");
+
+    const card = page.getByRole("button", { name: new RegExp(userStory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("failed");
+    await expect(card, "must not read back as the pre-generation 'todo' status").not.toContainText("todo");
+    await expect(card, "the failure reason must be visible without opening the Activity tab").toContainText(
+      "E2E simulated provider timeout",
+    );
+  });
+
+  test("ZYU-19 a failed task lands in its own Kanban column, not silently in Pending", async ({ browser }) => {
+    const userStory = stamp("Failed kanban story");
+    const taskId = seedTask({ userStory, status: "failed" });
+    seedFailureActivity(taskId, "E2E simulated provider timeout");
+
+    const page = await open(browser, "/agents/tasks");
+    await page.getByRole("tab", { name: "Kanban board" }).click();
+
+    await expect(kanbanColumn(page, "Failed").getByText(userStory)).toBeVisible();
+    // Before the fix a failed task normalized to 'todo' and landed here instead.
+    await expect(kanbanColumn(page, "Pending").getByText(userStory)).toHaveCount(0);
   });
 
   // ─── The review table, which is where the writes happen ────────────────────
