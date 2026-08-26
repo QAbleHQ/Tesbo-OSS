@@ -100,6 +100,7 @@ test.describe("zyra / agents (UI)", () => {
     status?: string;
     drafts?: Array<Record<string, unknown>>;
     projectId?: string;
+    context?: string;
   }
 
   /** Writes a completed Zyra task straight into the table, drafts and all. Returns its id. */
@@ -130,7 +131,7 @@ test.describe("zyra / agents (UI)", () => {
          true, true, false, false, false,
          ${drafts.length}, ${literal(JSON.stringify(drafts))}::jsonb, 0, '[]'::jsonb,
          ${literal(ZYRA_AGENT_NAME)}, ${literal(options.status ?? "in_review")},
-         '', '', '[]'::jsonb, 10, 20, 30, ${literal(sources)}::jsonb, ${literal(activity)}::jsonb);`,
+         '', ${literal(options.context ?? "")}, '[]'::jsonb, 10, 20, 30, ${literal(sources)}::jsonb, ${literal(activity)}::jsonb);`,
     );
     return scalar(
       `SELECT id FROM ai_generation_requests WHERE project_id = ${literal(projectId)} AND user_story = ${literal(userStory)};`,
@@ -157,6 +158,20 @@ test.describe("zyra / agents (UI)", () => {
       .locator('div[role="presentation"]')
       .filter({ has: page.getByRole("heading", { name: title, level: 2 }) })
       .last();
+  }
+
+  function kanbanColumn(page: Page, label: string): Locator {
+    return page.locator("section").filter({ has: page.getByRole("heading", { name: label, level: 2 }) });
+  }
+
+  /** Appends a "Generation failed" activity entry the way processZyraTask's catch block writes one. */
+  function seedFailureActivity(taskId: string, detail: string): void {
+    exec(
+      "UPDATE ai_generation_requests SET activity_log = activity_log || " +
+        `${literal(
+          JSON.stringify([{ actor: "agent", stage: "failed", title: "Generation failed", detail, createdAt: new Date().toISOString() }]),
+        )}::jsonb WHERE id = ${literal(taskId)};`,
+    );
   }
 
   // ─── The agent picker ──────────────────────────────────────────────────────
@@ -306,7 +321,9 @@ test.describe("zyra / agents (UI)", () => {
 
     const card = page.getByRole("button", { name: new RegExp(userStory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
     await expect(card).toBeVisible();
-    await expect(card).toContainText("in review");
+    // Status labels render Title Case ("In Review"), never the raw lowercase enum value ("in_review").
+    await expect(card).toContainText("In Review");
+    await expect(card).not.toContainText("in review");
     await expect(card, "the board summarises how much was generated").toContainText("2 testcases");
   });
 
@@ -318,7 +335,91 @@ test.describe("zyra / agents (UI)", () => {
     await page.getByRole("tab", { name: "Kanban board" }).click();
 
     await expect(page.getByRole("tab", { name: "Kanban board" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByText(userStory)).toBeVisible();
+    const card = page.getByText(userStory);
+    await expect(card).toBeVisible();
+
+    // The kanban card's own status chip is Title Case too, not the raw "in_review" token.
+    const cardContainer = page.locator("button", { has: card });
+    await expect(cardContainer).toContainText("In Review");
+  });
+
+  test("ZYU-24 the kanban card and its quick-view panel both show the task's description", async ({
+    browser,
+  }) => {
+    const userStory = stamp("Described story");
+    const context = "Business rule: only verified accounts may reset their password.";
+    seedTask({ userStory, context });
+
+    const page = await open(browser, "/agents/tasks");
+    await page.getByRole("tab", { name: "Kanban board" }).click();
+
+    const cardContainer = page.locator("button", { has: page.getByText(userStory) });
+    await expect(cardContainer, "the kanban card surfaces the same description as the list view").toContainText(context);
+
+    await cardContainer.click();
+    const panel = page.locator(".slide-in-right");
+    await expect(panel.getByText(userStory)).toBeVisible();
+    await expect(panel, "the quick-view panel opened from the card shows the full description too").toContainText(context);
+  });
+
+  test("ZYU-25 a task with no description renders neither view with an empty description line", async ({
+    browser,
+  }) => {
+    const userStory = stamp("Bare story");
+    seedTask({ userStory });
+
+    const page = await open(browser, "/agents/tasks");
+    await page.getByRole("tab", { name: "Kanban board" }).click();
+
+    const cardContainer = page.locator("button", { has: page.getByText(userStory) });
+    await expect(cardContainer).toBeVisible();
+    // The description <p> only renders when task.context is truthy — confirm the empty string
+    // doesn't leave a blank paragraph behind, by checking the card's text is exactly what the
+    // non-description fields produce (status, story, generated/token summary — no extra line).
+    await expect(cardContainer.locator("p")).toHaveCount(1);
+
+    await cardContainer.click();
+    const panel = page.locator(".slide-in-right");
+    await expect(panel.getByText(userStory)).toBeVisible();
+    await expect(panel.locator("h2 + p")).toHaveCount(0);
+  });
+
+  test("ZYU-18 a failed task shows a distinct error state on the task window, not a silent 'Pending'", async ({
+    browser,
+  }) => {
+    /*
+     * Regression test for the Kanban bug: a generation failure used to revert task_status to
+     * 'todo', so the task window rendered it exactly like a task that was never picked up — the
+     * user had to open the Activity tab to discover anything failed at all. The real generation
+     * call can't be exercised here (see the file header), so the failure is arranged the way the
+     * fixed backend leaves it: task_status = 'failed' plus a matching activity_log entry.
+     */
+    const userStory = stamp("Failed story");
+    const taskId = seedTask({ userStory, status: "failed" });
+    seedFailureActivity(taskId, "E2E simulated provider timeout");
+
+    const page = await open(browser, "/agents/tasks");
+
+    const card = page.getByRole("button", { name: new RegExp(userStory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("failed");
+    await expect(card, "must not read back as the pre-generation 'todo' status").not.toContainText("todo");
+    await expect(card, "the failure reason must be visible without opening the Activity tab").toContainText(
+      "E2E simulated provider timeout",
+    );
+  });
+
+  test("ZYU-19 a failed task lands in its own Kanban column, not silently in Pending", async ({ browser }) => {
+    const userStory = stamp("Failed kanban story");
+    const taskId = seedTask({ userStory, status: "failed" });
+    seedFailureActivity(taskId, "E2E simulated provider timeout");
+
+    const page = await open(browser, "/agents/tasks");
+    await page.getByRole("tab", { name: "Kanban board" }).click();
+
+    await expect(kanbanColumn(page, "Failed").getByText(userStory)).toBeVisible();
+    // Before the fix a failed task normalized to 'todo' and landed here instead.
+    await expect(kanbanColumn(page, "Pending").getByText(userStory)).toHaveCount(0);
   });
 
   // ─── The review table, which is where the writes happen ────────────────────
@@ -328,6 +429,8 @@ test.describe("zyra / agents (UI)", () => {
     const page = await open(browser, `/agents/tasks/${taskId}`);
 
     await expect(page.getByRole("heading", { name: "Zyra task", level: 1 })).toBeVisible();
+    // Same Title Case status label as the board and kanban card, not the raw "in_review" token.
+    await expect(page.getByText("In Review", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Generated Testcases (2)" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "Sign in with a valid password" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "P1" })).toBeVisible();
@@ -422,6 +525,9 @@ test.describe("zyra / agents (UI)", () => {
         message: "closing the task is persisted, not just visual",
       })
       .not.toBe("in_review");
+
+    // The chip updates in place to the Title Case label, not the raw "done"/"accepted" token.
+    await expect(page.getByText("Done", { exact: true })).toBeVisible();
   });
 
   // ─── Authorization ─────────────────────────────────────────────────────────
@@ -478,5 +584,93 @@ test.describe("zyra / agents (UI)", () => {
     // not hide it. The role that cannot is the one with no project access (ZYU-20).
     await expect(page.getByRole("heading", { name: "Zyra task", level: 1 })).toBeVisible();
     await expect(page.getByRole("cell", { name: "Sign in with a valid password" })).toBeVisible();
+  });
+
+  // ─── Chat session history (sidebar) ─────────────────────────────────────────
+
+  test("ZYU-26 the sidebar hides an empty auto-created session until it has a message", async ({ browser }) => {
+    /*
+     * Regression test for "Duplicate Empty 'Zyra Chat' Sessions are Displayed in the Chat
+     * Sidebar": opening the chat with no prior sessions auto-creates one to type into (existing
+     * behaviour, unchanged), but nothing was ever asked yet — it must not render as a
+     * conversation. No AI provider is configured for this tenant (see file header), so the send
+     * button stays disabled; the follow-up message is seeded directly, the same way the rest of
+     * this file works around that boundary.
+     */
+    const page = await open(browser, "/agents/zyra");
+    await expect(page.getByRole("heading", { name: "Zyra", level: 1 })).toBeVisible();
+
+    await expect(page.getByText("No conversations yet")).toBeVisible();
+    await expect(page.getByText("0 sessions")).toBeVisible();
+
+    const sessionId = scalar(
+      `SELECT id FROM zyra_chat_sessions WHERE project_id = ${literal(tenant!.mainProjectId)} ORDER BY created_at DESC LIMIT 1;`,
+    );
+    expect(sessionId, "the page still auto-creates a session to type into").toBeTruthy();
+
+    exec(
+      `INSERT INTO zyra_chat_messages (session_id, project_id, user_id, role, content, status) VALUES ` +
+        `(${literal(sessionId)}, ${literal(tenant!.mainProjectId)}, ${literal(tenant!.owner.userId)}, 'user', 'Write me some test cases', 'sent');`,
+    );
+    await page.reload();
+
+    await expect(page.getByText("1 session", { exact: true })).toBeVisible();
+    await expect(page.getByText("No conversations yet")).toHaveCount(0);
+  });
+
+  test("ZYU-27 reopening the chat with an unused session reuses it instead of creating another", async ({
+    browser,
+  }) => {
+    // The steady-state guard the auto-create bug depended on staying intact: loadData opens the
+    // existing empty session instead of creating a new one whenever the list isn't empty. If this
+    // regressed, every ordinary revisit — not just a race — would grow the sidebar's dead weight.
+    const page = await open(browser, "/agents/zyra");
+    await expect(page.getByText("No conversations yet")).toBeVisible();
+
+    const countAfterFirstVisit = Number(
+      scalar(`SELECT COUNT(*) FROM zyra_chat_sessions WHERE project_id = ${literal(tenant!.mainProjectId)};`),
+    );
+    expect(countAfterFirstVisit, "exactly one session is auto-created").toBe(1);
+
+    await page.reload();
+    await page.reload();
+
+    const countAfterReloads = Number(
+      scalar(`SELECT COUNT(*) FROM zyra_chat_sessions WHERE project_id = ${literal(tenant!.mainProjectId)};`),
+    );
+    expect(countAfterReloads, "reopening a still-empty session must reuse it, not create another").toBe(1);
+  });
+
+  // ─── Real-time status updates ───────────────────────────────────────────────
+
+  test("ZYU-24 the task board reflects Zyra finishing a task without a page reload", async ({ browser }) => {
+    /*
+     * Regression test for "task status is not updated in real time". Before this fix, the board
+     * fetched task state once on mount and never again — a status change made by the server-side
+     * generation job (or by another tab) only appeared after the user manually reloaded. The board
+     * now polls while any task is todo/in_progress. Simulate the job finishing by writing the
+     * status directly (the real job isn't exercisable here — no AI provider is called, per the
+     * file header) and assert the change lands without ever calling page.reload().
+     */
+    const taskId = seedTask({ status: "in_progress" });
+    const page = await open(browser, "/agents/tasks");
+    await expect(page.getByText("in progress", { exact: true })).toBeVisible();
+
+    exec(`UPDATE ai_generation_requests SET task_status = 'in_review' WHERE id = ${literal(taskId)};`);
+
+    await expect(page.getByText("in review", { exact: true })).toBeVisible({ timeout: 9000 });
+    await expect(page.getByText("in progress", { exact: true })).toHaveCount(0);
+  });
+
+  test("ZYU-25 the task detail page reflects Zyra finishing a task without a page reload", async ({ browser }) => {
+    const taskId = seedTask({ status: "todo" });
+    const page = await open(browser, `/agents/tasks/${taskId}`);
+    await expect(page.getByText("todo", { exact: true })).toBeVisible();
+
+    exec(`UPDATE ai_generation_requests SET task_status = 'failed' WHERE id = ${literal(taskId)};`);
+    seedFailureActivity(taskId, "E2E simulated provider timeout while this page was open");
+
+    await expect(page.getByText("failed", { exact: true })).toBeVisible({ timeout: 9000 });
+    await expect(page.getByText("E2E simulated provider timeout while this page was open")).toBeVisible();
   });
 });

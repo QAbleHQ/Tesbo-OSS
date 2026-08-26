@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { IconBell, IconSearch } from "@tabler/icons-react";
+import { IconBell, IconSearch, IconX } from "@tabler/icons-react";
 import type { AppNotification, ProjectSummary } from "@/lib/api";
 import { listNotifications } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
@@ -35,6 +35,13 @@ export default function TopBar() {
   const [notifLoading, setNotifLoading] = useState(false);
   const [notifError, setNotifError] = useState<string | null>(null);
   const notifBoxRef = useRef<HTMLDivElement>(null);
+
+  // Only used for the tooltip text on the search button — the ⌘K/Ctrl+K shortcut itself works on
+  // every platform regardless. Resolved after mount so SSR and the first client render still match.
+  const [isMac, setIsMac] = useState(false);
+  useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad|iPod/i.test(navigator.userAgent));
+  }, []);
 
   // ⌘K / Ctrl+K focuses the search box from anywhere, matching the shortcut hint shown in it.
   useEffect(() => {
@@ -110,6 +117,12 @@ export default function TopBar() {
     router.push(`/projects/${p.id}/dashboard`);
   }
 
+  function clearQuery() {
+    setQuery("");
+    setOpen(false);
+    inputRef.current?.focus();
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if (!open || results.length === 0) return;
     if (e.key === "ArrowDown") {
@@ -159,10 +172,28 @@ export default function TopBar() {
               placeholder="Search projects…"
               className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
             />
-            {!query && (
-              <span className="shrink-0 rounded-[3px] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[11px] text-[var(--muted-soft)]">
-                ⌘K
-              </span>
+            {query ? (
+              <button
+                type="button"
+                aria-label="Clear search"
+                title="Clear search"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={clearQuery}
+                className="flex shrink-0 items-center justify-center rounded-[3px] p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+              >
+                <IconX size={14} stroke={1.75} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label="Search"
+                title={isMac ? "Search (⌘K)" : "Search (Ctrl+K)"}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => inputRef.current?.focus()}
+                className="flex shrink-0 items-center justify-center rounded-[3px] p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+              >
+                <IconSearch size={14} stroke={1.75} />
+              </button>
             )}
 
             {open && query.trim() && (

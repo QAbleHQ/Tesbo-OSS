@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   authMe,
   closeZyraTask,
@@ -18,8 +18,9 @@ import {
   type SuiteNode,
   type ZyraTask,
 } from "@/lib/api";
-import { Button, Card, Field, FieldLabel, Input, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
+import { Button, Card, CopyButton, Field, FieldLabel, Input, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
+import { toTsv } from "@/lib/tsv";
 
 type SaveMode = "existing" | "new";
 type DetailTab = "testcases" | "activities" | "sources";
@@ -30,12 +31,32 @@ function normalizeStatus(status: string): string {
   return status || "todo";
 }
 
-function tone(status: string): "neutral" | "info" | "success" | "warning" {
+function tone(status: string): "neutral" | "info" | "success" | "warning" | "error" {
   const normalized = normalizeStatus(status);
   if (normalized === "done") return "success";
   if (normalized === "in_review") return "info";
   if (normalized === "in_progress") return "warning";
+  if (normalized === "failed") return "error";
   return "neutral";
+}
+
+function latestFailureDetail(activities: ZyraTask["activities"]): string | null {
+  for (let i = activities.length - 1; i >= 0; i -= 1) {
+    if (activities[i].stage === "failed") return activities[i].detail || "Zyra failed to generate testcase drafts.";
+  }
+  return null;
+}
+
+const TASK_STATUS_LABELS: Record<string, string> = {
+  todo: "Pending",
+  in_progress: "In Progress",
+  in_review: "In Review",
+  done: "Done",
+};
+
+function statusLabel(status: string): string {
+  const normalized = normalizeStatus(status);
+  return TASK_STATUS_LABELS[normalized] ?? normalized.replaceAll("_", " ");
 }
 
 function stepCount(stepsJson: string): number {
@@ -44,6 +65,28 @@ function stepCount(stepsJson: string): number {
     return Array.isArray(parsed) ? parsed.length : 0;
   } catch {
     return 0;
+  }
+}
+
+function stepsText(stepsJson: string): string {
+  try {
+    const parsed = JSON.parse(stepsJson);
+    if (!Array.isArray(parsed)) return "";
+    return parsed
+      .map((step, index) => {
+        if (typeof step === "string") return `${index + 1}. ${step}`;
+        if (step && typeof step === "object") {
+          const action = step.action || step.step || step.description || "";
+          const expected = step.expectedResult || step.expected || "";
+          if (!action && !expected) return "";
+          return expected ? `${index + 1}. ${action} -> ${expected}` : `${index + 1}. ${action}`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join(" | ");
+  } catch {
+    return "";
   }
 }
 
@@ -69,6 +112,7 @@ export default function ZyraTaskDetailPage() {
   const [working, setWorking] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const pollInFlightRef = useRef(false);
 
   const loadData = useCallback(async () => {
     try {
@@ -100,6 +144,33 @@ export default function ZyraTaskDetailPage() {
       else void loadData();
     });
   }, [loadData, router]);
+
+  // Lighter than loadData (skips suites/Jira) — just re-reads this task so Zyra finishing (or
+  // failing) generation server-side shows up here without a manual reload.
+  const refreshTask = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
+    try {
+      const taskData = await getZyraTask(projectId, taskId);
+      setTask(taskData);
+      setSelectedDrafts((prev) => prev.filter((index) => index < taskData.drafts.length));
+    } catch {
+      // A missed poll tick isn't worth surfacing; the next one usually succeeds.
+    } finally {
+      pollInFlightRef.current = false;
+    }
+  }, [projectId, taskId]);
+
+  useEffect(() => {
+    if (!task) return;
+    const status = normalizeStatus(task.taskStatus);
+    if (status !== "todo" && status !== "in_progress") return;
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void refreshTask();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [task, refreshTask]);
 
   function toggleDraft(index: number) {
     setSelectedDrafts((prev) => prev.includes(index) ? prev.filter((item) => item !== index) : [...prev, index]);
@@ -236,7 +307,24 @@ export default function ZyraTaskDetailPage() {
   }
 
   const done = normalizeStatus(task.taskStatus) === "done";
+  const taskStatusNow = normalizeStatus(task.taskStatus);
+  // Mirrors the backend guard in zyraFeedback: feedback only makes sense once there's something
+  // to review, or to retry after a failure. Disabling it here for todo/in_progress avoids a
+  // pointless round trip that the server would reject with a 409 anyway.
+  const canGiveFeedback = taskStatusNow === "in_review" || taskStatusNow === "failed";
   const allDraftsSelected = task.drafts.length > 0 && selectedDrafts.length === task.drafts.length;
+  const copyableDrafts = selectedDrafts.length > 0 ? selectedDrafts.map((i) => task.drafts[i]) : task.drafts;
+  const draftsTsv = toTsv(
+    ["Title", "Priority", "Preconditions", "Steps", "Expected Result", "Tags"],
+    copyableDrafts.map((draft) => [
+      draft.title,
+      draft.priority,
+      draft.preconditions,
+      stepsText(draft.stepsJson),
+      draft.expectedSummary,
+      draft.tags?.join(", ") ?? "",
+    ])
+  );
   const tabItems: Array<{ key: DetailTab; label: string; count?: number }> = [
     { key: "testcases", label: "Generated Testcases", count: task.drafts.length },
     { key: "activities", label: "Activities", count: task.activities.length },
@@ -259,8 +347,13 @@ export default function ZyraTaskDetailPage() {
       <Card className="p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">
-            <StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
+            <StatusChip tone={tone(task.taskStatus)}>{statusLabel(task.taskStatus)}</StatusChip>
             <h2 className="mt-3 text-lg font-semibold text-[var(--foreground)]">{task.userStory}</h2>
+            {normalizeStatus(task.taskStatus) === "failed" && (
+              <p className="mt-2 rounded-lg border border-[var(--error)]/40 bg-[var(--error-soft)] px-3 py-2 text-sm text-[var(--error-foreground)]">
+                {latestFailureDetail(task.activities)}
+              </p>
+            )}
             <p className="mt-2 text-sm text-[var(--muted)]">
               {task.generatedCount} testcase{task.generatedCount === 1 ? "" : "s"} generated, {task.savedCount} saved, {task.tokenUsage.total} tokens, updated {new Date(task.updatedAt).toLocaleString()}
             </p>
@@ -306,6 +399,15 @@ export default function ZyraTaskDetailPage() {
                   {allDraftsSelected ? "Unselect all" : "Select all"}
                 </Button>
                 <Button variant="secondary" onClick={clearDraftSelection} disabled={done || selectedDrafts.length === 0}>Clear selection</Button>
+                {task.drafts.length > 0 && (
+                  <span title={selectedDrafts.length > 0 ? "Copy the selected testcases as tab-separated values, ready to paste into Excel." : "Copy every generated testcase as tab-separated values, ready to paste into Excel."}>
+                    <CopyButton
+                      value={draftsTsv}
+                      label={selectedDrafts.length > 0 ? `Copy ${selectedDrafts.length} selected` : "Copy all"}
+                      copiedLabel="Copied"
+                    />
+                  </span>
+                )}
                 <Button variant="secondary" onClick={() => openSaveModal()} disabled={done || selectedDrafts.length === 0}>Save selected</Button>
                 <Button variant="secondary" onClick={() => void handleDeleteSelectedDrafts()} disabled={done || working || selectedDrafts.length === 0}>Delete selected</Button>
               </div>
@@ -409,7 +511,14 @@ export default function ZyraTaskDetailPage() {
                 )}
               </Field>
             )}
-            <Button variant="secondary" onClick={handleFeedback} disabled={working || done || !feedback.trim()}>{working ? "Sending..." : "Send feedback"}</Button>
+            {!canGiveFeedback && (
+              <p className="text-xs text-[var(--muted)]">
+                {taskStatusNow === "in_progress" || taskStatusNow === "todo"
+                  ? "Feedback opens up once Zyra finishes generating drafts for this task."
+                  : "Feedback isn't available once a task is closed."}
+              </p>
+            )}
+            <Button variant="secondary" onClick={handleFeedback} disabled={working || !canGiveFeedback || !feedback.trim()}>{working ? "Sending..." : "Send feedback"}</Button>
           </Card>
         </div>
       )}
