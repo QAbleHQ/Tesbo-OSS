@@ -61,12 +61,15 @@ import {
   type SuiteNode,
   type BugItem,
   type BugSeverity,
+  type BugPriority,
   type IssueSearchResult,
   type TestRunListItem,
 } from "@/lib/api";
 import { Button, StatusChip, Input, PageLoader, Select, Textarea, Drawer } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
 import IssuePickerModal from "@/components/IssuePickerModal";
+import ExecutionEvidencePanel from "@/components/ExecutionEvidencePanel";
+import { AutomationResultMeta, AutomationRunProvenance } from "@/components/AutomationResultMeta";
 import TrackingDestinationField, { type TrackingDestination } from "@/components/TrackingDestinationField";
 import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
 import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
@@ -78,11 +81,19 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 /* ───── Constants ───── */
 const EXEC_STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"] as const;
 const RUN_TABS = ["All", "Passed", "Failed", "Blocked", "Skipped", "Pending"] as const;
+/*
+ * Basecamp 10226268634 ("The Log Bug UI should be consistent across both Test Run → Log Bug and Bug
+ * Page → Log Bug"). This modal collected only a title, a description and evidence, so every bug
+ * filed from a run landed on the severity column's 'Medium' default with no way to say otherwise —
+ * while the same action from the Bugs page asked for severity (and now priority). Same fields, same
+ * order, same wording as projects/[id]/bugs/page.tsx.
+ */
+const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
+const BUG_PRIORITIES: BugPriority[] = ["P0", "P1", "P2", "P3"];
 type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
 import { avatarColor } from "@/lib/avatarColors";
 const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
-const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
 
 /* ───── Status tone helpers ───── */
 function statusToTone(status: string) {
@@ -311,10 +322,25 @@ function tabBadgeStyle(tab: RunTab): { bg: string; color: string } {
   return map[tab] || { bg: "var(--surface-tertiary)", color: "var(--muted)" };
 }
 
-/* ───── Segmented progress bar ─────
- * One segment per status, each colored with that same status's own token — the StatPill row
- * above and the per-execution badges elsewhere use the same tokens, so a Blocked segment here
- * reads as the same color as "Blocked" everywhere else in the screen, not a shared "other" bucket.
+/* ───── Segmented progress bar ───── */
+/*
+ * Basecamp 10221778177 ("Progress not showing correct colours or progress").
+ *
+ * Blocked, skipped and pending used to be summed into one `other` segment painted --warning, which
+ * is the BLOCKED colour. On a run of 109 cases with 100 still pending, the bar was ~92% amber and
+ * read as "everything is blocked" — and because the segments filled the whole track regardless, the
+ * fill length said nothing about progress either.
+ *
+ * Each status is now its own segment in the colour the rest of the app uses for it, including
+ * --status-notrun-dot for untested. This is the same fix 7f9b59a applied to the plan detail screen
+ * for Basecamp 10213200614; the run screen had the identical defect and was missed.
+ *
+ * Consequence, accepted deliberately and shared with that screen: the bar always totals 100%, so
+ * the percentage beside it — not the fill length — is the progress reading.
+ *
+ * dev's 48363ea fixed the same defect independently; the token set kept here is the one the StatPill
+ * row and the per-execution badges already use, so a Blocked segment reads as the same colour as
+ * "Blocked" everywhere else on the screen.
  */
 function RunProgressBar({
   passed,
@@ -332,13 +358,18 @@ function RunProgressBar({
   total: number;
 }) {
   const pct = (n: number) => (total ? `${(n / total) * 100}%` : "0%");
+  const segments: [number, string][] = [
+    [passed, "var(--status-pass-dot)"],
+    [failed, "var(--status-fail-dot)"],
+    [blocked, "var(--status-blocked-dot)"],
+    [skipped, "var(--status-skipped-dot)"],
+    [pending, "var(--status-notrun-dot)"],
+  ];
   return (
     <div className="flex h-2 gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
-      {passed > 0 && <div style={{ width: pct(passed), background: "var(--success)" }} />}
-      {failed > 0 && <div style={{ width: pct(failed), background: "var(--error)" }} />}
-      {blocked > 0 && <div style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
-      {skipped > 0 && <div style={{ width: pct(skipped), background: "var(--status-skipped-dot)" }} />}
-      {pending > 0 && <div style={{ width: pct(pending), background: "var(--ink-400)" }} />}
+      {segments.map(([value, color], index) =>
+        value > 0 ? <div key={index} style={{ width: pct(value), background: color }} /> : null
+      )}
     </div>
   );
 }
@@ -457,8 +488,9 @@ export default function TestRunDetailPage() {
   const [showBugDialog, setShowBugDialog] = useState(false);
   const [bugExecution, setBugExecution] = useState<ExecutionItem | null>(null);
   const [bugTitle, setBugTitle] = useState("");
-  const [bugDesc, setBugDesc] = useState("");
   const [bugSeverity, setBugSeverity] = useState<BugSeverity>("Medium");
+  const [bugPriority, setBugPriority] = useState<BugPriority | "">("");
+  const [bugDesc, setBugDesc] = useState("");
   const [bugAlreadyLogged, setBugAlreadyLogged] = useState(false);
   const [bugExistingChoice, setBugExistingChoice] = useState<"JIRA" | "LINEAR" | "TESBO">("TESBO");
   const [bugDestination, setBugDestination] = useState<TrackingDestination>("TESBO");
@@ -627,6 +659,7 @@ export default function TestRunDetailPage() {
     setBugTitle(`${titlePrefix}: ${exec.title || exec.snapshotTitle || "Untitled test case"}`);
     setBugDesc("");
     setBugSeverity("Medium");
+    setBugPriority("");
     setBugAlreadyLogged(false);
     setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
     setBugDestination("TESBO");
@@ -708,8 +741,9 @@ export default function TestRunDetailPage() {
     setShowBugDialog(false);
     setBugExecution(null);
     setBugTitle("");
-    setBugDesc("");
     setBugSeverity("Medium");
+    setBugPriority("");
+    setBugDesc("");
     setBugAlreadyLogged(false);
     setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
     setBugDestination("TESBO");
@@ -732,6 +766,7 @@ export default function TestRunDetailPage() {
         title: bugTitle.trim(),
         description: bugDesc.trim(),
         severity: bugSeverity,
+        priority: bugPriority || null,
         externalUrl: selfLogged ? bugUrl.trim() : undefined,
         integrationProvider: selfLogged && bugSelfSystem !== "OTHER" ? bugSelfSystem : null,
         integrationIssueKey: null,
@@ -1029,6 +1064,15 @@ export default function TestRunDetailPage() {
             {ownerName && <MemberAvatar name={ownerName} seed={run.ownerId} size={24} />}
           </div>
           {run.description && <p className="mt-1 text-[13px] text-[var(--muted-soft)]">{run.description}</p>}
+          {/*
+            * "Automated · github-actions · main · a1b2c3d · Build ↗" — renders nothing on a manual
+            * run, so the header is unchanged for every run a person created (Basecamp 10189985971 §4).
+            */}
+          {run.source === "automation" && (
+            <div className="mt-2">
+              <AutomationRunProvenance run={run} />
+            </div>
+          )}
           <div className="mt-2.5 flex flex-wrap items-center gap-4">
             {planName && (
               <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
@@ -1625,13 +1669,16 @@ export default function TestRunDetailPage() {
         title="Report a Bug"
       >
         <div className="space-y-4">
-          <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 p-3">
-            <svg className="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          {/* Themed rather than the literal red-50/red-200 these carried: in dark mode that pale
+              block stayed light while its text followed the theme, which is the same mismatch the
+              danger Button variant was fixed for. */}
+          <div className="flex items-start gap-2 rounded-lg border border-[var(--error-border)] bg-[var(--error-soft)] p-3">
+            <svg className="w-5 h-5 text-[var(--status-fail-text)] mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
             </svg>
             <div>
-              <p className="text-sm font-medium text-red-800">Test case marked as Failed</p>
-              <p className="text-xs text-red-600 mt-0.5">
+              <p className="text-sm font-medium text-[var(--status-fail-text)]">Test case marked as Failed</p>
+              <p className="text-xs text-[var(--status-fail-text)] opacity-80 mt-0.5">
                 {bugExecution?.externalId && <span className="font-mono mr-1">{bugExecution.externalId}</span>}
                 {bugExecution?.title || bugExecution?.snapshotTitle || "Untitled test case"}
               </p>
@@ -1734,32 +1781,54 @@ export default function TestRunDetailPage() {
                   placeholder="Steps to reproduce, expected vs actual behavior…"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-4 items-start">
-                <BugEvidenceField
-                  mode={bugEvidenceMode}
-                  onModeChange={setBugEvidenceMode}
-                  stagedFiles={bugStagedFiles}
-                  onStagedFilesChange={setBugStagedFiles}
-                  betterbugsUrl={bugBetterbugsUrl}
-                  onBetterbugsUrlChange={setBugBetterbugsUrl}
-                />
+              {/*
+                * Severity carries dev's required marker (48363ea/10226268634 — the run's modal used
+                * to collect no severity at all, so every bug filed from a run took the column
+                * default), paired with Priority from 10226247009. Evidence keeps its own full-width
+                * row below rather than sharing the grid with Severity: three controls do not fit two
+                * columns, and the file list needs the width.
+                */}
+              <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-sm font-medium text-[var(--muted)] mb-1">
                     Severity <span className="text-[var(--error-foreground)]">*</span>
                   </label>
                   <Select
-                    aria-label="Severity"
                     value={bugSeverity}
                     onChange={(e) => setBugSeverity(e.target.value as BugSeverity)}
+                    aria-label="Severity"
                   >
-                    {BUG_SEVERITIES.map((s) => (
-                      <option key={s} value={s}>
-                        {s}
+                    {BUG_SEVERITIES.map((severity) => (
+                      <option key={severity} value={severity}>
+                        {severity}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[var(--muted)] mb-1">Priority</label>
+                  <Select
+                    value={bugPriority}
+                    onChange={(e) => setBugPriority(e.target.value as BugPriority | "")}
+                    aria-label="Bug priority"
+                  >
+                    <option value="">Not set</option>
+                    {BUG_PRIORITIES.map((priority) => (
+                      <option key={priority} value={priority}>
+                        {priority}
                       </option>
                     ))}
                   </Select>
                 </div>
               </div>
+              <BugEvidenceField
+                mode={bugEvidenceMode}
+                onModeChange={setBugEvidenceMode}
+                stagedFiles={bugStagedFiles}
+                onStagedFilesChange={setBugStagedFiles}
+                betterbugsUrl={bugBetterbugsUrl}
+                onBetterbugsUrlChange={setBugBetterbugsUrl}
+              />
               {bugAlreadyLogged ? (
                 <div>
                   <label className="block text-sm font-medium text-[var(--muted)] mb-1">Ticket</label>
@@ -2033,6 +2102,13 @@ export default function TestRunDetailPage() {
 
               <div className="h-px bg-[var(--border)]" />
 
+              {/*
+                * Automation facts for this result — duration, retries and the framework's own
+                * failure text. Renders nothing at all for a human-recorded result, so a manually
+                * executed run's drawer is unchanged (Basecamp 10189985971).
+                */}
+              <AutomationResultMeta execution={panelExecution} />
+
               {/* Status picker */}
               <div>
                 <label className="mb-2 block text-[12.5px] font-medium text-[var(--muted)]">Status</label>
@@ -2065,8 +2141,10 @@ export default function TestRunDetailPage() {
                 />
               </div>
 
-              {/* Defect key/url */}
-              <div className="space-y-3">
+              {/* Defect key/url — Failed only (Basecamp 10221790207). Same rule as the full-page
+                  execute screen: a defect reference on a passing case ends up in the export and the
+                  traceability matrix, so the backend clears it when a non-Failed status is saved. */}
+              <div className="space-y-3" hidden={panelStatus !== "Failed"}>
                 <div>
                   <label className="mb-1 block text-[12.5px] font-medium text-[var(--muted)]">Defect Key</label>
                   <Input type="text" value={panelDefectKey} onChange={(e) => setPanelDefectKey(e.target.value)} placeholder="e.g. PROJ-123" />
@@ -2076,6 +2154,23 @@ export default function TestRunDetailPage() {
                   <Input type="url" value={panelDefectUrl} onChange={(e) => setPanelDefectUrl(e.target.value)} placeholder="https://…" />
                 </div>
               </div>
+
+              <div className="h-px bg-[var(--border)]" />
+
+              {/*
+                * Evidence. Keyed on the execution id so switching rows in the drawer remounts the
+                * panel and refetches, rather than showing the previous result's files.
+                */}
+              <ExecutionEvidencePanel
+                key={panelExecution.id}
+                cycleId={cycleId}
+                executionId={panelExecution.id}
+                onCountChange={(count) =>
+                  setExecutions((prev) =>
+                    prev.map((e) => (e.id === panelExecution.id ? { ...e, evidenceCount: count } : e))
+                  )
+                }
+              />
             </div>
 
             {/* Footer actions */}

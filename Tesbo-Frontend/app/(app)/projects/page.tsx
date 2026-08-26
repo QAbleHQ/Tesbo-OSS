@@ -141,6 +141,30 @@ function getInitials(name: string): string {
   return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
 }
 
+/*
+ * Basecamp 10221710841 ("[Projects] List view not showing failed pass rate").
+ *
+ * The grid card has always shown the full breakdown; the list row showed a single green bar filled
+ * to the pass rate, so a project at 67% looked like a third of its work was simply missing rather
+ * than failed. Same data, same colours, no legend — the row has no space for one, so the counts go
+ * in a tooltip instead.
+ */
+function PassRateBarCompact({ counts }: { counts: RunCounts }) {
+  const { passed, failed, blocked, total } = counts;
+  if (total <= 0) return null;
+  const pct = (n: number) => `${((n / total) * 100).toFixed(1)}%`;
+  const title = [`${passed} passed`, `${failed} failed`, blocked > 0 ? `${blocked} blocked` : null]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="flex h-1 max-w-[60px] flex-1 gap-px overflow-hidden rounded-full bg-[var(--surface-secondary)]" title={title}>
+      {passed > 0 && <div className="h-full" style={{ width: pct(passed), background: "var(--status-pass-dot)" }} />}
+      {failed > 0 && <div className="h-full" style={{ width: pct(failed), background: "var(--status-fail-dot)" }} />}
+      {blocked > 0 && <div className="h-full" style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
+    </div>
+  );
+}
+
 function PassRateBar({ counts }: { counts: RunCounts }) {
   const { passed, failed, blocked, total } = counts;
   if (total <= 0) return null;
@@ -749,10 +773,19 @@ function ProjectsPageContent() {
                       <div>
                         {p.currentPassRate !== null ? (
                           <div className="flex items-center gap-2">
-                            <div className="h-1 max-w-[60px] flex-1 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
-                              <div className="h-full rounded-full" style={{ width: `${p.currentPassRate}%`, background: "var(--status-pass-dot)" }} />
-                            </div>
+                            {p.runCounts ? (
+                              <PassRateBarCompact counts={p.runCounts} />
+                            ) : (
+                              <div className="h-1 max-w-[60px] flex-1 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
+                                <div className="h-full rounded-full" style={{ width: `${p.currentPassRate}%`, background: "var(--status-pass-dot)" }} />
+                              </div>
+                            )}
                             <span className="text-xs font-medium" style={{ color: passRateTextColor(p.currentPassRate) }}>{p.currentPassRate}%</span>
+                            {p.runCounts && p.runCounts.failed > 0 && (
+                              <span className="whitespace-nowrap text-[11px]" style={{ color: "var(--status-fail-text)" }}>
+                                {p.runCounts.failed} failed
+                              </span>
+                            )}
                           </div>
                         ) : (
                           <span className="text-xs text-[var(--muted-soft)]">{p.statsLoaded ? "No runs yet" : "—"}</span>

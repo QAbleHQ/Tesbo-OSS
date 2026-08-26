@@ -1128,6 +1128,169 @@ saved". The annotation exists for the model; the human reading the chat gets the
 
 ---
 
+## 6d. Wave 14 — portability, and the reported-ticket regressions (2026-08-25)
+
+Not a coverage wave either. Two things: making the suite runnable against a deployed environment from
+CI, and giving the board's fixed cards regression cover that actually runs there.
+
+### The measurement that started it
+
+The suite could not meaningfully run anywhere but this machine:
+
+```
+Suite total                       1191 tests in 60 files
+Runnable against a remote URL      127 tests in 14 files   (10.7%)
+Blocked on Docker                 1064 tests in 46 files
+```
+
+46 of 60 spec files import a DB-backed helper (`psql`, `rbac-tenant`, `screens-tenant`, `billing-db`,
+`reports-fixture`, `backend-logs`), and all of them reached Postgres through
+`docker compose exec postgres psql`. The container was only ever transport — but it still had to
+exist, so a CI agent pointed at stage skipped 46 files and reported success. `e2e/stage.env` confirms
+the state it left us in: no `E2E_DATABASE_URL`, so those suites were dark on stage.
+
+### What changed
+
+- **`utils/pg-runner.js`** (new) — a one-shot node-postgres client, spawned per statement with
+  `execFileSync`, so `utils/psql.ts` keeps its SYNCHRONOUS API (46 files call `exec`/`scalar` inline;
+  converting them all to `await` was not the change to make). Output is forced to the raw wire text via
+  a per-query `getTypeParser`, so an int8 comes back `"3"` and a timestamptz in Postgres's own
+  rendering — byte-identical to `psql -At`. Verified identical across ints, bools, NULL, no-rows,
+  timestamptz, enums and multi-row columns before anything depended on it.
+- **`utils/psql.ts`** — picks `direct` or `docker`, probing once per worker, pinnable with
+  `E2E_DB_TRANSPORT`. **Pin `direct` in CI**: the fallback would otherwise turn a bad connection
+  string into 46 silent skips. Also adds `execMany()` — see the timing note below.
+- **`utils/env-file.ts` + `environments/<name>.env`** (new) — per-environment config selected with
+  `E2E_ENV`, so a run no longer depends on the repo-root `.env` (which describes the local stack and
+  is the wrong answer everywhere else). **`process.env` wins over the file**, which is what lets a CI
+  job inject secrets as credentials and keep nothing secret in the checkout.
+- **`utils/env.ts`** — `autoProvision` now defaults on when a database URL is configured, not only for
+  localhost, because the DB-seed path is what provisions tenants on a remote target. `targetIsLocal`
+  is exported so global-setup can tell "there is a container log to scrape" from "there is not".
+- **`global-setup.ts`** — skips the OTP log scrape entirely on a remote target instead of spending a
+  rate-limited `signup/start` attempt and an 8s deadline per tenant to discover there is no log.
+- **`scripts/e2e-ci.sh`** (new) — the headless runner. `e2e-run.sh` and `e2e-stage.sh` drive
+  Terminal.app through osascript and cannot work on an agent. Refuses a production-looking host, Stripe
+  writes, and a 0-test selection; emits JUnit + HTML.
+- **`Jenkinsfile.e2e`** (new) — a STANDALONE job, deliberately not a stage in `Jenkinsfile.stage`: a red
+  test must never leave a blue/green cutover half-finished.
+
+Net effect: `E2E_DATABASE_URL` alone now makes all 46 DB-backed files runnable from a CI agent.
+
+### Connection cost dominates everything on a hosted database
+
+Measured against this stack's Neon instance, and worth knowing before writing any fixture:
+
+```
+connecting                       ~3400ms
+another query, same connection     ~294ms
+five statements in one call        ~376ms
+```
+
+So a helper that issues N statements as N calls pays ~3.4s N times over. That is what broke
+`SGN-A-17`: it failed on its **afterAll**, not its assertion — `purgeAccount()` ran five statements per
+account across ~15 accounts, needing ~187s against the 120s hook budget. It never fit on either
+transport (Docker ≈166s), which is why it had never passed. `execMany()` batches it to two round trips
+(~5s/account). **Batch teardowns; do not raise the timeout.** The one thing not to batch is a statement
+whose failure is tolerated — anything that can trip the append-only `audit_logs` trigger keeps its own
+call, or the tolerated failure abandons the rest of the batch.
+
+### The reported-ticket regressions — `e2e/regression/`
+
+All **36 fixed cards** across Writing Tests / Ready-for-QA / Ready-for-Deploy now have a home: 13 in the
+new folder, 23 already covered in `api/` and `ui/`. The per-card map is in
+[e2e/regression/README.md](../e2e/regression/README.md) and every test cites its card id, so
+`grep -rn <card-id> e2e/` finds the cover — the reconciliation problem §6c ran into.
+
+The folder's one rule: **no DB-backed imports**, so it runs on any URL with nothing but credentials.
+That is why it is a new folder rather than additions to the area-owning files, several of which are
+DB-backed and would have skipped exactly where the ticket was reported.
+
+**41 tests in 8 files.** Measured, not predicted — unlike Waves 12 and 13.
+
+### Five "Ready For the QA" cards have no fix on any branch
+
+Checked against `BugFixes`, `dev` and `main`. The cards were moved; the code was not touched.
+
+| Card | Ticket | Evidence in the product |
+|---|---|---|
+| 10230849105 | Logout confirmation | `Sidebar.tsx` wires the button straight to `onLogout` |
+| 10230839912 | My Account validation placement | one `error` string, rendered once after all three fields |
+| 10230858713 | Signup/login asterisks | no asterisk, no `required`, no `aria-required` |
+| 10230843780 | Members delete + confirm | `onClick={() => handleRemoveMember(...)}`, no dialog |
+| 10230848426 | Search clear (X) | no clear control; the `⌘K` hint is all there is |
+
+Covered with `test.fail()` — `api/authorization.spec.ts`'s convention — so CI stays green and Playwright
+reports "unexpectedly passing" the moment a fix lands. Nine tests across eight cards are marked that
+way. Note 10230848426's claim is also partly wrong: `TopBar.tsx` tests `(e.metaKey || e.ctrlKey)`, so
+Ctrl+K has always worked on Windows — the defect is the label, and that half is a passing test.
+
+### A real 500, found by the new tests
+
+`suites.name` is `VARCHAR(255)` and `createSuite` checked only that the name was non-empty, so a
+900-character name reached the column, Postgres raised 22001, and the caller got an unhandled **500**.
+That is what card 10217475765 was — the card whose BetterBugs session had 0 network requests, 0 logs
+and 0 user steps, so the test found the mechanism the report could not supply.
+
+The hole was open in four places, not one: `cycles.name` and `plans.name` are `VARCHAR(255)`,
+`bugs.title` is `VARCHAR(512)`, and cycles/plans carry `VARCHAR(128)` label columns — none validated on
+create or update. Fixed with `validateBoundedField()` next to the existing `validateProjectFields` /
+`validateWorkspaceName`, across 9 call sites. `REG-BOUND` covers every field in both directions: over
+the width is a 4xx and never a 5xx, and **exactly** the width is accepted — the second half being the
+guard against a fix that over-corrects to some tighter arbitrary bound.
+
+### Measurements that replace Wave 12/13 predictions
+
+First execution of specs those waves wrote but never ran:
+
+| Test | Predicted | Measured | Reading |
+|---|---|---|---|
+| `SGN-A-02` | green | **red** | product says `400 "Name is required"`, the spec asserts lowercase `"name is required"` — a copy mismatch, both predating the wave |
+| `SGN-A-17` | green | **red** | afterAll timeout, not the assertion — see the timing note above; fixed by `execMany()` |
+| `ONB-A-07` | green | **red** | expects 401, product answers `400 Authentication required`. `api/authorization.spec.ts` already documents 400 as the current behaviour, so the SPEC is wrong here |
+| `ONB-A-08` | green | **red** | a malformed body left 4 orgs where ≤1 was expected. Untriaged — possibly real |
+| `THM-15` | green | **red** | 120s timeout, context torn down; `THM-13`/`THM-14` take 2.7–2.8m each and pass. The §5 contention flake — re-confirm at `--workers=1` |
+
+`api/rbac.spec.ts` passed in full through the new transport, which is the strongest single signal that
+it is sound: every one of its tests provisions an org, three users, two projects and their memberships
+through `psql` in `beforeAll`.
+
+### The runs, in order
+
+Four runs, all `--workers=10` in a visible Terminal via `scripts/e2e-run.sh`.
+
+| # | Selection | Result | What it settled |
+|---|---|---|---|
+| 1 | `regression/` — 25 | 14 passed / 5 failed / 6 skipped | First execution. 4 failures were spec defects of mine (stale selectors); the 5th was the real 500 |
+| 2 | transport proof — 130 | 122 passed / 5 failed / 3 skipped | `api/rbac.spec.ts` green in full through the direct transport; none of the 5 involve it |
+| 3 | `regression/api/tickets-suites.spec.ts` — 20, **pre-fix image** | **9 failed** / 11 passed | The failing-first evidence: all 8 over-width fields answered **500**, one character over |
+| 4 | API impacted — 70, post-fix | 68 passed / 2 failed | All 9 now pass; `SGN-A-17` passes too (the `execMany` batching) |
+| 5 | UI regressions — 19 | 13 passed / 6 skipped / **0 failed** | The locator fixes hold; the 5 unfixed cards fail as expected |
+
+Run 3 is the one worth keeping. `ALLOW_STALE_IMAGES=1` was used deliberately — `e2e-run.sh`'s staleness
+guard exists to stop you testing code you are not running, and this was the one case where testing the
+OLD code was the entire point.
+
+The two remaining reds in run 4 are both accounted for and neither is the fix:
+
+- **`SGN-A-02`** — the copy mismatch above (`"Name is required"` vs `"name is required"`).
+- **`api/bugs.spec.ts` "the override is recorded in the activity stream"** — a missing `bug_linked`
+  audit entry, nothing to do with length validation. Its failure artifact existed *before* this
+  session's first run, and `e2e/api/bugs.spec.ts` was concurrently modified by another session whose
+  diff touches that exact activity assertion. Another session's in-flight work, on both counts.
+
+### Still unverified
+
+Stated rather than glossed:
+
+- **`modalByTitle()` is exercised only by `regression/ui/tickets-plans.spec.ts`**, which was held back:
+  the plan detail page is one of the files another session had modified, so running it against the old
+  frontend tests the wrong page and running it after a rebuild tests their unfinished edit. The other
+  six UI spec files test pages nobody else had touched, which is why they were run and it was not.
+- **Nothing has run against a deployed environment yet.** The portability work is verified locally and
+  by construction; the end-to-end proof is a stage run with `E2E_ENV=stage`.
+
+
 ## 7. Working across threads
 
 1. **Claim a wave here before starting it** — add your session and the date to the status table.

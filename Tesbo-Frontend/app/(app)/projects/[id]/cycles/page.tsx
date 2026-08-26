@@ -10,7 +10,9 @@ import {
   IconCircleDashed,
   IconCircleMinus,
   IconCircleX,
+  IconAlertTriangle,
   IconClipboardList,
+  IconRobot,
   IconClock,
   IconDeviceDesktop,
   IconPencil,
@@ -485,6 +487,28 @@ export default function TestRunsPage() {
                           {r.name}
                         </Link>
                         <StatusChip tone={statusTone(r.status)}>{r.status}</StatusChip>
+                        {/*
+                          * Whether a run's results were reported by an SDK or typed in by a person
+                          * is the first thing you need to know when a pass rate looks wrong, so it
+                          * belongs next to the name rather than only on the detail page. Nothing
+                          * renders for a manual run (Basecamp 10189985971).
+                          */}
+                        {r.source === "automation" && (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--muted)]"
+                            title={
+                              r.closeStatus === "incomplete"
+                                ? "Reported by an automation SDK. The test process never reported that it finished, so some results may be missing."
+                                : "Results reported by an automation SDK"
+                            }
+                          >
+                            <IconRobot size={11} stroke={1.75} />
+                            Automated
+                            {r.closeStatus === "incomplete" && (
+                              <IconAlertTriangle size={11} stroke={1.75} style={{ color: "var(--warning)" }} />
+                            )}
+                          </span>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--muted-soft)]">
                         {planName && (

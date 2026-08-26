@@ -55,6 +55,10 @@ function reportPaths(projectId: string): string[] {
     `/api/projects/${projectId}/reports/overview`,
     `/api/projects/${projectId}/reports/insights`,
     `/api/projects/${projectId}/reports/trends`,
+    // The export is a report read like any other, so it belongs in every sweep below — including
+    // RPT-A-54, which is the promise that a downgraded workspace can still get its data out.
+    `/api/projects/${projectId}/reports/export/csv?view=overview`,
+    `/api/projects/${projectId}/reports/export/xlsx?view=execution`,
   ];
 }
 
@@ -971,6 +975,201 @@ test.describe("the per-run report summary endpoint", () => {
     });
     expect(res.status()).toBe(200);
     expect((await res.json()).total).toBe(0);
+  });
+});
+
+/*
+ * Basecamp 10218723531 — "Reports & Insights > Export buttons are not working".
+ *
+ * The button was never wired to anything (no onClick, title="Coming soon"), so this endpoint is new
+ * rather than fixed. Six views, two formats. The contract worth holding: the file is the same numbers
+ * the screen shows, which is why these cases compare the export against the JSON endpoint behind the
+ * same tab instead of restating the fixture's arithmetic a second time.
+ */
+test.describe("report export", () => {
+  const EXPORT_VIEWS = ["overview", "execution", "matrix", "repository", "insights", "trends"] as const;
+
+  function exportUrl(view: string, format: "csv" | "xlsx", extra = ""): string {
+    return `/api/projects/${fixture.projectId}/reports/export/${format}?view=${view}${extra}`;
+  }
+
+  /** CSV split into rows, respecting the quoting rowsToCsv applies. */
+  function csvRows(body: string): string[][] {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let cell = "";
+    let quoted = false;
+    for (let i = 0; i < body.length; i++) {
+      const ch = body[i];
+      if (quoted) {
+        if (ch === '"' && body[i + 1] === '"') {
+          cell += '"';
+          i++;
+        } else if (ch === '"') quoted = false;
+        else cell += ch;
+        continue;
+      }
+      if (ch === '"') quoted = true;
+      else if (ch === ",") {
+        row.push(cell);
+        cell = "";
+      } else if (ch === "\n") {
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = "";
+      } else if (ch !== "\r") cell += ch;
+    }
+    row.push(cell);
+    if (row.length > 1 || row[0] !== "") rows.push(row);
+    return rows;
+  }
+
+  for (const view of EXPORT_VIEWS) {
+    test(`RPT-A-55 the ${view} view exports a CSV named after itself`, async () => {
+      const res = await asOwner.get(exportUrl(view, "csv"), { failOnStatusCode: false });
+      expect(res.status(), await res.text()).toBe(200);
+      expect(res.headers()["content-type"]).toContain("text/csv");
+      // The filename matters: six views downloading as one name is how you end up with
+      // report(3).csv and no idea which tab it came from.
+      expect(res.headers()["content-disposition"]).toContain(`filename="report-${view}.csv"`);
+
+      const rows = csvRows(await res.text());
+      expect(rows.length, "an export with no header row is an empty file with extra steps").toBeGreaterThan(0);
+      const header = rows[0];
+      if (view === "execution") {
+        expect(header).toEqual(["groupName", "Passed", "Failed", "Blocked", "Skipped", "Untested", "Retest", "total"]);
+      } else if (view === "matrix") {
+        expect(header[0]).toBe("externalId");
+        expect(header).toContain("bugUrl");
+      } else {
+        // The four dashboard views share the long form — one parseable table instead of stacked
+        // mini-tables with conflicting headers.
+        expect(header).toEqual(["section", "label", "metric", "value"]);
+      }
+      // Every data row has to have the same width as the header, or nothing can parse it.
+      for (const row of rows.slice(1)) expect(row.length).toBe(header.length);
+    });
+  }
+
+  for (const view of EXPORT_VIEWS) {
+    test(`RPT-A-56 the ${view} view exports a workbook`, async () => {
+      const res = await asOwner.get(exportUrl(view, "xlsx"), { failOnStatusCode: false });
+      expect(res.status(), await res.text()).toBe(200);
+      expect(res.headers()["content-disposition"]).toContain(`filename="report-${view}.xlsx"`);
+      const body = Buffer.from(await res.body());
+      // xlsx is a zip: "PK" or it is not a workbook, whatever the headers claim.
+      expect(body.subarray(0, 2).toString("latin1")).toBe("PK");
+      expect(body.length).toBeGreaterThan(0);
+    });
+  }
+
+  test("RPT-A-57 the execution export is the execution report, row for row", async () => {
+    const json = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution`);
+    const rows = csvRows(await (await asOwner.get(exportUrl("execution", "csv"))).text());
+
+    expect(rows.length - 1).toBe(json.rows.length);
+    const exported = new Map(rows.slice(1).map((row) => [row[0], row]));
+    for (const jsonRow of json.rows) {
+      const row = exported.get(String(jsonRow.groupName));
+      expect(row, `${jsonRow.groupName} is missing from the export`).toBeTruthy();
+      expect(row![1]).toBe(String(jsonRow.Passed));
+      expect(row![2]).toBe(String(jsonRow.Failed));
+      expect(row![7]).toBe(String(jsonRow.total));
+    }
+  });
+
+  test("RPT-A-58 the export carries the tab's filter, not the whole project", async () => {
+    // The screen filters by plan/run/suite/person/priority/tag. Exporting while looking at one run
+    // and getting every run back would be a quietly wrong file — worse than no export at all.
+    const run = fixture.runs[5];
+    const filter = `&filterBy=run&filterValue=${run.id}`;
+    const filtered = await getJson(
+      asOwner,
+      `/api/projects/${fixture.projectId}/reports/execution?filterBy=run&filterValue=${run.id}`,
+    );
+    const rows = csvRows(await (await asOwner.get(exportUrl("execution", "csv", filter))).text());
+
+    expect(rows.length - 1).toBe(filtered.rows.length);
+    const unfiltered = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution`);
+    expect(filtered.rows.length, "the fixture must actually be narrowed for this to prove anything").toBeLessThan(
+      unfiltered.rows.length,
+    );
+  });
+
+  test("RPT-A-59 the traceability export matches the matrix row for row", async () => {
+    const json = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/requirement-matrix`);
+    const rows = csvRows(await (await asOwner.get(exportUrl("matrix", "csv"))).text());
+    expect(rows.length - 1).toBe(json.rows.length);
+  });
+
+  test("RPT-A-60 a title carrying commas, quotes and newlines survives the CSV", async () => {
+    // rowsToCsv quotes and doubles quotes; the risk is a cell that silently becomes two columns and
+    // shifts every field after it on that row.
+    //
+    // Seeded in a throwaway project rather than the fixture: every other test in this file asserts
+    // exact aggregates over fixture.projectId, and an extra test case — even a deleted one — is
+    // exactly the kind of contamination this file's header warns about.
+    const nasty = `E2E Export "quoted", comma\nand newline ${Date.now()}`;
+    const projectId = await seedProject(asOwner, `E2E Export Quoting ${Date.now()}`);
+    try {
+      await seedTestCase(asOwner, projectId, { title: nasty, priority: "P3" });
+      const res = await asOwner.get(`/api/projects/${projectId}/reports/export/csv?view=matrix`);
+      const rows = csvRows(await res.text());
+      const header = rows[0];
+      const titleIndex = header.indexOf("testcaseTitle");
+      const match = rows.slice(1).find((row) => row[titleIndex]?.includes("and newline"));
+      expect(match, "the awkward title never made it into the export").toBeTruthy();
+      expect(match![titleIndex]).toBe(nasty);
+      expect(match!.length, "a quoted cell must not widen its row").toBe(header.length);
+    } finally {
+      purgeProject(projectId);
+    }
+  });
+
+  test("RPT-A-61 an unknown view is refused, naming the ones that exist", async () => {
+    const res = await asOwner.get(exportUrl("everything", "csv"), { failOnStatusCode: false });
+    expect(res.status()).toBe(400);
+    const { error } = await res.json();
+    expect(error).toContain("everything");
+    for (const view of EXPORT_VIEWS) expect(error).toContain(view);
+  });
+
+  test("RPT-A-62 an unsupported format is refused", async () => {
+    for (const format of ["pdf", "json", "csv.exe"]) {
+      const res = await asOwner.get(
+        `/api/projects/${fixture.projectId}/reports/export/${format}?view=overview`,
+        { failOnStatusCode: false },
+      );
+      expect(res.status(), `${format} should be refused, not guessed at`).toBe(400);
+    }
+  });
+
+  test("RPT-A-63 no view at all falls back to the overview rather than failing", async () => {
+    const res = await asOwner.get(`/api/projects/${fixture.projectId}/reports/export/csv`, {
+      failOnStatusCode: false,
+    });
+    expect(res.status()).toBe(200);
+    expect(res.headers()["content-disposition"]).toContain('filename="report-overview.csv"');
+  });
+
+  test("RPT-A-64 an empty project exports headers and no rows", async () => {
+    // The empty-result edge: a brand new project has no runs, no cases and no bugs, and every view
+    // still has to produce a file a spreadsheet can open.
+    const emptyId = await seedProject(asOwner, `E2E Export Empty ${Date.now()}`);
+    try {
+      for (const view of EXPORT_VIEWS) {
+        const res = await asOwner.get(
+          `/api/projects/${emptyId}/reports/export/csv?view=${view}`,
+          { failOnStatusCode: false },
+        );
+        expect(res.status(), `${view} on an empty project answered ${res.status()}`).toBe(200);
+        const rows = csvRows(await res.text());
+        expect(rows[0].length, `${view} produced no header row`).toBeGreaterThan(1);
+      }
+    } finally {
+      purgeProject(emptyId);
+    }
   });
 });
 

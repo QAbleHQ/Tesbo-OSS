@@ -585,3 +585,80 @@ test.describe("test plans — the plan detail progress panel", () => {
     }
   });
 });
+
+/*
+ * The plan header, its Plan items tab and the inline edit form.
+ *
+ * Three cards from the same screen: 10221932189 ("Test cases shows incorrect count" — the header
+ * chip counted pinned plan_items while the panel below counted the cases in the plan's runs, so a
+ * plan running twelve cases announced "0 test cases"), 10221983132 ("Plan items shows 0 count and
+ * message 'no planed items'" — accurate, but reading as a bug next to those twelve), and 10221977100
+ * ("Edit test plan > field labels are missing").
+ */
+test.describe("test plans — header count, plan items and editing", () => {
+  test.skip(skipReason !== null, skipReason ?? "");
+
+  test("PLN-U-12 the header's test case count is the plan's actual cases, not its pinned items", async ({
+    page,
+  }) => {
+    const api = await screensApi();
+    const project = await createProject(api);
+    try {
+      const plan = await createPlan(api, project.id);
+      // Three cases, all of them arriving through a linked RUN and none pinned as plan items — the
+      // exact shape of the report: caseCount is 0 while the plan plainly covers three cases.
+      await seedRun(api, project.id, { statuses: ["Passed", "Failed", "Untested"], planId: plan.id });
+
+      await page.goto(`/projects/${project.id}/plans/${plan.id}`);
+
+      // Asserted against the fixture rather than by scraping the TOTAL tile: `page.locator("div")`
+      // matches every div on the screen, and filtering that set was slow enough to time the test out.
+      await expect(page.getByText(/3 test cases/)).toBeVisible();
+      await expect(page.getByText(/^0 test cases$/)).toHaveCount(0);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
+    }
+  });
+
+  test("PLN-U-13 the empty Plan items tab explains where the plan's cases come from", async ({ page }) => {
+    const api = await screensApi();
+    const project = await createProject(api);
+    try {
+      const plan = await createPlan(api, project.id);
+      await seedRun(api, project.id, { statuses: ["Passed", "Failed"], planId: plan.id });
+
+      await page.goto(`/projects/${project.id}/plans/${plan.id}`);
+      await page.getByRole("button", { name: /Plan items/ }).click();
+
+      // The count stays honest — nothing is pinned — but the copy names the other number so the two
+      // no longer read as a contradiction.
+      const empty = page.getByText(/Nothing is pinned to this plan/);
+      await expect(empty).toBeVisible();
+      await expect(empty).toContainText(/\d+ test cases? come from the linked test runs/);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
+    }
+  });
+
+  test("PLN-U-14 the inline edit form labels every field", async ({ page }) => {
+    const api = await screensApi();
+    const project = await createProject(api);
+    try {
+      const plan = await createPlan(api, project.id);
+      await page.goto(`/projects/${project.id}/plans/${plan.id}`);
+      await page.getByRole("button", { name: /^Edit$/ }).first().click();
+
+      // Labels, not placeholders: a placeholder disappears the moment the field has a value, which
+      // is exactly the state you are in when editing an existing plan.
+      for (const label of ["Plan name", "Description", "Target release"]) {
+        await expect(page.getByLabel(label)).toBeVisible();
+      }
+      await expect(page.getByLabel("Plan name")).toHaveValue(plan.name);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
+    }
+  });
+});

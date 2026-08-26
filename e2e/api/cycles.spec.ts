@@ -484,6 +484,88 @@ test.describe("adding test cases to a run", () => {
   });
 });
 
+/*
+ * Run start and end timestamps — Basecamp 10221952787 ("[Test Run] history not showing when test
+ * was run").
+ *
+ * `cycles.started_at` and `cycles.ended_at` existed from the first migration and were written by
+ * nothing: only read. The runs list renders a clock from formatDuration(startedAt, endedAt), so it
+ * showed "—" for every run in the product, completed ones included. The status transition stamps
+ * them now, which is what the Start and Mark Completed buttons drive.
+ */
+test.describe("run timing", () => {
+  async function createRun(request: any, name: string) {
+    return (await request.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name } })).json();
+  }
+
+  async function readRun(request: any, id: string) {
+    return (await request.get(`/api/cycles/${id}`)).json();
+  }
+
+  test("starting a run stamps startedAt, completing it stamps endedAt", async ({ request }) => {
+    const run = await createRun(request, `E2E Run Timing ${Date.now()}`);
+    try {
+      // A run is created in Planning and has not started.
+      expect(run.startedAt ?? null).toBeNull();
+      expect(run.endedAt ?? null).toBeNull();
+
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      const started = await readRun(request, run.id);
+      expect(started.startedAt, "a run that is In Progress has to know when it started").toBeTruthy();
+      expect(started.endedAt ?? null).toBeNull();
+
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.endedAt).toBeTruthy();
+      // The original start survives completion — otherwise the duration is always zero.
+      expect(completed.startedAt).toBe(started.startedAt);
+      expect(new Date(completed.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(completed.startedAt).getTime());
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+
+  test("reopening a completed run clears its end, and an unrelated edit leaves the clock alone", async ({
+    request,
+  }) => {
+    const run = await createRun(request, `E2E Run Reopen ${Date.now()}`);
+    try {
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.endedAt).toBeTruthy();
+
+      // Reopened: it is running again, so it has no end.
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      const reopened = await readRun(request, run.id);
+      expect(reopened.endedAt ?? null).toBeNull();
+      expect(reopened.startedAt).toBe(completed.startedAt);
+
+      // Renaming a run is not a transition and must not touch either timestamp.
+      await request.patch(`/api/cycles/${run.id}`, { data: { name: `${run.name} renamed` } });
+      const renamed = await readRun(request, run.id);
+      expect(renamed.startedAt).toBe(reopened.startedAt);
+      expect(renamed.endedAt ?? null).toBeNull();
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+
+  test("a run taken straight to Completed still gets a start to measure from", async ({ request }) => {
+    // The transition Planning -> Completed skips In Progress entirely; without the back-fill the
+    // duration would be computed from a null start and read "—" forever.
+    const run = await createRun(request, `E2E Run Straight Complete ${Date.now()}`);
+    try {
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.startedAt).toBeTruthy();
+      expect(completed.endedAt).toBeTruthy();
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+});
+
 test.describe("list-cycles bucket counts", () => {
   // Regression for the Test Runs Pass Rate mismatch: the frontend's summary tile and the run
   // details page each compute their own pass rate from these bucket fields, and both now assume

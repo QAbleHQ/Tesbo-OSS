@@ -48,7 +48,7 @@ import {
   type TestRunListItem,
   type TestEnvironmentSetting,
 } from "@/lib/api";
-import { Button, StatusChip, StatusBadge, PriorityBadge, Input, PageLoader, Select, type TestStatus, type Priority } from "@/components/ui";
+import { Button, StatusChip, StatusBadge, PriorityBadge, Input, PageLoader, Select, Field, FieldLabel, type TestStatus, type Priority } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import { planStatus, formatLastRun, OwnerAvatar, PlanStatusBadge } from "@/components/testplans/PlanCard";
@@ -462,10 +462,40 @@ export default function PlanDetailPage() {
         {/* Page header: title + status + meta */}
         <div className="mb-3 shrink-0 pl-4">
           {editing ? (
+            /*
+              * Basecamp 10221977100 ("Edit test plan > field labels are missing"). Three bare inputs:
+              * the name had nothing at all identifying it, and the other two leaned on placeholders,
+              * which disappear the moment there is a value — so editing an existing plan showed three
+              * unlabelled boxes of text. Field/FieldLabel is what every other form in the app uses.
+              */
             <div className="max-w-lg space-y-3">
-              <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="text-[15px] font-semibold" />
-              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="Description" />
-              <Input value={editRelease} onChange={(e) => setEditRelease(e.target.value)} placeholder="Target release" />
+              <Field>
+                <FieldLabel htmlFor="plan-edit-name">Plan name</FieldLabel>
+                <Input
+                  id="plan-edit-name"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="text-[15px] font-semibold"
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="plan-edit-description">Description</FieldLabel>
+                <Input
+                  id="plan-edit-description"
+                  value={editDesc}
+                  onChange={(e) => setEditDesc(e.target.value)}
+                  placeholder="What this plan covers"
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="plan-edit-release">Target release</FieldLabel>
+                <Input
+                  id="plan-edit-release"
+                  value={editRelease}
+                  onChange={(e) => setEditRelease(e.target.value)}
+                  placeholder="e.g. 2026.09"
+                />
+              </Field>
               <div className="flex gap-2">
                 <Button onClick={handleSaveEdit}>Save</Button>
                 <Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button>
@@ -494,7 +524,27 @@ export default function PlanDetailPage() {
                 </span>
                 <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
                   <IconFileDescription size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
-                  <span className="font-mono text-[var(--foreground)]">{currentPlanSummary?.caseCount ?? items.length}</span> test cases
+                  {/*
+                    * Basecamp 10221932189 ("Test cases shows incorrect count"). This chip read
+                    * `caseCount` — the plan_items rows, i.e. cases explicitly pinned to the plan's
+                    * scope — while the Overall progress panel three lines below counted the cases in
+                    * the plan's runs. A plan with two runs and twelve cases therefore announced "0
+                    * test cases" directly above a TOTAL of 12.
+                    *
+                    * The chip now reports the same number as TOTAL, because that is what a reader
+                    * means by "how many test cases are in this plan". The pinned scope still has its
+                    * own count on the Plan items tab, where the word "items" says what it is.
+                    */}
+                  <span className="font-mono text-[var(--foreground)]">
+                    {/*
+                      * `||`, not `??`. derivedProgress is never null — with no runs it returns the
+                      * plan-progress payload, whose totalCases is 0 — so `??` never fell through and
+                      * a plan with pinned items but no runs yet showed "0 test cases", which is the
+                      * same defect as 10221932189 pointing the other way. Caught by PLN-U-05, which
+                      * exists precisely to catch this chip being widened by accident.
+                      */}
+                    {derivedProgress?.totalCases || currentPlanSummary?.caseCount || items.length}
+                  </span> test cases
                 </span>
                 {ownerName && <OwnerAvatar name={ownerName} seed={planOwnerId} />}
               </div>
@@ -784,7 +834,17 @@ export default function PlanDetailPage() {
                 <section>
                   {items.length === 0 ? (
                     <div className="rounded-[10px] border border-dashed border-[var(--border)] p-8 text-center">
-                      <p className="text-sm text-[var(--muted)]">No items in this plan. Items are suites or test cases that define the scope of the plan.</p>
+                      {/*
+                        * Basecamp 10221983132 ("Plan items shows 0 count and message 'no planed
+                        * items'"). The count was accurate — nothing was pinned — but it sat next to
+                        * a plan that was visibly running twelve cases, so it read as a bug. Naming
+                        * the other number is what removes the contradiction.
+                        */}
+                      <p className="text-sm text-[var(--muted)]">
+                        {total > 0
+                          ? `Nothing is pinned to this plan's scope yet. Its ${total} test case${total === 1 ? "" : "s"} come from the linked test runs — pin suites or cases here to say what the plan is meant to cover.`
+                          : "No items in this plan. Items are suites or test cases that define the scope of the plan."}
+                      </p>
                     </div>
                   ) : (
                     <div className="overflow-hidden rounded-[10px] border border-[var(--border)]">

@@ -10,6 +10,8 @@ import {
   type ExecutionItem,
 } from "@/lib/api";
 import { Button, StatusChip, Input, PageLoader, Textarea } from "@/components/ui";
+import ExecutionEvidencePanel from "@/components/ExecutionEvidencePanel";
+import { AutomationResultMeta } from "@/components/AutomationResultMeta";
 
 const STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"];
 
@@ -217,7 +219,14 @@ export default function ExecutionDetailPage() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          {/*
+            * Basecamp 10221790207 — "Only failed test case should show defect key and Defect URL".
+            * A defect reference on a passing case is not just clutter: it flows into the CSV export
+            * and the traceability matrix, where it reads as a bug against a case that passed. The
+            * backend clears the stored values when a status other than Failed is saved, so hiding
+            * the inputs here does not leave data behind invisibly.
+            */}
+          <div className="grid grid-cols-2 gap-3" hidden={status !== "Failed"}>
             <div>
               <label className="block text-sm font-medium text-[var(--muted)] mb-1">
                 Defect Key
@@ -241,6 +250,17 @@ export default function ExecutionDetailPage() {
               />
             </div>
           </div>
+
+          {/*
+            * The same two panels the run drawer shows, so a result looks the same wherever it is
+            * opened. Both render nothing for a human-recorded result with no evidence, which is
+            * every result that existed before the automation ingest (Basecamp 10189985971).
+            */}
+          <AutomationResultMeta execution={execution} />
+
+          <div className="h-px bg-[var(--border)]" />
+
+          <ExecutionEvidencePanel cycleId={cycleId} executionId={execution.id} />
 
           <div className="flex gap-2 pt-2">
             <Button type="submit" disabled={saving}>
