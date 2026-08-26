@@ -55,6 +55,12 @@ test.describe("auto bug-filing on Failed", () => {
       const titleInput = page.getByPlaceholder("Brief summary of the bug…");
       await expect(titleInput).toHaveValue(`Failed: ${title}`);
 
+      // Severity is mandatory and defaults to Medium so the dialog can always be filed without
+      // the reporter having to touch it.
+      const severitySelect = page.getByRole("combobox", { name: "Severity" });
+      await expect(severitySelect).toHaveValue("Medium");
+      await severitySelect.selectOption("Critical");
+
       await page.getByRole("button", { name: "File Bug" }).click();
       await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeHidden();
 
@@ -64,6 +70,7 @@ test.describe("auto bug-filing on Failed", () => {
         const bugs = await bugsRes.json();
         const filedBug = bugs.find((b: { title: string }) => b.title === `Failed: ${title}`);
         expect(filedBug).toBeTruthy();
+        expect(filedBug.severity).toBe("Critical");
         expect(filedBug.links.some((l: { testcaseId: string; cycleId: string }) =>
           l.testcaseId === testcase.id && l.cycleId === cycle.id,
         )).toBeTruthy();
@@ -72,6 +79,79 @@ test.describe("auto bug-filing on Failed", () => {
       }
     } finally {
       await cleanUp(cycle.id, testcase.id);
+    }
+  });
+
+  test("the severity dropdown offers only the four valid values and resets to Medium for the next dialog", async ({
+    page,
+  }) => {
+    const stamp = Date.now();
+    const titleA = `UI Bug Severity Reset A ${stamp}`;
+    const titleB = `UI Bug Severity Reset B ${stamp}`;
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    const cycle = await (
+      await api.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `UI Bug Severity Reset Cycle ${stamp}` } })
+    ).json();
+    await api.patch(`/api/cycles/${cycle.id}`, { data: { status: "In Progress" } });
+    const testcaseA = await (
+      await api.post(`/api/projects/${ctx.projectId}/testcases`, { data: { title: titleA } })
+    ).json();
+    const testcaseB = await (
+      await api.post(`/api/projects/${ctx.projectId}/testcases`, { data: { title: titleB } })
+    ).json();
+    await api.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds: [testcaseA.id, testcaseB.id] } });
+    await api.dispose();
+
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+
+      // Fail the first case, pick a non-default severity, and skip — the dialog must not carry
+      // that choice over into the next execution's report.
+      await page.getByRole("combobox").first().selectOption("Failed");
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeVisible();
+      const severitySelect = page.getByRole("combobox", { name: "Severity" });
+
+      // Mandatory dropdown: exactly the four backend-accepted values, no blank/empty option.
+      const optionValues = await severitySelect.locator("option").allTextContents();
+      expect(optionValues).toEqual(["Critical", "High", "Medium", "Low"]);
+
+      await severitySelect.selectOption("Low");
+      await page.getByRole("button", { name: "Skip", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeHidden();
+
+      // Fail the second case — its dialog must default back to Medium, not inherit "Low".
+      await page.getByRole("combobox").nth(1).selectOption("Failed");
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "Severity" })).toHaveValue("Medium");
+      await page.getByRole("button", { name: "File Bug" }).click();
+      await expect(page.getByRole("heading", { name: "Report a Bug" })).toBeHidden();
+
+      const verifyApi = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+      try {
+        const bugsRes = await verifyApi.get(`/api/projects/${ctx.projectId}/bugs`);
+        const bugs = await bugsRes.json();
+        const filedBug = bugs.find((b: { title: string }) => b.title === `Failed: ${titleB}`);
+        expect(filedBug).toBeTruthy();
+        expect(filedBug.severity).toBe("Medium");
+      } finally {
+        await verifyApi.dispose();
+      }
+    } finally {
+      const cleanupApi = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+      try {
+        const bugsRes = await cleanupApi.get(`/api/projects/${ctx.projectId}/bugs`);
+        const bugs = await bugsRes.json();
+        for (const bug of bugs) {
+          if (bug.links?.some((l: { testcaseId: string }) => l.testcaseId === testcaseA.id || l.testcaseId === testcaseB.id)) {
+            await cleanupApi.delete(`/api/bugs/${bug.id}`, { failOnStatusCode: false });
+          }
+        }
+        await cleanupApi.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+        await cleanupApi.delete(`/api/projects/${ctx.projectId}/testcases/${testcaseA.id}`, { failOnStatusCode: false });
+        await cleanupApi.delete(`/api/projects/${ctx.projectId}/testcases/${testcaseB.id}`, { failOnStatusCode: false });
+      } finally {
+        await cleanupApi.dispose();
+      }
     }
   });
 
@@ -180,6 +260,239 @@ test.describe("removing cases from a run", () => {
         await api.delete(`/api/projects/${ctx.projectId}/testcases/${id}`, { failOnStatusCode: false });
       }
       await api.dispose();
+    }
+  });
+});
+
+/*
+ * The run detail screen's progress bar, its defect fields and its Log Bug modal.
+ *
+ * Three cards: 10221778177 ("Progress not showing correct colours or progress" — blocked, skipped
+ * and pending were summed into one amber segment, so a run with 100 of 109 still pending was 92%
+ * "blocked"), 10221790207 ("Only failed test case should show defect key and Defect URL") and
+ * 10226268634 ("The Log Bug UI should be consistent across both Test Run → Log Bug and Bug Page →
+ * Log Bug" — the run's modal collected no severity at all, so every bug filed from a run took the
+ * column default).
+ */
+test.describe("run detail — progress, defects and the bug modal", () => {
+  test("EXE-U-30 every status gets its own colour in the run progress bar", async ({ page }) => {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    const cycle = await (
+      await api.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `UI Progress Run ${Date.now()}` } })
+    ).json();
+    const cases: string[] = [];
+    try {
+      // One case per status, so every segment has to be painted and none can hide behind another.
+      for (const label of ["pass", "fail", "block", "skip", "pending"]) {
+        const tc = await (
+          await api.post(`/api/projects/${ctx.projectId}/testcases`, {
+            data: { title: `UI Progress ${label} ${Date.now()}` },
+          })
+        ).json();
+        cases.push(tc.id);
+      }
+      await api.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds: cases } });
+      const executions = await (await api.get(`/api/cycles/${cycle.id}/executions`)).json();
+      const statuses = ["Passed", "Failed", "Blocked", "Skipped"];
+      for (let i = 0; i < statuses.length; i++) {
+        await api.patch(`/api/cycles/${cycle.id}/executions/${executions[i].id}`, { data: { status: statuses[i] } });
+      }
+
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+      await expect(page.getByText("Progress", { exact: true })).toBeVisible();
+
+      const segments = page.locator("div.flex.h-2 > div");
+      await expect(segments, "one segment per status present in the run").toHaveCount(5);
+      const colors = await segments.evaluateAll((els) =>
+        els.map((el) => getComputedStyle(el).backgroundColor),
+      );
+      // Five distinct colours: the defect was three statuses sharing the blocked amber.
+      expect(new Set(colors).size, `segments repeated a colour: ${colors.join(", ")}`).toBe(5);
+    } finally {
+      await api.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+      for (const id of cases) {
+        await api.delete(`/api/projects/${ctx.projectId}/testcases/${id}`, { failOnStatusCode: false });
+      }
+      await api.dispose();
+    }
+  });
+
+  test("EXE-U-31 defect fields appear only once the case is marked Failed", async ({ page }) => {
+    const { cycle, testcase } = await setUpCycleWithOneCase(`UI Defect Visibility ${Date.now()}`);
+    try {
+      // Driven from the full-page execute screen rather than the run's side panel: the panel opens
+      // from a row interaction this file has no established pattern for, and the same rule governs
+      // both screens. The execute screen renders its statuses as buttons.
+      const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+      const [execution] = await (await api.get(`/api/cycles/${cycle.id}/executions`)).json();
+      await api.dispose();
+
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}/execute/${execution.id}`);
+      await expect(page.getByText(testcase.title).first()).toBeVisible();
+
+      // Opens on Untested: a defect reference would be meaningless, so the fields are not offered.
+      await expect(page.getByText("Defect Key")).toBeHidden();
+
+      await page.getByRole("button", { name: "Failed", exact: true }).first().click();
+      await expect(page.getByText("Defect Key")).toBeVisible();
+      await expect(page.getByText("Defect URL")).toBeVisible();
+
+      await page.getByRole("button", { name: "Passed", exact: true }).first().click();
+      await expect(page.getByText("Defect Key")).toBeHidden();
+    } finally {
+      await cleanUp(cycle.id, testcase.id);
+    }
+  });
+
+  test("EXE-U-32 the run Log Bug modal asks for severity and priority, like the Bugs page", async ({ page }) => {
+    const { cycle, testcase } = await setUpCycleWithOneCase(`UI Log Bug Fields ${Date.now()}`);
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+      await expect(page.getByText(testcase.title).first()).toBeVisible();
+
+      // The inline status control is a <select>, and marking Failed is what opens this modal — the
+      // same pattern the passing tests at the top of this file use.
+      await page.getByRole("combobox").first().selectOption("Failed");
+
+      await expect(page.getByText("Report a Bug", { exact: true })).toBeVisible();
+      await expect(page.getByLabel("Severity")).toBeVisible();
+      await expect(page.getByLabel("Bug priority")).toBeVisible();
+      // Same defaults as the Bugs page: severity Medium, priority untriaged.
+      await expect(page.getByLabel("Severity")).toHaveValue("Medium");
+      await expect(page.getByLabel("Bug priority")).toHaveValue("");
+    } finally {
+      await cleanUp(cycle.id, testcase.id);
+    }
+  });
+});
+
+
+/*
+ * The evidence viewer, and the automation provenance on a run (Basecamp 10189985971).
+ *
+ * These are the UI half of section 5. Before this card the backend had served
+ * POST/GET /api/cycles/:cycleId/executions/:executionId/attachments since the bug-evidence work
+ * and NOTHING in the frontend called either -- so evidence was storable, billed against the
+ * workspace's storage allowance, and invisible in the product. There was not even a download route.
+ * An automated run's screenshots and traces would have been write-only without this.
+ */
+test.describe("execution evidence and automation provenance", () => {
+  /** Drives the automation ingest to produce a real automated run with a failure and evidence. */
+  async function seedAutomatedRun(label: string) {
+    const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
+    try {
+      const testcase = await (
+        await api.post(`/api/projects/${ctx.projectId}/testcases`, {
+          data: { title: `UI Automation ${label} ${Date.now()}` },
+        })
+      ).json();
+
+      const base = `/api/projects/${ctx.projectId}/automation`;
+      const run = await (
+        await api.post(`${base}/runs`, {
+          data: {
+            name: `UI Automation Run ${label} ${Date.now()}`,
+            triggeredBy: "github-actions",
+            branch: "release/ui-evidence",
+            commitSha: "abc1234def5678",
+            buildUrl: "https://github.com/acme/web/actions/runs/99",
+            caseIds: [testcase.externalId],
+          },
+        })
+      ).json();
+
+      await api.post(`${base}/runs/${run.runId}/results`, {
+        data: {
+          caseId: testcase.externalId,
+          status: "fail",
+          durationMs: 2500,
+          retryCount: 2,
+          errorMessage: "AssertionError: expected the cart to be empty",
+        },
+      });
+
+      // A 1x1 PNG, so the viewer has a real image to render.
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==",
+        "base64",
+      );
+      await api.post(`${base}/runs/${run.runId}/results/${testcase.externalId}/evidence`, {
+        multipart: {
+          kind: "screenshot",
+          files: { name: "cart-failure.png", mimeType: "image/png", buffer: png },
+        },
+      });
+      await api.post(`${base}/runs/${run.runId}/results/${testcase.externalId}/evidence`, {
+        multipart: {
+          kind: "trace",
+          files: { name: "cart-trace.zip", mimeType: "application/zip", buffer: Buffer.from("PKtrace") },
+        },
+      });
+      return { runId: run.runId as string, testcase };
+    } finally {
+      await api.dispose();
+    }
+  }
+
+  test("an automated run shows its provenance, and the drawer shows the failure and its evidence", async ({
+    page,
+  }) => {
+    const { runId, testcase } = await seedAutomatedRun("evidence");
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${runId}`);
+
+      // Provenance strip: how the run was produced, and the commit it ran against. Renders nothing
+      // at all on a manual run, which is why it is asserted on an automated one.
+      await expect(page.getByTitle(/reported by an automation SDK/i).first()).toBeVisible();
+      await expect(page.getByText("release/ui-evidence")).toBeVisible();
+      await expect(page.getByText("abc1234", { exact: false }).first()).toBeVisible();
+      await expect(page.getByRole("link", { name: /^Build/ })).toBeVisible();
+
+      // Open the result's drawer.
+      await page.getByText(testcase.title).first().click();
+
+      // The framework's own failure text, kept separate from Actual Result -- that field is the
+      // tester's prose and the ingest never writes it.
+      await expect(page.getByText("Failure reported by automation")).toBeVisible();
+      await expect(page.getByText(/AssertionError: expected the cart to be empty/)).toBeVisible();
+      // Retries are a flakiness signal even on a result that eventually passed.
+      await expect(page.getByText("2 retries")).toBeVisible();
+
+      // Evidence, grouped by kind: the screenshot renders inline, the trace is a named download.
+      await expect(page.getByText("Evidence")).toBeVisible();
+      await expect(page.getByRole("img", { name: "cart-failure.png" })).toBeVisible();
+      await expect(page.getByText("cart-trace.zip")).toBeVisible();
+
+      // The download link points at the route that did not exist before this card.
+      const traceLink = page.getByRole("link", { name: /cart-trace\.zip/ });
+      await expect(traceLink).toHaveAttribute(
+        "href",
+        new RegExp(`/api/cycles/${runId}/executions/[0-9a-f-]{36}/attachments/[0-9a-f-]{36}/download$`),
+      );
+    } finally {
+      await cleanUp(runId, testcase.id);
+    }
+  });
+
+  test("a manual run shows no automation provenance", async ({ page }) => {
+    // The other direction: every provenance field is null on a manual run, and the components
+    // return null rather than an empty shell -- a manually executed run must look exactly as it did
+    // before this feature existed.
+    const title = `UI Manual Run Case ${Date.now()}`;
+    const { cycle, testcase } = await setUpCycleWithOneCase(title);
+    try {
+      await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
+      await expect(page.getByText(testcase.title).first()).toBeVisible();
+      await expect(page.getByTitle(/reported by an automation SDK/i)).toHaveCount(0);
+
+      await page.getByText(testcase.title).first().click();
+      await expect(page.getByText("Failure reported by automation")).toHaveCount(0);
+      // The evidence panel itself is always present -- a person can attach evidence to a manual
+      // result too, which they previously could not do anywhere in the UI.
+      await expect(page.getByText("Evidence")).toBeVisible();
+      await expect(page.getByText(/No evidence attached/)).toBeVisible();
+    } finally {
+      await cleanUp(cycle.id, testcase.id);
     }
   });
 });

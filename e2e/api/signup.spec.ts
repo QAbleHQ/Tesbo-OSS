@@ -1,7 +1,14 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { emailDomain } from "../utils/env";
-import { clearOtpIpRateLimit, clearOtpRateLimit, seedOtpCode } from "../utils/otp";
-import { dbControlAvailable, exec, execAllowingAuditImmutability, literal, scalar } from "../utils/psql";
+import { clearOtpIpRateLimit, seedOtpCode } from "../utils/otp";
+import {
+  dbControlAvailable,
+  exec,
+  execAllowingAuditImmutability,
+  execMany,
+  literal,
+  scalar,
+} from "../utils/psql";
 import { anonymousContext } from "../utils/rbac-tenant";
 
 /*
@@ -66,17 +73,31 @@ test.describe("self-serve signup", () => {
     return email;
   }
 
-  /** Removes the user and any pending signup, so a re-run starts from the same place. */
+  /**
+   * Removes the user and any pending signup, so a re-run starts from the same place.
+   *
+   * Batched into two round trips rather than five, because this runs once per account created by the
+   * file and the connection is what costs on a hosted database — ~3.4s to connect against ~0.3s for
+   * another statement on a connection already open. As five separate calls this spent ~12.5s per
+   * account, and with the ~15 accounts this file creates the afterAll hook needed ~187s against a
+   * 120s budget: SGN-A-17 failed on the teardown, not on its assertion. Two calls bring it to ~5s.
+   *
+   * The users DELETE stays on its own call deliberately. It is the one statement here whose failure
+   * is expected and tolerated — any account that has been audited cannot be hard-deleted, because
+   * audit_logs is append-only and its foreign key is ON DELETE SET NULL. Batching it would let that
+   * tolerated failure abandon the rest of the batch. See execMany's caveat in utils/psql.ts.
+   */
   function purgeAccount(email: string): void {
-    exec(`DELETE FROM pending_signups WHERE email = ${literal(email.toLowerCase())};`);
-    exec(
-      `DELETE FROM organization_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(email.toLowerCase())});`,
-    );
-    exec(
-      `DELETE FROM project_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(email.toLowerCase())});`,
-    );
-    execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
-    clearOtpRateLimit(email.toLowerCase());
+    const normalized = email.toLowerCase();
+    execMany([
+      `DELETE FROM pending_signups WHERE email = ${literal(normalized)}`,
+      `DELETE FROM organization_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(normalized)})`,
+      `DELETE FROM project_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(normalized)})`,
+      // Inlined rather than calling clearOtpRateLimit(), purely so it shares this connection. Kept
+      // identical to utils/otp.ts's statement, including the three key shapes it clears.
+      `DELETE FROM otp_rate_limit WHERE email IN (${literal(`send:${normalized}`)}, ${literal(`verify:${normalized}`)}, ${literal(normalized)})`,
+    ]);
+    execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(normalized)};`);
   }
 
   function pendingCount(email: string): number {

@@ -483,3 +483,132 @@ test.describe("adding test cases to a run", () => {
     }
   });
 });
+
+/*
+ * Run start and end timestamps — Basecamp 10221952787 ("[Test Run] history not showing when test
+ * was run").
+ *
+ * `cycles.started_at` and `cycles.ended_at` existed from the first migration and were written by
+ * nothing: only read. The runs list renders a clock from formatDuration(startedAt, endedAt), so it
+ * showed "—" for every run in the product, completed ones included. The status transition stamps
+ * them now, which is what the Start and Mark Completed buttons drive.
+ */
+test.describe("run timing", () => {
+  async function createRun(request: any, name: string) {
+    return (await request.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name } })).json();
+  }
+
+  async function readRun(request: any, id: string) {
+    return (await request.get(`/api/cycles/${id}`)).json();
+  }
+
+  test("starting a run stamps startedAt, completing it stamps endedAt", async ({ request }) => {
+    const run = await createRun(request, `E2E Run Timing ${Date.now()}`);
+    try {
+      // A run is created in Planning and has not started.
+      expect(run.startedAt ?? null).toBeNull();
+      expect(run.endedAt ?? null).toBeNull();
+
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      const started = await readRun(request, run.id);
+      expect(started.startedAt, "a run that is In Progress has to know when it started").toBeTruthy();
+      expect(started.endedAt ?? null).toBeNull();
+
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.endedAt).toBeTruthy();
+      // The original start survives completion — otherwise the duration is always zero.
+      expect(completed.startedAt).toBe(started.startedAt);
+      expect(new Date(completed.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(completed.startedAt).getTime());
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+
+  test("reopening a completed run clears its end, and an unrelated edit leaves the clock alone", async ({
+    request,
+  }) => {
+    const run = await createRun(request, `E2E Run Reopen ${Date.now()}`);
+    try {
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.endedAt).toBeTruthy();
+
+      // Reopened: it is running again, so it has no end.
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      const reopened = await readRun(request, run.id);
+      expect(reopened.endedAt ?? null).toBeNull();
+      expect(reopened.startedAt).toBe(completed.startedAt);
+
+      // Renaming a run is not a transition and must not touch either timestamp.
+      await request.patch(`/api/cycles/${run.id}`, { data: { name: `${run.name} renamed` } });
+      const renamed = await readRun(request, run.id);
+      expect(renamed.startedAt).toBe(reopened.startedAt);
+      expect(renamed.endedAt ?? null).toBeNull();
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+
+  test("a run taken straight to Completed still gets a start to measure from", async ({ request }) => {
+    // The transition Planning -> Completed skips In Progress entirely; without the back-fill the
+    // duration would be computed from a null start and read "—" forever.
+    const run = await createRun(request, `E2E Run Straight Complete ${Date.now()}`);
+    try {
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.startedAt).toBeTruthy();
+      expect(completed.endedAt).toBeTruthy();
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+});
+
+test.describe("list-cycles bucket counts", () => {
+  // Regression for the Test Runs Pass Rate mismatch: the frontend's summary tile and the run
+  // details page each compute their own pass rate from these bucket fields, and both now assume
+  // passed + failed + blocked + skipped + untested === totalCases for every status a case can be
+  // in. If a new status is ever added to EXECUTION_STATUSES without a matching bucket, this drifts
+  // silently and the two pages diverge again exactly as they did before the fix.
+  test("passed, failed, blocked, skipped and untested buckets always sum to totalCases", async ({ request }) => {
+    const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const cycle = await (
+      await request.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `E2E Bucket Sum ${stamp}` } })
+    ).json();
+
+    const statuses = ["Passed", "Failed", "Blocked", "Skipped", "Retest", "Untested"];
+    const created = await (
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-create`, {
+        data: { testcases: statuses.map((_, i) => ({ title: `E2E Bucket Sum Case ${stamp}-${i}`, status: "Approved" })) },
+      })
+    ).json();
+    const testcaseIds: string[] = created.created.map((c: { id: string }) => c.id);
+
+    try {
+      await request.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds } });
+      const executions = await (await request.get(`/api/cycles/${cycle.id}/executions`)).json();
+      for (let i = 0; i < statuses.length; i++) {
+        if (statuses[i] === "Untested") continue;
+        await request.patch(`/api/cycles/${cycle.id}/executions/${executions[i].id}`, { data: { status: statuses[i] } });
+      }
+
+      const runs = await (await request.get(`/api/projects/${ctx.projectId}/cycles`)).json();
+      const thisRun = runs.find((r: { id: string }) => r.id === cycle.id);
+      expect(thisRun.totalCases).toBe(statuses.length);
+      // Retest has no dedicated bucket of its own and is folded into "untested" alongside the
+      // literal Untested case, so untested is 2 (Retest + Untested) here, not 1.
+      expect(thisRun.passed + thisRun.failed + thisRun.blocked + thisRun.skipped + thisRun.untested).toBe(
+        thisRun.totalCases,
+      );
+      expect(thisRun.untested).toBe(2);
+    } finally {
+      await request.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-delete`, {
+        data: { testcaseIds },
+        failOnStatusCode: false,
+      });
+    }
+  });
+});

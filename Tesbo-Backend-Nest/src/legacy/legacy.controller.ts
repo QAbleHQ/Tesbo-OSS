@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -36,6 +37,63 @@ const TESTCASE_EXPORT_BASE_HEADERS = [
   "suite",
   "component"
 ];
+
+/*
+ * Reports & Insights export.
+ *
+ * Basecamp 10218723531 ("Reports & Insights > Export buttons are not working"): the button carried
+ * no onClick at all — title="Coming soon", cursor-not-allowed, never wired to anything. It is a
+ * real export now, one per report view, because the screen already holds six different reports and
+ * exporting "the reports" without saying which one is meaningless.
+ *
+ * Every view reuses the same `*ForUser` service method the screen itself calls, so the numbers in
+ * the file are the numbers on the screen and authorization is the existing project-membership check
+ * rather than a second implementation of it.
+ *
+ * Two shapes come out of this. `execution` and `matrix` are already row-per-record tables and
+ * export as themselves. The other four are dashboards — a mix of scalars and several unrelated
+ * series — so they export in long form (section, label, metric, value), which stays one parseable
+ * table instead of stacked mini-tables with conflicting headers.
+ */
+const REPORT_EXPORT_VIEWS = ["overview", "execution", "matrix", "repository", "insights", "trends"] as const;
+type ReportExportView = (typeof REPORT_EXPORT_VIEWS)[number];
+
+const REPORT_LONG_HEADERS = ["section", "label", "metric", "value"];
+
+const REPORT_EXECUTION_HEADERS = [
+  "groupName",
+  "Passed",
+  "Failed",
+  "Blocked",
+  "Skipped",
+  "Untested",
+  "Retest",
+  "total"
+];
+
+const REPORT_MATRIX_HEADERS = [
+  "externalId",
+  "testcaseTitle",
+  "priority",
+  "testcaseStatus",
+  "suiteName",
+  "runName",
+  "runStatus",
+  "executionStatus",
+  "executedAt",
+  "bugTitle",
+  "bugStatus",
+  "bugUrl"
+];
+
+const REPORT_VIEW_SHEET_NAMES: Record<ReportExportView, string> = {
+  overview: "Overview",
+  execution: "Execution Report",
+  matrix: "Traceability",
+  repository: "Repository",
+  insights: "AI Insights",
+  trends: "Trends"
+};
 
 @Controller()
 export class LegacyController {
@@ -523,6 +581,41 @@ export class LegacyController {
     return this.legacy.listExecutionAttachments(cycleId, req.userId, executionId);
   }
 
+  /**
+   * Download (or, for an image/video, render) one evidence file from a run's result.
+   *
+   * The list endpoint above has existed without this one, so evidence has been storable and
+   * listable but not retrievable — see getExecutionAttachmentAccess. `?inline=1` is a request, not
+   * a guarantee: the service refuses inline for anything that is not an image or a video, so a
+   * trace .zip or a log is always a download.
+   */
+  @Get("/api/cycles/:cycleId/executions/:executionId/attachments/:attachmentId/download")
+  async downloadExecutionAttachment(
+    @Req() req: AuthenticatedRequest,
+    @Res() res: Response,
+    @Param("cycleId") cycleId: string,
+    @Param("executionId") executionId: string,
+    @Param("attachmentId") attachmentId: string,
+    @Query("inline") inline?: string
+  ) {
+    const access = await this.legacy.getExecutionAttachmentAccess(
+      cycleId,
+      req.userId,
+      executionId,
+      attachmentId,
+      inline === "1" || inline === "true"
+    );
+    if ("redirectUrl" in access) return res.redirect(302, access.redirectUrl);
+    res.setHeader("Content-Type", access.mimeType);
+    res.setHeader(
+      "Content-Disposition",
+      `${access.inline ? "inline" : "attachment"}; filename="${encodeURIComponent(access.originalFileName)}"`
+    );
+    if ("buffer" in access && access.buffer) return res.send(access.buffer);
+    if ("localPath" in access && access.localPath) return res.sendFile(access.localPath);
+    throw new Error("Attachment content unavailable");
+  }
+
   @Post("/api/cycles/:cycleId/executions/bulk-assign")
   bulkAssign(@Req() req: AuthenticatedRequest, @Param("cycleId") cycleId: string, @Body() body: Record<string, any>) {
     return this.legacy.bulkAssignExecutions(cycleId, req.userId, body);
@@ -787,6 +880,156 @@ export class LegacyController {
   @Get("/api/projects/:projectId/reports/trends")
   reportsTrends(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {
     return this.legacy.reportsTrendsForUser(req.userId, projectId);
+  }
+
+  @Get("/api/projects/:projectId/reports/export/:format")
+  async exportReport(
+    @Req() req: AuthenticatedRequest,
+    @Param("projectId") projectId: string,
+    @Param("format") format: string,
+    @Query() query: Record<string, any>,
+    @Res() res: Response
+  ) {
+    if (format !== "csv" && format !== "xlsx") {
+      throw new BadRequestException({ error: `Unsupported export format "${format}". Use csv or xlsx.` });
+    }
+    const view = String(query.view ?? "overview");
+    if (!REPORT_EXPORT_VIEWS.includes(view as ReportExportView)) {
+      throw new BadRequestException({
+        error: `Unknown report view "${view}". Expected one of: ${REPORT_EXPORT_VIEWS.join(", ")}.`
+      });
+    }
+    const typedView = view as ReportExportView;
+    const { headers, rows } = await this.reportExportRows(req, projectId, typedView, query);
+    const fileName = `report-${typedView}`;
+    if (format === "csv") {
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${fileName}.csv"`);
+      res.send(this.rowsToCsv(headers, rows));
+      return;
+    }
+    this.sendWorkbook(res, `${fileName}.xlsx`, REPORT_VIEW_SHEET_NAMES[typedView], rows, headers);
+  }
+
+  private longRow(section: string, label: string, metric: string, value: unknown): Record<string, unknown> {
+    // `?? ""` rather than String(value): a real 0 has to survive as 0, and a null pass rate (a run
+    // with nothing executed yet) has to read as blank rather than the word "null".
+    return { section, label, metric, value: value ?? "" };
+  }
+
+  private async reportExportRows(
+    req: AuthenticatedRequest,
+    projectId: string,
+    view: ReportExportView,
+    query: Record<string, any>
+  ): Promise<{ headers: string[]; rows: Record<string, unknown>[] }> {
+    if (view === "execution") {
+      // The screen's filter travels with the export: exporting "the execution report" while looking
+      // at one plan should not hand back every plan. filterBy/filterValue are the same query params
+      // the tab itself sends, and executionReport applies them.
+      const report = await this.legacy.executionReportForUser(req.userId, projectId, query);
+      const rows = (report.rows ?? []).map((row: Record<string, unknown>) => ({
+        groupName: row.groupName,
+        Passed: row.Passed,
+        Failed: row.Failed,
+        Blocked: row.Blocked,
+        Skipped: row.Skipped,
+        Untested: row.Untested,
+        Retest: row.Retest,
+        total: row.total
+      }));
+      return { headers: REPORT_EXECUTION_HEADERS, rows };
+    }
+
+    if (view === "matrix") {
+      const matrix = await this.legacy.requirementMatrixForUser(req.userId, projectId);
+      const rows = (matrix.rows ?? []).map((row: Record<string, unknown>) =>
+        Object.fromEntries(REPORT_MATRIX_HEADERS.map((header) => [header, row[header] ?? ""]))
+      );
+      return { headers: REPORT_MATRIX_HEADERS, rows };
+    }
+
+    if (view === "overview") {
+      const overview = await this.legacy.reportsOverviewForUser(req.userId, projectId);
+      const rows: Record<string, unknown>[] = [
+        this.longRow("summary", "", "trendDelta", overview.trendDelta),
+        this.longRow("summary", "", "flakyCount", overview.flakyCount),
+        this.longRow("summary", "", "coverageGapCount", overview.coverageGapCount),
+        this.longRow("summary", "", "untestedP1Count", overview.untestedP1Count),
+        this.longRow("summary", "", "aiSummary", overview.aiSummary)
+      ];
+      for (const point of overview.passRateTrend ?? []) {
+        rows.push(this.longRow("passRateTrend", point.name, "total", point.total));
+        rows.push(this.longRow("passRateTrend", point.name, "executed", point.executed));
+        rows.push(this.longRow("passRateTrend", point.name, "passRate", point.passRate));
+        rows.push(this.longRow("passRateTrend", point.name, "createdAt", point.createdAt));
+      }
+      for (const suite of overview.suiteHealth ?? []) {
+        rows.push(this.longRow("suiteHealth", suite.suiteName, "executed", suite.executed));
+        rows.push(this.longRow("suiteHealth", suite.suiteName, "passedPct", suite.passedPct));
+        rows.push(this.longRow("suiteHealth", suite.suiteName, "failedPct", suite.failedPct));
+        rows.push(this.longRow("suiteHealth", suite.suiteName, "blockedPct", suite.blockedPct));
+      }
+      return { headers: REPORT_LONG_HEADERS, rows };
+    }
+
+    if (view === "repository") {
+      const summary = await this.legacy.repositorySummaryForUser(req.userId, projectId);
+      const rows: Record<string, unknown>[] = [
+        this.longRow("summary", "", "totalTestCases", summary.totalTestCases),
+        this.longRow("summary", "", "updatedToday", summary.updatedToday),
+        this.longRow("summary", "", "updatedThisWeek", summary.updatedThisWeek),
+        this.longRow("summary", "", "updatedThisMonth", summary.updatedThisMonth)
+      ];
+      for (const bucket of summary.bySuite ?? []) rows.push(this.longRow("bySuite", String(bucket.name), "count", bucket.count));
+      for (const bucket of summary.byStatus ?? []) rows.push(this.longRow("byStatus", String(bucket.name), "count", bucket.count));
+      for (const bucket of summary.byPriority ?? []) rows.push(this.longRow("byPriority", String(bucket.name), "count", bucket.count));
+      for (const bucket of summary.addedByDate ?? []) rows.push(this.longRow("addedByDate", String(bucket.date), "count", bucket.count));
+      return { headers: REPORT_LONG_HEADERS, rows };
+    }
+
+    if (view === "insights") {
+      const insights = await this.legacy.reportsInsightsForUser(req.userId, projectId);
+      const rows: Record<string, unknown>[] = [
+        this.longRow("summary", "", "healthScore", insights.healthScore),
+        this.longRow("summary", "", "healthLabel", insights.healthLabel),
+        this.longRow("summary", "", "untestedP1Count", insights.untestedP1Count)
+      ];
+      for (const test of insights.flakyTests ?? []) {
+        const label = String(test.externalId || test.title || "");
+        rows.push(this.longRow("flakyTests", label, "title", test.title));
+        rows.push(this.longRow("flakyTests", label, "suiteName", test.suiteName));
+        rows.push(this.longRow("flakyTests", label, "flipCount", test.flipCount));
+        rows.push(this.longRow("flakyTests", label, "flakinessLabel", test.flakinessLabel));
+      }
+      for (const gap of insights.coverageGaps ?? []) {
+        rows.push(this.longRow("coverageGaps", gap.suiteName, "total", gap.total));
+        rows.push(this.longRow("coverageGaps", gap.suiteName, "covered", gap.covered));
+        rows.push(this.longRow("coverageGaps", gap.suiteName, "pct", gap.pct));
+      }
+      for (const suite of insights.coverageBySuite ?? []) {
+        rows.push(this.longRow("coverageBySuite", suite.suiteName, "total", suite.total));
+        rows.push(this.longRow("coverageBySuite", suite.suiteName, "covered", suite.covered));
+        rows.push(this.longRow("coverageBySuite", suite.suiteName, "pct", suite.pct));
+      }
+      return { headers: REPORT_LONG_HEADERS, rows };
+    }
+
+    const trends = await this.legacy.reportsTrendsForUser(req.userId, projectId);
+    const rows: Record<string, unknown>[] = [this.longRow("summary", "", "trendDelta", trends.trendDelta)];
+    for (const point of trends.passRateTrend ?? []) {
+      rows.push(this.longRow("passRateTrend", point.name, "total", point.total));
+      rows.push(this.longRow("passRateTrend", point.name, "executed", point.executed));
+      rows.push(this.longRow("passRateTrend", point.name, "passRate", point.passRate));
+      rows.push(this.longRow("passRateTrend", point.name, "createdAt", point.createdAt));
+    }
+    for (const bucket of trends.executionVelocity ?? []) {
+      rows.push(this.longRow("executionVelocity", String(bucket.name), "count", bucket.count));
+    }
+    for (const bucket of trends.bugDiscoveryRate ?? []) {
+      rows.push(this.longRow("bugDiscoveryRate", String(bucket.week), "count", bucket.count));
+    }
+    return { headers: REPORT_LONG_HEADERS, rows };
   }
 
   @Post("/api/projects/:projectId/ai/generate-testcases")
@@ -1439,6 +1682,16 @@ export class LegacyController {
    * ignored the project in their own URL, so any request at all was served, and `settings` is shaped
    * to carry an ingestion credential. The placeholder payloads are a missing feature, recorded in
    * docs/e2e-coverage-waves.md; being readable by anyone was a defect regardless of what fills them.
+   *
+   * SUPERSEDED, and will not be filled in as designed. Basecamp 10189985971 chose the opposite
+   * linking mechanism: automation reports results against a test case's `external_id`, onto
+   * ordinary `cycles`/`executions` rows, via /api/projects/:projectId/automation/* (src/automation).
+   * These six were shaped around spec-name/test-name matching in a store of their own, and the
+   * frontend client that called them (`listTesboRuns`, `ingestTesboPlaywright`,
+   * `getTesboTestHistory(projectId, specName, testName)`, ...) has been deleted for that reason.
+   * They are left standing only because removing a route is a separate, riskier change than
+   * deleting an uncalled client. Nothing should be built on them --
+   * see docs/automation-integration-plan.md §2, trap 2.
    */
   @Get("/api/projects/:projectId/tesbo-reports/runs")
   async tesboRuns(@Req() req: AuthenticatedRequest, @Param("projectId") projectId: string) {

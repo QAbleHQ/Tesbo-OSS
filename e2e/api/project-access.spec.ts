@@ -245,6 +245,22 @@ test.describe("project access", () => {
     }
   });
 
+  test("an unrecognised role is refused rather than silently becoming QA Engineer", async () => {
+    // Mirrors api/rbac.spec.ts's workspace-level version of this test. addProjectMember's
+    // parseRole refuses unknown strings outright, but that guarantee was never exercised through
+    // this endpoint — only assumed from the workspace-member path, which is a different call site.
+    try {
+      const res = await asOwner.put("/api/workspace/project-access", {
+        data: { projectId: tenant!.mainProjectId, userId: tenant!.guest.userId, role: "supervisor" },
+        failOnStatusCode: false,
+      });
+      expect(res.status()).toBe(400);
+      expect(storedProjectRole(tenant!.mainProjectId, tenant!.guest.userId)).toBe("");
+    } finally {
+      resetRbacMembership(tenant!);
+    }
+  });
+
   test("a project in another workspace cannot be granted away", async () => {
     const foreign = "00000000-0000-0000-0000-000000000000";
     const res = await asOwner.put("/api/workspace/project-access", {

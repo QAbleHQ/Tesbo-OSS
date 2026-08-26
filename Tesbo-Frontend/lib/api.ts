@@ -635,6 +635,27 @@ export async function listProjects(): Promise<ProjectSummary[]> {
   return api<ProjectSummary[]>("/api/projects");
 }
 
+// Raw columns from the `notifications` table (see migrations/V6_notifications.sql) — the backend
+// route returns rows as-is, unlike the camelCase DTOs above.
+export interface AppNotification {
+  id: string;
+  type: string;
+  title: string;
+  body: string | null;
+  link_entity_type: string | null;
+  link_entity_id: string | null;
+  read_at: string | null;
+  created_at: string;
+}
+
+export async function listNotifications(): Promise<AppNotification[]> {
+  return api<AppNotification[]>("/api/notifications");
+}
+
+export async function markNotificationRead(id: string): Promise<void> {
+  return api<void>(`/api/notifications/${id}/read`, { method: "POST" });
+}
+
 /**
  * Every projects-list card's stats in one response, replacing the five per-project calls the
  * screen used to fan out (test cases, suites, activity, members, runs). See
@@ -1834,6 +1855,18 @@ export interface TestRunListItem {
   blocked: number;
   skipped: number;
   untested: number;
+  /**
+   * Automation provenance (Basecamp 10189985971). `source` is 'manual' for every run a person
+   * creates; the rest are only ever set by the automation ingest and are null on a manual run.
+   */
+  source?: "manual" | "automation";
+  triggeredBy?: string | null;
+  commitSha?: string | null;
+  branchName?: string | null;
+  buildUrl?: string | null;
+  closedAt?: string | null;
+  closeStatus?: "completed" | "incomplete" | null;
+  lastResultAt?: string | null;
 }
 
 export interface TestRunDetail {
@@ -1854,6 +1887,18 @@ export interface TestRunDetail {
   shareEnabled: boolean;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Automation provenance (Basecamp 10189985971). `source` is 'manual' for every run a person
+   * creates; the rest are only ever set by the automation ingest and are null on a manual run.
+   */
+  source?: "manual" | "automation";
+  triggeredBy?: string | null;
+  commitSha?: string | null;
+  branchName?: string | null;
+  buildUrl?: string | null;
+  closedAt?: string | null;
+  closeStatus?: "completed" | "incomplete" | null;
+  lastResultAt?: string | null;
 }
 
 export interface ExecutionItem {
@@ -1880,6 +1925,21 @@ export interface ExecutionItem {
   executedAt: string | null;
   defectKey: string;
   defectUrl: string;
+  /**
+   * Set by the automation ingest only. `reportedBy` is 'human' for every result a person records,
+   * so a row can be labelled as automated without joining back through the run -- and a tester's
+   * later correction of an automated result flips it back, which is the point.
+   *
+   * `errorMessage` is deliberately separate from `actualResult`: that column is the tester's own
+   * prose and an SDK never writes it.
+   */
+  durationMs?: number | null;
+  retryCount?: number;
+  errorMessage?: string | null;
+  errorStack?: string | null;
+  reportedBy?: "human" | "automation";
+  /** Count only -- the file list is fetched per execution via listExecutionEvidence. */
+  evidenceCount?: number;
 }
 
 export interface AutomatedRunResult {
@@ -2135,6 +2195,13 @@ export interface BugAttachment {
 
 export type BugSeverity = "Critical" | "High" | "Medium" | "Low";
 
+/*
+ * Priority is nullable and separate from severity: severity is how bad the defect is, priority is
+ * how soon it gets worked on (Basecamp 10226247009). null means untriaged — a real state, distinct
+ * from any of P0..P3.
+ */
+export type BugPriority = "P0" | "P1" | "P2" | "P3";
+
 export interface BugItem {
   id: string;
   title: string;
@@ -2142,6 +2209,7 @@ export interface BugItem {
   externalUrl: string;
   status: string;
   severity: BugSeverity;
+  priority: BugPriority | null;
   executionId: string | null;
   testcaseId: string | null;
   cycleId: string | null;
@@ -2174,6 +2242,7 @@ export async function createBug(projectId: string, data: {
   description?: string;
   externalUrl?: string;
   severity?: BugSeverity;
+  priority?: BugPriority | null;
   integrationProvider?: "JIRA" | "LINEAR" | null;
   integrationIssueKey?: string | null;
   betterbugsUrl?: string | null;
@@ -2188,6 +2257,8 @@ export async function updateBug(bugId: string, data: {
   externalUrl?: string;
   status?: string;
   severity?: BugSeverity;
+  // null clears it back to untriaged; omitted leaves the stored value alone.
+  priority?: BugPriority | null;
   integrationProvider?: "JIRA" | "LINEAR" | null;
   integrationIssueKey?: string | null;
   betterbugsUrl?: string | null;
@@ -2406,6 +2477,25 @@ export interface ReportsTrends {
 
 export async function getReportsTrends(projectId: string): Promise<ReportsTrends> {
   return api<ReportsTrends>(`/api/projects/${projectId}/reports/trends`);
+}
+
+// ── Report: export ──
+// One file per report view, mirroring what the screen is showing — including the Execution Report
+// tab's active filter, so exporting while looking at one plan doesn't hand back every plan.
+// Downloaded through a plain <a href> like the test case export, which keeps the session cookie on
+// the request and lets the browser name the file from Content-Disposition.
+export type ReportExportView = "overview" | "execution" | "matrix" | "repository" | "insights" | "trends";
+
+export function getReportsExportUrl(
+  projectId: string,
+  view: ReportExportView,
+  format: "csv" | "xlsx",
+  params?: { filterBy?: string; filterValue?: string }
+): string {
+  const sp = new URLSearchParams({ view });
+  if (params?.filterBy) sp.set("filterBy", params.filterBy);
+  if (params?.filterValue) sp.set("filterValue", params.filterValue);
+  return `${API_BASE}/api/projects/${projectId}/reports/export/${format}?${sp.toString()}`;
 }
 
 // ── Project Home dashboard summary ──
@@ -3249,310 +3339,125 @@ export async function getWorkspaceActivitySummary(): Promise<ActivitySummary> {
   return api<ActivitySummary>("/api/workspace/activity/summary");
 }
 
-// ── Tesbo Test Manager reports module ─────────────────────────────────────────
+// ── Automation ingest (Basecamp 10189985971) ──────────────────────────────────
+//
+// Replaces the previous "Tesbo Test Manager reports module" block: ~30 client functions
+// (listTesboRuns, ingestTesboPlaywright, the alert-rule CRUD, share links, key rotation) plus
+// their types, none of which was imported anywhere, and only six of which had any backend at all
+// — the rest called routes that did not exist.
+//
+// It was not merely dead, it encoded the opposite design: TesboRunCase was keyed on `specName` +
+// `title` and getTesboTestHistory looked history up by test name, which is precisely the
+// name-matching the card's §3 rules out ("breaks silently on refactors, and produces results
+// attached to the wrong case with no visible error"), and its runs lived outside `cycles` so they
+// could never appear in the runs list, the traceability matrix or a test case's own history.
+//
+// Automation results are now ordinary runs and executions, linked by the test case's external id.
 
-export interface TesboRunSummary {
+/** What kind of file a piece of evidence is, which decides how the viewer renders it. */
+export type EvidenceKind = "screenshot" | "video" | "trace" | "log";
+
+export interface ExecutionEvidence {
   id: string;
-  projectId: string;
-  name: string;
-  status: string;
-  branchName?: string | null;
-  pullRequest?: string | null;
-  commitAuthor?: string | null;
-  runNumber?: string | null;
-  sourceType?: string | null;
-  githubRunId?: string | null;
-  startedAt: string | null;
-  endedAt: string | null;
-  createdAt: string;
-  total: number;
-  passed: number;
-  failed: number;
-  skipped: number;
+  kind: EvidenceKind | null;
+  fileName: string;
+  fileSize: number | null;
+  contentType: string | null;
+  createdAt?: string;
 }
 
-export interface TesboRunCase {
-  caseId: string;
-  specName?: string | null;
+export interface AutomationRunResult {
+  caseId: string | null;
   title: string;
-  fullTitle?: string | null;
+  executionId: string;
   status: string;
   durationMs: number | null;
-  traceUrl: string | null;
-  screenshotUrl: string | null;
-  videoUrl: string | null;
-  errorMessage?: string | null;
-  errorStack?: string | null;
-  attempt?: number | null;
-  projectName?: string | null;
-  browserName?: string | null;
-  browserVersion?: string | null;
-  osName?: string | null;
-  osPlatform?: string | null;
-  osArch?: string | null;
-  tags?: string[];
-  steps?: Array<{
-    description?: string;
-    status?: string;
-    durationMs?: number;
-  }>;
+  retryCount: number;
+  errorMessage: string | null;
+  executedAt: string | null;
+  reportedBy: "human" | "automation";
+  evidence: ExecutionEvidence[];
 }
 
-export interface TesboRunDetail extends TesboRunSummary {
-  specCount: number;
-  cases: TesboRunCase[];
-}
-
-export interface TesboPublicRunDetail extends TesboRunDetail {
-  shareEnabled: boolean;
-}
-
-export interface TesboSpecSummary {
-  specName: string;
-  totalRuns: number;
-  latestRunAt: string | null;
-  passed: number;
-  failed: number;
-  skipped: number;
-}
-
-export interface TesboSpecDetail {
-  specName: string;
-  tests: {
-    testName: string;
-    latestStatus: string | null;
-    totalRuns: number;
+export interface AutomationRunSummary {
+  runId: string;
+  name: string;
+  status: string;
+  source: "manual" | "automation";
+  triggeredBy: string | null;
+  commitSha: string | null;
+  branch: string | null;
+  buildUrl: string | null;
+  externalId: string | null;
+  environment: string | null;
+  buildVersion: string | null;
+  releaseName: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  closedAt: string | null;
+  closeStatus: "completed" | "incomplete" | null;
+  lastResultAt: string | null;
+  createdAt: string;
+  summary: {
+    total: number;
     passed: number;
     failed: number;
     skipped: number;
-  }[];
+    blocked: number;
+    untested: number;
+  };
 }
 
-export interface TesboProjectTest {
-  specName: string;
-  testName: string;
-  latestStatus: string | null;
-  latestRunAt: string | null;
-  totalRuns: number;
-  passed: number;
-  failed: number;
-  skipped: number;
+export interface AutomationRunDetail extends AutomationRunSummary {
+  results: AutomationRunResult[];
 }
 
-export interface TesboAnalytics {
-  totalRuns: number;
-  totalTests: number;
-  passRate: number;
-  byStatus: Record<string, number>;
-  runsByDay: { day: string; count: number }[];
+export async function getAutomationRun(projectId: string, runId: string): Promise<AutomationRunDetail> {
+  return api<AutomationRunDetail>(`/api/projects/${projectId}/automation/runs/${runId}`);
 }
 
-export interface TesboAlertRule {
-  id: string;
-  name: string;
-  conditionType: "FAILURE_RATIO" | "PASS_RATIO" | "BUILD_UPDATE";
-  comparator: "GREATER_THAN" | "GREATER_OR_EQUAL";
-  threshold: number | null;
-  recipients: string[];
-  frequency: "IMMEDIATE" | "DAILY";
-  enabled: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+// ── Execution evidence ────────────────────────────────────────────────────────
+//
+// The backend has served POST/GET /api/cycles/:cycleId/executions/:executionId/attachments since
+// the bug-evidence work, and nothing in the frontend has ever called either — so evidence has been
+// storable, billable against the plan's storage allowance, and unviewable. These two are what the
+// run screens use to show it.
 
-export interface TesboShareState {
-  enabled: boolean;
-  token: string | null;
-  publicUrl: string | null;
-}
-
-export interface TesboSettings {
-  keepTrace: boolean;
-  traceRetentionDays: number;
-  ingestionApiKey: string;
-  alertsEnabled: boolean;
-  shareByDefault: boolean;
-}
-
-export async function listTesboRuns(projectId: string): Promise<TesboRunSummary[]> {
-  return api<TesboRunSummary[]>(`/api/projects/${projectId}/tesbo-reports/runs`);
-}
-
-export async function getTesboRun(projectId: string, runId: string): Promise<TesboRunDetail> {
-  return api<TesboRunDetail>(`/api/projects/${projectId}/tesbo-reports/runs/${runId}`);
-}
-
-export async function listTesboSpecs(projectId: string): Promise<TesboSpecSummary[]> {
-  return api<TesboSpecSummary[]>(`/api/projects/${projectId}/tesbo-reports/specs`);
-}
-
-export async function getTesboSpec(projectId: string, specName: string): Promise<TesboSpecDetail> {
-  return api<TesboSpecDetail>(
-    `/api/projects/${projectId}/tesbo-reports/specs/${encodeURIComponent(specName)}`
+export async function listExecutionEvidence(
+  cycleId: string,
+  executionId: string
+): Promise<{ list: ExecutionEvidence[]; total: number }> {
+  return api<{ list: ExecutionEvidence[]; total: number }>(
+    `/api/cycles/${cycleId}/executions/${executionId}/attachments`
   );
 }
 
-export async function getTesboTestHistory(
-  projectId: string,
-  specName: string,
-  testName: string
-): Promise<{
-  specName: string;
-  testName: string;
-  runs: { runId: string; runName: string; status: string; executedAt: string | null }[];
-}> {
-  return api(
-    `/api/projects/${projectId}/tesbo-reports/specs/${encodeURIComponent(specName)}/tests/${encodeURIComponent(testName)}`
-  );
-}
-
-export async function listTesboTests(projectId: string): Promise<TesboProjectTest[]> {
-  return api<TesboProjectTest[]>(`/api/projects/${projectId}/tesbo-reports/tests`);
-}
-
-export async function getTesboAnalytics(projectId: string): Promise<TesboAnalytics> {
-  return api<TesboAnalytics>(`/api/projects/${projectId}/tesbo-reports/analytics`);
-}
-
-export async function listTesboAlertRules(projectId: string): Promise<TesboAlertRule[]> {
-  return api<TesboAlertRule[]>(`/api/projects/${projectId}/tesbo-reports/alerts`);
-}
-
-export async function createTesboAlertRule(
-  projectId: string,
-  body: Omit<TesboAlertRule, "id" | "createdAt" | "updatedAt">
-): Promise<TesboAlertRule> {
-  return api<TesboAlertRule>(`/api/projects/${projectId}/tesbo-reports/alerts`, {
-    method: "POST",
-    body,
-  });
-}
-
-export async function updateTesboAlertRule(
-  projectId: string,
-  alertId: string,
-  body: Omit<TesboAlertRule, "id" | "createdAt" | "updatedAt">
-): Promise<TesboAlertRule> {
-  return api<TesboAlertRule>(`/api/projects/${projectId}/tesbo-reports/alerts/${alertId}`, {
-    method: "PUT",
-    body,
-  });
-}
-
-export async function deleteTesboAlertRule(projectId: string, alertId: string): Promise<void> {
-  await api(`/api/projects/${projectId}/tesbo-reports/alerts/${alertId}`, {
-    method: "DELETE",
-  });
-}
-
-export async function toggleTesboAlertRule(
-  projectId: string,
-  alertId: string,
-  enabled: boolean
-): Promise<TesboAlertRule> {
-  return api<TesboAlertRule>(`/api/projects/${projectId}/tesbo-reports/alerts/${alertId}/toggle`, {
-    method: "POST",
-    body: { enabled },
-  });
-}
-
-export async function sendTesboAlertTest(projectId: string, alertId: string): Promise<void> {
-  await api(`/api/projects/${projectId}/tesbo-reports/alerts/${alertId}/send-test`, {
-    method: "POST",
-  });
-}
-
-export async function getTesboRunShare(projectId: string, runId: string): Promise<TesboShareState> {
-  return api<TesboShareState>(`/api/projects/${projectId}/tesbo-reports/runs/${runId}/share`);
-}
-
-export async function createTesboRunShare(
-  projectId: string,
-  runId: string,
-  expiresInHours = 168
-): Promise<TesboShareState> {
-  return api<TesboShareState>(`/api/projects/${projectId}/tesbo-reports/runs/${runId}/share`, {
-    method: "POST",
-    body: { expiresInHours },
-  });
-}
-
-export async function disableTesboRunShare(projectId: string, runId: string): Promise<void> {
-  await api(`/api/projects/${projectId}/tesbo-reports/runs/${runId}/share`, {
-    method: "DELETE",
-  });
-}
-
-export async function getPublicTesboRun(token: string): Promise<TesboPublicRunDetail> {
-  return api<TesboPublicRunDetail>(`/api/public/tesbo-reports/${token}`);
-}
-
-export async function getTesboSettings(projectId: string): Promise<TesboSettings> {
-  return api<TesboSettings>(`/api/projects/${projectId}/tesbo-reports/settings`);
-}
-
-export async function updateTesboSettings(
-  projectId: string,
-  body: Partial<TesboSettings>
-): Promise<TesboSettings> {
-  return api<TesboSettings>(`/api/projects/${projectId}/tesbo-reports/settings`, {
-    method: "PUT",
-    body,
-  });
-}
-
-export async function rotateTesboIngestionKey(projectId: string): Promise<{ ingestionApiKey: string }> {
-  return api<{ ingestionApiKey: string }>(`/api/projects/${projectId}/tesbo-reports/settings/rotate-key`, {
-    method: "POST",
-  });
-}
-
-export async function ingestTesboPlaywright(projectId: string, payload: unknown): Promise<{ runId: string }> {
-  return api<{ runId: string }>(`/api/projects/${projectId}/tesbo-reports/ingest/playwright`, {
-    method: "POST",
-    body: { payload },
-  });
-}
-
-export async function ingestTesboPlaywrightUpload(projectId: string, file: File): Promise<{ runId: string }> {
+export async function uploadExecutionEvidence(
+  cycleId: string,
+  executionId: string,
+  files: File[]
+): Promise<{ list: ExecutionEvidence[]; total: number }> {
   const form = new FormData();
-  form.append("result", file);
+  for (const file of files) form.append("files", file);
   const token = typeof window !== "undefined" ? readStoredValue("token") : null;
-  const res = await fetch(`${API_BASE}/api/projects/${projectId}/tesbo-reports/ingest/playwright/upload`, {
+  const res = await fetch(`${API_BASE}/api/cycles/${cycleId}/executions/${executionId}/attachments`, {
     method: "POST",
     credentials: "include",
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
     body: form,
   });
   if (!res.ok) {
+    // The backend answers a rejected upload with { error } naming the file and the limit; surface
+    // that rather than a generic message, since "which file and why" is the whole point of it.
     const text = await res.text();
-    throw new Error(text || "Failed to upload Tesbo Test Manager result file");
-  }
-  return res.json() as Promise<{ runId: string }>;
-}
-
-export async function uploadTesboCaseArtifact(
-  projectId: string,
-  runId: string,
-  caseId: string,
-  kind: "trace" | "screenshot" | "video",
-  file: File
-): Promise<{ caseId: string; kind: string; url: string }> {
-  const form = new FormData();
-  form.append("file", file);
-  const token = typeof window !== "undefined" ? readStoredValue("token") : null;
-  const res = await fetch(
-    `${API_BASE}/api/projects/${projectId}/tesbo-reports/runs/${runId}/cases/${caseId}/artifacts/${kind}/upload`,
-    {
-      method: "POST",
-      credentials: "include",
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      body: form,
+    let message = "Failed to upload evidence";
+    try {
+      const parsed = JSON.parse(text) as { error?: string };
+      if (parsed?.error) message = parsed.error;
+    } catch {
+      if (text) message = text;
     }
-  );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "Failed to upload Tesbo Test Manager artifact");
+    throw new Error(message);
   }
-  return res.json() as Promise<{ caseId: string; kind: string; url: string }>;
+  return res.json() as Promise<{ list: ExecutionEvidence[]; total: number }>;
 }

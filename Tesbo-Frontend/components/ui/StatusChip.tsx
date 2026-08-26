@@ -121,7 +121,7 @@ export default function StatusChip({
   return (
     <span
       className={cx(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[12px] font-medium leading-5",
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium leading-4 whitespace-nowrap max-w-full",
         chip,
         className,
       )}

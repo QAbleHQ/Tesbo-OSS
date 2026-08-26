@@ -1,10 +1,9 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { DatabaseService } from "../database/database.service";
-import { embedTexts, resolveEmbeddingAllocation } from "./rag-ai-allocation";
+import { EmbeddingKeyAllocation, embedTexts, resolveEmbeddingAllocation } from "./rag-ai-allocation";
 import {
   RAG_ANN_CANDIDATES,
   RAG_CONTEXT_CHAR_BUDGET,
-  RAG_EMBEDDING_MODEL,
   RAG_FTS_CANDIDATES,
   RAG_MAX_SOURCES,
   RAG_RRF_K
@@ -37,11 +36,16 @@ interface FusedSource {
   chunks: Array<{ content: string; headingPath: string | null }>;
 }
 
-// Additive semantic retrieval for Zyra's free-text chat path. Does NOT replace
-// knowledgeSnapshot() (that stays for the explicit-picker task-generation flow — a
-// named-document lookup, not semantic search). Never throws: any failure (no embedding
-// allocation, nothing embedded yet, embeddings API error) resolves to [] so the caller's
-// existing knowledgeSnapshot() fallback stays clean.
+// Hybrid retrieval for Zyra's free-text chat path: vector similarity (ANN) fused with keyword
+// full-text search. Does NOT replace knowledgeSnapshot() (that stays for the explicit-picker
+// task-generation flow — a named-document lookup, not semantic search).
+//
+// Never throws: any failure (no embedding allocation, nothing embedded yet, embeddings API
+// error) resolves to [] so the caller's existing knowledgeSnapshot() fallback stays clean. Note
+// that only the ANN half depends on an embeddings key — the FTS half runs regardless, so a
+// workspace with no embeddings key degrades to keyword-only matching rather than to nothing.
+// That degradation is invisible through retrieveKnowledgeContext() by design; use
+// retrieveWithDiagnostics() when a human needs to know which half ran.
 @Injectable()
 export class RagRetrievalService {
   private readonly logger = new Logger(RagRetrievalService.name);
@@ -49,28 +53,56 @@ export class RagRetrievalService {
   constructor(private readonly db: DatabaseService) {}
 
   async retrieveKnowledgeContext(projectId: string, query: string, opts: { maxSources?: number; charBudget?: number } = {}): Promise<RetrievedKnowledgeItem[]> {
+    return (await this.retrieveWithDiagnostics(projectId, query, opts)).items;
+  }
+
+  /**
+   * Same retrieval, but says whether the semantic half actually ran.
+   *
+   * retrieveKnowledgeContext() returns [] for every failure mode, which is right for callers
+   * that just want context and wrong for anyone trying to understand the system: "no embeddings
+   * key in the workspace" and "the knowledge base has nothing on this topic" produced an
+   * identical empty array. That is how semantic search stayed off across every project in
+   * production without a single alert. Callers that surface state to a human should use this.
+   */
+  async retrieveWithDiagnostics(
+    projectId: string,
+    query: string,
+    opts: { maxSources?: number; charBudget?: number } = {}
+  ): Promise<{ items: RetrievedKnowledgeItem[]; semanticSearchRan: boolean; reason: string }> {
+    let reason = "";
     try {
       const text = String(query || "").trim();
-      if (!text) return [];
+      if (!text) return { items: [], semanticSearchRan: false, reason: "Empty query." };
 
-      const allocation = await resolveEmbeddingAllocation(this.db, projectId);
+      const resolved = await resolveEmbeddingAllocation(this.db, projectId);
+      reason = resolved.reason;
+      const allocation = resolved.allocation;
+
       const [annRows, ftsDocRows, ftsFileRows] = await Promise.all([
         allocation ? this.annSearch(projectId, allocation, text) : Promise.resolve([] as AnnRow[]),
         this.ftsSearch(projectId, "knowledge_documents", "content_text", text),
         this.ftsSearch(projectId, "knowledge_files", "extracted_text", text)
       ]);
-      if (!annRows.length && !ftsDocRows.length && !ftsFileRows.length) return [];
+      if (!annRows.length && !ftsDocRows.length && !ftsFileRows.length) {
+        return { items: [], semanticSearchRan: Boolean(allocation), reason };
+      }
 
       const fused = this.fuse(annRows, [...ftsDocRows, ...ftsFileRows]);
-      return this.budgetToItems(fused, opts.maxSources ?? RAG_MAX_SOURCES, opts.charBudget ?? RAG_CONTEXT_CHAR_BUDGET);
+      return {
+        items: this.budgetToItems(fused, opts.maxSources ?? RAG_MAX_SOURCES, opts.charBudget ?? RAG_CONTEXT_CHAR_BUDGET),
+        semanticSearchRan: Boolean(allocation),
+        reason
+      };
     } catch (err) {
-      this.logger.warn(`retrieveKnowledgeContext failed for project ${projectId}: ${err instanceof Error ? err.message : err}`);
-      return [];
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`retrieveKnowledgeContext failed for project ${projectId}: ${message}`);
+      return { items: [], semanticSearchRan: false, reason: reason || `Retrieval failed: ${message}` };
     }
   }
 
-  private async annSearch(projectId: string, allocation: NonNullable<Awaited<ReturnType<typeof resolveEmbeddingAllocation>>>, query: string): Promise<AnnRow[]> {
-    const [queryVector] = await embedTexts(allocation, [query], RAG_EMBEDDING_MODEL);
+  private async annSearch(projectId: string, allocation: EmbeddingKeyAllocation, query: string): Promise<AnnRow[]> {
+    const [queryVector] = await embedTexts(allocation, [query]);
     if (!queryVector) return [];
     const vectorLiteral = `[${queryVector.join(",")}]`;
     // The literal `c.project_id = $1` equality is what lets Postgres prune straight to one

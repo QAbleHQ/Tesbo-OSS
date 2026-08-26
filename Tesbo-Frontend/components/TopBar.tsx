@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { IconBell, IconSearch } from "@tabler/icons-react";
-import type { ProjectSummary } from "@/lib/api";
+import type { AppNotification, ProjectSummary } from "@/lib/api";
+import { listNotifications } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import { useAppData } from "@/components/app/AppDataProvider";
 
@@ -29,6 +30,12 @@ export default function TopBar() {
   const searchBoxRef = useRef<HTMLLabelElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifItems, setNotifItems] = useState<AppNotification[]>([]);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const notifBoxRef = useRef<HTMLDivElement>(null);
+
   // ⌘K / Ctrl+K focuses the search box from anywhere, matching the shortcut hint shown in it.
   useEffect(() => {
     function handleShortcut(e: KeyboardEvent) {
@@ -49,6 +56,41 @@ export default function TopBar() {
     document.addEventListener("mousedown", handleOutsideClick);
     return () => document.removeEventListener("mousedown", handleOutsideClick);
   }, [open]);
+
+  useEffect(() => {
+    if (!notifOpen) return;
+    function handleOutsideClick(e: MouseEvent) {
+      if (notifBoxRef.current && !notifBoxRef.current.contains(e.target as Node)) setNotifOpen(false);
+    }
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === "Escape") setNotifOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [notifOpen]);
+
+  async function loadNotifications() {
+    setNotifLoading(true);
+    setNotifError(null);
+    try {
+      const items = await listNotifications();
+      setNotifItems(items);
+    } catch (e) {
+      setNotifError(e instanceof Error ? e.message : "Could not load notifications.");
+    } finally {
+      setNotifLoading(false);
+    }
+  }
+
+  function toggleNotifications() {
+    const opening = !notifOpen;
+    setNotifOpen(opening);
+    if (opening) void loadNotifications();
+  }
 
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -87,9 +129,10 @@ export default function TopBar() {
   }
 
   const displayName = user?.name || user?.email || "";
-  // Seeded on the email: a display name can be edited or shared between two people, so it would move
-  // someone's colour or collide two of them. The email is the stable identity.
-  const avatarSeed = user?.email || user?.name || "";
+  // Seeded on the user id: a display name can be edited and an email can be changed, either of
+  // which would move someone's colour or collide two people. The id is the one field every other
+  // screen (team avatars, activity, admins) also has and never changes.
+  const avatarSeed = user?.userId || user?.email || user?.name || "";
 
   return (
     <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-4 border-b border-[var(--border-subtle)] bg-[var(--surface)] px-8">
@@ -153,13 +196,50 @@ export default function TopBar() {
       <div className="flex items-center gap-2">
         {/* Page-provided end slot (e.g. page actions). Fills via a portal from the page. */}
         <div ref={bindEnd} className="flex items-center gap-2 empty:hidden" />
-        <button
-          type="button"
-          aria-label="Notifications"
-          className="flex h-8 w-8 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)]"
-        >
-          <IconBell size={16} stroke={1.75} />
-        </button>
+        <div ref={notifBoxRef} className="relative">
+          <button
+            type="button"
+            aria-label="Notifications"
+            aria-haspopup="true"
+            aria-expanded={notifOpen}
+            onClick={toggleNotifications}
+            className="flex h-8 w-8 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)]"
+          >
+            <IconBell size={16} stroke={1.75} />
+          </button>
+
+          {notifOpen && (
+            <div
+              role="menu"
+              aria-label="Notifications"
+              className="absolute right-0 top-full z-40 mt-1 w-[320px] max-w-[calc(100vw-2rem)] rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]"
+            >
+              {notifLoading ? (
+                <p className="px-3 py-2 text-[13px] text-[var(--muted-soft)]">Loading…</p>
+              ) : notifError ? (
+                <div className="px-3 py-2">
+                  <p className="text-[13px] text-[var(--error-foreground)]">{notifError}</p>
+                  <button
+                    type="button"
+                    onClick={() => void loadNotifications()}
+                    className="mt-1 text-[13px] font-medium text-[var(--brand-primary)] hover:underline"
+                  >
+                    Try again
+                  </button>
+                </div>
+              ) : notifItems.length === 0 ? (
+                <p className="px-3 py-2 text-[13px] text-[var(--muted-soft)]">No notifications</p>
+              ) : (
+                notifItems.map((n) => (
+                  <div key={n.id} role="menuitem" className="px-3 py-2 text-left text-[13px]">
+                    <p className="font-medium text-[var(--foreground)]">{n.title}</p>
+                    {n.body && <p className="mt-0.5 text-[var(--muted-soft)]">{n.body}</p>}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
         <span
           title={displayName || undefined}
           /*

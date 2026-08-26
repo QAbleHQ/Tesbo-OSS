@@ -10,7 +10,9 @@ import {
   IconCircleDashed,
   IconCircleMinus,
   IconCircleX,
+  IconAlertTriangle,
   IconClipboardList,
+  IconRobot,
   IconClock,
   IconDeviceDesktop,
   IconPencil,
@@ -70,13 +72,7 @@ const STATUS_FILTERS: { value: string; label: string; dot: string }[] = [
 const STATUS_SORT_ORDER: Record<string, number> = { Planning: 0, "In Progress": 1, Completed: 2 };
 type SortOption = "newest" | "oldest" | "name" | "status";
 
-import { AVATAR_COLORS as RUN_AVATAR_COLORS } from "@/lib/avatarColors";
-
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
+import { avatarColor } from "@/lib/avatarColors";
 
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -109,23 +105,24 @@ function passRateColor(pct: number): string {
 }
 
 function RunAvatar({ name }: { name: string }) {
-  const color = RUN_AVATAR_COLORS[hashSeed(name) % RUN_AVATAR_COLORS.length];
   return (
     <div
       className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xs font-bold tracking-wide text-white"
-      style={{ background: color }}
+      style={{ background: avatarColor(name) }}
     >
       {getInitials(name)}
     </div>
   );
 }
 
-function OwnerAvatar({ name }: { name: string }) {
-  const color = RUN_AVATAR_COLORS[hashSeed(name) % RUN_AVATAR_COLORS.length];
+// Seeded on the owner's id, not their name — matches every other person avatar (top bar, team
+// avatars, activity, admins) so the same person keeps the same colour everywhere. Part of
+// Basecamp 10198836413.
+function OwnerAvatar({ name, seed }: { name: string; seed?: string | null }) {
   return (
     <span
       className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-[var(--surface)] text-[10px] font-semibold text-white"
-      style={{ background: color }}
+      style={{ background: avatarColor(seed || name) }}
       title={name}
     >
       {getInitials(name)}
@@ -262,21 +259,6 @@ export default function TestRunsPage() {
     });
   }, [router, load]);
 
-  const summary = useMemo(() => {
-    const totalRuns = runs.length;
-    const inProgress = runs.filter((r) => r.status === "In Progress").length;
-    let totalExecuted = 0;
-    let totalPassed = 0;
-    let openFailures = 0;
-    for (const r of runs) {
-      totalExecuted += r.passed + r.failed + r.blocked + r.skipped;
-      totalPassed += r.passed;
-      openFailures += r.failed;
-    }
-    const passRate = totalExecuted > 0 ? Math.round((totalPassed / totalExecuted) * 100) : null;
-    return { totalRuns, inProgress, passRate, openFailures };
-  }, [runs]);
-
   const visibleRuns = useMemo(() => {
     const filtered = statusFilter === "all" ? runs : runs.filter((r) => r.status === statusFilter);
     const sorted = [...filtered];
@@ -296,6 +278,24 @@ export default function TestRunsPage() {
     }
     return sorted;
   }, [runs, statusFilter, sortBy]);
+
+  // Pass Rate = passed / totalCases (all assigned cases), the same denominator as the "X / Y cases"
+  // fraction on each run card and the Test Run Details page — so the three numbers always reconcile.
+  // Scoped to visibleRuns so the tiles match whatever status filter is applied below them.
+  const summary = useMemo(() => {
+    const totalRuns = visibleRuns.length;
+    const inProgress = visibleRuns.filter((r) => r.status === "In Progress").length;
+    let totalCases = 0;
+    let totalPassed = 0;
+    let openFailures = 0;
+    for (const r of visibleRuns) {
+      totalCases += r.totalCases;
+      totalPassed += r.passed;
+      openFailures += r.failed;
+    }
+    const passRate = totalCases > 0 ? Math.round((totalPassed / totalCases) * 100) : null;
+    return { totalRuns, inProgress, passRate, openFailures };
+  }, [visibleRuns]);
 
   /* create */
   async function handleCreate(e: React.FormEvent) {
@@ -487,6 +487,28 @@ export default function TestRunsPage() {
                           {r.name}
                         </Link>
                         <StatusChip tone={statusTone(r.status)}>{r.status}</StatusChip>
+                        {/*
+                          * Whether a run's results were reported by an SDK or typed in by a person
+                          * is the first thing you need to know when a pass rate looks wrong, so it
+                          * belongs next to the name rather than only on the detail page. Nothing
+                          * renders for a manual run (Basecamp 10189985971).
+                          */}
+                        {r.source === "automation" && (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--muted)]"
+                            title={
+                              r.closeStatus === "incomplete"
+                                ? "Reported by an automation SDK. The test process never reported that it finished, so some results may be missing."
+                                : "Results reported by an automation SDK"
+                            }
+                          >
+                            <IconRobot size={11} stroke={1.75} />
+                            Automated
+                            {r.closeStatus === "incomplete" && (
+                              <IconAlertTriangle size={11} stroke={1.75} style={{ color: "var(--warning)" }} />
+                            )}
+                          </span>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--muted-soft)]">
                         {planName && (
@@ -512,7 +534,7 @@ export default function TestRunsPage() {
                       </div>
                     </div>
 
-                    {ownerName && <OwnerAvatar name={ownerName} />}
+                    {ownerName && <OwnerAvatar name={ownerName} seed={r.ownerId} />}
 
                     <div className="flex shrink-0 items-center gap-1">
                       <Link

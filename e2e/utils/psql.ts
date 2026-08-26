@@ -1,12 +1,16 @@
 import { execFileSync } from "node:child_process";
+import path from "node:path";
 import { env } from "./env";
 
 /*
  * Raw Postgres access for suites that have to arrange or tear down state the API can't reach.
  *
- * Transport is `docker compose exec postgres psql`, so this only works where the compose stack is
- * reachable from wherever the tests run. dbControlAvailable() probes for that once per worker so
- * callers can skip cleanly against a remote target instead of failing mid-suite.
+ * Transport is a direct node-postgres connection (utils/pg-runner.js), falling back to
+ * `docker compose exec postgres psql` where the database is only reachable from inside the compose
+ * network — see transport() below. Neither needs anything of the target beyond its connection
+ * string, so the same helpers work against a local stack and a deployed one.
+ * dbControlAvailable() probes once per worker so callers can skip cleanly when no database was
+ * configured at all, instead of failing mid-suite.
  *
  * Every consumer is destructive by nature. Point these at disposable tenants only — never at the
  * shared smoke workspace (account A), which the rest of the suite assumes nobody is mutating.
@@ -40,10 +44,40 @@ function connectionString(): string {
   );
 }
 
-function run(sql: string, extraArgs: string[] = []): string {
-  // The container is transport only — it supplies the psql binary and the network path. What it is
-  // NOT is the database; that always comes from connectionString(). The argv-not-stdin rule above
-  // applies either way.
+/*
+ * How the SQL actually reaches Postgres. Two transports, same contract.
+ *
+ * "direct"  — utils/pg-runner.js, a one-shot node-postgres client spawned per statement. Needs
+ *             nothing but the connection string, so it works on a developer's machine and on a CI
+ *             runner identically. This is the default, and deliberately so: CI must not be the
+ *             first place a transport gets exercised.
+ * "docker"  — the original `docker compose exec postgres psql`, kept as a fallback for a stack
+ *             whose database is only reachable from inside the compose network. The container is
+ *             transport only; the database is always connectionString().
+ *
+ * Set E2E_DB_TRANSPORT=direct|docker to pin one. Pinning "direct" is worth doing in CI, where a
+ * silent fall back to a Docker that isn't there would turn a broken connection string into 46
+ * quietly skipped spec files instead of a loud failure.
+ */
+type Transport = "direct" | "docker";
+
+const PG_RUNNER = path.resolve(__dirname, "pg-runner.js");
+
+function runDirect(sql: string): string {
+  // The connection string and the SQL both go in as argv elements, never down stdin — see the
+  // argv-not-stdin note above, which cost a day of phantom no-op writes to establish.
+  //
+  // --no-warnings because pg 8.23 prints a nine-line SSL deprecation notice to stderr on every
+  // connection (`sslmode=require` is currently treated as `verify-full`). One statement's worth is
+  // noise; a suite's worth buries the one line that matters, and stderr is what
+  // execAllowingAuditImmutability() reads to tell an expected refusal from a real fault.
+  return execFileSync(process.execPath, ["--no-warnings", PG_RUNNER, connectionString(), sql], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function runViaDocker(sql: string, extraArgs: string[] = []): string {
   return execFileSync(
     "docker",
     [
@@ -65,9 +99,63 @@ function run(sql: string, extraArgs: string[] = []): string {
   );
 }
 
+let transportChoice: Transport | null = null;
+
+function transport(): Transport {
+  if (transportChoice) return transportChoice;
+
+  const pinned = process.env.E2E_DB_TRANSPORT;
+  if (pinned === "direct" || pinned === "docker") {
+    transportChoice = pinned;
+    return transportChoice;
+  }
+
+  // Probe once per worker. A direct connection is preferred whenever it works; Docker is only for
+  // the case where the database is not reachable from this host at all.
+  try {
+    runDirect("SELECT 1;");
+    transportChoice = "direct";
+  } catch {
+    transportChoice = "docker";
+  }
+  return transportChoice;
+}
+
+function run(sql: string, extraArgs: string[] = []): string {
+  return transport() === "direct" ? runDirect(sql) : runViaDocker(sql, extraArgs);
+}
+
 /** Runs SQL for its effect. Throws (via ON_ERROR_STOP) if Postgres rejects it. */
 export function exec(sql: string): void {
   run(sql);
+}
+
+/**
+ * Runs several statements over ONE connection, for their effect.
+ *
+ * Worth reaching for in any teardown that issues more than a couple of statements, because on a
+ * hosted database the connection — not the query — is what costs. Measured against this stack's Neon
+ * instance:
+ *
+ *     connecting                        ~3400ms
+ *     one more query, same connection     ~294ms
+ *     five statements in one call         ~376ms
+ *
+ * So five separate exec() calls spend ~17s where one execMany() spends ~3.8s. That is what pushed
+ * api/signup.spec.ts's afterAll past the 120s hook budget: purgeAccount() ran five statements per
+ * account across ~15 accounts, and the arithmetic (15 × 5 × ~2.5s ≈ 187s) never fit, on either
+ * transport. Batching fixes the cause; raising the timeout would only have hidden it.
+ *
+ * ONE TRANSACTIONAL CAVEAT, and it is the reason this is not simply applied everywhere: the
+ * statements share a single simple-query call, so a failure part-way through abandons the rest.
+ * Don't batch a statement whose failure is expected and tolerated — in particular anything that can
+ * trip the append-only audit_logs trigger, which is what execAllowingAuditImmutability() is for.
+ * Keep those as their own call.
+ */
+export function execMany(statements: string[]): void {
+  const batch = statements.map((s) => s.trim()).filter(Boolean);
+  if (batch.length === 0) return;
+  run(batch.map((s) => (s.endsWith(";") ? s : `${s};`)).join("\n"));
 }
 
 /**
