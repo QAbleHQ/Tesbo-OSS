@@ -405,7 +405,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
+                    className="cursor-pointer truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
@@ -415,7 +415,7 @@ export default function PlanDetailPage() {
               <button
                 type="button"
                 onClick={() => router.push(`/projects/${projectId}/plans`)}
-                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
+                className="shrink-0 cursor-pointer text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
               >
                 Test plans
               </button>
@@ -432,7 +432,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => { setEditName(planName); setEditDesc(planDescription); setEditRelease(planTargetRelease); setEditing(true); }}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
+                    className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
                   >
                     <IconPencil size={13} stroke={1.75} />
                     Edit
@@ -440,7 +440,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={handleDelete}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
+                    className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
                   >
                     <IconTrash size={13} stroke={1.75} />
                     Delete
@@ -448,7 +448,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => { setActiveTab("runs"); setShowCreateCycle(true); }}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border-0 bg-[var(--cta-primary)] px-3.5 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-[var(--cta-hover)]"
+                    className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border-0 bg-[var(--cta-primary)] px-3.5 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-[var(--cta-hover)]"
                   >
                     <IconPlus size={14} stroke={2} />
                     Create test run
@@ -572,7 +572,7 @@ export default function PlanDetailPage() {
                     type="button"
                     title="New test plan"
                     onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
+                    className="flex h-6 w-6 cursor-pointer items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={14} stroke={2.5} />
                   </button>
@@ -581,7 +581,7 @@ export default function PlanDetailPage() {
                   type="button"
                   title={planPanelOpen ? "Collapse plans" : "Show plans"}
                   onClick={togglePlanPanel}
-                  className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                  className="flex h-6 w-6 cursor-pointer items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
                 >
                   {planPanelOpen ? <IconLayoutSidebarLeftCollapse size={14} stroke={1.75} /> : <IconLayoutSidebarLeftExpand size={14} stroke={1.75} />}
                 </button>
@@ -593,7 +593,7 @@ export default function PlanDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/plans`)}
-                  className="mb-1 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] text-[var(--ink-600)] transition-colors hover:bg-[var(--surface-secondary)]"
+                  className="mb-1 flex h-8 w-full cursor-pointer items-center justify-between rounded-[6px] px-2 text-left text-[13px] text-[var(--ink-600)] transition-colors hover:bg-[var(--surface-secondary)]"
                 >
                   <span className="flex items-center gap-1.5"><IconList size={14} stroke={1.75} className="text-[var(--muted)]" />All plans</span>
                   <span className="font-mono text-[11px] text-[var(--muted)]">{allPlans.length}</span>
@@ -609,7 +609,7 @@ export default function PlanDetailPage() {
                       key={p.id}
                       type="button"
                       onClick={() => router.push(`/projects/${projectId}/plans/${p.id}`)}
-                      className={`mb-0.5 flex h-8 w-full items-center gap-2 rounded-[6px] px-2 text-left transition-colors ${isActive ? "bg-[var(--brand-soft)]" : "hover:bg-[var(--surface-secondary)]"}`}
+                      className={`mb-0.5 flex h-8 w-full cursor-pointer items-center gap-2 rounded-[6px] px-2 text-left transition-colors ${isActive ? "bg-[var(--brand-soft)]" : "hover:bg-[var(--surface-secondary)]"}`}
                     >
                       <StatusDot color={itemStatus === "active" ? "var(--status-pass-dot)" : "var(--muted-soft)"} />
                       <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
@@ -625,7 +625,7 @@ export default function PlanDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
+                  className="mt-2 flex h-8 w-full cursor-pointer items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                 >
                   <IconPlus size={13} stroke={1.75} />
                   New test plan
@@ -640,7 +640,7 @@ export default function PlanDetailPage() {
             <div className="flex shrink-0 items-center gap-0 border-b border-[var(--border)] px-4">
               <button
                 onClick={() => setActiveTab("runs")}
-                className={`flex h-10 items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
+                className={`flex h-10 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
                   activeTab === "runs" ? "border-[var(--brand-primary)] text-[var(--accent-light)]" : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
                 }`}
               >
@@ -649,7 +649,7 @@ export default function PlanDetailPage() {
               </button>
               <button
                 onClick={() => setActiveTab("items")}
-                className={`flex h-10 items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
+                className={`flex h-10 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
                   activeTab === "items" ? "border-[var(--brand-primary)] text-[var(--accent-light)]" : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
                 }`}
               >
@@ -801,7 +801,7 @@ export default function PlanDetailPage() {
                                 <button
                                   onClick={() => handleDissociate(run.id)}
                                   title="Unlink from plan"
-                                  className="rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error-foreground)]"
+                                  className="cursor-pointer rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error-foreground)]"
                                 >
                                   <IconX size={15} stroke={1.75} />
                                 </button>
@@ -878,7 +878,7 @@ export default function PlanDetailPage() {
                                     onClick={() => handleRemoveItem(item.id)}
                                     disabled={removingItemId === item.id}
                                     title="Remove from plan"
-                                    className="rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error-foreground)] disabled:opacity-50"
+                                    className="cursor-pointer rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error-foreground)] disabled:cursor-not-allowed disabled:opacity-50"
                                   >
                                     <IconX size={14} stroke={1.75} />
                                   </button>

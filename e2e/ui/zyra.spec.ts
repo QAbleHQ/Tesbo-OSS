@@ -100,6 +100,7 @@ test.describe("zyra / agents (UI)", () => {
     status?: string;
     drafts?: Array<Record<string, unknown>>;
     projectId?: string;
+    context?: string;
   }
 
   /** Writes a completed Zyra task straight into the table, drafts and all. Returns its id. */
@@ -130,7 +131,7 @@ test.describe("zyra / agents (UI)", () => {
          true, true, false, false, false,
          ${drafts.length}, ${literal(JSON.stringify(drafts))}::jsonb, 0, '[]'::jsonb,
          ${literal(ZYRA_AGENT_NAME)}, ${literal(options.status ?? "in_review")},
-         '', '', '[]'::jsonb, 10, 20, 30, ${literal(sources)}::jsonb, ${literal(activity)}::jsonb);`,
+         '', ${literal(options.context ?? "")}, '[]'::jsonb, 10, 20, 30, ${literal(sources)}::jsonb, ${literal(activity)}::jsonb);`,
     );
     return scalar(
       `SELECT id FROM ai_generation_requests WHERE project_id = ${literal(projectId)} AND user_story = ${literal(userStory)};`,
@@ -320,7 +321,9 @@ test.describe("zyra / agents (UI)", () => {
 
     const card = page.getByRole("button", { name: new RegExp(userStory.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) });
     await expect(card).toBeVisible();
-    await expect(card).toContainText("in review");
+    // Status labels render Title Case ("In Review"), never the raw lowercase enum value ("in_review").
+    await expect(card).toContainText("In Review");
+    await expect(card).not.toContainText("in review");
     await expect(card, "the board summarises how much was generated").toContainText("2 testcases");
   });
 
@@ -332,7 +335,53 @@ test.describe("zyra / agents (UI)", () => {
     await page.getByRole("tab", { name: "Kanban board" }).click();
 
     await expect(page.getByRole("tab", { name: "Kanban board" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.getByText(userStory)).toBeVisible();
+    const card = page.getByText(userStory);
+    await expect(card).toBeVisible();
+
+    // The kanban card's own status chip is Title Case too, not the raw "in_review" token.
+    const cardContainer = page.locator("button", { has: card });
+    await expect(cardContainer).toContainText("In Review");
+  });
+
+  test("ZYU-24 the kanban card and its quick-view panel both show the task's description", async ({
+    browser,
+  }) => {
+    const userStory = stamp("Described story");
+    const context = "Business rule: only verified accounts may reset their password.";
+    seedTask({ userStory, context });
+
+    const page = await open(browser, "/agents/tasks");
+    await page.getByRole("tab", { name: "Kanban board" }).click();
+
+    const cardContainer = page.locator("button", { has: page.getByText(userStory) });
+    await expect(cardContainer, "the kanban card surfaces the same description as the list view").toContainText(context);
+
+    await cardContainer.click();
+    const panel = page.locator(".slide-in-right");
+    await expect(panel.getByText(userStory)).toBeVisible();
+    await expect(panel, "the quick-view panel opened from the card shows the full description too").toContainText(context);
+  });
+
+  test("ZYU-25 a task with no description renders neither view with an empty description line", async ({
+    browser,
+  }) => {
+    const userStory = stamp("Bare story");
+    seedTask({ userStory });
+
+    const page = await open(browser, "/agents/tasks");
+    await page.getByRole("tab", { name: "Kanban board" }).click();
+
+    const cardContainer = page.locator("button", { has: page.getByText(userStory) });
+    await expect(cardContainer).toBeVisible();
+    // The description <p> only renders when task.context is truthy — confirm the empty string
+    // doesn't leave a blank paragraph behind, by checking the card's text is exactly what the
+    // non-description fields produce (status, story, generated/token summary — no extra line).
+    await expect(cardContainer.locator("p")).toHaveCount(1);
+
+    await cardContainer.click();
+    const panel = page.locator(".slide-in-right");
+    await expect(panel.getByText(userStory)).toBeVisible();
+    await expect(panel.locator("h2 + p")).toHaveCount(0);
   });
 
   test("ZYU-18 a failed task shows a distinct error state on the task window, not a silent 'Pending'", async ({
@@ -380,6 +429,8 @@ test.describe("zyra / agents (UI)", () => {
     const page = await open(browser, `/agents/tasks/${taskId}`);
 
     await expect(page.getByRole("heading", { name: "Zyra task", level: 1 })).toBeVisible();
+    // Same Title Case status label as the board and kanban card, not the raw "in_review" token.
+    await expect(page.getByText("In Review", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Generated Testcases (2)" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "Sign in with a valid password" })).toBeVisible();
     await expect(page.getByRole("cell", { name: "P1" })).toBeVisible();
@@ -474,6 +525,9 @@ test.describe("zyra / agents (UI)", () => {
         message: "closing the task is persisted, not just visual",
       })
       .not.toBe("in_review");
+
+    // The chip updates in place to the Title Case label, not the raw "done"/"accepted" token.
+    await expect(page.getByText("Done", { exact: true })).toBeVisible();
   });
 
   // ─── Authorization ─────────────────────────────────────────────────────────

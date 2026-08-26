@@ -52,6 +52,7 @@ import { RepositoryTestCaseTable } from "@/components/testcases/RepositoryTestCa
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import {
   Button,
+  CopyButton,
   Input,
   Select,
   Textarea,
@@ -67,6 +68,7 @@ import CustomFieldsSection from "@/components/customFields/CustomFieldsSection";
 import CustomFieldFilterPopover from "@/components/customFields/CustomFieldFilterPopover";
 import { getConfiguredDefaultValue, validateCustomFieldValues } from "@/components/customFields/customFieldTypes";
 import { readStoredValue, writeStoredValue } from "@/lib/storage";
+import { toTsv } from "@/lib/tsv";
 
 // 500 is the server's per-request ceiling (listTestCases clamps `limit`), so it is the largest
 // page we can offer. Paired with "select all matching" below, a 500-case suite no longer has to
@@ -315,6 +317,35 @@ export default function TestCasesPage() {
   const selectedCaseIdSet = useMemo(() => new Set(selectedCaseIds), [selectedCaseIds]);
   const areAllCasesSelected =
     selectedSuiteCases.length > 0 && selectedSuiteCases.every((tc) => selectedCaseIdSet.has(tc.id));
+  // Copy-to-clipboard only has the currently loaded page to draw from — a selection made via
+  // "Select all N matching" can reach beyond it, so this is the subset of the selection (or of
+  // the page, with no selection) that TSV export can actually see.
+  const copyableCases =
+    selectedCaseIds.length > 0 ? selectedSuiteCases.filter((tc) => selectedCaseIdSet.has(tc.id)) : selectedSuiteCases;
+  const copySelectionIncomplete = selectedCaseIds.length > 0 && copyableCases.length < selectedCaseIds.length;
+  const testCasesTsv = useMemo(
+    () =>
+      toTsv(
+        ["ID", "Title", "Suite", "Priority", "Type", "Automation", "Status", "Updated"],
+        copyableCases.map((tc) => [
+          tc.externalId || tc.id,
+          tc.title,
+          (tc.suiteId && suiteNameMap.get(tc.suiteId)) || "",
+          tc.priority,
+          tc.type,
+          tc.automationStatus,
+          tc.status,
+          tc.updatedAt ? new Date(tc.updatedAt).toLocaleDateString() : "",
+        ])
+      ),
+    [copyableCases, suiteNameMap]
+  );
+  const copyCasesLabel = selectedCaseIds.length > 0 ? `Copy ${copyableCases.length} selected` : `Copy page (${selectedSuiteCases.length})`;
+  const copyCasesTitle = selectedCaseIds.length > 0
+    ? copySelectionIncomplete
+      ? `Copies the ${copyableCases.length} selected test cases loaded on this page as tab-separated values, ready to paste into Excel. ${selectedCaseIds.length - copyableCases.length} more selected case(s) are on other pages and won't be included.`
+      : `Copies the ${copyableCases.length} selected test cases as tab-separated values, ready to paste into Excel.`
+    : `Copies the ${selectedSuiteCases.length} test cases on this page as tab-separated values, ready to paste into Excel.`;
   /*
    * The sum of the suite counts, which is NOT the size of the repository.
    *
@@ -1502,6 +1533,11 @@ export default function TestCasesPage() {
                     />
                     {/* Columns control renders here (portaled from the table), as the 5th dropdown. */}
                     <div ref={setColumnsSlotEl} className="flex items-center empty:hidden" />
+                    {selectedSuiteCases.length > 0 && (
+                      <span title={copyCasesTitle}>
+                        <CopyButton value={testCasesTsv} label={copyCasesLabel} copiedLabel="Copied" />
+                      </span>
+                    )}
                     {activeFilterCount > 0 && (
                       <button
                         type="button"

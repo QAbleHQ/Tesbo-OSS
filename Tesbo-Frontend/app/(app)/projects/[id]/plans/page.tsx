@@ -68,7 +68,7 @@ function PlanSortMenu({ sortBy, onSortChange }: { sortBy: SortBy; onSortChange: 
         type="button"
         onClick={() => setIsOpen((prev) => !prev)}
         aria-expanded={isOpen}
-        className="flex h-8 items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
+        className="flex h-8 cursor-pointer items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
       >
         <IconArrowsSort size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
         Sort: {currentLabel}
@@ -84,7 +84,7 @@ function PlanSortMenu({ sortBy, onSortChange }: { sortBy: SortBy; onSortChange: 
                 onSortChange(option.value);
                 setIsOpen(false);
               }}
-              className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-[var(--surface-secondary)] ${
+              className={`flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-[var(--surface-secondary)] ${
                 option.value === sortBy ? "text-[var(--brand-primary)]" : "text-[var(--foreground)]"
               }`}
             >
@@ -369,7 +369,7 @@ export default function PlansPage() {
                   type="button"
                   onClick={() => setSearchQuery("")}
                   aria-label="Clear search"
-                  className="shrink-0 rounded-full p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                  className="shrink-0 cursor-pointer rounded-full p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
                 >
                   <IconX size={12} stroke={2} />
                 </button>
@@ -378,7 +378,7 @@ export default function PlansPage() {
             <button
               type="button"
               onClick={() => setStatusFilterOpen((v) => !v)}
-              className="flex h-[30px] items-center gap-1.5 rounded-[6px] border px-3 text-[12px] font-medium transition-colors"
+              className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border px-3 text-[12px] font-medium transition-colors"
               style={
                 statusFilter !== "all"
                   ? { borderColor: "var(--brand-primary)", color: "var(--accent-light)", background: "var(--brand-soft)" }
@@ -399,7 +399,7 @@ export default function PlansPage() {
                 onClick={() => handleViewModeChange("grid")}
                 aria-label="Grid view"
                 aria-pressed={viewMode === "grid"}
-                className="flex h-[26px] w-7 items-center justify-center rounded-[4px] transition-colors"
+                className="flex h-[26px] w-7 cursor-pointer items-center justify-center rounded-[4px] transition-colors"
                 style={{ background: viewMode === "grid" ? "var(--surface)" : "transparent", color: viewMode === "grid" ? "var(--brand-primary)" : "var(--muted-soft)" }}
               >
                 <IconLayoutGrid size={15} stroke={1.75} />
@@ -409,7 +409,7 @@ export default function PlansPage() {
                 onClick={() => handleViewModeChange("list")}
                 aria-label="List view"
                 aria-pressed={viewMode === "list"}
-                className="flex h-[26px] w-7 items-center justify-center rounded-[4px] transition-colors"
+                className="flex h-[26px] w-7 cursor-pointer items-center justify-center rounded-[4px] transition-colors"
                 style={{ background: viewMode === "list" ? "var(--surface)" : "transparent", color: viewMode === "list" ? "var(--brand-primary)" : "var(--muted-soft)" }}
               >
                 <IconList size={15} stroke={1.75} />
@@ -425,7 +425,7 @@ export default function PlansPage() {
                   key={option}
                   type="button"
                   onClick={() => setStatusFilter(option)}
-                  className="rounded-full border px-3 py-[3px] text-[11.5px] font-medium capitalize transition-colors"
+                  className="cursor-pointer rounded-full border px-3 py-[3px] text-[11.5px] font-medium capitalize transition-colors"
                   style={
                     statusFilter === option
                       ? { borderColor: "var(--brand-primary)", color: "var(--accent-light)", background: "var(--brand-soft)" }
@@ -446,7 +446,7 @@ export default function PlansPage() {
               <button
                 type="button"
                 onClick={() => { setSearchQuery(""); setStatusFilter("all"); }}
-                className="flex items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] hover:underline"
+                className="flex cursor-pointer items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] hover:underline"
               >
                 <IconX size={12} stroke={2} />
                 Clear filters

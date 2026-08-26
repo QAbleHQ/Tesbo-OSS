@@ -165,7 +165,7 @@ export function PlanCard({ plan, projectId, ownerName, canManage, onDelete }: Pl
               type="button"
               title="Delete plan"
               onClick={() => onDelete(plan)}
-              className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
+              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
             >
               <IconTrash size={13} stroke={1.75} />
             </button>
