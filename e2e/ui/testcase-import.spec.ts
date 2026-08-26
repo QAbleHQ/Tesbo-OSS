@@ -16,7 +16,7 @@ const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.js
 const STATE_PATH = path.join(__dirname, "../.auth/state.json");
 
 test.describe("test case import", () => {
-  test("importing a CSV shows a completion toast that survives closing the import modal", async ({ page }) => {
+  test("importing a CSV shows a completion toast that survives closing the import modal", { tag: '@tesbo.testId("TES-TC-824")' }, async ({ page }) => {
     // Regression test for: import completed successfully but no toast notification was
     // ever shown, during or after — see ImportTestCasesModal.tsx / testcases/page.tsx.
     const stamp = Date.now();
@@ -219,7 +219,7 @@ test.describe("test case import wizard", () => {
 
   /* ─────────────────────────── the wizard ─────────────────────────── */
 
-  test("auto-maps the column names other tools export, without any manual mapping", async ({ browser }) => {
+  test("auto-maps the column names other tools export, without any manual mapping", { tag: '@tesbo.testId("TES-TC-825")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Aliases");
@@ -259,7 +259,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("finds the header row below leading junk rows, and numbers errors by file line", async ({ browser }) => {
+  test("finds the header row below leading junk rows, and numbers errors by file line", { tag: '@tesbo.testId("TES-TC-826")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Header Row");
@@ -293,7 +293,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("will not import until a Title column is mapped", async ({ browser }) => {
+  test("will not import until a Title column is mapped", { tag: '@tesbo.testId("TES-TC-827")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "No Title");
@@ -316,7 +316,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("skips titles that already exist and titles repeated inside the file", async ({ browser }) => {
+  test("skips titles that already exist and titles repeated inside the file", { tag: '@tesbo.testId("TES-TC-828")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Duplicates");
@@ -354,7 +354,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("creates the suite and its component subfolder, and reuses them on a second import", async ({ browser }) => {
+  test("creates the suite and its component subfolder, and reuses them on a second import", { tag: '@tesbo.testId("TES-TC-829")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Suites");
@@ -397,7 +397,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("splits steps into actions with their expected results", async ({ browser }) => {
+  test("splits steps into actions with their expected results", { tag: '@tesbo.testId("TES-TC-830")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Steps");
@@ -423,7 +423,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("offers a worksheet picker for a workbook, defaulting to the sheet holding test cases", async ({ browser }) => {
+  test("offers a worksheet picker for a workbook, defaulting to the sheet holding test cases", { tag: '@tesbo.testId("TES-TC-831")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Workbook");
@@ -458,7 +458,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("keeps the user on the upload step when there is nothing readable in the file", async ({ browser }) => {
+  test("keeps the user on the upload step when there is nothing readable in the file", { tag: '@tesbo.testId("TES-TC-832")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Unreadable");
@@ -631,7 +631,7 @@ test.describe("test case import wizard", () => {
 
   /* ─────────────────────────── the export links ─────────────────────────── */
 
-  test("the export menu links to both formats and to both templates", async ({ browser }) => {
+  test("the export menu links to both formats and to both templates", { tag: '@tesbo.testId("TES-TC-833")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Export Menu");
@@ -668,7 +668,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("the run detail page exports the run as CSV", async ({ browser }) => {
+  test("the run detail page exports the run as CSV", { tag: '@tesbo.testId("TES-TC-834")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Run Export");

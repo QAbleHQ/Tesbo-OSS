@@ -65,7 +65,7 @@ function themeButton(page: Page, mode: "light" | "dark") {
 test.describe("theme toggle", () => {
   test.skip(!!skipReason, skipReason ?? "");
 
-  test("THM-01 a browser that has never chosen renders light", async ({ page }) => {
+  test("THM-01 a browser that has never chosen renders light", { tag: '@tesbo.testId("TES-TC-837")' }, async ({ page }) => {
     await page.goto("/projects");
     await expect(themeButton(page, "light")).toBeVisible();
 
@@ -77,7 +77,7 @@ test.describe("theme toggle", () => {
     expect(applied.stored).toBeNull();
   });
 
-  test("THM-02/03 switching to dark and back applies and reverses all three signals", async ({ page }) => {
+  test("THM-02/03 switching to dark and back applies and reverses all three signals", { tag: '@tesbo.testId("TES-TC-838")' }, async ({ page }) => {
     await page.goto("/projects");
 
     await themeButton(page, "dark").click();
@@ -93,7 +93,7 @@ test.describe("theme toggle", () => {
     expect(light.colorScheme).toBe("light");
   });
 
-  test("THM-04 exactly one of the two buttons reads as pressed", async ({ page }) => {
+  test("THM-04 exactly one of the two buttons reads as pressed", { tag: '@tesbo.testId("TES-TC-839")' }, async ({ page }) => {
     await setStoredTheme(page, "dark");
     await page.goto("/projects");
 
@@ -105,7 +105,7 @@ test.describe("theme toggle", () => {
     await expect(themeButton(page, "dark")).toHaveAttribute("aria-pressed", "false");
   });
 
-  test("THM-05 the choice is persisted and survives a reload", async ({ page }) => {
+  test("THM-05 the choice is persisted and survives a reload", { tag: '@tesbo.testId("TES-TC-840")' }, async ({ page }) => {
     await page.goto("/projects");
 
     await themeButton(page, "dark").click();
@@ -130,7 +130,7 @@ test.describe("theme toggle", () => {
     });
   }
 
-  test("THM-07 dark is applied during parsing, before the app renders", async ({ page, request }) => {
+  test("THM-07 dark is applied during parsing, before the app renders", { tag: '@tesbo.testId("TES-TC-845")' }, async ({ page, request }) => {
     /*
      * Two halves, both deterministic. First: the theme script is inline in <head>, ahead of any
      * body content, so the browser runs it while parsing rather than after hydration. Asserted
@@ -153,7 +153,7 @@ test.describe("theme toggle", () => {
     expect(applied.hasDarkClass).toBe(true);
   });
 
-  test("THM-08 a browser that refuses localStorage still loads the app and themes the session", async ({
+  test("THM-08 a browser that refuses localStorage still loads the app and themes the session", { tag: '@tesbo.testId("TES-TC-846")' }, async ({
     page,
   }) => {
     /*
@@ -187,7 +187,7 @@ test.describe("theme toggle", () => {
     await expect.poll(async () => (await readAppliedTheme(page)).dataset).toBe("dark");
   });
 
-  test("THM-09 the theme holds across client-side navigation", async ({ page }) => {
+  test("THM-09 the theme holds across client-side navigation", { tag: '@tesbo.testId("TES-TC-847")' }, async ({ page }) => {
     await setStoredTheme(page, "dark");
     await page.goto("/projects");
 
@@ -202,7 +202,7 @@ test.describe("theme toggle", () => {
     expect((await readAppliedTheme(page)).dataset).toBe("dark");
   });
 
-  test("THM-10 the theme holds across a hard reload of a deep route", async ({ page }) => {
+  test("THM-10 the theme holds across a hard reload of a deep route", { tag: '@tesbo.testId("TES-TC-848")' }, async ({ page }) => {
     await setStoredTheme(page, "dark");
     await page.goto(`/projects/${tenant!.projectId}/testcases`);
     expect((await readAppliedTheme(page)).dataset).toBe("dark");
@@ -211,7 +211,7 @@ test.describe("theme toggle", () => {
     expect((await readAppliedTheme(page)).dataset).toBe("dark");
   });
 
-  test("THM-11 the theme belongs to the browser, not the session", async ({ browser }) => {
+  test("THM-11 the theme belongs to the browser, not the session", { tag: '@tesbo.testId("TES-TC-849")' }, async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a disposable user to log out with");
     /*
      * A user of its own, never the shared screens session: logging out invalidates the session
@@ -473,18 +473,18 @@ test.describe("every screen follows the theme", () => {
     return Array.from(offenders.values()).sort((a, b) => a.ratio - b.ratio);
   }
 
-  test("THM-13 no text anywhere is unreadable against what's behind it", async ({ page }) => {
+  test("THM-13 no text anywhere is unreadable against what's behind it", { tag: '@tesbo.testId("TES-TC-884")' }, async ({ page }) => {
     test.slow();
     // Below 3:1 is not "a bit low" — it is text a person cannot reliably make out at any size.
     expect(await sweepContrast(page, "unreadable")).toEqual([]);
   });
 
-  test("THM-14 text meets WCAG AA contrast in both themes", async ({ page }) => {
+  test("THM-14 text meets WCAG AA contrast in both themes", { tag: '@tesbo.testId("TES-TC-885")' }, async ({ page }) => {
     test.slow();
     // The softer bar: 4.5:1 for body text, 3:1 for large or bold text, per WCAG 2.1 AA.
     expect(await sweepContrast(page, "subAA")).toEqual([]);
   });
-  test("THM-15 a toast is readable in both themes", async ({ page }) => {
+  test("THM-15 a toast is readable in both themes", { tag: '@tesbo.testId("TES-TC-1085")' }, async ({ page }) => {
     /*
      * Basecamp 10212550781 — "[work space settings] success message fonts are not visible".
      *

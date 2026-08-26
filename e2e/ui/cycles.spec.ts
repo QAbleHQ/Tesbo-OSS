@@ -69,7 +69,7 @@ function statPillValue(page: Page, label: string): Locator {
 }
 
 test.describe("Test Runs — Pass Rate and Skipped consistency", () => {
-  test("the per-run card and the Run Details page reconcile the same Pass Rate, and Skipped is visible on both", async ({
+  test("the per-run card and the Run Details page reconcile the same Pass Rate, and Skipped is visible on both", { tag: '@tesbo.testId("TES-TC-1329")' }, async ({
     page,
   }) => {
     const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
@@ -110,7 +110,7 @@ test.describe("Test Runs — Pass Rate and Skipped consistency", () => {
     }
   });
 
-  test("a run where every case is Skipped shows 0% pass rate, not NaN, with Skipped counted correctly", async ({
+  test("a run where every case is Skipped shows 0% pass rate, not NaN, with Skipped counted correctly", { tag: '@tesbo.testId("TES-TC-1330")' }, async ({
     page,
   }) => {
     const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
@@ -133,7 +133,7 @@ test.describe("Test Runs — Pass Rate and Skipped consistency", () => {
     }
   });
 
-  test("a run with zero assigned cases renders with no breakdown row and does not break the list", async ({
+  test("a run with zero assigned cases renders with no breakdown row and does not break the list", { tag: '@tesbo.testId("TES-TC-1331")' }, async ({
     page,
   }) => {
     const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
@@ -154,7 +154,7 @@ test.describe("Test Runs — Pass Rate and Skipped consistency", () => {
     }
   });
 
-  test("the summary Pass Rate tile is passed over total cases for the currently filtered runs, not passed over executed cases across every run", async ({
+  test("the summary Pass Rate tile is passed over total cases for the currently filtered runs, not passed over executed cases across every run", { tag: '@tesbo.testId("TES-TC-1332")' }, async ({
     page,
   }) => {
     const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });

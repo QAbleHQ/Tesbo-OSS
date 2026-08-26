@@ -24,7 +24,7 @@ async function deleteSuite(request: import("@playwright/test").APIRequestContext
 }
 
 test.describe("test case CRUD", () => {
-  test("supports the create -> read -> update -> list -> delete lifecycle", async ({ request }) => {
+  test("supports the create -> read -> update -> list -> delete lifecycle", { tag: '@tesbo.testId("TES-TC-551")' }, async ({ request }) => {
     const title = `E2E smoke test case ${Date.now()}`;
 
     const createRes = await request.post(`/api/projects/${ctx.projectId}/testcases`, {
@@ -66,7 +66,7 @@ test.describe("test case CRUD", () => {
     expect(getAfterDeleteRes.status()).toBe(404);
   });
 
-  test("defaults are applied when optional fields are omitted on create", async ({ request }) => {
+  test("defaults are applied when optional fields are omitted on create", { tag: '@tesbo.testId("TES-TC-552")' }, async ({ request }) => {
     const created = await createCase(request);
     try {
       expect(created.priority).toBe("P2");
@@ -81,7 +81,7 @@ test.describe("test case CRUD", () => {
     }
   });
 
-  test("blank title defaults to 'Untitled test case' when omitted entirely, but an explicit empty string is honored", async ({
+  test("blank title defaults to 'Untitled test case' when omitted entirely, but an explicit empty string is honored", { tag: '@tesbo.testId("TES-TC-553")' }, async ({
     request,
   }) => {
     const withoutTitle = await (
@@ -103,7 +103,7 @@ test.describe("test case CRUD", () => {
     }
   });
 
-  test("an explicit empty string clears text fields on update ('?? null' treats '' as provided, unlike bugs' '|| null' pattern)", async ({
+  test("an explicit empty string clears text fields on update ('?? null' treats '' as provided, unlike bugs' '|| null' pattern)", { tag: '@tesbo.testId("TES-TC-554")' }, async ({
     request,
   }) => {
     const created = await createCase(request, {
@@ -128,7 +128,7 @@ test.describe("test case CRUD", () => {
     }
   });
 
-  test("estimatedDuration is accepted on create/update but silently discarded (dead field)", async ({
+  test("estimatedDuration is accepted on create/update but silently discarded (dead field)", { tag: '@tesbo.testId("TES-TC-555")' }, async ({
     request,
   }) => {
     // KNOWN GAP: the `estimated_duration` column exists (migrations/V7_testcase_additional_fields.sql)
@@ -152,7 +152,7 @@ test.describe("test case CRUD", () => {
     }
   });
 
-  test("getting, updating, or deleting a nonexistent test case returns 404", async ({ request }) => {
+  test("getting, updating, or deleting a nonexistent test case returns 404", { tag: '@tesbo.testId("TES-TC-556")' }, async ({ request }) => {
     const missingId = "00000000-0000-0000-0000-000000000000";
 
     const getRes = await request.get(`/api/projects/${ctx.projectId}/testcases/${missingId}`, {
@@ -172,7 +172,7 @@ test.describe("test case CRUD", () => {
     expect(deleteRes.status()).toBe(404);
   });
 
-  test("delete is a soft delete — the row disappears from get/list but the external_id isn't recyclable", async ({
+  test("delete is a soft delete — the row disappears from get/list but the external_id isn't recyclable", { tag: '@tesbo.testId("TES-TC-557")' }, async ({
     request,
   }) => {
     const created = await createCase(request);
@@ -197,7 +197,7 @@ test.describe("test case CRUD", () => {
 });
 
 test.describe("move to suite", () => {
-  test("creating a test case with a suiteId assigns it to that suite", async ({ request }) => {
+  test("creating a test case with a suiteId assigns it to that suite", { tag: '@tesbo.testId("TES-TC-558")' }, async ({ request }) => {
     const suite = await createSuite(request, `E2E Move Create Suite ${Date.now()}`);
     const created = await createCase(request, { suiteId: suite.id });
 
@@ -209,7 +209,7 @@ test.describe("move to suite", () => {
     }
   });
 
-  test("updating suiteId moves a test case from one suite to another", async ({ request }) => {
+  test("updating suiteId moves a test case from one suite to another", { tag: '@tesbo.testId("TES-TC-559")' }, async ({ request }) => {
     const suiteA = await createSuite(request, `E2E Move A ${Date.now()}`);
     const suiteB = await createSuite(request, `E2E Move B ${Date.now()}`);
     const created = await createCase(request, { suiteId: suiteA.id });
@@ -231,7 +231,7 @@ test.describe("move to suite", () => {
     }
   });
 
-  test("moving back to no suite by sending suiteId: null un-suites the test case", async ({ request }) => {
+  test("moving back to no suite by sending suiteId: null un-suites the test case", { tag: '@tesbo.testId("TES-TC-560")' }, async ({ request }) => {
     const suite = await createSuite(request, `E2E Move To Null ${Date.now()}`);
     const created = await createCase(request, { suiteId: suite.id });
 
@@ -249,7 +249,7 @@ test.describe("move to suite", () => {
     }
   });
 
-  test("omitting suiteId on update un-assigns the suite (suite_id is overwritten, not COALESCEd)", async ({
+  test("omitting suiteId on update un-assigns the suite (suite_id is overwritten, not COALESCEd)", { tag: '@tesbo.testId("TES-TC-561")' }, async ({
     request,
   }) => {
     // KNOWN GAP (documented, not test.fail() — mirrors updateSuite's parentId bug in
@@ -274,7 +274,7 @@ test.describe("move to suite", () => {
     }
   });
 
-  test("bulk-update moves many test cases into a suite in one call", async ({ request }) => {
+  test("bulk-update moves many test cases into a suite in one call", { tag: '@tesbo.testId("TES-TC-562")' }, async ({ request }) => {
     const suite = await createSuite(request, `E2E Bulk Move Suite ${Date.now()}`);
     const a = await createCase(request);
     const b = await createCase(request);
@@ -298,7 +298,7 @@ test.describe("move to suite", () => {
 });
 
 test.describe("field edits — every editable field", () => {
-  test("create accepts the full field set and returns each field verbatim", async ({ request }) => {
+  test("create accepts the full field set and returns each field verbatim", { tag: '@tesbo.testId("TES-TC-563")' }, async ({ request }) => {
     const suite = await createSuite(request, `E2E Full Fields Suite ${Date.now()}`);
     const me = await (await request.get("/api/auth/me")).json();
     const steps = [
@@ -348,7 +348,7 @@ test.describe("field edits — every editable field", () => {
     }
   });
 
-  test("update can change every editable field to a new value", async ({ request }) => {
+  test("update can change every editable field to a new value", { tag: '@tesbo.testId("TES-TC-564")' }, async ({ request }) => {
     const suiteA = await createSuite(request, `E2E Edit A ${Date.now()}`);
     const suiteB = await createSuite(request, `E2E Edit B ${Date.now()}`);
     const owner = await (await request.get("/api/auth/me")).json();
@@ -404,7 +404,7 @@ test.describe("field edits — every editable field", () => {
 });
 
 test.describe("bulk operations", () => {
-  test("bulk-update changes priority, status and ownerId for every selected test case", async ({ request }) => {
+  test("bulk-update changes priority, status and ownerId for every selected test case", { tag: '@tesbo.testId("TES-TC-565")' }, async ({ request }) => {
     const me = await (await request.get("/api/auth/me")).json();
     const a = await createCase(request, { priority: "P3", status: "Draft" });
     const b = await createCase(request, { priority: "P3", status: "Draft" });
@@ -427,7 +427,7 @@ test.describe("bulk operations", () => {
     }
   });
 
-  test("bulk-update sending an empty string leaves that field unchanged (falsy-check, unlike single-update's blank-out gap)", async ({
+  test("bulk-update sending an empty string leaves that field unchanged (falsy-check, unlike single-update's blank-out gap)", { tag: '@tesbo.testId("TES-TC-566")' }, async ({
     request,
   }) => {
     const created = await createCase(request, { priority: "P1" });
@@ -445,14 +445,14 @@ test.describe("bulk operations", () => {
     }
   });
 
-  test("bulk-update no-ops silently on an empty testcaseIds array", async ({ request }) => {
+  test("bulk-update no-ops silently on an empty testcaseIds array", { tag: '@tesbo.testId("TES-TC-567")' }, async ({ request }) => {
     const res = await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-update`, {
       data: { testcaseIds: [], priority: "P0" },
     });
     expect(res.ok()).toBeTruthy();
   });
 
-  test("bulk-delete soft-deletes every selected test case", async ({ request }) => {
+  test("bulk-delete soft-deletes every selected test case", { tag: '@tesbo.testId("TES-TC-568")' }, async ({ request }) => {
     const a = await createCase(request);
     const b = await createCase(request);
 
@@ -469,14 +469,14 @@ test.describe("bulk operations", () => {
     }
   });
 
-  test("bulk-delete no-ops silently on an empty testcaseIds array", async ({ request }) => {
+  test("bulk-delete no-ops silently on an empty testcaseIds array", { tag: '@tesbo.testId("TES-TC-569")' }, async ({ request }) => {
     const res = await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-delete`, {
       data: { testcaseIds: [] },
     });
     expect(res.ok()).toBeTruthy();
   });
 
-  test("archiving sets status to Archived; restoring a prior status is just another update", async ({
+  test("archiving sets status to Archived; restoring a prior status is just another update", { tag: '@tesbo.testId("TES-TC-570")' }, async ({
     request,
   }) => {
     const created = await createCase(request, { status: "Approved" });
@@ -509,7 +509,7 @@ test.describe("bulk operations", () => {
 });
 
 test.describe("search", () => {
-  test("matches by title substring, case-insensitively", async ({ request }) => {
+  test("matches by title substring, case-insensitively", { tag: '@tesbo.testId("TES-TC-571")' }, async ({ request }) => {
     const marker = `E2E Search Title ${Date.now()}`;
     const created = await createCase(request, { title: marker });
 
@@ -525,7 +525,7 @@ test.describe("search", () => {
     }
   });
 
-  test("matches by external ID substring", async ({ request }) => {
+  test("matches by external ID substring", { tag: '@tesbo.testId("TES-TC-572")' }, async ({ request }) => {
     const created = await createCase(request);
 
     try {
@@ -539,7 +539,7 @@ test.describe("search", () => {
     }
   });
 
-  test("matches by type substring, excluding other types", async ({ request }) => {
+  test("matches by type substring, excluding other types", { tag: '@tesbo.testId("TES-TC-573")' }, async ({ request }) => {
     const marker = Date.now();
     const regression = await createCase(request, { title: `E2E Search Type A ${marker}`, type: "Regression" });
     const smoke = await createCase(request, { title: `E2E Search Type B ${marker}`, type: "Smoke" });
@@ -556,7 +556,7 @@ test.describe("search", () => {
     }
   });
 
-  test("returns an empty list when nothing matches", async ({ request }) => {
+  test("returns an empty list when nothing matches", { tag: '@tesbo.testId("TES-TC-574")' }, async ({ request }) => {
     const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
       params: { search: `no-such-testcase-${Date.now()}` },
     });
@@ -564,7 +564,7 @@ test.describe("search", () => {
     expect(await res.json()).toEqual([]);
   });
 
-  test("an unescaped LIKE wildcard in the search term over-matches instead of being treated literally", async ({
+  test("an unescaped LIKE wildcard in the search term over-matches instead of being treated literally", { tag: '@tesbo.testId("TES-TC-575")' }, async ({
     request,
   }) => {
     // KNOWN GAP: listTestCases() wraps `search` in %...% but never escapes a literal % or _
@@ -592,7 +592,7 @@ test.describe("search", () => {
 });
 
 test.describe("filters", () => {
-  test("filters by status, priority, and type independently", async ({ request }) => {
+  test("filters by status, priority, and type independently", { tag: '@tesbo.testId("TES-TC-576")' }, async ({ request }) => {
     const marker = Date.now();
     const a = await createCase(request, {
       title: `E2E Filter A ${marker}`,
@@ -631,7 +631,7 @@ test.describe("filters", () => {
     }
   });
 
-  test("filters by suiteId, automationStatus, jiraIssueKey and linearIssueKey", async ({ request }) => {
+  test("filters by suiteId, automationStatus, jiraIssueKey and linearIssueKey", { tag: '@tesbo.testId("TES-TC-577")' }, async ({ request }) => {
     const suite = await createSuite(request, `E2E Filter Suite ${Date.now()}`);
     const marker = Date.now();
     const inSuite = await createCase(request, {
@@ -678,7 +678,7 @@ test.describe("filters", () => {
     }
   });
 
-  test("suiteId=none filters to test cases with no suite assigned", async ({ request }) => {
+  test("suiteId=none filters to test cases with no suite assigned", { tag: '@tesbo.testId("TES-TC-1208")' }, async ({ request }) => {
     const suite = await createSuite(request, `E2E NoSuite Filter Suite ${Date.now()}`);
     const marker = Date.now();
     const inSuite = await createCase(request, { title: `E2E NoSuite InSuite ${marker}`, suiteId: suite.id });
@@ -709,7 +709,7 @@ test.describe("filters", () => {
     }
   });
 
-  test("combining status and priority filters applies AND logic", async ({ request }) => {
+  test("combining status and priority filters applies AND logic", { tag: '@tesbo.testId("TES-TC-578")' }, async ({ request }) => {
     const marker = Date.now();
     const match = await createCase(request, { title: `E2E Combo Match ${marker}`, status: "In Review", priority: "P0" });
     const wrongPriority = await createCase(request, {
@@ -741,7 +741,7 @@ test.describe("filters", () => {
 });
 
 test.describe("pagination", () => {
-  test("limit controls page size while X-Total-Count reports the full filtered total", async ({ request }) => {
+  test("limit controls page size while X-Total-Count reports the full filtered total", { tag: '@tesbo.testId("TES-TC-579")' }, async ({ request }) => {
     const marker = `E2E Pagination ${Date.now()}`;
     const created: string[] = [];
     try {
@@ -761,7 +761,7 @@ test.describe("pagination", () => {
     }
   });
 
-  test("offset pages through results with no overlap, covering every fixture row exactly once", async ({
+  test("offset pages through results with no overlap, covering every fixture row exactly once", { tag: '@tesbo.testId("TES-TC-580")' }, async ({
     request,
   }) => {
     const marker = `E2E Offset ${Date.now()}`;
@@ -793,7 +793,7 @@ test.describe("pagination", () => {
     }
   });
 
-  test("limit=0 returns an empty page without affecting the reported total", async ({ request }) => {
+  test("limit=0 returns an empty page without affecting the reported total", { tag: '@tesbo.testId("TES-TC-581")' }, async ({ request }) => {
     const marker = `E2E ZeroLimit ${Date.now()}`;
     const created = await createCase(request, { title: marker });
 
@@ -809,7 +809,7 @@ test.describe("pagination", () => {
     }
   });
 
-  test("a negative limit or offset is floored instead of reaching the database", async ({ request }) => {
+  test("a negative limit or offset is floored instead of reaching the database", { tag: '@tesbo.testId("TES-TC-582")' }, async ({ request }) => {
     /*
      * REWRITTEN, and this is the narrow case the tracker's §3 rule allows: the expectation itself was
      * documenting a defect. This test used to be titled "...is passed straight to the database with no
@@ -849,7 +849,7 @@ test.describe("pagination", () => {
     expect(huge.status()).toBe(200);
     expect((await huge.json()).length).toBeLessThanOrEqual(500);
   });
-  test("the list stays in ID sequence after a bulk action, and pages stay stable", async ({ request }) => {
+  test("the list stays in ID sequence after a bulk action, and pages stay stable", { tag: '@tesbo.testId("TES-TC-958")' }, async ({ request }) => {
     /*
      * Basecamp 10212941059 / BetterBugs 6a8428b9 — "Test Case ID Sequence Is Incorrect After
      * Performing Bulk Actions". The reported screen read AIP-TC-33, then 25, 26, 27, 28, 29, 30.
@@ -916,7 +916,7 @@ test.describe("pagination", () => {
       for (const id of created) await deleteCase(request, id);
     }
   });
-  test("suiteId=none returns exactly the cases that belong to no suite", async ({ request }) => {
+  test("suiteId=none returns exactly the cases that belong to no suite", { tag: '@tesbo.testId("TES-TC-959")' }, async ({ request }) => {
     /*
      * Basecamp 10212879823 / 10212867874 — "Test Case Counts Are Inconsistent Between Test Case
      * Repository and Test Suite" / "Test Cases Created Through Zyra AI Are Missing from Test Suite".
@@ -995,7 +995,7 @@ test.describe("pagination", () => {
       await deleteSuite(request, suite.id);
     }
   });
-  test("archived cases are out of the default list but still reachable and still counted", async ({
+  test("archived cases are out of the default list but still reachable and still counted", { tag: '@tesbo.testId("TES-TC-960")' }, async ({
     request,
   }) => {
     /*
@@ -1054,7 +1054,7 @@ test.describe("pagination", () => {
       for (const id of [...live, archived].filter(Boolean)) await deleteCase(request, id);
     }
   });
-  test("bulk-move can take a case out of its suite, not only into another one", async ({ request }) => {
+  test("bulk-move can take a case out of its suite, not only into another one", { tag: '@tesbo.testId("TES-TC-961")' }, async ({ request }) => {
     /*
      * Basecamp 10194174342 — "test cases count and test cases discrepancy after suite move". The
      * reported screen showed TOTAL 136 against a suite tree summing to 108.
@@ -1121,7 +1121,7 @@ test.describe("pagination", () => {
       await deleteSuite(request, to.id);
     }
   });
-  test("an over-long field is a field-level 400, never an Internal Server Error", async ({ request }) => {
+  test("an over-long field is a field-level 400, never an Internal Server Error", { tag: '@tesbo.testId("TES-TC-1209")' }, async ({ request }) => {
     /*
      * Basecamp 10226376787 — "Internal Server Error When Adding a Long Description to Test Case Details".
      *
@@ -1194,7 +1194,7 @@ test.describe("pagination", () => {
     }
   });
 
-  test("a bulk import names the row and field that is too long instead of failing with a 500", async ({
+  test("a bulk import names the row and field that is too long instead of failing with a 500", { tag: '@tesbo.testId("TES-TC-1210")' }, async ({
     request,
   }) => {
     /*
@@ -1226,7 +1226,7 @@ test.describe("pagination", () => {
     expect((await listed.json()).length, "a refused batch partially imported").toBe(0);
   });
 
-  test("estimatedDuration is persisted, returned, and format-validated", async ({ request }) => {
+  test("estimatedDuration is persisted, returned, and format-validated", { tag: '@tesbo.testId("TES-TC-1211")' }, async ({ request }) => {
     /*
      * Basecamp 10226363759 — "Estimated Time Field Accepts Invalid Text and Special Characters".
      *

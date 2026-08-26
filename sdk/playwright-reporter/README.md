@@ -1,4 +1,4 @@
-# `@tesbo/playwright-reporter`
+# `@tesbox/playwright-reporter`
 
 Reports Playwright results into Tesbo, linked to the test cases they validate.
 
@@ -9,7 +9,7 @@ created.
 ## Install
 
 ```bash
-npm install --save-dev @tesbo/playwright-reporter
+npm install --save-dev @tesbox/playwright-reporter
 ```
 
 ## Set it up
@@ -18,13 +18,13 @@ You need three values, all on **Project → Settings → API & MCP** in Tesbo. T
 checks they work together, and prints the config to paste:
 
 ```bash
-npx @tesbo/playwright-reporter init
+npx @tesbox/playwright-reporter init
 ```
 
 To check an existing setup — including inside CI, where it prompts for nothing and just reports:
 
 ```bash
-npx @tesbo/playwright-reporter doctor
+npx @tesbox/playwright-reporter doctor
 ```
 
 `doctor` exits `0` when the three values are reachable and valid, `1` when verification failed, and
@@ -42,7 +42,7 @@ npx @tesbo/playwright-reporter doctor
 export default defineConfig({
   reporter: [
     ['list'],
-    ['@tesbo/playwright-reporter', {
+    ['@tesbox/playwright-reporter', {
       // baseUrl and projectId are not secrets — commit them. A self-hosted install needs its own
       // baseUrl in version control anyway.
       baseUrl: 'https://api-app.tesbo.io',
@@ -54,7 +54,7 @@ export default defineConfig({
 });
 ```
 
-Create the token in Tesbo under **Project → Settings → API tokens**. It needs the `write` scope, and
+Create the token in Tesbo under **Project → Settings → API & MCP**. It needs the `write` scope, and
 it is scoped to one project — a token issued for project A cannot report into project B.
 
 | Variable | Purpose |

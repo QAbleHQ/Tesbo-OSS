@@ -180,7 +180,7 @@ export function resolveConfig(input: TesboConfigInput = {}, env: NodeJS.ProcessE
       state: "unconfigured",
       message:
         `not configured — ${ENV_BASE_URL}, ${ENV_PROJECT_ID} and ${ENV_TOKEN} are all unset, so results ` +
-        `will not be reported. Run "npx @tesbo/playwright-reporter doctor" to set them up, or pass ` +
+        `will not be reported. Run "npx @tesbox/playwright-reporter doctor" to set them up, or pass ` +
         `enabled: false to silence this.`
     };
   }
@@ -193,7 +193,7 @@ export function resolveConfig(input: TesboConfigInput = {}, env: NodeJS.ProcessE
         `partially configured: ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} missing. ` +
         `Reporting is configured but cannot work, so this is a hard failure rather than a warning — ` +
         `a run that quietly reported nothing would look exactly like a run that succeeded. ` +
-        `Run "npx @tesbo/playwright-reporter doctor" to check the values.`
+        `Run "npx @tesbox/playwright-reporter doctor" to check the values.`
     };
   }
 

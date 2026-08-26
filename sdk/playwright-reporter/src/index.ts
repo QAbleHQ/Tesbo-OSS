@@ -26,7 +26,7 @@ export type { TesboConfigInput, ResolvedTesboConfig, ConfigResolution } from "./
  *
  *     reporter: [
  *       ['list'],
- *       ['@tesbo/playwright-reporter', { projectId: process.env.TESBO_PROJECT_ID }],
+ *       ['@tesbox/playwright-reporter', { projectId: process.env.TESBO_PROJECT_ID }],
  *     ]
  *
  * and tag each test with the case it validates:

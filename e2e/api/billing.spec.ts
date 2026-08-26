@@ -90,7 +90,7 @@ function expectBillingInfoContract(info: Record<string, unknown>) {
 }
 
 test.describe("billing info and usage", () => {
-  test("GET /api/billing returns the plan card contract with coherent plan-state flags", async ({
+  test("GET /api/billing returns the plan card contract with coherent plan-state flags", { tag: '@tesbo.testId("TES-TC-75")' }, async ({
     request,
   }) => {
     const res = await request.get("/api/billing");
@@ -98,7 +98,7 @@ test.describe("billing info and usage", () => {
     expectBillingInfoContract(await res.json());
   });
 
-  test("GET /api/billing/usage reports the limits actually in force for the plan", async ({ request }) => {
+  test("GET /api/billing/usage reports the limits actually in force for the plan", { tag: '@tesbo.testId("TES-TC-76")' }, async ({ request }) => {
     const res = await request.get("/api/billing/usage");
     expect(res.ok()).toBeTruthy();
     const usage = await res.json();
@@ -123,7 +123,7 @@ test.describe("billing info and usage", () => {
     if (usage.plan === "pro" || usage.inGracePeriod) expect(proLimits).toBeTruthy();
   });
 
-  test("POST /api/billing/reconcile returns the same contract as GET and doesn't invent a plan", async ({
+  test("POST /api/billing/reconcile returns the same contract as GET and doesn't invent a plan", { tag: '@tesbo.testId("TES-TC-77")' }, async ({
     request,
   }) => {
     const before = await (await request.get("/api/billing")).json();
@@ -145,7 +145,7 @@ test.describe("billing info and usage", () => {
 });
 
 test.describe("billing history", () => {
-  test("GET /api/billing/history returns timeline entries newest first", async ({ request }) => {
+  test("GET /api/billing/history returns timeline entries newest first", { tag: '@tesbo.testId("TES-TC-78")' }, async ({ request }) => {
     const res = await request.get("/api/billing/history");
     expect(res.ok()).toBeTruthy();
     const history = await res.json();
@@ -165,7 +165,7 @@ test.describe("billing history", () => {
     }
   });
 
-  test("GET /api/billing/history clamps ?limit and ignores values that aren't a positive number", async ({
+  test("GET /api/billing/history clamps ?limit and ignores values that aren't a positive number", { tag: '@tesbo.testId("TES-TC-79")' }, async ({
     request,
   }) => {
     const one = await request.get("/api/billing/history?limit=1");
@@ -188,7 +188,7 @@ test.describe("billing history", () => {
 });
 
 test.describe("invoices", () => {
-  test("GET /api/billing/invoices returns settled invoices with working receipt links", async ({
+  test("GET /api/billing/invoices returns settled invoices with working receipt links", { tag: '@tesbo.testId("TES-TC-80")' }, async ({
     request,
   }) => {
     const res = await request.get("/api/billing/invoices");
@@ -212,7 +212,7 @@ test.describe("invoices", () => {
 });
 
 test.describe("pricing quotes", () => {
-  test("GET /api/billing/pricing quotes a supported currency with coherent availability flags", async ({
+  test("GET /api/billing/pricing quotes a supported currency with coherent availability flags", { tag: '@tesbo.testId("TES-TC-81")' }, async ({
     request,
   }) => {
     const res = await request.get("/api/billing/pricing");
@@ -240,7 +240,7 @@ test.describe("pricing quotes", () => {
     }
   });
 
-  test("GET /api/billing/pricing is stable across calls", async ({ request }) => {
+  test("GET /api/billing/pricing is stable across calls", { tag: '@tesbo.testId("TES-TC-82")' }, async ({ request }) => {
     const first = await (await request.get("/api/billing/pricing")).json();
     const second = await (await request.get("/api/billing/pricing")).json();
     // A quote that flips currency between two page loads would show one price and charge another.
@@ -250,7 +250,7 @@ test.describe("pricing quotes", () => {
     expect(second.inrAvailable).toBe(first.inrAvailable);
   });
 
-  test("?currency=usd is always honoured", async ({ request }) => {
+  test("?currency=usd is always honoured", { tag: '@tesbo.testId("TES-TC-83")' }, async ({ request }) => {
     const res = await request.get("/api/billing/pricing?currency=usd");
     expect(res.ok()).toBeTruthy();
     const pricing = await res.json();
@@ -259,7 +259,7 @@ test.describe("pricing quotes", () => {
     expect(pricing.currency).toBe("usd");
   });
 
-  test("?currency=inr is either honoured or refused outright, never silently downgraded", async ({
+  test("?currency=inr is either honoured or refused outright, never silently downgraded", { tag: '@tesbo.testId("TES-TC-84")' }, async ({
     request,
   }) => {
     const res = await request.get("/api/billing/pricing?currency=inr", { failOnStatusCode: false });
@@ -278,7 +278,7 @@ test.describe("pricing quotes", () => {
     }
   });
 
-  test("an unsupported currency is rejected rather than defaulting to one", async ({ request }) => {
+  test("an unsupported currency is rejected rather than defaulting to one", { tag: '@tesbo.testId("TES-TC-85")' }, async ({ request }) => {
     for (const currency of ["eur", "gbp", "xyz", "us"]) {
       const res = await request.get(`/api/billing/pricing?currency=${currency}`, {
         failOnStatusCode: false,
@@ -289,7 +289,7 @@ test.describe("pricing quotes", () => {
     }
   });
 
-  test("currency is matched case- and whitespace-insensitively", async ({ request }) => {
+  test("currency is matched case- and whitespace-insensitively", { tag: '@tesbo.testId("TES-TC-86")' }, async ({ request }) => {
     const canonical = await (await request.get("/api/billing/pricing?currency=usd")).json();
     for (const variant of ["USD", "Usd", "%20usd%20"]) {
       const res = await request.get(`/api/billing/pricing?currency=${variant}`);
@@ -298,7 +298,7 @@ test.describe("pricing quotes", () => {
     }
   });
 
-  test("GET /api/billing/pricing is reachable without a session", async () => {
+  test("GET /api/billing/pricing is reachable without a session", { tag: '@tesbo.testId("TES-TC-87")' }, async () => {
     // Deliberately public: the pricing modal quotes the plan from the visitor's own location, and
     // there's nothing workspace-specific in the response for a caller with no workspace.
     const res = await anon.get("/api/billing/pricing", { failOnStatusCode: false });
@@ -315,7 +315,7 @@ test.describe("checkout session validation", () => {
   // a live key, and a regression that moved the Stripe call earlier would show up as a new Customer
   // appearing in the dashboard on every test run.
 
-  test("a missing or unsupported interval is refused", async ({ request }) => {
+  test("a missing or unsupported interval is refused", { tag: '@tesbo.testId("TES-TC-88")' }, async ({ request }) => {
     for (const body of [{}, { interval: "weekly" }, { interval: "" }, { interval: "MONTHLY" }]) {
       const res = await request.post("/api/billing/checkout-session", {
         data: body,
@@ -326,7 +326,7 @@ test.describe("checkout session validation", () => {
     }
   });
 
-  test("an unsupported currency is refused even with a valid interval", async ({ request }) => {
+  test("an unsupported currency is refused even with a valid interval", { tag: '@tesbo.testId("TES-TC-89")' }, async ({ request }) => {
     const res = await request.post("/api/billing/checkout-session", {
       data: { interval: "monthly", currency: "eur" },
       failOnStatusCode: false,
@@ -335,7 +335,7 @@ test.describe("checkout session validation", () => {
     expect((await res.json()).error).toContain("currency must be");
   });
 
-  test("requesting INR from outside India is refused, not quietly charged in USD", async ({
+  test("requesting INR from outside India is refused, not quietly charged in USD", { tag: '@tesbo.testId("TES-TC-90")' }, async ({
     request,
   }) => {
     const res = await request.post("/api/billing/checkout-session", {
@@ -363,7 +363,7 @@ test.describe("webhook signature verification", () => {
   // permanently undeliverable, so each case below must come back 400 to make Stripe stop and to
   // surface the real cause (almost always the wrong signing secret).
 
-  test("a request with no Stripe-Signature header is refused", async () => {
+  test("a request with no Stripe-Signature header is refused", { tag: '@tesbo.testId("TES-TC-91")' }, async () => {
     const res = await anon.post("/api/billing/webhook", {
       headers: { "content-type": "application/json" },
       data: JSON.stringify({ id: uniqueStripeId("evt"), type: "invoice.paid" }),
@@ -373,13 +373,13 @@ test.describe("webhook signature verification", () => {
     expect(String((await res.json()).error)).toMatch(/signature|secret/i);
   });
 
-  test("a malformed signature is refused with 400, never 500", async () => {
+  test("a malformed signature is refused with 400, never 500", { tag: '@tesbo.testId("TES-TC-92")' }, async () => {
     const event = invoicePaid({ organizationId: "00000000-0000-0000-0000-000000000000" });
     const res = await postStripeWebhook(anon, event, { signature: "t=1,v1=not-a-real-signature" });
     expect(res.status()).toBe(400);
   });
 
-  test("a signature computed with the wrong secret is refused", async () => {
+  test("a signature computed with the wrong secret is refused", { tag: '@tesbo.testId("TES-TC-93")' }, async () => {
     const event = subscriptionEvent("customer.subscription.updated", {
       organizationId: "00000000-0000-0000-0000-000000000000",
       subscriptionId: uniqueStripeId("sub"),
@@ -389,7 +389,7 @@ test.describe("webhook signature verification", () => {
     expect(res.status()).toBe(400);
   });
 
-  test("a correctly signed payload with a stale timestamp is refused", async () => {
+  test("a correctly signed payload with a stale timestamp is refused", { tag: '@tesbo.testId("TES-TC-94")' }, async () => {
     // Stripe's constructEvent enforces a 5-minute tolerance, so a captured-and-replayed body can't
     // be posted back hours later even with its original valid signature.
     const event = invoicePaid({ organizationId: "00000000-0000-0000-0000-000000000000" });
@@ -397,7 +397,7 @@ test.describe("webhook signature verification", () => {
     expect(res.status()).toBe(400);
   });
 
-  test("the signature covers the body, so altering it after signing is refused", async () => {
+  test("the signature covers the body, so altering it after signing is refused", { tag: '@tesbo.testId("TES-TC-95")' }, async () => {
     const signed = JSON.stringify(invoicePaid({ organizationId: "00000000-0000-0000-0000-000000000000" }));
     const signature = signStripePayload(signed);
     const tampered = signed.replace('"amount_paid":36000', '"amount_paid":1');
@@ -412,7 +412,7 @@ test.describe("webhook signature verification", () => {
 });
 
 test.describe("authentication", () => {
-  test("every workspace-scoped billing endpoint refuses a caller with no session", async () => {
+  test("every workspace-scoped billing endpoint refuses a caller with no session", { tag: '@tesbo.testId("TES-TC-96")' }, async () => {
     for (const endpoint of AUTHENTICATED_ENDPOINTS) {
       const res =
         endpoint.method === "get"
@@ -438,7 +438,7 @@ test.describe("Stripe write paths", () => {
     "writes to Stripe — set E2E_BILLING_ALLOW_STRIPE_WRITES=true against a test-mode Stripe key",
   );
 
-  test("POST /api/billing/checkout-session returns a hosted Stripe Checkout URL", async ({ request }) => {
+  test("POST /api/billing/checkout-session returns a hosted Stripe Checkout URL", { tag: '@tesbo.testId("TES-TC-97")' }, async ({ request }) => {
     const res = await request.post("/api/billing/checkout-session", {
       data: { interval: "annual" },
       failOnStatusCode: false,
@@ -456,7 +456,7 @@ test.describe("Stripe write paths", () => {
     expect(new URL(url).hostname).toContain("stripe.com");
   });
 
-  test("POST /api/billing/portal-session returns a hosted Stripe Billing Portal URL", async ({
+  test("POST /api/billing/portal-session returns a hosted Stripe Billing Portal URL", { tag: '@tesbo.testId("TES-TC-98")' }, async ({
     request,
   }) => {
     const res = await request.post("/api/billing/portal-session", { failOnStatusCode: false });

@@ -76,6 +76,7 @@ test.describe("bugs list — controls, filters and the edit modal", () => {
 
   test(
     ticket("REG-BUG-01", "10226234070", "the row's edit and delete controls are labelled and legibly sized"),
+    { tag: '@tesbo.testId("TES-TC-1276")' },
     async ({ page }) => {
       // Also covers 10218564160 — "delete button is not visible" is the same faint-glyph defect
       // from a second reporter, and a fix that enlarged only the edit control would pass a test
@@ -106,6 +107,7 @@ test.describe("bugs list — controls, filters and the edit modal", () => {
 
   test(
     ticket("REG-BUG-02", "10218564160", "the delete control is a real target, not empty space"),
+    { tag: '@tesbo.testId("TES-TC-1277")' },
     async ({ page }) => {
       /*
        * Filed separately from 10226234070 and kept as its own test because the reporter's complaint
@@ -128,6 +130,7 @@ test.describe("bugs list — controls, filters and the edit modal", () => {
 
   test(
     ticket("REG-BUG-03", "10226229423", "a long title is clamped and carries its full text as a tooltip"),
+    { tag: '@tesbo.testId("TES-TC-1278")' },
     async ({ page }) => {
       const title = page.locator("td span[title]").filter({ hasText: "E2E REG long bug title" }).first();
       await expect(title).toBeVisible();
@@ -144,6 +147,7 @@ test.describe("bugs list — controls, filters and the edit modal", () => {
 
   test(
     ticket("REG-BUG-04", "10226242373", "the severity filter narrows the list and clears back"),
+    { tag: '@tesbo.testId("TES-TC-1279")' },
     async ({ page }) => {
       const rows = page.locator("tbody tr");
       // The search has already narrowed the shared project to this test's two fixtures, so these
@@ -161,6 +165,7 @@ test.describe("bugs list — controls, filters and the edit modal", () => {
 
   test(
     ticket("REG-BUG-05", "10226242373", "the severity filter is available on the board too"),
+    { tag: '@tesbo.testId("TES-TC-1280")' },
     async ({ page }) => {
       // The board groups by status, so the status filter is deliberately list-only — but "show me
       // the Critical ones" is exactly what the board is for, which is why this is not view-gated.
@@ -176,6 +181,7 @@ test.describe("bugs list — controls, filters and the edit modal", () => {
 
   test(
     ticket("REG-BUG-06", "10217828537", "the edit modal scrolls to its own footer instead of the page behind it"),
+    { tag: '@tesbo.testId("TES-TC-1281")' },
     async ({ page }) => {
       /*
        * "Bug edit pop up is not scrollable thus not able to update bug". Fixed upstream in
@@ -239,6 +245,7 @@ test.describe("bug priority on the screen", () => {
 
   test(
     ticket("REG-BUG-07", "10226247009", "the list shows a priority per bug, and an em dash when untriaged"),
+    { tag: '@tesbo.testId("TES-TC-1282")' },
     async ({ page }) => {
       const triagedRow = page.locator("tbody tr").filter({ hasText: triagedTitle });
       await expect(triagedRow.getByText("P1", { exact: true })).toBeVisible();
@@ -253,6 +260,7 @@ test.describe("bug priority on the screen", () => {
 
   test(
     ticket("REG-BUG-08", "10226247009", "the report form offers priority, defaulting to not set"),
+    { tag: '@tesbo.testId("TES-TC-1283")' },
     async ({ page }) => {
       await page.getByRole("button", { name: /report a bug/i }).first().click();
       await expect(page.getByText("Report a Bug", { exact: true })).toBeVisible();
@@ -271,6 +279,7 @@ test.describe("bug priority on the screen", () => {
 
   test(
     ticket("REG-BUG-09", "10226247009", "editing a bug changes its priority and can clear it again"),
+    { tag: '@tesbo.testId("TES-TC-1284")' },
     async ({ page }) => {
       const row = page.locator("tbody tr").filter({ hasText: triagedTitle });
       await row.getByRole("button", { name: "Edit bug" }).click();
@@ -340,6 +349,7 @@ test.describe("bug evidence validation", () => {
 
   test(
     ticket("REG-BUG-10", "10226296533", "the picker advertises the types it accepts"),
+    { tag: '@tesbo.testId("TES-TC-1285")' },
     async ({ page }) => {
       await openReportModal(page);
       // Advisory only — the OS dialog can always be switched to "All files" — but without it the
@@ -354,6 +364,7 @@ test.describe("bug evidence validation", () => {
 
   test(
     ticket("REG-BUG-11", "10226296533", "an unsupported file is named and refused without being staged"),
+    { tag: '@tesbo.testId("TES-TC-1286")' },
     async ({ page }) => {
       await openReportModal(page);
       await fileInput(page).setInputFiles({
@@ -373,6 +384,7 @@ test.describe("bug evidence validation", () => {
 
   test(
     ticket("REG-BUG-12", "10226296533", "an oversized file is refused with the limit, before any upload"),
+    { tag: '@tesbo.testId("TES-TC-1287")' },
     async ({ page }) => {
       await openReportModal(page);
 
@@ -400,6 +412,7 @@ test.describe("bug evidence validation", () => {
 
   test(
     ticket("REG-BUG-13", "10226296533", "a mixed selection keeps the good files and drops only the bad one"),
+    { tag: '@tesbo.testId("TES-TC-1288")' },
     async ({ page }) => {
       await openReportModal(page);
       await fileInput(page).setInputFiles([
@@ -417,6 +430,7 @@ test.describe("bug evidence validation", () => {
 
   test(
     ticket("REG-BUG-14", "10226296533", "a server-side rejection is shown, and the button leaves Saving"),
+    { tag: '@tesbo.testId("TES-TC-1289")' },
     async ({ page }) => {
       /*
        * The original defect, reproduced from the other side: the client check is bypassed here (the

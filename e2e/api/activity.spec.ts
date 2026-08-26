@@ -178,7 +178,7 @@ test.describe("activity feed", () => {
 
   // ─── The feed records what happened ────────────────────────────────────────
 
-  test("ACT-A-01 an action in a project appears in that project's feed", async () => {
+  test("ACT-A-01 an action in a project appears in that project's feed", { tag: '@tesbo.testId("TES-TC-886")' }, async () => {
     const suiteName = stamp("Suite");
     const caseTitle = stamp("Case");
     await createSuite(suiteName);
@@ -191,7 +191,7 @@ test.describe("activity feed", () => {
     expect(entryFor(list, caseTitle), "no entry for the new test case").toBeTruthy();
   });
 
-  test("ACT-A-02 every entry says who did it, never 'System'", async () => {
+  test("ACT-A-02 every entry says who did it, never 'System'", { tag: '@tesbo.testId("TES-TC-887")' }, async () => {
     const suiteName = stamp("AttributedSuite");
     const caseTitle = stamp("AttributedCase");
     const suiteId = await createSuite(suiteName);
@@ -225,7 +225,7 @@ test.describe("activity feed", () => {
     ).toEqual([]);
   });
 
-  test("ACT-A-03 the same action also reaches the workspace-wide feed", async () => {
+  test("ACT-A-03 the same action also reaches the workspace-wide feed", { tag: '@tesbo.testId("TES-TC-888")' }, async () => {
     const suiteName = stamp("WorkspaceVisible");
     await createSuite(suiteName);
 
@@ -236,7 +236,7 @@ test.describe("activity feed", () => {
     expect(entryFor(list, suiteName), "the event is missing from the workspace feed").toBeTruthy();
   });
 
-  test("ACT-A-04 an entry carries the entity it describes and when it happened", async () => {
+  test("ACT-A-04 an entry carries the entity it describes and when it happened", { tag: '@tesbo.testId("TES-TC-889")' }, async () => {
     const suiteName = stamp("Shaped");
     const suiteId = await createSuite(suiteName);
 
@@ -253,7 +253,7 @@ test.describe("activity feed", () => {
     expect(entry!.id, "every entry needs a stable key for the list").toBeTruthy();
   });
 
-  test("ACT-A-05 the feed is newest first", async () => {
+  test("ACT-A-05 the feed is newest first", { tag: '@tesbo.testId("TES-TC-890")' }, async () => {
     const first = stamp("Oldest");
     const second = stamp("Middle");
     const third = stamp("Newest");
@@ -284,7 +284,7 @@ test.describe("activity feed", () => {
     expect(iSecond, "the middle suite should sit above the oldest one").toBeLessThan(iFirst);
   });
 
-  test("ACT-A-06 one action produces one entry, not two", async () => {
+  test("ACT-A-06 one action produces one entry, not two", { tag: '@tesbo.testId("TES-TC-891")' }, async () => {
     const caseTitle = stamp("NoDuplicate");
     await createTestCase(caseTitle);
 
@@ -303,7 +303,7 @@ test.describe("activity feed", () => {
 
   // ─── Filters ───────────────────────────────────────────────────────────────
 
-  test("ACT-A-07 the entityType filter narrows the feed to that type", async () => {
+  test("ACT-A-07 the entityType filter narrows the feed to that type", { tag: '@tesbo.testId("TES-TC-892")' }, async () => {
     const suiteName = stamp("TypeFilterSuite");
     const caseTitle = stamp("TypeFilterCase");
     await createSuite(suiteName);
@@ -320,7 +320,7 @@ test.describe("activity feed", () => {
     expect(multi.list.length).toBeGreaterThanOrEqual(suitesOnly.list.length);
   });
 
-  test("ACT-A-08 the search filter matches an entity's name", async () => {
+  test("ACT-A-08 the search filter matches an entity's name", { tag: '@tesbo.testId("TES-TC-893")' }, async () => {
     const needle = `Needle${Date.now()}`;
     const hit = stamp(`${needle} Hit`);
     const miss = stamp("Miss");
@@ -333,7 +333,7 @@ test.describe("activity feed", () => {
     expect(entryFor(list, miss), "a non-matching entity survived the search").toBeFalsy();
   });
 
-  test("ACT-A-09 the since filter drops everything older than it", async () => {
+  test("ACT-A-09 the since filter drops everything older than it", { tag: '@tesbo.testId("TES-TC-894")' }, async () => {
     const older = stamp("BeforeCutoff");
     await createSuite(older);
 
@@ -347,7 +347,7 @@ test.describe("activity feed", () => {
     expect(entryFor(afterEpoch.list, older)).toBeTruthy();
   });
 
-  test("ACT-A-10 the actorId filter narrows the feed to one person's actions", async () => {
+  test("ACT-A-10 the actorId filter narrows the feed to one person's actions", { tag: '@tesbo.testId("TES-TC-895")' }, async () => {
     const byOwner = stamp("ByOwner");
     const byQa = stamp("ByQa");
     await createTestCase(byOwner, asOwner);
@@ -365,7 +365,7 @@ test.describe("activity feed", () => {
 
   // ─── Scope, paging and refusals ────────────────────────────────────────────
 
-  test("ACT-A-11 an entity's history survives the entity being deleted", async () => {
+  test("ACT-A-11 an entity's history survives the entity being deleted", { tag: '@tesbo.testId("TES-TC-896")' }, async () => {
     const suiteName = stamp("DeletedButRemembered");
     const suiteId = await createSuite(suiteName);
     expect(entryFor((await feed({ limit: 100 })).list, suiteName)).toBeTruthy();
@@ -386,7 +386,7 @@ test.describe("activity feed", () => {
     ).toBeTruthy();
   });
 
-  test("ACT-A-12 another project's activity is not in this project's feed", async () => {
+  test("ACT-A-12 another project's activity is not in this project's feed", { tag: '@tesbo.testId("TES-TC-897")' }, async () => {
     const mine = stamp("MyProject");
     await createSuite(mine);
     const theirsName = stamp("OtherProject");
@@ -406,7 +406,7 @@ test.describe("activity feed", () => {
     ).toBe(true);
   });
 
-  test("ACT-A-13 limit and offset page the feed, and total ignores them", async () => {
+  test("ACT-A-13 limit and offset page the feed, and total ignores them", { tag: '@tesbo.testId("TES-TC-898")' }, async () => {
     for (let i = 0; i < 4; i++) await createSuite(stamp(`Page${i}`));
 
     const all = await feed({ limit: 100 });
@@ -425,7 +425,7 @@ test.describe("activity feed", () => {
     expect(overlap, "pages must not repeat entries").toEqual([]);
   });
 
-  test("ACT-A-14 a malformed limit or offset is not a 500", async () => {
+  test("ACT-A-14 a malformed limit or offset is not a 500", { tag: '@tesbo.testId("TES-TC-899")' }, async () => {
     await createSuite(stamp("BadPaging"));
 
     // pageNumber() exists because NaN used to survive Math.max/Math.min and reach the LIMIT clause.
@@ -448,7 +448,7 @@ test.describe("activity feed", () => {
     }
   });
 
-  test("ACT-A-14b a malformed since or actorId is refused as a bad request, not swallowed", async () => {
+  test("ACT-A-14b a malformed since or actorId is refused as a bad request, not swallowed", { tag: '@tesbo.testId("TES-TC-1107")' }, async () => {
     /*
      * These two used to reach Postgres unchecked — `since` as `$n::timestamptz` (22007) and
      * `actorId` against a uuid column (22P02) — and both answered 500. "Not a 500" is the floor;
@@ -474,7 +474,7 @@ test.describe("activity feed", () => {
     expect(Array.isArray(ok.list)).toBe(true);
   });
 
-  test("ACT-A-14c the since filter resolves against a feed that joins projects", async () => {
+  test("ACT-A-14c the since filter resolves against a feed that joins projects", { tag: '@tesbo.testId("TES-TC-1108")' }, async () => {
     /*
      * Regression for Postgres 42702. The feed's outer query is
      * `FROM activity_events ae LEFT JOIN projects pr`, and `projects` has a `created_at` of its own,
@@ -490,7 +490,7 @@ test.describe("activity feed", () => {
     expect(entryFor(list, name), "an entry from the last hour is missing from a since-filtered feed").toBeTruthy();
   });
 
-  test("ACT-A-15 the summary agrees with the feed it summarises", async () => {
+  test("ACT-A-15 the summary agrees with the feed it summarises", { tag: '@tesbo.testId("TES-TC-900")' }, async () => {
     const caseTitle = stamp("SummaryCase");
     await createTestCase(caseTitle);
 
@@ -523,7 +523,7 @@ test.describe("activity feed", () => {
     }
   });
 
-  test("ACT-A-16 an anonymous caller and a non-member are both refused", async () => {
+  test("ACT-A-16 an anonymous caller and a non-member are both refused", { tag: '@tesbo.testId("TES-TC-901")' }, async () => {
     await createSuite(stamp("Guarded"));
 
     const anonRes = await anon.get(`/api/projects/${tenant!.mainProjectId}/activity`, { failOnStatusCode: false });
@@ -538,7 +538,7 @@ test.describe("activity feed", () => {
     expect(anonWorkspace.status()).toBe(401);
   });
 
-  test("ACT-A-17 a workspace member with no project access cannot read its activity", async () => {
+  test("ACT-A-17 a workspace member with no project access cannot read its activity", { tag: '@tesbo.testId("TES-TC-902")' }, async () => {
     await createSuite(stamp("NoAccess"));
     const asGuest = await loginAs(tenant!.guest);
     try {

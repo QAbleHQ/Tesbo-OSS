@@ -46,7 +46,7 @@ const SKIP_NO_LOGS =
 test.describe("email delivery gating", () => {
   test.skip(logsUnavailable, SKIP_NO_LOGS);
 
-  test("the stack under test cannot deliver email to a real recipient", async () => {
+  test("the stack under test cannot deliver email to a real recipient", { tag: '@tesbo.testId("TES-TC-915")' }, async () => {
     const report = readEmailDeliveryReport();
     expect(
       report,
@@ -74,7 +74,7 @@ test.describe("email delivery gating", () => {
     }
   });
 
-  test("a sandbox-configured stack logs no delivery-blocked warnings", async () => {
+  test("a sandbox-configured stack logs no delivery-blocked warnings", { tag: '@tesbo.testId("TES-TC-916")' }, async () => {
     const report = readEmailDeliveryReport();
     test.skip(report?.server !== "sandbox", "only meaningful when a sandbox server is configured");
 
@@ -83,7 +83,7 @@ test.describe("email delivery gating", () => {
     expect(readBackendLogs(20_000) ?? "").not.toContain("[email] Blocking delivery");
   });
 
-  test("an OTP is printed to the log and never emailed, and the printed code works", async ({ playwright }) => {
+  test("an OTP is printed to the log and never emailed, and the printed code works", { tag: '@tesbo.testId("TES-TC-917")' }, async ({ playwright }) => {
     clearOtpIpRateLimit();
     const anon = await playwright.request.newContext({
       baseURL: env.apiBaseUrl,
@@ -121,7 +121,7 @@ test.describe("email delivery gating", () => {
     }
   });
 
-  test("a wrong code is still rejected when the right one is sitting in the log", async ({ playwright }) => {
+  test("a wrong code is still rejected when the right one is sitting in the log", { tag: '@tesbo.testId("TES-TC-918")' }, async ({ playwright }) => {
     clearOtpIpRateLimit();
     const anon = await playwright.request.newContext({
       baseURL: env.apiBaseUrl,
@@ -165,7 +165,7 @@ test.describe("invite email in log mode", () => {
     test.skip(logsUnavailable, SKIP_NO_LOGS);
   });
 
-  test("the accept link is printed to the log and the printed token actually works", async ({ playwright }) => {
+  test("the accept link is printed to the log and the printed token actually works", { tag: '@tesbo.testId("TES-TC-919")' }, async ({ playwright }) => {
     const email = testAddress(`email-delivery-invite-${Date.now()}`);
     let inviteId: string | null = null;
     const anon = await playwright.request.newContext({
@@ -240,7 +240,7 @@ test.describe("the admin health endpoint reports email delivery", () => {
     );
   });
 
-  test("reports the delivery mode, the Postmark server type, and how far mail gets", async () => {
+  test("reports the delivery mode, the Postmark server type, and how far mail gets", { tag: '@tesbo.testId("TES-TC-920")' }, async () => {
     const res = await asAdmin!.get("/api/admin/system/health", { failOnStatusCode: false });
     expect(res.ok(), `${res.status()} ${await res.text()}`).toBeTruthy();
 
@@ -271,7 +271,7 @@ test.describe("the admin health endpoint reports email delivery", () => {
     expect(scalar(`SELECT count(*) FROM platform_admins WHERE user_id = ${literal(admin!.userId)};`)).toBe("1");
   });
 
-  test("stays closed to callers who are not platform admins", async ({ request, playwright }) => {
+  test("stays closed to callers who are not platform admins", { tag: '@tesbo.testId("TES-TC-921")' }, async ({ request, playwright }) => {
     // api/tail.spec.ts asserts these two statuses as part of its authorization sweep; repeated here
     // because this endpoint now hands back platform-wide email configuration, so the gate protecting
     // it belongs to this change too.

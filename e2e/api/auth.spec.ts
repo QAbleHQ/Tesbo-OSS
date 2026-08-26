@@ -12,21 +12,21 @@ async function anonContext(playwright: import("@playwright/test").PlaywrightWork
 }
 
 test.describe("auth", () => {
-  test("an authenticated session can fetch the current user", async ({ request }) => {
+  test("an authenticated session can fetch the current user", { tag: '@tesbo.testId("TES-TC-24")' }, async ({ request }) => {
     const res = await request.get("/api/auth/me");
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
     expect(body.email).toBe(env.testEmail);
   });
 
-  test("an unauthenticated request is rejected", async ({ playwright }) => {
+  test("an unauthenticated request is rejected", { tag: '@tesbo.testId("TES-TC-25")' }, async ({ playwright }) => {
     const anon = await anonContext(playwright);
     const res = await anon.get("/api/auth/me");
     expect(res.status()).toBe(401);
     await anon.dispose();
   });
 
-  test("an incorrect password is rejected", async ({ playwright }) => {
+  test("an incorrect password is rejected", { tag: '@tesbo.testId("TES-TC-34")' }, async ({ playwright }) => {
     const anon = await anonContext(playwright);
     const res = await anon.post("/api/auth/password/login", {
       data: { email: env.testEmail, password: "definitely-wrong-password" },
@@ -36,7 +36,7 @@ test.describe("auth", () => {
     await anon.dispose();
   });
 
-  test("rejects a login request missing required fields", async ({ playwright }) => {
+  test("rejects a login request missing required fields", { tag: '@tesbo.testId("TES-TC-45")' }, async ({ playwright }) => {
     const anon = await anonContext(playwright);
     const res = await anon.post("/api/auth/password/login", {
       data: { email: env.testEmail },
@@ -46,7 +46,7 @@ test.describe("auth", () => {
     await anon.dispose();
   });
 
-  test("invalidates the session on logout", async ({ playwright }) => {
+  test("invalidates the session on logout", { tag: '@tesbo.testId("TES-TC-27")' }, async ({ playwright }) => {
     const anon = await anonContext(playwright);
     // Log in fresh here rather than reusing the shared default session — logging that
     // one out would break every other spec relying on the same storageState.
@@ -70,7 +70,7 @@ test.describe("otp", () => {
   // own per-email counter, e.g. the rate-limit test below mid-loop.)
   test.beforeEach(() => clearOtpIpRateLimit());
 
-  test("rejects OTP verification with an incorrect code", async ({ playwright }) => {
+  test("rejects OTP verification with an incorrect code", { tag: '@tesbo.testId("TES-TC-28")' }, async ({ playwright }) => {
     const anon = await anonContext(playwright);
     const email = disposableEmail("api-otp-wrong");
     const res = await anon.post("/api/auth/otp/verify", {
@@ -81,7 +81,7 @@ test.describe("otp", () => {
     await anon.dispose();
   });
 
-  test("completes a full OTP sign-in for a disposable account", async ({ playwright }) => {
+  test("completes a full OTP sign-in for a disposable account", { tag: '@tesbo.testId("TES-TC-29")' }, async ({ playwright }) => {
     const anon = await anonContext(playwright);
     const email = disposableEmail("api-otp-roundtrip");
     seedOtpCode(email, "246810");
@@ -97,7 +97,7 @@ test.describe("otp", () => {
     await anon.dispose();
   });
 
-  test("rate-limits repeated OTP requests", async ({ playwright }) => {
+  test("rate-limits repeated OTP requests", { tag: '@tesbo.testId("TES-TC-30")' }, async ({ playwright }) => {
     const anon = await anonContext(playwright);
     const email = disposableEmail("api-otp-rate-limit");
 

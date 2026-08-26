@@ -5,7 +5,7 @@ import { expect, test } from "@playwright/test";
 const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.json"), "utf-8"));
 
 test.describe("test suite CRUD", () => {
-  test("supports create -> list -> rename -> reposition -> delete", async ({ request }) => {
+  test("supports create -> list -> rename -> reposition -> delete", { tag: '@tesbo.testId("TES-TC-527")' }, async ({ request }) => {
     const name = `E2E Suite ${Date.now()}`;
     const created = await (
       await request.post(`/api/projects/${ctx.projectId}/suites`, { data: { name } })
@@ -42,7 +42,7 @@ test.describe("test suite CRUD", () => {
     }
   });
 
-  test("renaming a child suite without sending parentId silently detaches it to root", async ({
+  test("renaming a child suite without sending parentId silently detaches it to root", { tag: '@tesbo.testId("TES-TC-528")' }, async ({
     request,
   }) => {
     // KNOWN GAP (documented, not test.fail() — this is a data-integrity bug, not a security
@@ -76,7 +76,7 @@ test.describe("test suite CRUD", () => {
     }
   });
 
-  test("deleting a suite with mode=moveToDefault un-suites its test cases instead of removing them", async ({
+  test("deleting a suite with mode=moveToDefault un-suites its test cases instead of removing them", { tag: '@tesbo.testId("TES-TC-529")' }, async ({
     request,
   }) => {
     const suite = await (
@@ -106,7 +106,7 @@ test.describe("test suite CRUD", () => {
     }
   });
 
-  test("deleting a suite with mode=deleteTestcases removes its test cases entirely", async ({
+  test("deleting a suite with mode=deleteTestcases removes its test cases entirely", { tag: '@tesbo.testId("TES-TC-530")' }, async ({
     request,
   }) => {
     const suite = await (

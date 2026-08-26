@@ -150,7 +150,7 @@ test.describe("custom fields (UI)", () => {
 
   // ─── The settings screen ───────────────────────────────────────────────────
 
-  test("an owner can add a custom field and see it listed", async ({ browser }) => {
+  test("an owner can add a custom field and see it listed", { tag: '@tesbo.testId("TES-TC-654")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     await page.goto(settingsUrl());
     await expect(page.getByRole("heading", { name: "Custom Fields" })).toBeVisible();
@@ -178,7 +178,7 @@ test.describe("custom fields (UI)", () => {
     expect(persisted.config.unit).toBe("hours");
   });
 
-  test("a select field can be built with options from the modal", async ({ browser }) => {
+  test("a select field can be built with options from the modal", { tag: '@tesbo.testId("TES-TC-655")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     await page.goto(settingsUrl());
 
@@ -200,7 +200,7 @@ test.describe("custom fields (UI)", () => {
     await expect(definitionRow(page, name)).toContainText("Single-Select Dropdown");
   });
 
-  test("a name the server refuses is reported in the form, and nothing is created", async ({ browser }) => {
+  test("a name the server refuses is reported in the form, and nothing is created", { tag: '@tesbo.testId("TES-TC-656")' }, async ({ browser }) => {
     const existing = await defineField({ fieldType: "text" });
 
     const page = await pageAs(browser, "owner");
@@ -216,7 +216,7 @@ test.describe("custom fields (UI)", () => {
     expect(await listFields()).toHaveLength(1);
   });
 
-  test("the order arrows move a field, and the new order is what the project keeps", async ({ browser }) => {
+  test("the order arrows move a field, and the new order is what the project keeps", { tag: '@tesbo.testId("TES-TC-657")' }, async ({ browser }) => {
     const first = await defineField({ fieldType: "text" });
     const second = await defineField({ fieldType: "text" });
 
@@ -232,7 +232,7 @@ test.describe("custom fields (UI)", () => {
       .toEqual([second.id, first.id]);
   });
 
-  test("a field can be deactivated and reactivated from the list", async ({ browser }) => {
+  test("a field can be deactivated and reactivated from the list", { tag: '@tesbo.testId("TES-TC-658")' }, async ({ browser }) => {
     const field = await defineField({ fieldType: "text" });
 
     const page = await pageAs(browser, "owner");
@@ -248,7 +248,7 @@ test.describe("custom fields (UI)", () => {
     await expect.poll(async () => (await listFields())[0].status).toBe("active");
   });
 
-  test("archiving asks first and leaves the field read-only", async ({ browser }) => {
+  test("archiving asks first and leaves the field read-only", { tag: '@tesbo.testId("TES-TC-659")' }, async ({ browser }) => {
     const field = await defineField({ fieldType: "text" });
 
     const page = await pageAs(browser, "owner");
@@ -271,7 +271,7 @@ test.describe("custom fields (UI)", () => {
     await expect.poll(async () => (await listFields())[0].status).toBe("archived");
   });
 
-  test("an unused field can be deleted, and a field in use is not offered for deletion", async ({ browser }) => {
+  test("an unused field can be deleted, and a field in use is not offered for deletion", { tag: '@tesbo.testId("TES-TC-660")' }, async ({ browser }) => {
     const unused = await defineField({ fieldType: "text" });
     const used = await defineField({ fieldType: "text" });
     await seedTestCase({ customFieldValues: { [used.id]: "recorded" } });
@@ -292,7 +292,7 @@ test.describe("custom fields (UI)", () => {
     await expect.poll(async () => (await listFields()).map((d) => d.id)).toEqual([used.id]);
   });
 
-  test("a QA engineer is told the screen isn't theirs to use", async ({ browser }) => {
+  test("a QA engineer is told the screen isn't theirs to use", { tag: '@tesbo.testId("TES-TC-661")' }, async ({ browser }) => {
     await defineField({ fieldType: "text" });
 
     const page = await pageAs(browser, "qa");
@@ -302,7 +302,7 @@ test.describe("custom fields (UI)", () => {
     await expect(page.getByRole("button", { name: "Add custom field" })).toHaveCount(0);
   });
 
-  test("on the Launch plan the screen sells the upgrade instead of offering the editor", async ({ browser }) => {
+  test("on the Launch plan the screen sells the upgrade instead of offering the editor", { tag: '@tesbo.testId("TES-TC-662")' }, async ({ browser }) => {
     resetToLaunch(tenant!.organizationId);
     try {
       const page = await pageAs(browser, "owner");
@@ -316,7 +316,7 @@ test.describe("custom fields (UI)", () => {
     }
   });
 
-  test("a workspace that downgrades keeps seeing the fields it already has, with a warning", async ({ browser }) => {
+  test("a workspace that downgrades keeps seeing the fields it already has, with a warning", { tag: '@tesbo.testId("TES-TC-663")' }, async ({ browser }) => {
     const field = await defineField({ fieldType: "text" });
     resetToLaunch(tenant!.organizationId);
     try {
@@ -333,7 +333,7 @@ test.describe("custom fields (UI)", () => {
 
   // ─── On the test case panel ────────────────────────────────────────────────
 
-  test("a required custom field is enforced on the create panel and its value is saved", async ({ browser }) => {
+  test("a required custom field is enforced on the create panel and its value is saved", { tag: '@tesbo.testId("TES-TC-664")' }, async ({ browser }) => {
     const placeholder = "e.g. payments";
     const field = await defineField({ fieldType: "text", required: true, config: { placeholder } });
 
@@ -362,7 +362,7 @@ test.describe("custom fields (UI)", () => {
     expect(storedValue(field.id, created[0].id)).toBe('"Payments"');
   });
 
-  test("an existing test case shows its custom fields on their own tab", async ({ browser }) => {
+  test("an existing test case shows its custom fields on their own tab", { tag: '@tesbo.testId("TES-TC-665")' }, async ({ browser }) => {
     const single = await defineField({
       fieldType: "single_select",
       config: { options: [{ label: "Low" }, { label: "High" }] },
@@ -388,7 +388,7 @@ test.describe("custom fields (UI)", () => {
 
   // ─── Filtering the list ────────────────────────────────────────────────────
 
-  test("the custom field filter narrows the test case list", async ({ browser }) => {
+  test("the custom field filter narrows the test case list", { tag: '@tesbo.testId("TES-TC-666")' }, async ({ browser }) => {
     const single = await defineField({
       fieldType: "single_select",
       config: { options: [{ label: "Alpha" }, { label: "Beta" }] },

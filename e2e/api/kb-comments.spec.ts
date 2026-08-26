@@ -130,7 +130,7 @@ test.describe("knowledge base v2 — document comments", () => {
 
   // ─── The primary flow ──────────────────────────────────────────────────────
 
-  test("KBC-A-01 a comment is posted, listed with its author's name, and counted as open", async () => {
+  test("KBC-A-01 a comment is posted, listed with its author's name, and counted as open", { tag: '@tesbo.testId("TES-TC-281")' }, async () => {
     const posted = await comment({ body: "Is this section still accurate?" });
     expect(posted.body).toBe("Is this section still accurate?");
     expect(posted.authorId).toBe(tenant!.owner.userId);
@@ -148,7 +148,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(list.list[0].authorName).toBe(posted.authorName);
   });
 
-  test("KBC-A-02 a reply nests under its thread root rather than appearing as a second thread", async () => {
+  test("KBC-A-02 a reply nests under its thread root rather than appearing as a second thread", { tag: '@tesbo.testId("TES-TC-282")' }, async () => {
     const root = await comment({ body: "Question" });
     const reply = await comment({ body: "Answer", parentCommentId: root.id }, asManager);
     expect(reply.parentCommentId).toBe(root.id);
@@ -165,7 +165,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(reread.list[0].replies.map((r: any) => r.id)).toEqual([reply.id, second.id]);
   });
 
-  test("KBC-A-03 a reply to a reply is refused so threads stay one level deep", async () => {
+  test("KBC-A-03 a reply to a reply is refused so threads stay one level deep", { tag: '@tesbo.testId("TES-TC-283")' }, async () => {
     const root = await comment({ body: "Root" });
     const reply = await comment({ body: "Reply", parentCommentId: root.id });
 
@@ -181,7 +181,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(list.list[0].replies).toHaveLength(1);
   });
 
-  test("KBC-A-04 a thread root carries an anchor to the passage it is about", async () => {
+  test("KBC-A-04 a thread root carries an anchor to the passage it is about", { tag: '@tesbo.testId("TES-TC-284")' }, async () => {
     const anchored = await comment({
       body: "This paragraph contradicts the one above",
       anchorText: "a document worth discussing",
@@ -206,7 +206,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(reply.anchorEnd).toBeNull();
   });
 
-  test("KBC-A-05 an anchor with no offsets is kept, and offsets with no anchor are dropped", async () => {
+  test("KBC-A-05 an anchor with no offsets is kept, and offsets with no anchor are dropped", { tag: '@tesbo.testId("TES-TC-285")' }, async () => {
     const textOnly = await comment({ body: "Anchored loosely", anchorText: "worth discussing" });
     expect(textOnly.anchorText).toBe("worth discussing");
     expect(textOnly.anchorStart).toBeNull();
@@ -227,7 +227,7 @@ test.describe("knowledge base v2 — document comments", () => {
 
   // ─── Editing ──────────────────────────────────────────────────────────────
 
-  test("KBC-A-06 an author edits their own comment", async () => {
+  test("KBC-A-06 an author edits their own comment", { tag: '@tesbo.testId("TES-TC-286")' }, async () => {
     const posted = await comment({ body: "Frist draft" }, asQa);
     const res = await asQa.patch(commentUrl(posted.id), {
       data: { body: "First draft" },
@@ -238,7 +238,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(scalar(`SELECT body FROM knowledge_document_comments WHERE id = ${literal(posted.id)};`)).toBe("First draft");
   });
 
-  test("KBC-A-07 nobody else edits the wording, not even an owner or a manager", async () => {
+  test("KBC-A-07 nobody else edits the wording, not even an owner or a manager", { tag: '@tesbo.testId("TES-TC-287")' }, async () => {
     const posted = await comment({ body: "Written by the QA engineer" }, asQa);
 
     for (const [who, api] of [
@@ -259,7 +259,7 @@ test.describe("knowledge base v2 — document comments", () => {
     );
   });
 
-  test("KBC-A-08 an empty, whitespace-only, or over-long comment is refused on create and on edit", async () => {
+  test("KBC-A-08 an empty, whitespace-only, or over-long comment is refused on create and on edit", { tag: '@tesbo.testId("TES-TC-288")' }, async () => {
     for (const body of [{}, { body: "" }, { body: "   " }, { body: "\n\t " }]) {
       const res = await asOwner.post(commentsUrl(), { data: body, failOnStatusCode: false });
       expect(res.status(), `${JSON.stringify(body)} was accepted`).toBe(400);
@@ -289,14 +289,14 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(scalar(`SELECT body FROM knowledge_document_comments WHERE id = ${literal(posted.id)};`)).toBe("fine");
   });
 
-  test("KBC-A-09 a comment's body is trimmed rather than stored with its surrounding whitespace", async () => {
+  test("KBC-A-09 a comment's body is trimmed rather than stored with its surrounding whitespace", { tag: '@tesbo.testId("TES-TC-289")' }, async () => {
     const posted = await comment({ body: "   padded on both sides   " });
     expect(posted.body).toBe("padded on both sides");
   });
 
   // ─── Resolving ────────────────────────────────────────────────────────────
 
-  test("KBC-A-10 resolving a thread records who resolved it and drops the open count", async () => {
+  test("KBC-A-10 resolving a thread records who resolved it and drops the open count", { tag: '@tesbo.testId("TES-TC-290")' }, async () => {
     const first = await comment({ body: "Thread one" });
     await comment({ body: "Thread two" });
     expect((await listComments()).openCount).toBe(2);
@@ -315,7 +315,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(list.openCount).toBe(1);
   });
 
-  test("KBC-A-11 a resolved thread is reopened, and the resolver is cleared with it", async () => {
+  test("KBC-A-11 a resolved thread is reopened, and the resolver is cleared with it", { tag: '@tesbo.testId("TES-TC-291")' }, async () => {
     const posted = await comment({ body: "Reopenable" });
     await asOwner.patch(commentUrl(posted.id), { data: { isResolved: true }, failOnStatusCode: false });
 
@@ -330,7 +330,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect((await listComments()).openCount).toBe(1);
   });
 
-  test("KBC-A-12 a reply cannot be resolved on its own — the thread is resolved from its root", async () => {
+  test("KBC-A-12 a reply cannot be resolved on its own — the thread is resolved from its root", { tag: '@tesbo.testId("TES-TC-292")' }, async () => {
     const root = await comment({ body: "Root" });
     const reply = await comment({ body: "Reply", parentCommentId: root.id });
 
@@ -340,7 +340,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect((await listComments()).openCount).toBe(1);
   });
 
-  test("KBC-A-13 a manager resolves anyone's thread, and a qa_engineer only their own", async () => {
+  test("KBC-A-13 a manager resolves anyone's thread, and a qa_engineer only their own", { tag: '@tesbo.testId("TES-TC-293")' }, async () => {
     const theirs = await comment({ body: "Owner's thread" });
     const mine = await comment({ body: "QA's thread" }, asQa);
 
@@ -362,7 +362,7 @@ test.describe("knowledge base v2 — document comments", () => {
 
   // ─── Deleting ─────────────────────────────────────────────────────────────
 
-  test("KBC-A-14 deleting a thread root takes its replies with it", async () => {
+  test("KBC-A-14 deleting a thread root takes its replies with it", { tag: '@tesbo.testId("TES-TC-294")' }, async () => {
     const root = await comment({ body: "Doomed thread" });
     const reply = await comment({ body: "Doomed reply", parentCommentId: root.id }, asManager);
     const survivor = await comment({ body: "Unrelated thread" });
@@ -381,7 +381,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(list.total).toBe(1);
   });
 
-  test("KBC-A-15 deleting a single reply leaves its thread standing", async () => {
+  test("KBC-A-15 deleting a single reply leaves its thread standing", { tag: '@tesbo.testId("TES-TC-295")' }, async () => {
     const root = await comment({ body: "Surviving thread" });
     const doomed = await comment({ body: "Doomed reply", parentCommentId: root.id });
     const kept = await comment({ body: "Kept reply", parentCommentId: root.id });
@@ -393,7 +393,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(list.list[0].replies.map((r: any) => r.id)).toEqual([kept.id]);
   });
 
-  test("KBC-A-16 a qa_engineer deletes their own comment but not someone else's", async () => {
+  test("KBC-A-16 a qa_engineer deletes their own comment but not someone else's", { tag: '@tesbo.testId("TES-TC-296")' }, async () => {
     const mine = await comment({ body: "QA's own" }, asQa);
     const theirs = await comment({ body: "Owner's" });
 
@@ -407,7 +407,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect((await asManager.delete(commentUrl(theirs.id), { failOnStatusCode: false })).status()).toBe(200);
   });
 
-  test("KBC-A-17 a deleted comment cannot be edited, resolved or deleted again", async () => {
+  test("KBC-A-17 a deleted comment cannot be edited, resolved or deleted again", { tag: '@tesbo.testId("TES-TC-297")' }, async () => {
     const posted = await comment({ body: "Gone" });
     await asOwner.delete(commentUrl(posted.id), { failOnStatusCode: false });
 
@@ -423,7 +423,7 @@ test.describe("knowledge base v2 — document comments", () => {
 
   // ─── Read-only provider mirrors ───────────────────────────────────────────
 
-  test("KBC-A-18 a document synced from a provider still takes comments, which is the point of them", async () => {
+  test("KBC-A-18 a document synced from a provider still takes comments, which is the point of them", { tag: '@tesbo.testId("TES-TC-298")' }, async () => {
     const doc = await createDocument(`E2E Jira mirror ${Date.now()}`);
     exec(
       `UPDATE knowledge_documents SET is_read_only = true, source_provider = 'jira' WHERE id = ${literal(doc.id)};`,
@@ -454,7 +454,7 @@ test.describe("knowledge base v2 — document comments", () => {
 
   // ─── Validation and scoping ───────────────────────────────────────────────
 
-  test("KBC-A-19 comments on an unknown, deleted, or malformed document id are refused", async () => {
+  test("KBC-A-19 comments on an unknown, deleted, or malformed document id are refused", { tag: '@tesbo.testId("TES-TC-299")' }, async () => {
     const unknown = await asOwner.get(kbUrl("/documents/11111111-1111-4111-8111-111111111111/comments"), {
       failOnStatusCode: false,
     });
@@ -481,7 +481,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect((await listComments()).list.map((c: any) => c.id)).toEqual([posted.id]);
   });
 
-  test("KBC-A-20 a malformed or unknown comment id is a 404, not a 500", async () => {
+  test("KBC-A-20 a malformed or unknown comment id is a 404, not a 500", { tag: '@tesbo.testId("TES-TC-300")' }, async () => {
     for (const bad of ["not-a-uuid", "0", "11111111-1111-4111-8111-111111111111"]) {
       for (const attempt of [
         asOwner.patch(commentUrl(bad), { data: { body: "x" }, failOnStatusCode: false }),
@@ -503,7 +503,7 @@ test.describe("knowledge base v2 — document comments", () => {
     }
   });
 
-  test("KBC-A-21 a reply cannot be attached to a comment on a different document", async () => {
+  test("KBC-A-21 a reply cannot be attached to a comment on a different document", { tag: '@tesbo.testId("TES-TC-301")' }, async () => {
     const otherDoc = await createDocument(`E2E Other doc ${Date.now()}`);
     const foreignRoot = await comment({ body: "On the other document" }, asOwner, otherDoc.id);
 
@@ -515,7 +515,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect((await listComments()).total).toBe(0);
   });
 
-  test("KBC-A-22 a comment in another project is not reachable through this project's URL", async () => {
+  test("KBC-A-22 a comment in another project is not reachable through this project's URL", { tag: '@tesbo.testId("TES-TC-302")' }, async () => {
     const foreignDoc = await createDocument(`E2E Foreign doc ${Date.now()}`, tenant!.secondProjectId);
     // Posted through the SECOND project's own URL — the point of the test is reaching it through
     // the first project's URL below, not creating it there.
@@ -543,7 +543,7 @@ test.describe("knowledge base v2 — document comments", () => {
 
   // ─── Authorization ────────────────────────────────────────────────────────
 
-  test("KBC-A-23 no comment route answers a caller with no session", async () => {
+  test("KBC-A-23 no comment route answers a caller with no session", { tag: '@tesbo.testId("TES-TC-303")' }, async () => {
     const posted = await comment({ body: "Guarded" });
 
     const attempts: Array<[string, () => Promise<APIResponse>]> = [
@@ -574,7 +574,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect(list.list[0].isResolved).toBe(false);
   });
 
-  test("KBC-A-24 a workspace member with no project access cannot read or write the discussion", async () => {
+  test("KBC-A-24 a workspace member with no project access cannot read or write the discussion", { tag: '@tesbo.testId("TES-TC-304")' }, async () => {
     const posted = await comment({ body: "Members only" });
 
     for (const attempt of [
@@ -590,7 +590,7 @@ test.describe("knowledge base v2 — document comments", () => {
     expect((await listComments()).total).toBe(1);
   });
 
-  test("KBC-A-25 every project member can read the discussion and add to it", async () => {
+  test("KBC-A-25 every project member can read the discussion and add to it", { tag: '@tesbo.testId("TES-TC-305")' }, async () => {
     const root = await comment({ body: "Started by the owner" });
     for (const [who, api] of [
       ["manager", asManager],

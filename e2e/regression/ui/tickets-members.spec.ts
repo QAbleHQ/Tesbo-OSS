@@ -26,6 +26,7 @@ import { ticket } from "../fixtures";
 test.describe("workspace members — reported tickets", () => {
   test(
     ticket("REG-MEM-01", "10230843780", "removing a member asks for confirmation first"),
+    { tag: '@tesbo.testId("TES-TC-1293")' },
     async ({ page }) => {
       // EXPECTED RED: there is no dialog, the removal happens on the first click.
       test.fail();
@@ -71,6 +72,7 @@ test.describe("workspace members — reported tickets", () => {
 
   test(
     ticket("REG-MEM-02", "10230843780", "the remove control is labelled so its purpose is unambiguous"),
+    { tag: '@tesbo.testId("TES-TC-1294")' },
     async ({ page }) => {
       /*
        * The icon half of the card, asserted as a label rather than as a picture.

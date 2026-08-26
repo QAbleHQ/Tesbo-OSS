@@ -122,7 +122,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
 
   // ─── Bulk status ──────────────────────────────────────────────────────────
 
-  test("EXO-A-01 setting the status of several executions at once applies it to all of them", async () => {
+  test("EXO-A-01 setting the status of several executions at once applies it to all of them", { tag: '@tesbo.testId("TES-TC-174")' }, async () => {
     const { cycleId, executionIds } = await seedRun(3);
     expect(executionStatuses(cycleId)).toEqual(["Untested", "Untested", "Untested"]);
 
@@ -139,7 +139,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect(statuses, "bulk-status reported success but changed nothing").toEqual(["Passed", "Passed", "Passed"]);
   });
 
-  test("EXO-A-02 bulk status leaves executions outside the selection alone", async () => {
+  test("EXO-A-02 bulk status leaves executions outside the selection alone", { tag: '@tesbo.testId("TES-TC-175")' }, async () => {
     const { cycleId, executionIds } = await seedRun(3);
     const selected = executionIds.slice(0, 2);
 
@@ -157,7 +157,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect(failed, "a partial bulk selection did not apply to exactly the selected executions").toBe(2);
   });
 
-  test("EXO-A-03 bulk status refuses an unknown status value", async () => {
+  test("EXO-A-03 bulk status refuses an unknown status value", { tag: '@tesbo.testId("TES-TC-176")' }, async () => {
     const { cycleId, executionIds } = await seedRun(2);
     const res = await asOwner.post(`/api/cycles/${cycleId}/executions/bulk-status`, {
       data: { executionIds, status: "Bananas" },
@@ -170,7 +170,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect(executionStatuses(cycleId).every((s) => s === "Untested")).toBe(true);
   });
 
-  test("EXO-A-04 bulk assignment sets the assignee on every selected execution", async () => {
+  test("EXO-A-04 bulk assignment sets the assignee on every selected execution", { tag: '@tesbo.testId("TES-TC-177")' }, async () => {
     const { cycleId, executionIds } = await seedRun(2);
     const res = await asOwner.post(`/api/cycles/${cycleId}/executions/bulk-assign`, {
       data: { executionIds, assigneeId: tenant!.qa.userId },
@@ -188,7 +188,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect(assigned, "bulk-assign reported success but assigned nobody").toBe(2);
   });
 
-  test("EXO-A-05 bulk assignment refuses someone who is not a member of the project", async () => {
+  test("EXO-A-05 bulk assignment refuses someone who is not a member of the project", { tag: '@tesbo.testId("TES-TC-178")' }, async () => {
     const { cycleId, executionIds } = await seedRun(1);
     const res = await asOwner.post(`/api/cycles/${cycleId}/executions/bulk-assign`, {
       data: { executionIds, assigneeId: tenant!.guest.userId },
@@ -205,7 +205,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     ).toBe("0");
   });
 
-  test("EXO-A-06 neither bulk route answers a caller with no session or from another project", async () => {
+  test("EXO-A-06 neither bulk route answers a caller with no session or from another project", { tag: '@tesbo.testId("TES-TC-179")' }, async () => {
     const { cycleId, executionIds } = await seedRun(2);
 
     for (const [what, api] of [
@@ -226,7 +226,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
 
   // ─── Schedules ────────────────────────────────────────────────────────────
 
-  test("EXO-A-07 a created schedule is listed for its project", async () => {
+  test("EXO-A-07 a created schedule is listed for its project", { tag: '@tesbo.testId("TES-TC-180")' }, async () => {
     const created = await asOwner.post(`/api/projects/${tenant!.mainProjectId}/cycles/schedules`, {
       data: { name: stamp("nightly"), cron: "0 2 * * *", enabled: true },
       failOnStatusCode: false,
@@ -258,7 +258,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     ).toContain(schedule.id);
   });
 
-  test("EXO-A-08 a schedule is updated and deleted, and the list reflects both", async () => {
+  test("EXO-A-08 a schedule is updated and deleted, and the list reflects both", { tag: '@tesbo.testId("TES-TC-181")' }, async () => {
     const created = await asOwner.post(`/api/projects/${tenant!.mainProjectId}/cycles/schedules`, {
       data: { name: stamp("weekly"), cron: "0 3 * * 1" },
       failOnStatusCode: false,
@@ -288,7 +288,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect(JSON.stringify(afterDelete)).not.toContain(schedule.id);
   });
 
-  test("EXO-A-08b while scheduled runs are unimplemented, the routes say so instead of faking success", async () => {
+  test("EXO-A-08b while scheduled runs are unimplemented, the routes say so instead of faking success", { tag: '@tesbo.testId("TES-TC-922")' }, async () => {
     /*
      * The companion to EXO-A-07/08/10, which stay red on purpose.
      *
@@ -337,7 +337,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect(await listed.json()).toEqual([]);
   });
 
-  test("EXO-A-09 the schedule routes refuse a caller with no session, and a non-member on the project ones", async () => {
+  test("EXO-A-09 the schedule routes refuse a caller with no session, and a non-member on the project ones", { tag: '@tesbo.testId("TES-TC-183")' }, async () => {
     // Anonymous is refused everywhere. For a signed-in non-member the split is structural: the list
     // and create routes carry a projectId and can check membership, while PATCH/DELETE
     // /api/cycles/schedules/:scheduleId identify a schedule that cannot exist yet — with no schedules
@@ -385,7 +385,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     }
   });
 
-  test("EXO-A-10 a schedule needs a name and a valid cron expression", async () => {
+  test("EXO-A-10 a schedule needs a name and a valid cron expression", { tag: '@tesbo.testId("TES-TC-184")' }, async () => {
     for (const data of [{}, { name: "" }, { name: "no cron" }, { name: "bad cron", cron: "not a cron" }]) {
       const res = await asOwner.post(`/api/projects/${tenant!.mainProjectId}/cycles/schedules`, {
         data,
@@ -406,7 +406,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
 
   // ─── Share links ──────────────────────────────────────────────────────────
 
-  test("EXO-A-11 sharing a run mints a token that serves the run publicly", async () => {
+  test("EXO-A-11 sharing a run mints a token that serves the run publicly", { tag: '@tesbo.testId("TES-TC-185")' }, async () => {
     const { cycleId } = await seedRun(2);
 
     const shared = await asOwner.post(`/api/cycles/${cycleId}/share`, {
@@ -433,7 +433,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect((await publicExecutions.json()).length).toBe(2);
   });
 
-  test("EXO-A-12 revoking a share link stops it serving the run", async () => {
+  test("EXO-A-12 revoking a share link stops it serving the run", { tag: '@tesbo.testId("TES-TC-186")' }, async () => {
     const { cycleId } = await seedRun(1);
     const token = (await (await asOwner.post(`/api/cycles/${cycleId}/share`, { data: { enabled: true } })).json())
       .shareToken;
@@ -460,7 +460,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect((await anon.get(`/api/public/shared-runs/${token}`, { failOnStatusCode: false })).status()).toBe(200);
   });
 
-  test("EXO-A-13 an unknown or absent share token serves nothing", async () => {
+  test("EXO-A-13 an unknown or absent share token serves nothing", { tag: '@tesbo.testId("TES-TC-187")' }, async () => {
     for (const token of ["not-a-real-token", "00000000000000000000000000000000", "%20"]) {
       for (const suffix of ["", "/executions"]) {
         const res = await anon.get(`/api/public/shared-runs/${token}${suffix}`, { failOnStatusCode: false });
@@ -469,7 +469,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     }
   });
 
-  test("EXO-A-14 only someone inside the project can mint a share link for its run", async () => {
+  test("EXO-A-14 only someone inside the project can mint a share link for its run", { tag: '@tesbo.testId("TES-TC-188")' }, async () => {
     const { cycleId } = await seedRun(1);
 
     // A public URL to a whole run — case titles, results, linked defect keys — must not be
@@ -487,7 +487,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     ).toBe("");
   });
 
-  test("EXO-A-15 a malformed or unknown cycle id is refused without a 500", async () => {
+  test("EXO-A-15 a malformed or unknown cycle id is refused without a 500", { tag: '@tesbo.testId("TES-TC-189")' }, async () => {
     for (const bad of ["not-a-uuid", "11111111-1111-4111-8111-111111111111"]) {
       for (const [what, attempt] of [
         ["share", () => asOwner.post(`/api/cycles/${bad}/share`, { data: { enabled: true }, failOnStatusCode: false })],
@@ -509,7 +509,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
 
   // ─── The rest of /api/cycles/*, which the export fix left behind ───────────
 
-  test("EXO-A-16 a run's executions, edits and deletion are not reachable without project access", async () => {
+  test("EXO-A-16 a run's executions, edits and deletion are not reachable without project access", { tag: '@tesbo.testId("TES-TC-190")' }, async () => {
     /*
      * The comment above exportCycleExecutions in legacy.service.ts records this gap in the product's
      * own words: "the rest of /api/cycles/* still has the original gap — executions(), getCycle(),
@@ -557,7 +557,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
    * sequential POSTs to set it up would dwarf the thing under test. This suite owns a disposable
    * tenant, which is the only place bulk-seeding like this is allowed.
    */
-  test("EXO-E-01 a large selection is added completely, and fast enough not to hit a proxy timeout", async () => {
+  test("EXO-E-01 a large selection is added completely, and fast enough not to hit a proxy timeout", { tag: '@tesbo.testId("TES-TC-923")' }, async () => {
     const BATCH = 250;
     const cycle = await asOwner.post(`/api/projects/${tenant!.mainProjectId}/cycles`, {
       data: { name: stamp("bulk run") },
@@ -620,7 +620,7 @@ test.describe("execution bulk operations, schedules and share links", () => {
     expect(elapsed, `adding ${BATCH} cases took ${elapsed}ms`).toBeLessThan(30_000);
   });
 
-  test("EXO-E-02 re-adding a large selection after a partial import does not duplicate it", async () => {
+  test("EXO-E-02 re-adding a large selection after a partial import does not duplicate it", { tag: '@tesbo.testId("TES-TC-924")' }, async () => {
     const BATCH = 40;
     const cycle = await asOwner.post(`/api/projects/${tenant!.mainProjectId}/cycles`, {
       data: { name: stamp("retry run") },

@@ -8,8 +8,8 @@
  * anybody anything — it hangs the pipeline until the job times out. So the reporter's contract is to
  * *fail fast and say what is missing*, and the asking happens here, in a command a human runs.
  *
- *   npx @tesbo/playwright-reporter doctor   # verify what is configured, prompt for what is not
- *   npx @tesbo/playwright-reporter init     # ask for all three and print the config to paste
+ *   npx @tesbox/playwright-reporter doctor   # verify what is configured, prompt for what is not
+ *   npx @tesbox/playwright-reporter init     # ask for all three and print the config to paste
  *
  * Both refuse to prompt when stdin is not a TTY, and exit non-zero instead, so neither can ever be
  * the reason a CI job hangs.
@@ -176,7 +176,7 @@ Add the reporter to playwright.config.ts — the two non-secret values belong in
 
   reporter: [
     ['list'],
-    ['@tesbo/playwright-reporter', {
+    ['@tesbox/playwright-reporter', {
       baseUrl: '${config.baseUrl}',
       projectId: '${config.projectId}',
       environment: 'staging',
@@ -361,8 +361,8 @@ function usage(): void {
   console.log(`tesbo-playwright (v${version()}) — Tesbo reporter for Playwright
 
 Usage:
-  npx @tesbo/playwright-reporter doctor    Verify the three values, prompting for any that are unset
-  npx @tesbo/playwright-reporter init      Ask for all three, verify them, print the config to paste
+  npx @tesbox/playwright-reporter doctor    Verify the three values, prompting for any that are unset
+  npx @tesbox/playwright-reporter init      Ask for all three, verify them, print the config to paste
 
 Configuration (inline reporter options override these):
   ${label(ENV_BASE_URL)}API host, e.g. https://api-app.tesbo.io — no default, and not the web app host

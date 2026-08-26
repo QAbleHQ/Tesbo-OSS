@@ -11,7 +11,7 @@ test.describe("test case list pagination", () => {
   // header that wasn't in the CORS exposedHeaders allowlist. Cross-origin fetch() silently
   // returned null for it, so the frontend fell back to the current page's row count as the
   // "total" — making a full page look like the last page and disabling Next forever.
-  test("Next/Previous move between pages and show the correct rows for a suite with 12 test cases", async ({
+  test("Next/Previous move between pages and show the correct rows for a suite with 12 test cases", { tag: '@tesbo.testId("TES-TC-835")' }, async ({
     page,
   }) => {
     const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });

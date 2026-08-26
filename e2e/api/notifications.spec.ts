@@ -16,14 +16,14 @@ import { env } from "../utils/env";
  */
 
 test.describe("notifications", () => {
-  test("NOTIF-A-01 an authenticated caller gets a 200 array", async ({ request }) => {
+  test("NOTIF-A-01 an authenticated caller gets a 200 array", { tag: '@tesbo.testId("TES-TC-1178")' }, async ({ request }) => {
     const res = await request.get("/api/notifications", { failOnStatusCode: false });
     expect(res.status(), await res.text()).toBe(200);
     const body = await res.json();
     expect(Array.isArray(body), `expected an array, got ${JSON.stringify(body)}`).toBe(true);
   });
 
-  test("NOTIF-A-02 an unauthenticated caller is refused, not served an empty list", async () => {
+  test("NOTIF-A-02 an unauthenticated caller is refused, not served an empty list", { tag: '@tesbo.testId("TES-TC-1179")' }, async () => {
     const anon = await request.newContext({ baseURL: env.apiBaseUrl, storageState: { cookies: [], origins: [] } });
     try {
       const res = await anon.get("/api/notifications", { failOnStatusCode: false });
@@ -35,7 +35,7 @@ test.describe("notifications", () => {
     }
   });
 
-  test("NOTIF-A-03 marking a nonexistent notification read answers 404, not a silent success", async ({
+  test("NOTIF-A-03 marking a nonexistent notification read answers 404, not a silent success", { tag: '@tesbo.testId("TES-TC-1180")' }, async ({
     request,
   }) => {
     const res = await request.post(`/api/notifications/${crypto.randomUUID()}/read`, {
@@ -44,7 +44,7 @@ test.describe("notifications", () => {
     expect(res.status(), await res.text()).toBe(404);
   });
 
-  test("NOTIF-A-04 a malformed id is still a clean 404, not a 500", async ({ request }) => {
+  test("NOTIF-A-04 a malformed id is still a clean 404, not a 500", { tag: '@tesbo.testId("TES-TC-1181")' }, async ({ request }) => {
     for (const id of ["not-a-uuid", "", "..%2F..", "1 OR 1=1"]) {
       const res = await request.post(`/api/notifications/${encodeURIComponent(id)}/read`, {
         failOnStatusCode: false,
@@ -53,7 +53,7 @@ test.describe("notifications", () => {
     }
   });
 
-  test("NOTIF-A-05 an unauthenticated caller cannot mark a notification read", async () => {
+  test("NOTIF-A-05 an unauthenticated caller cannot mark a notification read", { tag: '@tesbo.testId("TES-TC-1182")' }, async () => {
     const anon = await request.newContext({ baseURL: env.apiBaseUrl, storageState: { cookies: [], origins: [] } });
     try {
       const res = await anon.post(`/api/notifications/${crypto.randomUUID()}/read`, {

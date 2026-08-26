@@ -334,6 +334,32 @@ For a first successful local setup you can leave all of these empty.
 
 ---
 
+## Step 9 — Automate: report results from your test framework (optional)
+
+Everything in Step 7 is the **manual** flow. If your tests are automated, they can report their own
+results into Tesbo instead — creating a Test Run and filling in each case's pass/fail automatically.
+
+**[→ Playwright integration guide](docs/playwright-integration.md)** — install the reporter, tag your
+tests with the case they validate, and every `npx playwright test` posts its results back into Tesbo,
+with failure screenshots, video and traces attached.
+
+The short version:
+
+```bash
+npm install --save-dev @tesbox/playwright-reporter   # in your Playwright project
+npx @tesbox/playwright-reporter init                 # asks for the 3 values and verifies them
+```
+
+```ts
+test('user can reset password', { tag: '@tesbo.testId("TES-1042")' }, async ({ page }) => { … });
+```
+
+The reporter is in [`sdk/playwright-reporter/`](sdk/playwright-reporter/). It never creates test
+cases — it only reports results against cases you already own — and it cannot fail your suite: if
+Tesbo is unreachable the failure is logged and counted, never thrown.
+
+---
+
 ## Local development (npm, without building app images)
 
 Still need Postgres (Path A or B) + Redis.
@@ -378,7 +404,16 @@ Match CORS / URLs to these ports in `.env`.
 - `docker-compose.yml` — app stack (frontend, backend, migrator, redis)  
 - `docker.env.example` — full env template (Path A/B + optional integrations)  
 - `scripts/` — `docker-up.sh`, `docker-up.ps1`  
-- `docs/` — more documentation  
+- `sdk/playwright-reporter/` — Playwright reporter that posts automated results into Tesbo  
+- `docs/` — more documentation (see **Documentation** below)  
+
+## Documentation
+
+| Guide | What it covers |
+| --- | --- |
+| [Playwright integration](docs/playwright-integration.md) | Step-by-step: report automated Playwright results into Tesbo |
+| [Feature documentation](docs/FEATURE_DOCUMENTATION.md) | What each module does, endpoint by endpoint |
+| [Deploy guide](docs/deploy-guide.md) | Deploying the stack beyond a local setup |
 
 ## Contributing / Security
 

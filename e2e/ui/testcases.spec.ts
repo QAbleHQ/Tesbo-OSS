@@ -7,7 +7,7 @@ const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.js
 const STATE_PATH = path.join(__dirname, "../.auth/state.json");
 
 test.describe("test case creation", () => {
-  test("a user can create a test case from the UI and see it in the list", async ({ page }) => {
+  test("a user can create a test case from the UI and see it in the list", { tag: '@tesbo.testId("TES-TC-836")' }, async ({ page }) => {
     const title = `UI smoke test case ${Date.now()}`;
 
     await page.goto(`/projects/${ctx.projectId}/testcases`);

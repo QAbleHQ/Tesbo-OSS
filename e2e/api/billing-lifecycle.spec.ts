@@ -159,7 +159,7 @@ test.describe("payment lifecycle", () => {
   test.describe("webhook-driven subscription state", () => {
     test.skip(!!webhookSkipReason, webhookSkipReason ?? undefined);
 
-    test("checkout.session.completed upgrades the workspace and records the upgrade", async () => {
+    test("checkout.session.completed upgrades the workspace and records the upgrade", { tag: '@tesbo.testId("TES-TC-43")' }, async () => {
       resetToLaunch(orgId);
       const subscriptionId = uniqueStripeId("sub");
 
@@ -183,7 +183,7 @@ test.describe("payment lifecycle", () => {
       expect(upgraded!.detail.amountTotal).toBe(36000);
     });
 
-    test("customer.subscription.created activates a workspace that never saw a checkout event", async () => {
+    test("customer.subscription.created activates a workspace that never saw a checkout event", { tag: '@tesbo.testId("TES-TC-44")' }, async () => {
       resetToLaunch(orgId);
       const subscriptionId = uniqueStripeId("sub");
 
@@ -209,7 +209,7 @@ test.describe("payment lifecycle", () => {
       expect((await history()).some((e) => e.action === "billing_upgraded")).toBeTruthy();
     });
 
-    test("the billing interval is derived from the configured price, not from the event", async () => {
+    test("the billing interval is derived from the configured price, not from the event", { tag: '@tesbo.testId("TES-TC-50")' }, async () => {
       test.skip(
         !env.stripePriceIdProMonthly || !env.stripePriceIdProAnnual,
         "needs both configured USD price IDs to tell the two intervals apart",
@@ -240,7 +240,7 @@ test.describe("payment lifecycle", () => {
       expect((await billingInfo()).billingInterval).toBe("annual");
     });
 
-    test("a scheduled cancellation is surfaced and reverting it is recorded too", async () => {
+    test("a scheduled cancellation is surfaced and reverting it is recorded too", { tag: '@tesbo.testId("TES-TC-46")' }, async () => {
       setProPlan(orgId, { cancel_at_period_end: false });
       const subscriptionId = uniqueStripeId("sub");
       const periodEnd = unixDaysFromNow(20);
@@ -283,7 +283,7 @@ test.describe("payment lifecycle", () => {
       expect(countBillingAuditEntries(orgId, "billing_cancel_reverted")).toBe(revertedBefore + 1);
     });
 
-    test("a failed invoice flags the workspace but keeps Pro access while Stripe retries", async () => {
+    test("a failed invoice flags the workspace but keeps Pro access while Stripe retries", { tag: '@tesbo.testId("TES-TC-47")' }, async () => {
       setProPlan(orgId, { payment_failed_at: null });
 
       const res = await postStripeWebhook(
@@ -304,7 +304,7 @@ test.describe("payment lifecycle", () => {
       expect(failed!.detail.amountDue).toBe(36000);
     });
 
-    test("Stripe's retries don't re-notify: only the first failure of a dunning cycle is recorded", async () => {
+    test("Stripe's retries don't re-notify: only the first failure of a dunning cycle is recorded", { tag: '@tesbo.testId("TES-TC-53")' }, async () => {
       setProPlan(orgId, { payment_failed_at: null });
       const before = countBillingAuditEntries(orgId, "billing_payment_failed");
 
@@ -321,7 +321,7 @@ test.describe("payment lifecycle", () => {
       expect(firstFailure).not.toBeNull();
     });
 
-    test("a paid invoice clears the failure state and records the receipt", async () => {
+    test("a paid invoice clears the failure state and records the receipt", { tag: '@tesbo.testId("TES-TC-48")' }, async () => {
       setProPlan(orgId, { payment_failed_at: isoDaysFromNow(-3) });
 
       const res = await postStripeWebhook(
@@ -337,7 +337,7 @@ test.describe("payment lifecycle", () => {
       expect(paid!.detail.invoiceNumber).toBe("E2E-0007");
     });
 
-    test("a cancelled subscription drops to Launch and opens a grace window", async () => {
+    test("a cancelled subscription drops to Launch and opens a grace window", { tag: '@tesbo.testId("TES-TC-49")' }, async () => {
       setProPlan(orgId);
       const subscriptionId = uniqueStripeId("sub");
 
@@ -369,7 +369,7 @@ test.describe("payment lifecycle", () => {
       expect(downgraded!.detail.limitsApplyFrom).toBeTruthy();
     });
 
-    test("repeated subscription updates can't push an open grace deadline back", async () => {
+    test("repeated subscription updates can't push an open grace deadline back", { tag: '@tesbo.testId("TES-TC-55")' }, async () => {
       setGraceWindow(orgId, 5);
       const originalDeadline = readBillingState(orgId).plan_grace_ends_at;
       const subscriptionId = uniqueStripeId("sub");
@@ -394,7 +394,7 @@ test.describe("payment lifecycle", () => {
       expect((await billingInfo()).inGracePeriod).toBe(true);
     });
 
-    test("resubscribing clears the grace window, the dunning flag and the lock notice", async () => {
+    test("resubscribing clears the grace window, the dunning flag and the lock notice", { tag: '@tesbo.testId("TES-TC-51")' }, async () => {
       // A workspace that lapsed, ran out its grace window, got locked, and is now paying again.
       setGraceWindow(orgId, -1, {
         payment_failed_at: isoDaysFromNow(-40),
@@ -427,7 +427,7 @@ test.describe("payment lifecycle", () => {
       expect(state.grace_locked_notified_at).toBeNull();
     });
 
-    test("a redelivered event is acknowledged but applied only once", async () => {
+    test("a redelivered event is acknowledged but applied only once", { tag: '@tesbo.testId("TES-TC-52")' }, async () => {
       setProPlan(orgId, { payment_failed_at: null });
       const event = invoicePaid({ organizationId: orgId, amountPaid: 12345, number: "E2E-REPLAY" });
       const before = countBillingAuditEntries(orgId, "billing_payment_succeeded");
@@ -443,13 +443,13 @@ test.describe("payment lifecycle", () => {
       expect(countBillingAuditEntries(orgId, "billing_payment_succeeded")).toBe(before + 1);
     });
 
-    test("an event type with no handler is acknowledged rather than retried", async () => {
+    test("an event type with no handler is acknowledged rather than retried", { tag: '@tesbo.testId("TES-TC-57")' }, async () => {
       const res = await postStripeWebhook(anon, unhandledEvent());
       expect(res.ok()).toBeTruthy();
       expect(await res.json()).toMatchObject({ received: true });
     });
 
-    test("an event that can't be routed to a workspace is ignored, not applied to the wrong one", async () => {
+    test("an event that can't be routed to a workspace is ignored, not applied to the wrong one", { tag: '@tesbo.testId("TES-TC-58")' }, async () => {
       setProPlan(orgId);
       const stateBefore = readBillingState(orgId);
 
@@ -473,7 +473,7 @@ test.describe("payment lifecycle", () => {
       expect(stateAfter.subscription_status).toBe(stateBefore.subscription_status);
     });
 
-    test("a Stripe read failure on the billing page never downgrades a paying customer", async () => {
+    test("a Stripe read failure on the billing page never downgrades a paying customer", { tag: '@tesbo.testId("TES-TC-59")' }, async () => {
       // getBillingInfo self-heals plan drift, which for a Pro workspace means retrieving its
       // subscription from Stripe. This tenant's subscription id is synthetic, so that retrieve
       // fails — and the page must still report Pro. Treating an unreachable or erroring Stripe as
@@ -490,7 +490,7 @@ test.describe("payment lifecycle", () => {
   });
 
   test.describe("plan limits on Launch", () => {
-    test("usage reports the Launch ceilings", async () => {
+    test("usage reports the Launch ceilings", { tag: '@tesbo.testId("TES-TC-60")' }, async () => {
       resetToLaunch(orgId);
       const summary = await usage();
       expect(summary.plan).toBe("launch");
@@ -499,7 +499,7 @@ test.describe("payment lifecycle", () => {
       expect(summary.inGracePeriod).toBe(false);
     });
 
-    test("creating a project beyond the allowance is refused with a route out", async () => {
+    test("creating a project beyond the allowance is refused with a route out", { tag: '@tesbo.testId("TES-TC-61")' }, async () => {
       resetToLaunch(orgId);
       const res = await createProject("E2E Billing Over Limit");
       expect(res.status()).toBe(403);
@@ -508,7 +508,7 @@ test.describe("payment lifecycle", () => {
       expect(error).toContain("Upgrade to Pro");
     });
 
-    test("custom fields are refused as a Pro feature", async () => {
+    test("custom fields are refused as a Pro feature", { tag: '@tesbo.testId("TES-TC-62")' }, async () => {
       resetToLaunch(orgId);
       const res = await asBilling.post(`/api/projects/${projectIds[0]}/custom-fields/definitions`, {
         data: { name: `E2E Billing Field ${Date.now()}`, fieldType: "text" },
@@ -518,7 +518,7 @@ test.describe("payment lifecycle", () => {
       expect((await res.json()).error).toContain("Pro plan feature");
     });
 
-    test("Linear is refused as a Pro integration while Jira passes the plan gate", async () => {
+    test("Linear is refused as a Pro integration while Jira passes the plan gate", { tag: '@tesbo.testId("TES-TC-63")' }, async () => {
       resetToLaunch(orgId);
 
       const linear = await asBilling.post("/api/workspace/integrations/linear/callback", {
@@ -539,7 +539,7 @@ test.describe("payment lifecycle", () => {
       expect((await jira.json()).error).toContain("Authorization code");
     });
 
-    test("POST /api/billing/portal-session refuses a workspace with no billing account", async () => {
+    test("POST /api/billing/portal-session refuses a workspace with no billing account", { tag: '@tesbo.testId("TES-TC-64")' }, async () => {
       resetToLaunch(orgId);
       expect(readBillingState(orgId).stripe_customer_id).toBeNull();
 
@@ -552,7 +552,7 @@ test.describe("payment lifecycle", () => {
   });
 
   test.describe("plan limits on Pro", () => {
-    test("usage reports unlimited projects and the larger storage allowance", async () => {
+    test("usage reports unlimited projects and the larger storage allowance", { tag: '@tesbo.testId("TES-TC-65")' }, async () => {
       setProPlan(orgId);
       const summary = await usage();
       expect(summary.plan).toBe("pro");
@@ -560,7 +560,7 @@ test.describe("payment lifecycle", () => {
       expect(summary.storageLimitBytes).toBe(5 * 1024 * 1024 * 1024);
     });
 
-    test("projects beyond the Launch allowance can be created, and every project is writable", async () => {
+    test("projects beyond the Launch allowance can be created, and every project is writable", { tag: '@tesbo.testId("TES-TC-66")' }, async () => {
       setProPlan(orgId);
       const res = await createProject("E2E Billing Pro Extra");
       expect(res.ok()).toBeTruthy();
@@ -577,7 +577,7 @@ test.describe("payment lifecycle", () => {
       }
     });
 
-    test("custom fields and the Pro-only integration are available", async () => {
+    test("custom fields and the Pro-only integration are available", { tag: '@tesbo.testId("TES-TC-67")' }, async () => {
       setProPlan(orgId);
 
       const created = await asBilling.post(`/api/projects/${projectIds[0]}/custom-fields/definitions`, {
@@ -605,7 +605,7 @@ test.describe("payment lifecycle", () => {
   });
 
   test.describe("the post-downgrade grace window", () => {
-    test("an open window keeps Pro-sized limits and says when they end", async () => {
+    test("an open window keeps Pro-sized limits and says when they end", { tag: '@tesbo.testId("TES-TC-68")' }, async () => {
       setGraceWindow(orgId, 7);
 
       const info = await billingInfo();
@@ -625,7 +625,7 @@ test.describe("payment lifecycle", () => {
       await asBilling.delete(`/api/projects/${(await created.json()).id}`, { failOnStatusCode: false });
     });
 
-    test("a closed window starts enforcing Launch limits", async () => {
+    test("a closed window starts enforcing Launch limits", { tag: '@tesbo.testId("TES-TC-69")' }, async () => {
       setGraceWindow(orgId, -1);
 
       const info = await billingInfo();
@@ -640,7 +640,7 @@ test.describe("payment lifecycle", () => {
       expect(created.status()).toBe(403);
     });
 
-    test("projects beyond the allowance become read-only, and reads are untouched", async () => {
+    test("projects beyond the allowance become read-only, and reads are untouched", { tag: '@tesbo.testId("TES-TC-70")' }, async () => {
       setGraceWindow(orgId, -1);
       const oldest = activeProjectIdsOldestFirst(orgId);
       const writable = oldest[1];
@@ -680,7 +680,7 @@ test.describe("payment lifecycle", () => {
       expect(nested.status()).toBe(403);
     });
 
-    test("archiving a locked project is still allowed — otherwise the lock is inescapable", async () => {
+    test("archiving a locked project is still allowed — otherwise the lock is inescapable", { tag: '@tesbo.testId("TES-TC-71")' }, async () => {
       setGraceWindow(orgId, -1);
       const oldest = activeProjectIdsOldestFirst(orgId);
       const sacrificial = oldest[oldest.length - 1];
@@ -704,7 +704,7 @@ test.describe("payment lifecycle", () => {
       projectIds = await ensureActiveProjects(4);
     });
 
-    test("the enforcement notice fires exactly once, however many actions are blocked", async () => {
+    test("the enforcement notice fires exactly once, however many actions are blocked", { tag: '@tesbo.testId("TES-TC-72")' }, async () => {
       setGraceWindow(orgId, -1, { grace_locked_notified_at: null });
       const before = countBillingAuditEntries(orgId, "billing_limits_enforced");
 
@@ -724,7 +724,7 @@ test.describe("payment lifecycle", () => {
       expect(entry!.summary).toContain("Grace period ended");
     });
 
-    test("upgrading again immediately unlocks a read-only project", async () => {
+    test("upgrading again immediately unlocks a read-only project", { tag: '@tesbo.testId("TES-TC-73")' }, async () => {
       setGraceWindow(orgId, -1);
       const locked = activeProjectIdsOldestFirst(orgId)[2];
       const refused = await asBilling.patch(`/api/projects/${locked}`, {
@@ -745,7 +745,7 @@ test.describe("payment lifecycle", () => {
   });
 
   test.describe("workspace isolation", () => {
-    test("one workspace's plan says nothing about another's", async ({ request }) => {
+    test("one workspace's plan says nothing about another's", { tag: '@tesbo.testId("TES-TC-74")' }, async ({ request }) => {
       // `request` here is the shared smoke workspace (account A) via the default storageState. It's
       // never written by this suite, so forcing this tenant onto Pro must leave it exactly as it was.
       const before = await (await request.get("/api/billing")).json();

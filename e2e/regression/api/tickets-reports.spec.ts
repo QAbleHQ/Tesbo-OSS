@@ -129,6 +129,7 @@ test.describe("reports export — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-A-03", "10218723531", "the export carries the tab's filter, not the whole project"),
+    { tag: '@tesbo.testId("TES-TC-1237")' },
     async () => {
       /*
        * The screen filters by plan/run/suite/person/priority/tag. Exporting while looking at one run
@@ -163,6 +164,7 @@ test.describe("reports export — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-A-04", "10218723531", "a title carrying commas, quotes and newlines survives the CSV"),
+    { tag: '@tesbo.testId("TES-TC-1238")' },
     async () => {
       // rowsToCsv quotes and doubles quotes; the risk is a cell that silently becomes two columns and
       // shifts every field after it on that row — a file that opens without complaint and is wrong.
@@ -186,6 +188,7 @@ test.describe("reports export — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-A-05", "10218723531", "an unknown view is refused, naming the ones that exist"),
+    { tag: '@tesbo.testId("TES-TC-1239")' },
     async () => {
       const res = await api.get(exportUrl("everything", "csv"), { failOnStatusCode: false });
       expect(res.status()).toBe(400);
@@ -195,7 +198,7 @@ test.describe("reports export — reported ticket 10218723531", () => {
     },
   );
 
-  test(ticket("REG-RPT-A-06", "10218723531", "an unsupported format is refused"), async () => {
+  test(ticket("REG-RPT-A-06", "10218723531", "an unsupported format is refused"), { tag: '@tesbo.testId("TES-TC-1240")' }, async () => {
     for (const format of ["pdf", "json", "csv.exe"]) {
       const res = await api.get(`/api/projects/${projectId}/reports/export/${format}?view=overview`, {
         failOnStatusCode: false,
@@ -206,6 +209,7 @@ test.describe("reports export — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-A-07", "10218723531", "no view at all falls back to the overview rather than failing"),
+    { tag: '@tesbo.testId("TES-TC-1241")' },
     async () => {
       const res = await api.get(`/api/projects/${projectId}/reports/export/csv`, { failOnStatusCode: false });
       expect(res.status()).toBe(200);
@@ -215,6 +219,7 @@ test.describe("reports export — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-A-08", "10218723531", "the export is not reachable without a session, or from another tenant"),
+    { tag: '@tesbo.testId("TES-TC-1242")' },
     async () => {
       /*
        * A new endpoint that serves a whole project's data as a file is exactly the shape of thing

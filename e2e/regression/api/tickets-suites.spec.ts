@@ -28,6 +28,7 @@ test.describe("test suite creation — reported ticket 10217475765", () => {
 
   test(
     ticket("REG-SUITE-01", "10217475765", "a suite can be created and then read back"),
+    { tag: '@tesbo.testId("TES-TC-1243")' },
     async ({ request }) => {
       // The plain path first. If this ever breaks, every other test here is noise.
       const projectId = accountA().projectId;
@@ -59,6 +60,7 @@ test.describe("test suite creation — reported ticket 10217475765", () => {
 
   test(
     ticket("REG-SUITE-02", "10217475765", "hostile suite names are refused or accepted, never crashed on"),
+    { tag: '@tesbo.testId("TES-TC-1244")' },
     async ({ request }) => {
       /*
        * The inputs that turn a missing length check or a bad cast into a 500. This is the shape the
@@ -119,6 +121,7 @@ test.describe("test suite creation — reported ticket 10217475765", () => {
 
   test(
     ticket("REG-SUITE-03", "10217475765", "opening a suite that does not exist is a clean 404, not a crash"),
+    { tag: '@tesbo.testId("TES-TC-1245")' },
     async ({ request }) => {
       // The other half of "clicking a test suite" going wrong: a stale id from a list the user still
       // has open. A malformed uuid is the case that reaches Postgres's cast and 500s if unguarded.
@@ -146,6 +149,7 @@ test.describe("test suite creation — reported ticket 10217475765", () => {
 
   test(
     ticket("REG-SUITE-04", "10217475765", "a suite holding a test case still opens"),
+    { tag: '@tesbo.testId("TES-TC-1246")' },
     async ({ request }) => {
       /*
        * The state the reporter would most plausibly have been in — a suite with something in it,

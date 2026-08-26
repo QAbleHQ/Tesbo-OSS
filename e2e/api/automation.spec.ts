@@ -98,7 +98,7 @@ const PNG_1PX = Buffer.from(
 );
 
 test.describe("automation ingest - run lifecycle", () => {
-  test("AUT-01 a full session: create a run, report pass/fail/skip, attach evidence, close, read it back", async ({
+  test("AUT-01 a full session: create a run, report pass/fail/skip, attach evidence, close, read it back", { tag: '@tesbo.testId("TES-TC-1119")' }, async ({
     request: api,
   }) => {
     const cases = await seedCases(api, 3, "lifecycle");
@@ -220,7 +220,7 @@ test.describe("automation ingest - run lifecycle", () => {
     }
   });
 
-  test("AUT-02 a run with no caseIds still accepts results, attaching each case as it reports", async ({
+  test("AUT-02 a run with no caseIds still accepts results, attaching each case as it reports", { tag: '@tesbo.testId("TES-TC-1120")' }, async ({
     request: api,
   }) => {
     // A suite that grew a test after the run was opened must still be able to report it. This is
@@ -245,7 +245,7 @@ test.describe("automation ingest - run lifecycle", () => {
     }
   });
 
-  test("AUT-03 closing twice reports the run as already closed rather than reopening or erroring", async ({
+  test("AUT-03 closing twice reports the run as already closed rather than reopening or erroring", { tag: '@tesbo.testId("TES-TC-1121")' }, async ({
     request: api,
   }) => {
     // A retried CI step closes twice. Neither an error nor a silent reopen is right: the second
@@ -271,7 +271,7 @@ test.describe("automation ingest - run lifecycle", () => {
     }
   });
 
-  test("AUT-04 an incomplete close is recorded as such while the run still reads Completed", async ({
+  test("AUT-04 an incomplete close is recorded as such while the run still reads Completed", { tag: '@tesbo.testId("TES-TC-1122")' }, async ({
     request: api,
   }) => {
     /*
@@ -295,7 +295,7 @@ test.describe("automation ingest - run lifecycle", () => {
     }
   });
 
-  test("AUT-05 a summary that disagrees with the stored rows is reported as a mismatch, not stored", async ({
+  test("AUT-05 a summary that disagrees with the stored rows is reported as a mismatch, not stored", { tag: '@tesbo.testId("TES-TC-1123")' }, async ({
     request: api,
   }) => {
     /*
@@ -331,7 +331,7 @@ test.describe("automation ingest - run lifecycle", () => {
 });
 
 test.describe("automation ingest - case linking", () => {
-  test("AUT-10 cases/resolve separates the ids that exist from the ones that do not", async ({
+  test("AUT-10 cases/resolve separates the ids that exist from the ones that do not", { tag: '@tesbo.testId("TES-TC-1124")' }, async ({
     request: api,
   }) => {
     // Card section 3: this is the call an SDK makes at collection time so a typo fails fast
@@ -353,7 +353,7 @@ test.describe("automation ingest - case linking", () => {
     }
   });
 
-  test("AUT-11 case ids match case-insensitively", async ({ request: api }) => {
+  test("AUT-11 case ids match case-insensitively", { tag: '@tesbo.testId("TES-TC-1125")' }, async ({ request: api }) => {
     // A developer writing tesbo.testId("tes-1042") means the same case as TES-1042, and the
     // trigram index is on lower(external_id) so the comparison is indexed either way.
     const cases = await seedCases(api, 1, "case-fold");
@@ -381,7 +381,7 @@ test.describe("automation ingest - case linking", () => {
     }
   });
 
-  test("AUT-12 an unknown case id is refused and no test case is created for it", async ({
+  test("AUT-12 an unknown case id is refused and no test case is created for it", { tag: '@tesbo.testId("TES-TC-1126")' }, async ({
     request: api,
   }) => {
     /*
@@ -409,7 +409,7 @@ test.describe("automation ingest - case linking", () => {
     }
   });
 
-  test("AUT-13 unknown ids at run creation are reported, not fatal", async ({ request: api }) => {
+  test("AUT-13 unknown ids at run creation are reported, not fatal", { tag: '@tesbo.testId("TES-TC-1127")' }, async ({ request: api }) => {
     // A stale tag should not stop the run: the SDK gets the list back and warns, and the rest of
     // the suite still reports.
     const cases = await seedCases(api, 1, "partial");
@@ -429,7 +429,7 @@ test.describe("automation ingest - case linking", () => {
     }
   });
 
-  test("AUT-14 duplicate case ids in one call do not break the unique constraint", async ({
+  test("AUT-14 duplicate case ids in one call do not break the unique constraint", { tag: '@tesbo.testId("TES-TC-1128")' }, async ({
     request: api,
   }) => {
     // Two automated tests legitimately covering one manual case would otherwise fail the whole
@@ -451,7 +451,7 @@ test.describe("automation ingest - case linking", () => {
     }
   });
 
-  test("AUT-15 another tenant's test case is never adopted into this run", async ({ request: api }) => {
+  test("AUT-15 another tenant's test case is never adopted into this run", { tag: '@tesbo.testId("TES-TC-1129")' }, async ({ request: api }) => {
     /*
      * Tenancy, not convenience. addCycleTestCases had this exact hole: a case resolved by id alone
      * let one workspace's run adopt another's case, copying its title into snapshot_title.
@@ -504,7 +504,7 @@ test.describe("automation ingest - status vocabulary", () => {
     ["interrupted", "Blocked"],
   ];
 
-  test("AUT-20 every accepted wire status maps to a stored status the dashboards count", async ({
+  test("AUT-20 every accepted wire status maps to a stored status the dashboards count", { tag: '@tesbo.testId("TES-TC-1130")' }, async ({
     request: api,
   }) => {
     /*
@@ -538,7 +538,7 @@ test.describe("automation ingest - status vocabulary", () => {
     }
   });
 
-  test("AUT-21 an unrecognised, missing, or over-long status is refused, never stored", async ({
+  test("AUT-21 an unrecognised, missing, or over-long status is refused, never stored", { tag: '@tesbo.testId("TES-TC-1131")' }, async ({
     request: api,
   }) => {
     // The over-long case is the one that used to be a 500: status is VARCHAR(32), so a
@@ -582,7 +582,7 @@ test.describe("automation ingest - status vocabulary", () => {
 });
 
 test.describe("automation ingest - idempotency", () => {
-  test("AUT-30 resubmitting a result updates it in place and counts the retry", async ({
+  test("AUT-30 resubmitting a result updates it in place and counts the retry", { tag: '@tesbo.testId("TES-TC-1132")' }, async ({
     request: api,
   }) => {
     /*
@@ -624,7 +624,7 @@ test.describe("automation ingest - idempotency", () => {
     }
   });
 
-  test("AUT-31 a caller-supplied retryCount wins, so a re-report does not inflate it", async ({
+  test("AUT-31 a caller-supplied retryCount wins, so a re-report does not inflate it", { tag: '@tesbo.testId("TES-TC-1133")' }, async ({
     request: api,
   }) => {
     // Playwright knows its own attempt index; letting the server increment on top of that would
@@ -652,7 +652,7 @@ test.describe("automation ingest - idempotency", () => {
     }
   });
 
-  test("AUT-32 the same externalId resolves to the existing run instead of opening a second", async ({
+  test("AUT-32 the same externalId resolves to the existing run instead of opening a second", { tag: '@tesbo.testId("TES-TC-1134")' }, async ({
     request: api,
   }) => {
     // A GitHub Actions workflow re-run, and every shard of one attempt, present the same key.
@@ -678,7 +678,7 @@ test.describe("automation ingest - idempotency", () => {
     }
   });
 
-  test("AUT-33 concurrent shards racing on one externalId converge on a single run", async ({
+  test("AUT-33 concurrent shards racing on one externalId converge on a single run", { tag: '@tesbo.testId("TES-TC-1135")' }, async ({
     request: api,
   }) => {
     /*
@@ -707,7 +707,7 @@ test.describe("automation ingest - idempotency", () => {
 });
 
 test.describe("automation ingest - validation", () => {
-  test("AUT-40 a run needs a name, and an over-long one is a 400 rather than a 500", async ({
+  test("AUT-40 a run needs a name, and an over-long one is a 400 rather than a 500", { tag: '@tesbo.testId("TES-TC-1136")' }, async ({
     request: api,
   }) => {
     // cycles.name is VARCHAR(255).
@@ -717,7 +717,7 @@ test.describe("automation ingest - validation", () => {
     }
   });
 
-  test("AUT-41 over-long provenance fields are refused by name, not truncated", async ({
+  test("AUT-41 over-long provenance fields are refused by name, not truncated", { tag: '@tesbo.testId("TES-TC-1137")' }, async ({
     request: api,
   }) => {
     // Every field here comes from a CI environment variable whose length the pipeline does not
@@ -742,7 +742,7 @@ test.describe("automation ingest - validation", () => {
     }
   });
 
-  test("AUT-42 triggeredBy is bounded, so a typo in a CI config is refused", async ({ request: api }) => {
+  test("AUT-42 triggeredBy is bounded, so a typo in a CI config is refused", { tag: '@tesbo.testId("TES-TC-1138")' }, async ({ request: api }) => {
     const res = await createRun(api, {
       name: `E2E Automation Trigger ${Date.now()}`,
       triggeredBy: "githubactions",
@@ -751,7 +751,7 @@ test.describe("automation ingest - validation", () => {
     expect((await res.json()).error).toContain("triggeredBy must be one of");
   });
 
-  test("AUT-43 caseIds must be an array, is capped, and rejects ids no case could have", async ({
+  test("AUT-43 caseIds must be an array, is capped, and rejects ids no case could have", { tag: '@tesbo.testId("TES-TC-1139")' }, async ({
     request: api,
   }) => {
     const notArray = await createRun(api, {
@@ -775,7 +775,7 @@ test.describe("automation ingest - validation", () => {
     expect(tooLong.status()).toBe(400);
   });
 
-  test("AUT-44 durationMs and retryCount reject values a real test cannot produce", async ({
+  test("AUT-44 durationMs and retryCount reject values a real test cannot produce", { tag: '@tesbo.testId("TES-TC-1140")' }, async ({
     request: api,
   }) => {
     // duration_ms is INTEGER (about 24.8 days); retry_count is a non-negative count. Neither had
@@ -812,7 +812,7 @@ test.describe("automation ingest - validation", () => {
     }
   });
 
-  test("AUT-45 a malformed or unknown run id is a 404, never a 500 from the uuid cast", async ({
+  test("AUT-45 a malformed or unknown run id is a 404, never a 500 from the uuid cast", { tag: '@tesbo.testId("TES-TC-1141")' }, async ({
     request: api,
   }) => {
     // The convention requireProjectAccess set: a typo and a genuinely missing row get the same
@@ -834,7 +834,7 @@ test.describe("automation ingest - validation", () => {
     }
   });
 
-  test("AUT-46 close rejects a status outside completed/incomplete", async ({ request: api }) => {
+  test("AUT-46 close rejects a status outside completed/incomplete", { tag: '@tesbo.testId("TES-TC-1142")' }, async ({ request: api }) => {
     const runIds: string[] = [];
     try {
       const run = await (await createRun(api, { name: `E2E Automation Close Bad ${Date.now()}` })).json();
@@ -872,7 +872,7 @@ test.describe("automation ingest - authorization", () => {
     return { ctx, tokenId: body.id };
   }
 
-  test("AUT-50 an anonymous caller is refused on every route", async ({ request: api }) => {
+  test("AUT-50 an anonymous caller is refused on every route", { tag: '@tesbo.testId("TES-TC-1143")' }, async ({ request: api }) => {
     const runIds: string[] = [];
     try {
       const run = await (await createRun(api, { name: `E2E Automation Anon ${Date.now()}` })).json();
@@ -900,7 +900,7 @@ test.describe("automation ingest - authorization", () => {
     }
   });
 
-  test("AUT-51 a project-scoped API token can drive a whole session", async ({ request: api }) => {
+  test("AUT-51 a project-scoped API token can drive a whole session", { tag: '@tesbo.testId("TES-TC-1144")' }, async ({ request: api }) => {
     // The credential the SDK actually holds. Nothing here uses a browser session.
     const cases = await seedCases(api, 1, "token");
     const runIds: string[] = [];
@@ -938,7 +938,7 @@ test.describe("automation ingest - authorization", () => {
     }
   });
 
-  test("AUT-52 a read-only token can read a run but not write one", async ({ request: api }) => {
+  test("AUT-52 a read-only token can read a run but not write one", { tag: '@tesbo.testId("TES-TC-1145")' }, async ({ request: api }) => {
     // Scope enforcement lives in the controller. Without it "read" would be indistinguishable
     // from "write" on this surface.
     let token: { ctx: APIRequestContext; tokenId: string } | null = null;
@@ -970,7 +970,7 @@ test.describe("automation ingest - authorization", () => {
     }
   });
 
-  test("AUT-53 a token scoped to one project cannot reach another in the same workspace", async ({
+  test("AUT-53 a token scoped to one project cannot reach another in the same workspace", { tag: '@tesbo.testId("TES-TC-1146")' }, async ({
     request: api,
   }) => {
     /*
@@ -1015,7 +1015,7 @@ test.describe("automation ingest - authorization", () => {
     }
   });
 
-  test("AUT-54 account B cannot reach account A's run by id", async ({ request: api }) => {
+  test("AUT-54 account B cannot reach account A's run by id", { tag: '@tesbo.testId("TES-TC-1147")' }, async ({ request: api }) => {
     const runIds: string[] = [];
     try {
       const run = await (await createRun(api, { name: `E2E Automation Tenant ${Date.now()}` })).json();
@@ -1055,7 +1055,7 @@ test.describe("automation ingest - evidence", () => {
     return `${automationBase(ctxA.projectId)}/runs/${runId}/results/${caseId}/evidence`;
   }
 
-  test("AUT-60 a Playwright trace .zip is accepted as trace evidence and downloads back", async ({
+  test("AUT-60 a Playwright trace .zip is accepted as trace evidence and downloads back", { tag: '@tesbo.testId("TES-TC-1148")' }, async ({
     request: api,
   }) => {
     /*
@@ -1100,7 +1100,7 @@ test.describe("automation ingest - evidence", () => {
     }
   });
 
-  test("AUT-61 a .zip is refused as a screenshot, so the trace exception cannot be borrowed", async ({
+  test("AUT-61 a .zip is refused as a screenshot, so the trace exception cannot be borrowed", { tag: '@tesbo.testId("TES-TC-1149")' }, async ({
     request: api,
   }) => {
     const { cases, run } = await runWithResult(api, "zip-as-shot");
@@ -1121,7 +1121,7 @@ test.describe("automation ingest - evidence", () => {
     }
   });
 
-  test("AUT-62 an unknown kind, a missing file, and an empty file are each refused", async ({
+  test("AUT-62 an unknown kind, a missing file, and an empty file are each refused", { tag: '@tesbo.testId("TES-TC-1150")' }, async ({
     request: api,
   }) => {
     const { cases, run } = await runWithResult(api, "bad-evidence");
@@ -1157,7 +1157,7 @@ test.describe("automation ingest - evidence", () => {
     }
   });
 
-  test("AUT-63 evidence for a case with no result in the run is refused", async ({ request: api }) => {
+  test("AUT-63 evidence for a case with no result in the run is refused", { tag: '@tesbo.testId("TES-TC-1151")' }, async ({ request: api }) => {
     // Post the result before its evidence -- otherwise there is no row to attach it to, and
     // silently creating one would invent a result nobody reported.
     const cases = await seedCases(api, 1, "orphan-evidence");
@@ -1179,7 +1179,7 @@ test.describe("automation ingest - evidence", () => {
     }
   });
 
-  test("AUT-64 an image may render inline; a trace never does", async ({ request: api }) => {
+  test("AUT-64 an image may render inline; a trace never does", { tag: '@tesbo.testId("TES-TC-1152")' }, async ({ request: api }) => {
     /*
      * A trace .zip and a log are served as downloads whatever the caller asks for, so nothing
      * inside a stored archive is ever interpreted by a browser in Tesbo's own origin.
@@ -1221,7 +1221,7 @@ test.describe("automation ingest - evidence", () => {
     }
   });
 
-  test("AUT-65 evidence is not readable by another tenant or an anonymous caller", async ({
+  test("AUT-65 evidence is not readable by another tenant or an anonymous caller", { tag: '@tesbo.testId("TES-TC-1153")' }, async ({
     request: api,
   }) => {
     // An attachment id turning up in a log line or an export must not be enough to hand over the

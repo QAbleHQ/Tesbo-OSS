@@ -163,7 +163,7 @@ test.describe("knowledge base — embeddings allocation and semantic retrieval",
     );
   }
 
-  test("a workspace with no embeddings-capable key leaves documents retryable, not permanently unsupported", async () => {
+  test("a workspace with no embeddings-capable key leaves documents retryable, not permanently unsupported", { tag: '@tesbo.testId("TES-TC-1172")' }, async () => {
     // The self-sealing half of the outage. Anthropic cannot embed, so nothing is indexed — that
     // part is expected. What must NOT happen is the source being marked 'unsupported', which is
     // terminal and would keep it dark forever even after a capable key is added.
@@ -180,7 +180,7 @@ test.describe("knowledge base — embeddings allocation and semantic retrieval",
     exec(`DELETE FROM knowledge_documents WHERE id = ${literal(docId)}`);
   });
 
-  test("an Anthropic project borrows an embeddings-capable key from the workspace and indexes at the platform width", async () => {
+  test("an Anthropic project borrows an embeddings-capable key from the workspace and indexes at the platform width", { tag: '@tesbo.testId("TES-TC-1173")' }, async () => {
     // The core fix. Chat stays on Claude; a second workspace key supplies the vectors. Before the
     // fix this produced zero chunks, because the allocator only ever looked at the project's own
     // allocated key and only ever accepted 'openai'.
@@ -211,7 +211,7 @@ test.describe("knowledge base — embeddings allocation and semantic retrieval",
     exec(`DELETE FROM knowledge_documents WHERE id = ${literal(docId)}`);
   });
 
-  test("a paraphrase with no shared keywords retrieves the document — the thing keyword search cannot do", async () => {
+  test("a paraphrase with no shared keywords retrieves the document — the thing keyword search cannot do", { tag: '@tesbo.testId("TES-TC-1174")' }, async () => {
     await addKey("Embeddings paraphrase", "openai", stub.baseUrl);
 
     const docId = await createDocument(`E2E paraphrase ${Date.now()}`, "Customers may add plants to a wishlist for future purchase.");
@@ -241,7 +241,7 @@ test.describe("knowledge base — embeddings allocation and semantic retrieval",
     exec(`DELETE FROM knowledge_documents WHERE id = ${literal(docId)}`);
   });
 
-  test("a document with no extractable text is genuinely unsupported and costs no API call", async () => {
+  test("a document with no extractable text is genuinely unsupported and costs no API call", { tag: '@tesbo.testId("TES-TC-1175")' }, async () => {
     await addKey("Embeddings empty", "openai", stub.baseUrl);
 
     const docId = await createDocument(`E2E empty ${Date.now()}`, "   ");
@@ -252,7 +252,7 @@ test.describe("knowledge base — embeddings allocation and semantic retrieval",
     exec(`DELETE FROM knowledge_documents WHERE id = ${literal(docId)}`);
   });
 
-  test("an embeddings API failure marks the source failed and never throws into the caller", async () => {
+  test("an embeddings API failure marks the source failed and never throws into the caller", { tag: '@tesbo.testId("TES-TC-1176")' }, async () => {
     await addKey("Embeddings failing", "openai", stub.baseUrl);
     stub.failWith = 401;
 
@@ -268,7 +268,7 @@ test.describe("knowledge base — embeddings allocation and semantic retrieval",
     exec(`DELETE FROM knowledge_documents WHERE id = ${literal(docId)}`);
   });
 
-  test("chunks never leak across projects", async () => {
+  test("chunks never leak across projects", { tag: '@tesbo.testId("TES-TC-1177")' }, async () => {
     await addKey("Embeddings tenancy", "openai", stub.baseUrl);
 
     const docId = await createDocument(`E2E tenancy ${Date.now()}`, "Wishlist content scoped to the main project only.");

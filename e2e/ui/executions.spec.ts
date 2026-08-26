@@ -41,7 +41,7 @@ async function cleanUp(cycleId: string, testcaseId: string) {
 }
 
 test.describe("auto bug-filing on Failed", () => {
-  test("marking an execution Failed opens the bug dialog, and filing creates a linked bug", async ({
+  test("marking an execution Failed opens the bug dialog, and filing creates a linked bug", { tag: '@tesbo.testId("TES-TC-667")' }, async ({
     page,
   }) => {
     const title = `UI Bug Dialog Test Case ${Date.now()}`;
@@ -82,7 +82,7 @@ test.describe("auto bug-filing on Failed", () => {
     }
   });
 
-  test("the severity dropdown offers only the four valid values and resets to Medium for the next dialog", async ({
+  test("the severity dropdown offers only the four valid values and resets to Medium for the next dialog", { tag: '@tesbo.testId("TES-TC-1333")' }, async ({
     page,
   }) => {
     const stamp = Date.now();
@@ -155,7 +155,7 @@ test.describe("auto bug-filing on Failed", () => {
     }
   });
 
-  test("skipping the dialog leaves the execution Failed with no bug filed", async ({ page }) => {
+  test("skipping the dialog leaves the execution Failed with no bug filed", { tag: '@tesbo.testId("TES-TC-668")' }, async ({ page }) => {
     const title = `UI Bug Dialog Declined Test Case ${Date.now()}`;
     const { cycle, testcase } = await setUpCycleWithOneCase(title);
 
@@ -220,7 +220,7 @@ test.describe("removing cases from a run", () => {
     return { cycle, testcaseIds };
   }
 
-  test("the run panel's count follows a removal, and never disagrees with the run's own Total", async ({
+  test("the run panel's count follows a removal, and never disagrees with the run's own Total", { tag: '@tesbo.testId("TES-TC-999")' }, async ({
     page,
   }) => {
     const { cycle, testcaseIds } = await setUpCycleWithCases(3);
@@ -275,7 +275,7 @@ test.describe("removing cases from a run", () => {
  * column default).
  */
 test.describe("run detail — progress, defects and the bug modal", () => {
-  test("EXE-U-30 every status gets its own colour in the run progress bar", async ({ page }) => {
+  test("EXE-U-30 every status gets its own colour in the run progress bar", { tag: '@tesbo.testId("TES-TC-1334")' }, async ({ page }) => {
     const api = await pwRequest.newContext({ baseURL: env.apiBaseUrl, storageState: STATE_PATH });
     const cycle = await (
       await api.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `UI Progress Run ${Date.now()}` } })
@@ -317,7 +317,7 @@ test.describe("run detail — progress, defects and the bug modal", () => {
     }
   });
 
-  test("EXE-U-31 defect fields appear only once the case is marked Failed", async ({ page }) => {
+  test("EXE-U-31 defect fields appear only once the case is marked Failed", { tag: '@tesbo.testId("TES-TC-1335")' }, async ({ page }) => {
     const { cycle, testcase } = await setUpCycleWithOneCase(`UI Defect Visibility ${Date.now()}`);
     try {
       // Driven from the full-page execute screen rather than the run's side panel: the panel opens
@@ -344,7 +344,7 @@ test.describe("run detail — progress, defects and the bug modal", () => {
     }
   });
 
-  test("EXE-U-32 the run Log Bug modal asks for severity and priority, like the Bugs page", async ({ page }) => {
+  test("EXE-U-32 the run Log Bug modal asks for severity and priority, like the Bugs page", { tag: '@tesbo.testId("TES-TC-1336")' }, async ({ page }) => {
     const { cycle, testcase } = await setUpCycleWithOneCase(`UI Log Bug Fields ${Date.now()}`);
     try {
       await page.goto(`/projects/${ctx.projectId}/cycles/${cycle.id}`);
@@ -434,7 +434,7 @@ test.describe("execution evidence and automation provenance", () => {
     }
   }
 
-  test("an automated run shows its provenance, and the drawer shows the failure and its evidence", async ({
+  test("an automated run shows its provenance, and the drawer shows the failure and its evidence", { tag: '@tesbo.testId("TES-TC-1337")' }, async ({
     page,
   }) => {
     const { runId, testcase } = await seedAutomatedRun("evidence");
@@ -474,7 +474,7 @@ test.describe("execution evidence and automation provenance", () => {
     }
   });
 
-  test("a manual run shows no automation provenance", async ({ page }) => {
+  test("a manual run shows no automation provenance", { tag: '@tesbo.testId("TES-TC-1338")' }, async ({ page }) => {
     // The other direction: every provenance field is null on a manual run, and the components
     // return null rather than an empty shell -- a manually executed run must look exactly as it did
     // before this feature existed.

@@ -134,7 +134,7 @@ test.describe("zyra chat ↔ repository consistency", () => {
 
   // ─── The contract the chat UI depends on ───────────────────────────────────
 
-  test("ZCC-A-01 an assistant turn records which cases it actually saved", async () => {
+  test("ZCC-A-01 an assistant turn records which cases it actually saved", { tag: '@tesbo.testId("TES-TC-979")' }, async () => {
     const sessionId = await newSession("E2E ZCC records saves");
     const first = await seedCase(`E2E ZCC Case A ${Date.now()}`);
     const second = await seedCase(`E2E ZCC Case B ${Date.now()}`);
@@ -152,7 +152,7 @@ test.describe("zyra chat ↔ repository consistency", () => {
     expect(advertised(turn!).sort()).toEqual([first.id, second.id].sort());
   });
 
-  test("ZCC-A-02 a turn never advertises a case the repository no longer has", async () => {
+  test("ZCC-A-02 a turn never advertises a case the repository no longer has", { tag: '@tesbo.testId("TES-TC-980")' }, async () => {
     const sessionId = await newSession("E2E ZCC deleted case");
     const kept = await seedCase(`E2E ZCC Kept ${Date.now()}`);
     const removed = await seedCase(`E2E ZCC Removed ${Date.now()}`);
@@ -175,7 +175,7 @@ test.describe("zyra chat ↔ repository consistency", () => {
     ).toEqual([kept.id]);
   });
 
-  test("ZCC-A-03 a turn that saved nothing does not claim otherwise in its record", async () => {
+  test("ZCC-A-03 a turn that saved nothing does not claim otherwise in its record", { tag: '@tesbo.testId("TES-TC-981")' }, async () => {
     const sessionId = await newSession("E2E ZCC saved nothing");
     // The shape applyZyraChatOperations leaves when every operation was filtered or failed: a reply
     // that reads like success, and no saved rows behind it. zyraTranscript annotates this to the
@@ -208,7 +208,7 @@ test.describe("zyra chat ↔ repository consistency", () => {
     ).toBe(true);
   });
 
-  test("ZCC-A-04 the transcript's saved ids all belong to this project", async () => {
+  test("ZCC-A-04 the transcript's saved ids all belong to this project", { tag: '@tesbo.testId("TES-TC-982")' }, async () => {
     const sessionId = await newSession("E2E ZCC cross project");
     const mine = await seedCase(`E2E ZCC Mine ${Date.now()}`);
 
@@ -240,7 +240,7 @@ test.describe("zyra chat ↔ repository consistency", () => {
     }
   });
 
-  test("ZCC-A-05 the session read is refused to a caller with no access to the project", async () => {
+  test("ZCC-A-05 the session read is refused to a caller with no access to the project", { tag: '@tesbo.testId("TES-TC-983")' }, async () => {
     const sessionId = await newSession("E2E ZCC guarded");
     const asGuest = await loginAs(tenant!.guest);
     try {

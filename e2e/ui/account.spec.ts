@@ -151,7 +151,7 @@ test.describe("account screen and password reset (UI)", () => {
 
   // ─── The label ─────────────────────────────────────────────────────────────
 
-  test('ACU-01 the account screen is labelled "My Account"', async ({ browser }) => {
+  test('ACU-01 the account screen is labelled "My Account"', { tag: '@tesbo.testId("TES-TC-986")' }, async ({ browser }) => {
     const page = await openAccount(browser);
 
     // Both places the label appears: the page heading and the sidebar link that reaches it.
@@ -194,7 +194,7 @@ test.describe("account screen and password reset (UI)", () => {
     }
   });
 
-  test("ACU-04 a wrong current password, a mismatch, and a weak password are each refused", async ({
+  test("ACU-04 a wrong current password, a mismatch, and a weak password are each refused", { tag: '@tesbo.testId("TES-TC-989")' }, async ({
     browser,
   }) => {
     const page = await openAccount(browser);
@@ -224,7 +224,7 @@ test.describe("account screen and password reset (UI)", () => {
 
   // ─── Forgot password ───────────────────────────────────────────────────────
 
-  test("ACU-05 the login screen offers a way to recover a forgotten password", async ({ browser }) => {
+  test("ACU-05 the login screen offers a way to recover a forgotten password", { tag: '@tesbo.testId("TES-TC-990")' }, async ({ browser }) => {
     const page = await anonymousPage(browser);
     await page.goto("/login");
 
@@ -236,7 +236,7 @@ test.describe("account screen and password reset (UI)", () => {
     await expect(page.getByText("Forgot password?")).toBeVisible();
   });
 
-  test("ACU-06 requesting a reset link says so without revealing whether the account exists", async ({
+  test("ACU-06 requesting a reset link says so without revealing whether the account exists", { tag: '@tesbo.testId("TES-TC-991")' }, async ({
     browser,
   }) => {
     const page = await anonymousPage(browser);
@@ -253,7 +253,7 @@ test.describe("account screen and password reset (UI)", () => {
     }
   });
 
-  test("ACU-07 a reset link sets a new password and signs the user in with it", async ({ browser }) => {
+  test("ACU-07 a reset link sets a new password and signs the user in with it", { tag: '@tesbo.testId("TES-TC-992")' }, async ({ browser }) => {
     test.skip(!backendLogsAvailable(), "reads the reset link out of the backend container log");
     const page = await anonymousPage(browser);
 
@@ -276,7 +276,7 @@ test.describe("account screen and password reset (UI)", () => {
     expect(await passwordWorks(FIXTURE_PASSWORD), "the old password must stop working").toBe(false);
   });
 
-  test("ACU-08 a reset link cannot be used twice", async ({ browser }) => {
+  test("ACU-08 a reset link cannot be used twice", { tag: '@tesbo.testId("TES-TC-993")' }, async ({ browser }) => {
     test.skip(!backendLogsAvailable(), "reads the reset link out of the backend container log");
     const page = await anonymousPage(browser);
 
@@ -301,7 +301,7 @@ test.describe("account screen and password reset (UI)", () => {
     await expect(page.locator("#password")).toHaveCount(0);
   });
 
-  test("ACU-09 an unknown or malformed reset token is reported, never a blank or broken page", async ({
+  test("ACU-09 an unknown or malformed reset token is reported, never a blank or broken page", { tag: '@tesbo.testId("TES-TC-994")' }, async ({
     browser,
   }) => {
     const page = await anonymousPage(browser);
@@ -313,7 +313,7 @@ test.describe("account screen and password reset (UI)", () => {
     }
   });
 
-  test("ACU-10 the reset form enforces the same password rules as the account screen", async ({ browser }) => {
+  test("ACU-10 the reset form enforces the same password rules as the account screen", { tag: '@tesbo.testId("TES-TC-995")' }, async ({ browser }) => {
     test.skip(!backendLogsAvailable(), "reads the reset link out of the backend container log");
     const page = await anonymousPage(browser);
 
@@ -349,7 +349,7 @@ test.describe("account screen and password reset (UI)", () => {
   });
   // ─── The profile card ──────────────────────────────────────────────────────
 
-  test("ACU-11 the profile shows the name captured at signup, not just the email", async ({ browser }) => {
+  test("ACU-11 the profile shows the name captured at signup, not just the email", { tag: '@tesbo.testId("TES-TC-996")' }, async ({ browser }) => {
     /*
      * Basecamp 10212498688 — "Profile page should have user name and surname and mobile number fields
      * fetched during sign up". The Profile card rendered nothing but the email.
@@ -383,7 +383,7 @@ test.describe("account screen and password reset (UI)", () => {
 
   // ─── Cross-device session invalidation ─────────────────────────────────────
 
-  test("ACU-12 a different browser's session is signed out too", async ({ browser }) => {
+  test("ACU-12 a different browser's session is signed out too", { tag: '@tesbo.testId("TES-TC-1310")' }, async ({ browser }) => {
     // The half of this behaviour that already worked before the fix — kept as regression cover now
     // that the mechanism changed from "invalidate the others" to "invalidate everything".
     const otherDeviceState = await writeStorageState(tenant!.owner, `account-ui-owner-other-device-${contexts.length}`);

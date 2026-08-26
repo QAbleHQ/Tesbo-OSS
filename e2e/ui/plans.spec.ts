@@ -64,7 +64,7 @@ test.describe("test plans — the plan card", () => {
     await api?.dispose();
   });
 
-  test("PLN-U-01 a plan with runs but no plan items shows its runs and no case count", async ({ page }) => {
+  test("PLN-U-01 a plan with runs but no plan items shows its runs and no case count", { tag: '@tesbo.testId("TES-TC-1041")' }, async ({ page }) => {
     // The reported card: pass rate over two runs, and a "0 cases" chip beside them that nothing on
     // the screen could explain. The cases live on the cycles, not on the plan.
     const project = await createProject(api);
@@ -102,7 +102,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-02 a plan that does have items still shows no case count on the card", async ({ page }) => {
+  test("PLN-U-02 a plan that does have items still shows no case count on the card", { tag: '@tesbo.testId("TES-TC-1042")' }, async ({ page }) => {
     // Guards against the negative assertion passing merely because the count would have been 0.
     const project = await createProject(api);
     try {
@@ -129,7 +129,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-03 the surviving footer chips match the API for a never-run and a run plan", async ({ page }) => {
+  test("PLN-U-03 the surviving footer chips match the API for a never-run and a run plan", { tag: '@tesbo.testId("TES-TC-1043")' }, async ({ page }) => {
     const project = await createProject(api);
     let run: SeededRun | undefined;
     try {
@@ -161,7 +161,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-04 the list view renders the same card, also without a case count", async ({ page }) => {
+  test("PLN-U-04 the list view renders the same card, also without a case count", { tag: '@tesbo.testId("TES-TC-1044")' }, async ({ page }) => {
     const project = await createProject(api);
     let run: SeededRun | undefined;
     try {
@@ -184,7 +184,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-05 the card opens the plan detail, which keeps its own test case stat", async ({ page }) => {
+  test("PLN-U-05 the card opens the plan detail, which keeps its own test case stat", { tag: '@tesbo.testId("TES-TC-1045")' }, async ({ page }) => {
     // The detail header shows the same caseCount next to the Items tab that lists exactly those
     // cases, so it stayed. This test is what fails if the removal is widened by accident.
     const project = await createProject(api);
@@ -216,7 +216,7 @@ test.describe("test plans — list, search and empty states", () => {
     await api?.dispose();
   });
 
-  test("PLN-U-06 a project with no plans shows the empty state and no case count", async ({ page }) => {
+  test("PLN-U-06 a project with no plans shows the empty state and no case count", { tag: '@tesbo.testId("TES-TC-1046")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/plans`);
@@ -228,7 +228,7 @@ test.describe("test plans — list, search and empty states", () => {
     }
   });
 
-  test("PLN-U-07 search narrows the cards and clears back to the full list", async ({ page }) => {
+  test("PLN-U-07 search narrows the cards and clears back to the full list", { tag: '@tesbo.testId("TES-TC-1047")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const wanted = await createPlan(api, project.id, { name: `E2E Searchable Plan ${uniqueSuffix()}` });
@@ -340,7 +340,7 @@ test.describe("test plans — the plan detail progress panel", () => {
     await api?.dispose();
   });
 
-  test("PLN-U-08 a plan lists every run its progress header counts, including a Planning one", async ({
+  test("PLN-U-08 a plan lists every run its progress header counts, including a Planning one", { tag: '@tesbo.testId("TES-TC-1048")' }, async ({
     page,
   }) => {
     /*
@@ -386,7 +386,7 @@ test.describe("test plans — the plan detail progress panel", () => {
     }
   });
 
-  test("PLN-U-09 the progress tiles add up to Total when the plan also holds an empty run", async ({
+  test("PLN-U-09 the progress tiles add up to Total when the plan also holds an empty run", { tag: '@tesbo.testId("TES-TC-1049")' }, async ({
     page,
   }) => {
     /*
@@ -438,7 +438,7 @@ test.describe("test plans — the plan detail progress panel", () => {
       await deleteProjects(api, [project.id]);
     }
   });
-  test("PLN-U-10 untested is the same colour on the bar, its legend dot and its tile", async ({
+  test("PLN-U-10 untested is the same colour on the bar, its legend dot and its tile", { tag: '@tesbo.testId("TES-TC-1050")' }, async ({
     page,
   }) => {
     /*
@@ -519,7 +519,7 @@ test.describe("test plans — the plan detail progress panel", () => {
       await deleteProjects(api, [project.id]);
     }
   });
-  test("PLN-U-11 the progress header equals the sum of the runs listed beneath it", async ({ page }) => {
+  test("PLN-U-11 the progress header equals the sum of the runs listed beneath it", { tag: '@tesbo.testId("TES-TC-1051")' }, async ({ page }) => {
     /*
      * Basecamp 10213208002 — "Test plan: Overall progress percentage not matching", reported as the
      * header disagreeing with the run listed under it.
@@ -598,7 +598,7 @@ test.describe("test plans — the plan detail progress panel", () => {
 test.describe("test plans — header count, plan items and editing", () => {
   test.skip(skipReason !== null, skipReason ?? "");
 
-  test("PLN-U-12 the header's test case count is the plan's actual cases, not its pinned items", async ({
+  test("PLN-U-12 the header's test case count is the plan's actual cases, not its pinned items", { tag: '@tesbo.testId("TES-TC-1356")' }, async ({
     page,
   }) => {
     const api = await screensApi();
@@ -621,7 +621,7 @@ test.describe("test plans — header count, plan items and editing", () => {
     }
   });
 
-  test("PLN-U-13 the empty Plan items tab explains where the plan's cases come from", async ({ page }) => {
+  test("PLN-U-13 the empty Plan items tab explains where the plan's cases come from", { tag: '@tesbo.testId("TES-TC-1357")' }, async ({ page }) => {
     const api = await screensApi();
     const project = await createProject(api);
     try {
@@ -642,7 +642,7 @@ test.describe("test plans — header count, plan items and editing", () => {
     }
   });
 
-  test("PLN-U-14 the inline edit form labels every field", async ({ page }) => {
+  test("PLN-U-14 the inline edit form labels every field", { tag: '@tesbo.testId("TES-TC-1358")' }, async ({ page }) => {
     const api = await screensApi();
     const project = await createProject(api);
     try {

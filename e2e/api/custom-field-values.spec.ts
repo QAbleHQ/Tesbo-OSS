@@ -158,7 +158,7 @@ test.describe("custom field values", () => {
 
   // ─── The round trip ────────────────────────────────────────────────────────
 
-  test("stores and reads back a value of every field type", async () => {
+  test("stores and reads back a value of every field type", { tag: '@tesbo.testId("TES-TC-102")' }, async () => {
     const text = await defineField({ fieldType: "text" });
     const longText = await defineField({ fieldType: "long_text" });
     const boolean = await defineField({ fieldType: "boolean" });
@@ -198,7 +198,7 @@ test.describe("custom field values", () => {
     expect(numberField.config.unit).toBe("hours");
   });
 
-  test("text is trimmed and multi-select selections are de-duplicated on the way in", async () => {
+  test("text is trimmed and multi-select selections are de-duplicated on the way in", { tag: '@tesbo.testId("TES-TC-103")' }, async () => {
     const text = await defineField({ fieldType: "text" });
     const multi = await defineField({
       fieldType: "multi_select",
@@ -214,7 +214,7 @@ test.describe("custom field values", () => {
     expect(valueOf(fields, multi.id)).toEqual([iosId, androidId]);
   });
 
-  test("clearing a value removes the stored row rather than storing an empty one", async () => {
+  test("clearing a value removes the stored row rather than storing an empty one", { tag: '@tesbo.testId("TES-TC-104")' }, async () => {
     const text = await defineField({ fieldType: "text" });
     const multi = await defineField({ fieldType: "multi_select", config: { options: [{ label: "iOS" }] } });
     const testcase = await createdTestCase();
@@ -231,7 +231,7 @@ test.describe("custom field values", () => {
 
   // ─── Required fields ───────────────────────────────────────────────────────
 
-  test("a required field must be filled in, and cannot then be emptied", async () => {
+  test("a required field must be filled in, and cannot then be emptied", { tag: '@tesbo.testId("TES-TC-105")' }, async () => {
     const optional = await defineField({ fieldType: "text" });
     const testcase = await createdTestCase();
     const required = await defineField({ fieldType: "text", required: true });
@@ -251,7 +251,7 @@ test.describe("custom field values", () => {
     expect(storedValue(required.id, testcase.id)).toBe('"filled"');
   });
 
-  test("a field made required after the fact blocks the next save of an existing test case", async () => {
+  test("a field made required after the fact blocks the next save of an existing test case", { tag: '@tesbo.testId("TES-TC-106")' }, async () => {
     const testcase = await createdTestCase();
     const field = await defineField({ fieldType: "text" });
 
@@ -273,7 +273,7 @@ test.describe("custom field values", () => {
     expect(withValue.status(), await withValue.text()).toBe(200);
   });
 
-  test("an inactive required field does not block a save, and an archived one cannot be written at all", async () => {
+  test("an inactive required field does not block a save, and an archived one cannot be written at all", { tag: '@tesbo.testId("TES-TC-107")' }, async () => {
     const testcase = await createdTestCase();
     const inactive = await defineField({ fieldType: "text", required: true });
     const archived = await defineField({ fieldType: "text" });
@@ -294,7 +294,7 @@ test.describe("custom field values", () => {
     expect(valueRowCount(testcase.id)).toBe(1);
   });
 
-  test("a value for a field this project does not have is refused", async () => {
+  test("a value for a field this project does not have is refused", { tag: '@tesbo.testId("TES-TC-108")' }, async () => {
     const testcase = await createdTestCase();
     const foreign = await defineField({ fieldType: "text" }, tenant!.secondProjectId);
 
@@ -308,7 +308,7 @@ test.describe("custom field values", () => {
 
   // ─── Per-type validation ───────────────────────────────────────────────────
 
-  test("each field type refuses values that don't belong to it", async () => {
+  test("each field type refuses values that don't belong to it", { tag: '@tesbo.testId("TES-TC-109")' }, async () => {
     const text = await defineField({ fieldType: "text", config: { maxLength: 5 } });
     const boolean = await defineField({ fieldType: "boolean" });
     const single = await defineField({ fieldType: "single_select", config: { options: [{ label: "Only" }] } });
@@ -356,7 +356,7 @@ test.describe("custom field values", () => {
     });
   });
 
-  test("an option that has been deactivated can no longer be chosen", async () => {
+  test("an option that has been deactivated can no longer be chosen", { tag: '@tesbo.testId("TES-TC-110")' }, async () => {
     const single = await defineField({
       fieldType: "single_select",
       config: { options: [{ label: "Live" }, { label: "Retiring" }] },
@@ -381,7 +381,7 @@ test.describe("custom field values", () => {
 
   // ─── Defaults ──────────────────────────────────────────────────────────────
 
-  test("a configured default lands on a new test case that says nothing about the field", async () => {
+  test("a configured default lands on a new test case that says nothing about the field", { tag: '@tesbo.testId("TES-TC-111")' }, async () => {
     const text = await defineField({ fieldType: "text", config: { defaultValue: "unspecified" } });
     const number = await defineField({ fieldType: "number", config: { defaultValue: 3 } });
     const single = await defineField({ fieldType: "single_select", config: { options: [{ label: "Low" }, { label: "High" }] } });
@@ -396,7 +396,7 @@ test.describe("custom field values", () => {
     expect(valueOf(fields, single.id)).toBe(lowId);
   });
 
-  test("a default never overwrites a value the caller gave, nor one already recorded", async () => {
+  test("a default never overwrites a value the caller gave, nor one already recorded", { tag: '@tesbo.testId("TES-TC-112")' }, async () => {
     const field = await defineField({ fieldType: "text", config: { defaultValue: "fallback" } });
 
     const explicit = await createdTestCase({ customFieldValues: { [field.id]: "chosen" } });
@@ -412,7 +412,7 @@ test.describe("custom field values", () => {
     expect(storedValue(field.id, explicit.id)).toBe('"second choice"');
   });
 
-  test("an inactive field's default is not applied to new test cases", async () => {
+  test("an inactive field's default is not applied to new test cases", { tag: '@tesbo.testId("TES-TC-113")' }, async () => {
     const field = await defineField({ fieldType: "text", config: { defaultValue: "fallback" } });
     await asOwner.patch(`${definitionsUrl()}/${field.id}/status`, { data: { status: "inactive" } });
 
@@ -422,7 +422,7 @@ test.describe("custom field values", () => {
 
   // ─── Through the test case endpoints ───────────────────────────────────────
 
-  test("values ride along with test case creation and editing", async () => {
+  test("values ride along with test case creation and editing", { tag: '@tesbo.testId("TES-TC-114")' }, async () => {
     const field = await defineField({ fieldType: "text" });
 
     const created = await createdTestCase({ customFieldValues: { [field.id]: "at creation" } });
@@ -447,7 +447,7 @@ test.describe("custom field values", () => {
     expect(storedValue(field.id, created.id)).toBe('"at edit"');
   });
 
-  test("duplicating a test case carries its custom field values across", async () => {
+  test("duplicating a test case carries its custom field values across", { tag: '@tesbo.testId("TES-TC-115")' }, async () => {
     const text = await defineField({ fieldType: "text" });
     const multi = await defineField({
       fieldType: "multi_select",
@@ -473,7 +473,7 @@ test.describe("custom field values", () => {
     expect(storedValue(text.id, source.id)).toBe('"carried over"');
   });
 
-  test("deleting a test case takes its values with it", async () => {
+  test("deleting a test case takes its values with it", { tag: '@tesbo.testId("TES-TC-116")' }, async () => {
     const field = await defineField({ fieldType: "text" });
     const testcase = await createdTestCase({ customFieldValues: { [field.id]: "doomed" } });
     expect(valueRowCount(testcase.id)).toBe(1);
@@ -486,7 +486,7 @@ test.describe("custom field values", () => {
     expect(read.status()).toBe(404);
   });
 
-  test("reading or writing values needs a test case this project actually holds", async () => {
+  test("reading or writing values needs a test case this project actually holds", { tag: '@tesbo.testId("TES-TC-117")' }, async () => {
     const elsewhere = await createdTestCase({}, tenant!.secondProjectId);
 
     // "not-a-uuid" belongs here rather than in a validation test: unguarded it reaches Postgres as
@@ -502,7 +502,7 @@ test.describe("custom field values", () => {
 
   // ─── History ───────────────────────────────────────────────────────────────
 
-  test("a changed value is recorded once, and an unchanged one is not recorded at all", async () => {
+  test("a changed value is recorded once, and an unchanged one is not recorded at all", { tag: '@tesbo.testId("TES-TC-118")' }, async () => {
     const field = await defineField({ fieldType: "text" });
     const testcase = await createdTestCase();
 
@@ -519,7 +519,7 @@ test.describe("custom field values", () => {
 
   // ─── Authorization ─────────────────────────────────────────────────────────
 
-  test("a QA engineer can record values even though they cannot configure the fields", async () => {
+  test("a QA engineer can record values even though they cannot configure the fields", { tag: '@tesbo.testId("TES-TC-119")' }, async () => {
     const field = await defineField({ fieldType: "text" });
     const testcase = await createdTestCase();
 
@@ -529,7 +529,7 @@ test.describe("custom field values", () => {
     expect(valueOf(await readValues(testcase.id, asQa), field.id)).toBe("qa wrote this");
   });
 
-  test("values are refused to a caller with no session and to a member with no project access", async () => {
+  test("values are refused to a caller with no session and to a member with no project access", { tag: '@tesbo.testId("TES-TC-120")' }, async () => {
     const field = await defineField({ fieldType: "text" });
     const testcase = await createdTestCase({ customFieldValues: { [field.id]: "private" } });
 
@@ -546,7 +546,7 @@ test.describe("custom field values", () => {
     expect(storedValue(field.id, testcase.id)).toBe('"private"');
   });
 
-  test("the test case list does not hand a project's custom field values to an anonymous caller", async () => {
+  test("the test case list does not hand a project's custom field values to an anonymous caller", { tag: '@tesbo.testId("TES-TC-121")' }, async () => {
     const field = await defineField({ fieldType: "text" });
     await createdTestCase({ customFieldValues: { [field.id]: "commercially sensitive" } });
 
@@ -556,7 +556,7 @@ test.describe("custom field values", () => {
 
   // ─── Plan gating ───────────────────────────────────────────────────────────
 
-  test("on the Launch plan values stay readable, the value endpoint closes, and saving a test case still works", async () => {
+  test("on the Launch plan values stay readable, the value endpoint closes, and saving a test case still works", { tag: '@tesbo.testId("TES-TC-122")' }, async () => {
     const field = await defineField({ fieldType: "text" });
     const testcase = await createdTestCase({ customFieldValues: { [field.id]: "recorded on Pro" } });
 
@@ -589,7 +589,7 @@ test.describe("custom field values", () => {
   // ─── Filtering the list ────────────────────────────────────────────────────
 
   test.describe("filtering the test case list", () => {
-    test("every operator narrows the list to the test cases that match", async () => {
+    test("every operator narrows the list to the test cases that match", { tag: '@tesbo.testId("TES-TC-124")' }, async () => {
       const text = await defineField({ fieldType: "text" });
       const single = await defineField({
         fieldType: "single_select",
@@ -698,7 +698,7 @@ test.describe("custom field values", () => {
       }
     });
 
-    test("a filter the project cannot resolve is refused rather than ignored", async () => {
+    test("a filter the project cannot resolve is refused rather than ignored", { tag: '@tesbo.testId("TES-TC-125")' }, async () => {
       await createdTestCase();
 
       const cases: [string, string][] = [
@@ -718,7 +718,7 @@ test.describe("custom field values", () => {
 
   // ─── Export ────────────────────────────────────────────────────────────────
 
-  test("the CSV export carries a column per active field, with option labels resolved", async () => {
+  test("the CSV export carries a column per active field, with option labels resolved", { tag: '@tesbo.testId("TES-TC-123")' }, async () => {
     const text = await defineField({ fieldType: "text" });
     const single = await defineField({
       fieldType: "single_select",

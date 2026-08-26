@@ -31,7 +31,7 @@ async function cleanupExecutionFixture(
 }
 
 test.describe("test execution updates", () => {
-  test("adding a test case to a cycle auto-creates an Untested execution with no executedAt", async ({
+  test("adding a test case to a cycle auto-creates an Untested execution with no executedAt", { tag: '@tesbo.testId("TES-TC-191")' }, async ({
     request,
   }) => {
     const fixture = await makeExecutionFixture(request);
@@ -44,7 +44,7 @@ test.describe("test execution updates", () => {
     }
   });
 
-  test("updating status stamps executedAt; updating an unrelated field without status does not", async ({
+  test("updating status stamps executedAt; updating an unrelated field without status does not", { tag: '@tesbo.testId("TES-TC-192")' }, async ({
     request,
   }) => {
     const fixture = await makeExecutionFixture(request);
@@ -79,7 +79,7 @@ test.describe("test execution updates", () => {
     }
   });
 
-  test("persists assigneeId, defectKey, and defectUrl", async ({ request }) => {
+  test("persists assigneeId, defectKey, and defectUrl", { tag: '@tesbo.testId("TES-TC-193")' }, async ({ request }) => {
     const fixture = await makeExecutionFixture(request);
     try {
       const meRes = await request.get("/api/auth/me");
@@ -108,7 +108,7 @@ test.describe("test execution updates", () => {
     }
   });
 
-  test("supports every status in the EXEC_STATUSES set the UI offers", async ({ request }) => {
+  test("supports every status in the EXEC_STATUSES set the UI offers", { tag: '@tesbo.testId("TES-TC-194")' }, async ({ request }) => {
     const fixture = await makeExecutionFixture(request);
     try {
       for (const status of ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"]) {
@@ -138,7 +138,7 @@ test.describe("test execution updates", () => {
  * alone would have left the stale reference in the database and in every export that reads it.
  */
 test.describe("defect fields follow the result", () => {
-  test("a defect recorded on a failure is kept while it is still failing", async ({ request }) => {
+  test("a defect recorded on a failure is kept while it is still failing", { tag: '@tesbo.testId("TES-TC-1167")' }, async ({ request }) => {
     const fixture = await makeExecutionFixture(request);
     try {
       await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
@@ -160,7 +160,7 @@ test.describe("defect fields follow the result", () => {
     }
   });
 
-  test("passing the case afterwards clears the defect it used to carry", async ({ request }) => {
+  test("passing the case afterwards clears the defect it used to carry", { tag: '@tesbo.testId("TES-TC-1168")' }, async ({ request }) => {
     const fixture = await makeExecutionFixture(request);
     try {
       await request.patch(`/api/cycles/${fixture.cycle.id}/executions/${fixture.execution.id}`, {
@@ -179,7 +179,7 @@ test.describe("defect fields follow the result", () => {
     }
   });
 
-  test("the same clearing applies to blocked and skipped, and the export follows", async ({ request }) => {
+  test("the same clearing applies to blocked and skipped, and the export follows", { tag: '@tesbo.testId("TES-TC-1169")' }, async ({ request }) => {
     const fixture = await makeExecutionFixture(request);
     try {
       for (const status of ["Blocked", "Skipped", "Retest", "Untested"]) {
@@ -224,7 +224,7 @@ test.describe("defect fields follow the result", () => {
  * row), the second with 500 instead of 400.
  */
 test.describe("execution status validation", () => {
-  test("a status outside the allowed set is refused, and nothing is written", async ({ request }) => {
+  test("a status outside the allowed set is refused, and nothing is written", { tag: '@tesbo.testId("TES-TC-1170")' }, async ({ request }) => {
     const fixture = await makeExecutionFixture(request);
     try {
       const rejected = ["pass", "passed", "PASSED", "banana", "x".repeat(33)];
@@ -244,7 +244,7 @@ test.describe("execution status validation", () => {
     }
   });
 
-  test("every allowed status is still accepted, and an omitted status still means 'no change'", async ({
+  test("every allowed status is still accepted, and an omitted status still means 'no change'", { tag: '@tesbo.testId("TES-TC-1171")' }, async ({
     request,
   }) => {
     // The other direction of the same fix: the validation must not have closed the door on the

@@ -5,7 +5,7 @@ import { expect, test } from "@playwright/test";
 const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.json"), "utf-8"));
 
 test.describe("bug CRUD", () => {
-  test("supports the create -> read -> update -> list -> delete lifecycle", async ({ request }) => {
+  test("supports the create -> read -> update -> list -> delete lifecycle", { tag: '@tesbo.testId("TES-TC-99")' }, async ({ request }) => {
     const title = `E2E Bug ${Date.now()}`;
     const created = await (
       await request.post(`/api/projects/${ctx.projectId}/bugs`, {
@@ -53,7 +53,7 @@ test.describe("bug CRUD", () => {
     expect(getAfterDeleteRes.status()).toBe(404);
   });
 
-  test("creating a bug with a link populates it, and addBugLink/removeBugLink manage further links", async ({
+  test("creating a bug with a link populates it, and addBugLink/removeBugLink manage further links", { tag: '@tesbo.testId("TES-TC-100")' }, async ({
     request,
   }) => {
     const cycle = await (
@@ -113,7 +113,7 @@ test.describe("bug CRUD", () => {
     }
   });
 
-  test("sending an empty string to clear a field leaves the old value in place", async ({ request }) => {
+  test("sending an empty string to clear a field leaves the old value in place", { tag: '@tesbo.testId("TES-TC-101")' }, async ({ request }) => {
     // KNOWN GAP (documented, not test.fail() — a data-integrity bug, not a security one):
     // updateBug (legacy.service.ts:1958) sends every field as `body.field || null`, so an
     // empty string collapses to null before it ever reaches COALESCE, which then keeps the old
@@ -151,7 +151,7 @@ test.describe("bug CRUD", () => {
  * nullable, because "nobody has triaged this" is a real state and not the same as P2.
  */
 test.describe("bug priority", () => {
-  test("a bug can be created with a priority, and one created without stays untriaged", async ({ request }) => {
+  test("a bug can be created with a priority, and one created without stays untriaged", { tag: '@tesbo.testId("TES-TC-1154")' }, async ({ request }) => {
     const withPriority = await (
       await request.post(`/api/projects/${ctx.projectId}/bugs`, {
         data: { title: `E2E Bug Priority ${Date.now()}`, severity: "Low", priority: "P1" },
@@ -182,7 +182,7 @@ test.describe("bug priority", () => {
     }
   });
 
-  test("priority can be set, changed and cleared back to untriaged", async ({ request }) => {
+  test("priority can be set, changed and cleared back to untriaged", { tag: '@tesbo.testId("TES-TC-1155")' }, async ({ request }) => {
     const bug = await (
       await request.post(`/api/projects/${ctx.projectId}/bugs`, {
         data: { title: `E2E Bug Priority Edit ${Date.now()}` },
@@ -209,7 +209,7 @@ test.describe("bug priority", () => {
     }
   });
 
-  test("an unknown priority is refused by name, and stores nothing", async ({ request }) => {
+  test("an unknown priority is refused by name, and stores nothing", { tag: '@tesbo.testId("TES-TC-1156")' }, async ({ request }) => {
     const before = (await (await request.get(`/api/projects/${ctx.projectId}/bugs`)).json()).length;
 
     for (const bad of ["P9", "urgent", "critical", 7]) {
@@ -227,7 +227,7 @@ test.describe("bug priority", () => {
     expect(after, "a refused create must not leave a bug behind").toBe(before);
   });
 
-  test("priority is matched case-insensitively, the way severity already is", async ({ request }) => {
+  test("priority is matched case-insensitively, the way severity already is", { tag: '@tesbo.testId("TES-TC-1157")' }, async ({ request }) => {
     const bug = await (
       await request.post(`/api/projects/${ctx.projectId}/bugs`, {
         data: { title: `E2E Bug Priority Case ${Date.now()}`, priority: "p2" },
@@ -279,7 +279,7 @@ test.describe("linking a bug fails the execution", () => {
     return found?.status;
   }
 
-  test("reporting a bug against an untested case marks it Failed", async ({ request }) => {
+  test("reporting a bug against an untested case marks it Failed", { tag: '@tesbo.testId("TES-TC-1158")' }, async ({ request }) => {
     const suffix = `${Date.now()}`;
     const { cycle, testcase, execution } = await seedRunWithCase(request, suffix);
     expect(execution.status, "the fixture has to start untested for this to prove anything").toBe("Untested");
@@ -302,7 +302,7 @@ test.describe("linking a bug fails the execution", () => {
     }
   });
 
-  test("a passed result is overridden, and the override is recorded in the activity stream", async ({ request }) => {
+  test("a passed result is overridden, and the override is recorded in the activity stream", { tag: '@tesbo.testId("TES-TC-1159")' }, async ({ request }) => {
     const suffix = `${Date.now()}`;
     const startedAt = new Date(Date.now() - 60_000).toISOString();
     const { cycle, testcase, execution } = await seedRunWithCase(request, `override ${suffix}`);
@@ -347,7 +347,7 @@ test.describe("linking a bug fails the execution", () => {
     }
   });
 
-  test("adding a link to an existing bug fails that execution too", async ({ request }) => {
+  test("adding a link to an existing bug fails that execution too", { tag: '@tesbo.testId("TES-TC-1160")' }, async ({ request }) => {
     const suffix = `${Date.now()}`;
     const { cycle, testcase, execution } = await seedRunWithCase(request, `late link ${suffix}`);
 
@@ -372,7 +372,7 @@ test.describe("linking a bug fails the execution", () => {
     }
   });
 
-  test("a link with no execution behind it changes nothing and does not fail the request", async ({ request }) => {
+  test("a link with no execution behind it changes nothing and does not fail the request", { tag: '@tesbo.testId("TES-TC-1161")' }, async ({ request }) => {
     // Linking a bug to a test case WITHOUT naming a run is legitimate — the case exists, no execution
     // does. The old code path did nothing here; the new one must also do nothing, quietly.
     const suffix = `${Date.now()}`;
@@ -397,7 +397,7 @@ test.describe("linking a bug fails the execution", () => {
     }
   });
 
-  test("a bogus execution id in the links is ignored rather than 500ing", async ({ request }) => {
+  test("a bogus execution id in the links is ignored rather than 500ing", { tag: '@tesbo.testId("TES-TC-1162")' }, async ({ request }) => {
     // The id travels in the request body, so it can name anything at all — including an execution in
     // a workspace the caller cannot see. The project join is what stops that reaching an UPDATE.
     const suffix = `${Date.now()}`;
