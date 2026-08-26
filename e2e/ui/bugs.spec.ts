@@ -382,6 +382,33 @@ test.describe("bug priority", () => {
     await page.getByRole("button", { name: "Save Changes" }).click();
     await expect(row.getByText(/^P[0-3]$/)).toHaveCount(0);
   });
+
+  test("BUG-U-19 the priority filter narrows the list and clears back", async ({ page }) => {
+    const rows = page.locator("tbody tr");
+    const before = await rows.count();
+    expect(before, "the fixture seeds a triaged and an untriaged bug").toBeGreaterThanOrEqual(2);
+
+    await page.getByLabel("Filter by priority").selectOption("P1");
+    await expect(page.getByText(untriagedTitle)).toHaveCount(0);
+    await expect(rows).toHaveCount(1);
+    await expect(page.locator("tbody").getByText("P1", { exact: true }).first()).toBeVisible();
+
+    await page.getByLabel("Filter by priority").selectOption("");
+    await expect(rows).toHaveCount(before);
+  });
+
+  test("BUG-U-20 the priority filter is available on the board too", async ({ page }) => {
+    // Same `filtered` list feeds the board's columns as the severity/status filters (BUG-U-09/14) —
+    // a priority filter that only existed in List would silently keep narrowing Board after a view
+    // switch, with no control there to see or clear it.
+    await page.getByRole("button", { name: "Board", exact: true }).click();
+    const priority = page.getByLabel("Filter by priority");
+    await expect(priority).toBeVisible();
+
+    await priority.selectOption("P1");
+    await expect(page.getByText(untriagedTitle)).toHaveCount(0);
+    await expect(page.getByText(triagedTitle)).toBeVisible();
+  });
 });
 
 /*
