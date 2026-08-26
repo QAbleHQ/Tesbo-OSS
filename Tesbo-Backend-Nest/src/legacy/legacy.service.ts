@@ -8676,11 +8676,16 @@ export class LegacyService implements OnModuleInit {
 
   async zyraChatSessions(projectId: string, userId: string | null | undefined) {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
+    // has_messages is additive, not a filter: every session this project ever created is still
+    // returned (callers and existing tests rely on a just-created session showing up immediately).
+    // It exists so the sidebar can hide sessions nobody ever used without the API silently dropping
+    // rows out of its own list.
     const res = await this.db.query(
-      `SELECT id, project_id, user_id, title, created_at, updated_at, active_plan
-       FROM zyra_chat_sessions
-       WHERE project_id = $1
-       ORDER BY updated_at DESC
+      `SELECT s.id, s.project_id, s.user_id, s.title, s.created_at, s.updated_at, s.active_plan,
+              EXISTS (SELECT 1 FROM zyra_chat_messages m WHERE m.session_id = s.id) AS has_messages
+       FROM zyra_chat_sessions s
+       WHERE s.project_id = $1
+       ORDER BY s.updated_at DESC
        LIMIT 50`,
       [projectId]
     );

@@ -543,10 +543,24 @@ export default function ZyraChatPage() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [stoppingPlan, setStoppingPlan] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Guards the mount effect against firing loadData twice for the same mount (React 18 dev
+  // double-invoke, or the effect re-running before the first pass resolves) — without it, two
+  // concurrent runs can each see zero sessions and each create an empty one. Does not protect
+  // against two genuinely separate mounts (e.g. two tabs) racing each other; the sidebar filter
+  // below is what keeps any such leftover empty session out of view either way.
+  const loadStartedRef = useRef(false);
+  const creatingSessionRef = useRef(false);
   const messages = useMemo(() => activeSession?.messages || [], [activeSession]);
+  // The sidebar is a history of conversations that actually happened — a session nobody ever sent
+  // a message in (including one still being created) has nothing to show and shouldn't clutter or
+  // duplicate in the list. `hasMessages` only comes back on list responses (see api.ts), so a
+  // session missing the field reads as empty and is filtered out until refreshSessions() sees it
+  // with its first message.
+  const visibleSessions = useMemo(() => sessions.filter((session) => session.hasMessages), [sessions]);
 
   const refreshSessions = useCallback(async () => {
     const data = await listZyraChatSessions(projectId);
@@ -560,10 +574,20 @@ export default function ZyraChatPage() {
   }, [projectId]);
 
   const createSession = useCallback(async () => {
-    const session = await createZyraChatSession(projectId);
-    setSessions((prev) => [session, ...prev]);
-    setActiveSession(session);
-    setTimeout(() => textareaRef.current?.focus(), 100);
+    // A double-click on "New", or a second caller landing here while the first request is still
+    // in flight, would otherwise fire two POSTs and hand back two distinct empty sessions.
+    if (creatingSessionRef.current) return;
+    creatingSessionRef.current = true;
+    setCreatingSession(true);
+    try {
+      const session = await createZyraChatSession(projectId);
+      setSessions((prev) => [session, ...prev.filter((s) => s.id !== session.id)]);
+      setActiveSession(session);
+      setTimeout(() => textareaRef.current?.focus(), 100);
+    } finally {
+      creatingSessionRef.current = false;
+      setCreatingSession(false);
+    }
   }, [projectId]);
 
   const loadData = useCallback(async () => {
@@ -586,6 +610,8 @@ export default function ZyraChatPage() {
   }, [createSession, openSession, projectId, refreshSessions]);
 
   useEffect(() => {
+    if (loadStartedRef.current) return;
+    loadStartedRef.current = true;
     authMe().then((me) => {
       if (!me) router.replace("/login");
       else void loadData();
@@ -773,10 +799,10 @@ export default function ZyraChatPage() {
                 <div>
                   <p className="text-sm font-semibold text-[var(--foreground)]">Conversations</p>
                   <p className="text-[11px] text-[var(--muted)]">
-                    {sessions.length} {sessions.length === 1 ? "session" : "sessions"}
+                    {visibleSessions.length} {visibleSessions.length === 1 ? "session" : "sessions"}
                   </p>
                 </div>
-                <Button size="sm" variant="secondary" onClick={() => void createSession()}>
+                <Button size="sm" variant="secondary" disabled={creatingSession} onClick={() => void createSession()}>
                   <IconPlus size={13} stroke={2} />
                   New
                 </Button>
@@ -784,10 +810,10 @@ export default function ZyraChatPage() {
 
               {/* Session list — scrollable */}
               <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-                {sessions.length === 0 && (
+                {visibleSessions.length === 0 && (
                   <p className="px-3 py-8 text-center text-xs text-[var(--muted)]">No conversations yet</p>
                 )}
-                {sessions.map((session) => {
+                {visibleSessions.map((session) => {
                   const isActive = activeSession?.id === session.id;
                   return (
                     <button

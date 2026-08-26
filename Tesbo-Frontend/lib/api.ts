@@ -899,6 +899,8 @@ export interface ZyraChatSession {
   updatedAt: string;
   messages?: ZyraChatMessage[];
   activePlan?: ZyraChatActivePlan | null;
+  /** Only present on list responses; absent (falsy) on a session just returned from create/get. */
+  hasMessages?: boolean;
 }
 
 export async function getZyraAgent(projectId: string): Promise<ZyraAgentState> {

@@ -482,6 +482,56 @@ test.describe("zyra — agent, chat, tasks and AI keys", () => {
     }
   });
 
+  test("ZYR-A-39 a session only reports hasMessages once a message is actually persisted", async () => {
+    // Regression test for "duplicate empty Zyra chat sessions in the sidebar": the sidebar now
+    // reads this flag to decide what counts as history, so the list route has to compute it
+    // correctly and keep returning every session — the flag is additive, not a filter (see
+    // ZYR-A-11 and ZYR-A-14, which still expect an unused session to come back from this route).
+    const session = await createSession();
+
+    async function findInList(): Promise<any> {
+      const res = await asOwner.get(url("/agents/zyra/chat/sessions"), { failOnStatusCode: false });
+      expect(res.status()).toBe(200);
+      const body = await res.json();
+      const list = body.list ?? body.sessions ?? body;
+      return list.find((s: any) => s.id === session.id);
+    }
+
+    const before = await findInList();
+    expect(before, "the freshly created session is still returned by the list").toBeTruthy();
+    expect(before.hasMessages, "a session nobody used must not report hasMessages").toBeFalsy();
+
+    // No provider is configured for this tenant (see file header), so the send fails downstream —
+    // but the user's message is inserted before that failure (ZYR-A-15 pins the session surviving
+    // it), which is enough to flip the flag.
+    await asOwner.post(url(`/agents/zyra/chat/sessions/${session.id}/messages`), {
+      data: { message: "Write me some test cases" },
+      failOnStatusCode: false,
+    });
+
+    const after = await findInList();
+    expect(after.hasMessages, "a session with a persisted message must report hasMessages").toBe(true);
+  });
+
+  test("ZYR-A-40 two concurrent session creates both succeed and both stay out of history until used", async () => {
+    // The reported bug: a race on the client (an unguarded mount effect firing twice) could POST
+    // this route twice before either landed, producing two empty sessions with near-identical
+    // timestamps that then sat in the sidebar forever. The route itself creating two rows here is
+    // correct REST behaviour and stays that way — what has to hold is that neither row is mistaken
+    // for real history until someone actually uses it.
+    const [a, b] = await Promise.all([createSession("Zyra chat"), createSession("Zyra chat")]);
+    expect(a.id).not.toBe(b.id);
+
+    const res = await asOwner.get(url("/agents/zyra/chat/sessions"), { failOnStatusCode: false });
+    const body = await res.json();
+    const list = body.list ?? body.sessions ?? body;
+    for (const created of [a, b]) {
+      const entry = list.find((s: any) => s.id === created.id);
+      expect(entry, "both concurrently created sessions are still listed").toBeTruthy();
+      expect(entry.hasMessages, "an unused concurrent duplicate must not report hasMessages").toBeFalsy();
+    }
+  });
+
   // ─── Tasks, drafts and history ────────────────────────────────────────────
 
   test("ZYR-A-17 a task is read back with its drafts", async () => {

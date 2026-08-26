@@ -586,6 +586,61 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByRole("cell", { name: "Sign in with a valid password" })).toBeVisible();
   });
 
+  // ─── Chat session history (sidebar) ─────────────────────────────────────────
+
+  test("ZYU-26 the sidebar hides an empty auto-created session until it has a message", async ({ browser }) => {
+    /*
+     * Regression test for "Duplicate Empty 'Zyra Chat' Sessions are Displayed in the Chat
+     * Sidebar": opening the chat with no prior sessions auto-creates one to type into (existing
+     * behaviour, unchanged), but nothing was ever asked yet — it must not render as a
+     * conversation. No AI provider is configured for this tenant (see file header), so the send
+     * button stays disabled; the follow-up message is seeded directly, the same way the rest of
+     * this file works around that boundary.
+     */
+    const page = await open(browser, "/agents/zyra");
+    await expect(page.getByRole("heading", { name: "Zyra", level: 1 })).toBeVisible();
+
+    await expect(page.getByText("No conversations yet")).toBeVisible();
+    await expect(page.getByText("0 sessions")).toBeVisible();
+
+    const sessionId = scalar(
+      `SELECT id FROM zyra_chat_sessions WHERE project_id = ${literal(tenant!.mainProjectId)} ORDER BY created_at DESC LIMIT 1;`,
+    );
+    expect(sessionId, "the page still auto-creates a session to type into").toBeTruthy();
+
+    exec(
+      `INSERT INTO zyra_chat_messages (session_id, project_id, user_id, role, content, status) VALUES ` +
+        `(${literal(sessionId)}, ${literal(tenant!.mainProjectId)}, ${literal(tenant!.owner.userId)}, 'user', 'Write me some test cases', 'sent');`,
+    );
+    await page.reload();
+
+    await expect(page.getByText("1 session", { exact: true })).toBeVisible();
+    await expect(page.getByText("No conversations yet")).toHaveCount(0);
+  });
+
+  test("ZYU-27 reopening the chat with an unused session reuses it instead of creating another", async ({
+    browser,
+  }) => {
+    // The steady-state guard the auto-create bug depended on staying intact: loadData opens the
+    // existing empty session instead of creating a new one whenever the list isn't empty. If this
+    // regressed, every ordinary revisit — not just a race — would grow the sidebar's dead weight.
+    const page = await open(browser, "/agents/zyra");
+    await expect(page.getByText("No conversations yet")).toBeVisible();
+
+    const countAfterFirstVisit = Number(
+      scalar(`SELECT COUNT(*) FROM zyra_chat_sessions WHERE project_id = ${literal(tenant!.mainProjectId)};`),
+    );
+    expect(countAfterFirstVisit, "exactly one session is auto-created").toBe(1);
+
+    await page.reload();
+    await page.reload();
+
+    const countAfterReloads = Number(
+      scalar(`SELECT COUNT(*) FROM zyra_chat_sessions WHERE project_id = ${literal(tenant!.mainProjectId)};`),
+    );
+    expect(countAfterReloads, "reopening a still-empty session must reuse it, not create another").toBe(1);
+  });
+
   // ─── Real-time status updates ───────────────────────────────────────────────
 
   test("ZYU-24 the task board reflects Zyra finishing a task without a page reload", async ({ browser }) => {
