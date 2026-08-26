@@ -16,6 +16,26 @@ import {
 import { Button, Input, Card, Field, FieldLabel, Select } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
+function currentTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/** Every IANA zone the browser knows about, for the dropdown. */
+function allTimezones(): string[] {
+  try {
+    const supportedValuesOf = (Intl as unknown as { supportedValuesOf?: (key: string) => string[] }).supportedValuesOf;
+    const zones = supportedValuesOf?.("timeZone");
+    if (zones && zones.length > 0) return zones;
+  } catch {
+    // Intl.supportedValuesOf isn't available in every runtime — fall through to the fallback below.
+  }
+  return ["UTC"];
+}
+
 export default function ScheduleRunsPage() {
   const params = useParams();
   const router = useRouter();
@@ -32,7 +52,13 @@ export default function ScheduleRunsPage() {
   const [scheduleType, setScheduleType] = useState<"one_time" | "recurring">("one_time");
   const [runAt, setRunAt] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState(1440);
-  const [timezone, setTimezone] = useState("UTC");
+  const [timezone, setTimezone] = useState<string>(currentTimezone);
+  // Computed once at mount: the option list itself doesn't change, only which one is selected.
+  const [timezoneOptions] = useState<string[]>(() => {
+    const zones = allTimezones();
+    const current = currentTimezone();
+    return zones.includes(current) ? zones : [current, ...zones];
+  });
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -169,10 +195,16 @@ export default function ScheduleRunsPage() {
           </Field>
           <Field>
             <FieldLabel>Timezone</FieldLabel>
-            <Input
+            <Select
               value={timezone}
               onChange={(e) => setTimezone(e.target.value)}
-            />
+            >
+              {timezoneOptions.map((tz) => (
+                <option key={tz} value={tz}>
+                  {tz}
+                </option>
+              ))}
+            </Select>
           </Field>
           {scheduleType === "one_time" ? (
             <div className="md:col-span-2">
