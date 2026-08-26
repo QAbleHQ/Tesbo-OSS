@@ -1,5 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import { loadEnvironmentFile } from "./env-file";
+
+/*
+ * Applied before anything below is read.
+ *
+ * Every consumer in the suite — specs, global-setup and playwright.config.ts alike — resolves its
+ * configuration through this module, so this is the one place that can guarantee an environment file
+ * is in process.env before the first value is taken from it. The constants immediately below are
+ * evaluated at import time, which is why this cannot be deferred into a function.
+ *
+ * A no-op unless E2E_ENV or E2E_ENV_FILE is set, so every existing local invocation is unaffected.
+ */
+loadEnvironmentFile();
 
 function isLocalHost(url: string): boolean {
   try {
@@ -88,6 +101,16 @@ export const env = {
   apiBaseUrl,
   webBaseUrl,
   ci: !!process.env.CI,
+
+  /*
+   * Whether the stack under test is this machine's docker-compose stack.
+   *
+   * The distinction that matters is not "localhost" for its own sake — it is whether there is a
+   * backend container whose stdout can be read. Signup OTPs are printed there and nowhere else
+   * outside production, so every provisioning path that scrapes a log is available here and
+   * unavailable against a deployed target.
+   */
+  targetIsLocal,
 
   // Disposable smoke-test account. On a fresh stack this user doesn't exist yet —
   // global-setup creates it automatically when autoProvision is enabled (see below).
@@ -201,17 +224,24 @@ export const env = {
    */
   allowStripeWrites: process.env.E2E_BILLING_ALLOW_STRIPE_WRITES === "true",
 
-  // Signup requires an OTP. When the target looks local, global-setup tries two ways to get
-  // one without a human in the loop, in order: (1) sign up over the real API and scrape the
-  // OTP out of `docker compose logs` — works when no Postmark token is configured, since the
-  // backend then just console.logs the code instead of emailing it; (2) if that doesn't turn
-  // up a code within a few seconds (e.g. a real POSTMARK_API_TOKEN is set, so the code went
-  // out as an actual email instead), seed the user directly into Postgres with a correctly
-  // hashed password, bypassing OTP delivery entirely. Against a remote target, pre-create the
-  // user yourself and either leave this unset (it defaults to false there) or set it to false.
+  /*
+   * Whether global-setup may create the tenants it needs, rather than requiring them to exist.
+   *
+   * Signup requires an OTP, and there are two ways to get one without a human in the loop:
+   *   1. sign up over the real API and scrape the code out of `docker compose logs` — available
+   *      only for this machine's stack, since it reads a container's stdout;
+   *   2. seed the user straight into Postgres with a correctly hashed password, bypassing OTP
+   *      delivery entirely — available wherever the database is reachable.
+   *
+   * (2) is why this no longer defaults to false against a deployed target. utils/psql.ts now
+   * connects directly rather than through `docker compose exec`, so a DATABASE_URL for the
+   * environment under test is enough to provision every tenant there — which is what makes a CI
+   * run against staging need nothing but a URL pair and a connection string. With no database
+   * configured this still defaults to false for a remote host, and the tenants must pre-exist.
+   */
   autoProvision: process.env.E2E_AUTO_PROVISION
     ? process.env.E2E_AUTO_PROVISION === "true"
-    : targetIsLocal,
+    : targetIsLocal || !!backendValue("DATABASE_URL"),
   dockerComposeFile:
     process.env.E2E_DOCKER_COMPOSE_FILE ?? path.resolve(__dirname, "../../docker-compose.yml"),
   dockerService: process.env.E2E_DOCKER_SERVICE ?? "backend",
