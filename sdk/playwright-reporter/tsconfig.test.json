@@ -1,0 +1,12 @@
+// Tests are compiled rather than run through --experimental-strip-types: strip-types resolves
+// imports as ESM, which needs explicit ".ts" specifiers that the CommonJS build (and every consumer
+// of this package) must not have. Compiling keeps one import style across src and tests.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "dist-test",
+    "declaration": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": []
+}

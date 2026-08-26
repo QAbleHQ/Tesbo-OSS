@@ -2,20 +2,23 @@
 // Tesbo-Backend-Nest/src/auth/password.service.ts (assertValidPassword) — keep both in sync.
 
 export const NAME_MAX_LENGTH = 100;
+// Signup's First name / Last name fields use a stricter cap than the shared single-field "Name"
+// above (e.g. invite registration) — mirrors the backend's SignupService.startSelfServeSignup.
+export const SIGNUP_NAME_MAX_LENGTH = 50;
 export const PASSWORD_MIN_LENGTH = 8;
-export const PASSWORD_MAX_LENGTH = 128;
+export const PASSWORD_MAX_LENGTH = 16;
 export const EMAIL_MAX_LENGTH = 255;
 
-export const PASSWORD_RULES_HINT = `At least ${PASSWORD_MIN_LENGTH} characters, with an uppercase letter, a lowercase letter, and a number.`;
+export const PASSWORD_RULES_HINT = `${PASSWORD_MIN_LENGTH}-${PASSWORD_MAX_LENGTH} characters, with an uppercase letter, a lowercase letter, and a number.`;
 
 // Unicode letters/marks so accented and non-Latin names aren't rejected, plus the
 // punctuation real names use: space, hyphen, apostrophe, period (e.g. "Jr.").
 const NAME_CHARS_RE = /^[\p{L}\p{M} '.-]+$/u;
 
-export function validateName(value: string, fieldLabel = "Name"): string | null {
+export function validateName(value: string, fieldLabel = "Name", maxLength = NAME_MAX_LENGTH): string | null {
   const trimmed = value.trim();
   if (!trimmed) return `${fieldLabel} is required`;
-  if (trimmed.length > NAME_MAX_LENGTH) return `${fieldLabel} must be at most ${NAME_MAX_LENGTH} characters`;
+  if (trimmed.length > maxLength) return `${fieldLabel} must be at most ${maxLength} characters`;
   if (!NAME_CHARS_RE.test(trimmed)) {
     return `${fieldLabel} can only contain letters, spaces, hyphens, apostrophes, and periods`;
   }
@@ -146,4 +149,81 @@ export function validateKnowledgeFolderName(name: string): string | null {
  */
 export function blankDocumentFlagKey(documentId: string): string {
   return `kb-blank-doc:${documentId}`;
+}
+
+// Mirrors Tesbo-Backend-Nest/src/legacy/legacy.service.ts — KB_ALLOWED_EXTENSIONS and
+// EVIDENCE_MAX_FILE_SIZE / assertValidEvidenceFiles — keep both in sync. The server is still the
+// authority; this copy exists so a rejected file is named the moment it is picked, instead of after
+// a full upload that the modal used to swallow silently (Basecamp 10226296533).
+export const EVIDENCE_ALLOWED_EXTENSIONS = [
+  "png", "jpg", "jpeg", "webp", "svg",
+  "pdf", "doc", "docx", "txt", "md",
+  "xls", "xlsx", "csv",
+  "ppt", "pptx",
+  "js", "ts", "java", "py", "json", "xml", "yaml", "yml", "sql", "html", "css",
+  "mp3", "wav", "m4a",
+  "mp4", "mov", "webm",
+];
+
+export const EVIDENCE_MAX_FILE_SIZE = 25 * 1024 * 1024;
+
+// The picker's `accept` list. Advisory only — a viewer can always switch the dialog to "All files",
+// which is why validateEvidenceFile still runs on everything that comes back.
+export const EVIDENCE_ACCEPT_ATTRIBUTE = EVIDENCE_ALLOWED_EXTENSIONS.map((ext) => `.${ext}`).join(",");
+
+export function formatFileSizeShort(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+}
+
+export function validateEvidenceFile(file: { name: string; size: number }): string | null {
+  const ext = file.name.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
+  if (!ext) return `${file.name} has no file extension, so its type can't be determined.`;
+  if (!EVIDENCE_ALLOWED_EXTENSIONS.includes(ext)) return `${file.name}: .${ext} files aren't supported.`;
+  if (file.size <= 0) return `${file.name} is empty (0 bytes).`;
+  if (file.size > EVIDENCE_MAX_FILE_SIZE) {
+    return `${file.name} is ${formatFileSizeShort(file.size)}, which is over the ${formatFileSizeShort(EVIDENCE_MAX_FILE_SIZE)} limit.`;
+  }
+  return null;
+}
+
+// Test run environments (project settings > Test Environments) are stored inside the project's
+// free-form settings JSONB, with no column width and no backend validation at all — these are a
+// product-level cap picked here, matching the other short-label fields (KB_FOLDER_NAME_MAX_LENGTH).
+export const ENVIRONMENT_NAME_MAX_LENGTH = 50;
+export const ENVIRONMENT_URL_MAX_LENGTH = 500;
+
+/** Validates a test run environment's name, including uniqueness against the other environments. */
+export function validateEnvironmentName(value: string, existing: { name: string }[]): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "Environment name is required";
+  if (trimmed.length > ENVIRONMENT_NAME_MAX_LENGTH) {
+    return `Environment name must be at most ${ENVIRONMENT_NAME_MAX_LENGTH} characters`;
+  }
+  if (existing.some((item) => item.name.trim().toLowerCase() === trimmed.toLowerCase())) {
+    return "An environment with this name already exists";
+  }
+  return "";
+}
+
+/** Validates a test run environment's URL: required, bounded length, http(s) only, and unique. */
+export function validateEnvironmentUrl(value: string, existing: { url: string }[]): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "Environment URL is required";
+  if (trimmed.length > ENVIRONMENT_URL_MAX_LENGTH) {
+    return `Environment URL must be at most ${ENVIRONMENT_URL_MAX_LENGTH} characters`;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return "Enter a valid URL, e.g. https://staging.example.com";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return "Environment URL must start with http:// or https://";
+  }
+  if (existing.some((item) => item.url.trim().toLowerCase() === trimmed.toLowerCase())) {
+    return "This URL is already added to another environment";
+  }
+  return "";
 }

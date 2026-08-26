@@ -32,6 +32,56 @@ if pgrep -f "playwright test" >/dev/null 2>&1; then
   exit 3
 fi
 
+# ── Image freshness ──────────────────────────────────────────────────────────
+# The failure this exists to stop: on 2026-08-24 a 258-test run went red almost everywhere and every
+# failure was a route or a label that simply was not in the running containers — images built seven
+# hours earlier, before the code under test was written. A red run against stale images is worse than
+# no run, because it reads exactly like a broken product.
+#
+# So: if any source file is newer than the image built from it, refuse and say what to do. Set
+# ALLOW_STALE_IMAGES=1 to run anyway (testing something unrelated to the edits in the tree).
+SRC_DIRS=(
+  "$REPO/Tesbo-Backend-Nest/src" "$REPO/Tesbo-Backend-Nest/migrations"
+  "$REPO/Tesbo-Frontend/app" "$REPO/Tesbo-Frontend/components" "$REPO/Tesbo-Frontend/lib"
+)
+
+image_epoch() {
+  local iso
+  iso="$(docker image inspect -f '{{.Created}}' "$1" 2>/dev/null || true)"
+  [ -z "$iso" ] && return 1
+  python3 -c "import sys,datetime;print(int(datetime.datetime.fromisoformat(sys.argv[1].split('.')[0].rstrip('Z')+'+00:00').timestamp()))" "$iso"
+}
+
+newest_source_epoch() {
+  local newest=0 m
+  for dir in "${SRC_DIRS[@]}"; do
+    [ -d "$dir" ] || continue
+    m="$(find "$dir" -type f -not -path '*/node_modules/*' -not -path '*/.next/*' -not -path '*/dist/*' \
+      -exec stat -f '%m' {} + 2>/dev/null | sort -rn | head -1)"
+    [ -n "$m" ] && [ "$m" -gt "$newest" ] && newest="$m"
+  done
+  echo "$newest"
+}
+
+if [ "${ALLOW_STALE_IMAGES:-0}" != "1" ]; then
+  SRC_EPOCH="$(newest_source_epoch)"
+  for img in tesbo-test-manager-private-backend tesbo-test-manager-private-frontend; do
+    IMG_EPOCH="$(image_epoch "$img:latest" || echo 0)"
+    if [ "$IMG_EPOCH" -eq 0 ]; then
+      echo "error: no $img:latest image — build the stack first: scripts/deploy-and-test.sh $*" >&2
+      exit 5
+    fi
+    if [ "$SRC_EPOCH" -gt "$IMG_EPOCH" ]; then
+      echo "error: $img was built $(( (SRC_EPOCH - IMG_EPOCH) / 60 )) minute(s) BEFORE the newest source change." >&2
+      echo "       Testing it would test code you are not running. Deploy first, then test:" >&2
+      echo "         scripts/deploy-and-test.sh $*" >&2
+      echo "       (ALLOW_STALE_IMAGES=1 to override, only when the change cannot affect this selection.)" >&2
+      exit 6
+    fi
+  done
+  echo "Images: backend + frontend are newer than every source file — safe to test."
+fi
+
 # Resolve the selection without executing anything, so the count can be checked before committing.
 cd "$E2E"
 SELECTED="$(API_BASE_URL="$API_BASE_URL" WEB_BASE_URL="$WEB_BASE_URL" \

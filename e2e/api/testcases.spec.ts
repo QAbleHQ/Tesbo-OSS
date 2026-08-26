@@ -1121,4 +1121,170 @@ test.describe("pagination", () => {
       await deleteSuite(request, to.id);
     }
   });
+  test("an over-long field is a field-level 400, never an Internal Server Error", async ({ request }) => {
+    /*
+     * Basecamp 10226376787 — "Internal Server Error When Adding a Long Description to Test Case Details".
+     *
+     * The title is misleading and the screenshot settles it: `description` is TEXT and cannot overflow;
+     * the long lorem-ipsum was in the TITLE, which is VARCHAR(512). Nothing bounded it, so Postgres
+     * raised 22001 (string_data_right_truncation), no handler caught that code, and the create answered
+     * 500 with "Internal server error" — telling the reporter nothing about which field to shorten.
+     *
+     * Title was just the field they happened to use. `testcases` has fourteen length-bounded columns and
+     * none were validated, so each was its own latent 500. Same defect class as the Knowledge Base
+     * folder rename (Basecamp 10199204536).
+     */
+    const marker = `E2E Bounded ${Date.now()}`;
+    const created: string[] = [];
+    try {
+      // The reported case, and the boundary either side of it.
+      const tooLongTitle = "T".repeat(513);
+      const overLong = await request.post(`/api/projects/${ctx.projectId}/testcases`, {
+        data: { title: tooLongTitle },
+        failOnStatusCode: false,
+      });
+      expect(
+        overLong.status(),
+        `a 513-character title answered ${overLong.status()} — a 500 here is the reported bug`,
+      ).toBe(400);
+      const message = await overLong.text();
+      expect(message, "the error must name the field and its limit").toMatch(/title/i);
+      expect(message).toMatch(/512/);
+
+      // 512 exactly is a legal title, so the guard must be off-by-none.
+      const atLimit = await request.post(`/api/projects/${ctx.projectId}/testcases`, {
+        data: { title: "A".repeat(512) },
+        failOnStatusCode: false,
+      });
+      expect(atLimit.status(), `a 512-character title was refused — ${await atLimit.text()}`).toBe(201);
+      created.push((await atLimit.json()).id);
+
+      // The other bounded columns, each reachable through the API with its own width.
+      const base = await createCase(request, { title: `${marker} base` });
+      created.push(base.id);
+      for (const [field, max] of [
+        ["component", 255],
+        ["automationFramework", 64],
+        ["priority", 8],
+        ["severity", 32],
+        ["automationTags", 512],
+      ] as const) {
+        const res = await request.post(`/api/projects/${ctx.projectId}/testcases`, {
+          data: { title: `${marker} ${field}`, [field]: "x".repeat(max + 1) },
+          failOnStatusCode: false,
+        });
+        expect(res.status(), `an over-long ${field} answered ${res.status()}: ${await res.text()}`).toBe(400);
+
+        // And the same field on UPDATE, which writes the same column.
+        const patched = await request.put(`/api/projects/${ctx.projectId}/testcases/${base.id}`, {
+          data: { [field]: "x".repeat(max + 1) },
+          failOnStatusCode: false,
+        });
+        expect(patched.status(), `an over-long ${field} on update answered ${patched.status()}`).toBe(400);
+      }
+
+      // Nothing was written by any of the refused calls.
+      const listed = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+        params: { search: marker, limit: 50 },
+      });
+      const titles = (await listed.json()).map((tc: { title: string }) => tc.title);
+      expect(titles.filter((t: string) => t.startsWith(`${marker} `)).length, "a refused create still wrote a row").toBe(1);
+    } finally {
+      for (const id of created) await deleteCase(request, id);
+    }
+  });
+
+  test("a bulk import names the row and field that is too long instead of failing with a 500", async ({
+    request,
+  }) => {
+    /*
+     * The bulk path casts each text column to its varchar width, so one over-long value anywhere in the
+     * batch raised 22001 and rolled the whole transaction back — an import of many rows died with
+     * nothing written and no indication which row or field was at fault.
+     */
+    const marker = `E2E BulkBounded ${Date.now()}`;
+    const res = await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-create`, {
+      data: {
+        testcases: [
+          { title: `${marker} fine 1` },
+          { title: `${marker} fine 2` },
+          { title: "T".repeat(513) },
+        ],
+      },
+      failOnStatusCode: false,
+    });
+    expect(res.status(), `an over-long row answered ${res.status()}: ${await res.text()}`).toBe(400);
+    const body = await res.text();
+    // The row number is what makes a 500-row import diagnosable.
+    expect(body, "the error should name the offending row").toMatch(/row 3/i);
+    expect(body).toMatch(/title/i);
+
+    // The batch is all-or-nothing, so the two valid rows must not have landed either.
+    const listed = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
+      params: { search: marker, limit: 50 },
+    });
+    expect((await listed.json()).length, "a refused batch partially imported").toBe(0);
+  });
+
+  test("estimatedDuration is persisted, returned, and format-validated", async ({ request }) => {
+    /*
+     * Basecamp 10226363759 — "Estimated Time Field Accepts Invalid Text and Special Characters".
+     *
+     * It was worse than the report: the frontend has always sent `estimatedDuration` on create and
+     * update, and the backend had NO reference to it at all, so the V7 `estimated_duration VARCHAR(64)`
+     * column was dead and every value typed was silently discarded. It accepted anything because it
+     * stored nothing — so the first thing asserted here is that it round-trips at all.
+     */
+    const created: string[] = [];
+    try {
+      // Round-trips on create.
+      const withDuration = await request.post(`/api/projects/${ctx.projectId}/testcases`, {
+        data: { title: `E2E Duration ${Date.now()}`, estimatedDuration: "2h 30m" },
+        failOnStatusCode: false,
+      });
+      expect(withDuration.status(), `creating with a duration — ${await withDuration.text()}`).toBe(201);
+      const id = (await withDuration.json()).id;
+      created.push(id);
+      const read = await (await request.get(`/api/projects/${ctx.projectId}/testcases/${id}`)).json();
+      expect(read.estimatedDuration, "the estimate was silently discarded").toBe("2h 30m");
+
+      // And on update.
+      const patched = await request.put(`/api/projects/${ctx.projectId}/testcases/${id}`, {
+        data: { estimatedDuration: "90" },
+        failOnStatusCode: false,
+      });
+      expect(patched.status()).toBeLessThan(400);
+      expect((await (await request.get(`/api/projects/${ctx.projectId}/testcases/${id}`)).json()).estimatedDuration).toBe("90");
+
+      // The forms the field is meant to take.
+      for (const value of ["45m", "3h", "12h 5m", "600"]) {
+        const res = await request.put(`/api/projects/${ctx.projectId}/testcases/${id}`, {
+          data: { estimatedDuration: value },
+          failOnStatusCode: false,
+        });
+        expect(res.status(), `"${value}" should be a valid duration — ${await res.text()}`).toBeLessThan(400);
+      }
+
+      // The reported complaint: free text and special characters are refused now.
+      for (const value of ["abc", "2 hours-ish", "!!!", "-5", "2h 30x", "<script>"]) {
+        const res = await request.put(`/api/projects/${ctx.projectId}/testcases/${id}`, {
+          data: { estimatedDuration: value },
+          failOnStatusCode: false,
+        });
+        expect(res.status(), `"${value}" was accepted as a duration`).toBe(400);
+      }
+
+      // Over 64 characters is refused by the length guard, not by a truncation 500.
+      const long = await request.put(`/api/projects/${ctx.projectId}/testcases/${id}`, {
+        data: { estimatedDuration: "9".repeat(65) },
+        failOnStatusCode: false,
+      });
+      expect(long.status()).toBe(400);
+
+      // The last valid value survived every refusal above.
+      expect((await (await request.get(`/api/projects/${ctx.projectId}/testcases/${id}`)).json()).estimatedDuration).toBe("600");
+    } finally {
+      for (const id of created) await deleteCase(request, id);
+    }
+  });
 });

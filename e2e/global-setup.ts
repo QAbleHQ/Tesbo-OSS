@@ -180,7 +180,16 @@ function provisionUserViaDatabaseSeed(account: Account): void {
 }
 
 async function provisionUser(api: APIRequestContext, account: Account): Promise<void> {
-  const provisionedViaOtp = account.seedDirectly ? false : await provisionUserViaOtp(api, account);
+  /*
+   * The OTP path reads the code out of the backend container's stdout, so it exists only against
+   * this machine's compose stack. Against a deployed target there is no such log: the attempt would
+   * spend one of signup/start's five rate-limited attempts, wait out waitForOtpInLogs' 8s deadline,
+   * and then fall through to the database seed anyway — per tenant, seven times over. Skip straight
+   * to the seed, which is what actually works there now that psql.ts can reach a remote database
+   * without Docker.
+   */
+  const canScrapeOtp = env.targetIsLocal && !account.seedDirectly;
+  const provisionedViaOtp = canScrapeOtp ? await provisionUserViaOtp(api, account) : false;
   if (!provisionedViaOtp) {
     provisionUserViaDatabaseSeed(account);
   }
@@ -302,6 +311,18 @@ async function setUpOptionalAccount(
   contextPath: string,
   label: string,
 ): Promise<void> {
+  // Not configured at all — the common case against a remote target, where these tenants cannot be
+  // created without either a readable backend log or database access. Bail before touching the
+  // network: otherwise each one spends a login attempt, a provisioning attempt and two sleeps per
+  // retry proving something the empty credentials already said.
+  if (!account.email || !account.password) {
+    fs.rmSync(contextPath, { force: true });
+    console.warn(
+      `[e2e] no credentials configured for the ${label} tenant — the suites that depend on it will skip.`,
+    );
+    return;
+  }
+
   try {
     await setUpAccount(account, statePath, contextPath);
   } catch (error) {

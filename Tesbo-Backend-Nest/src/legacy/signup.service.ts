@@ -34,9 +34,21 @@ export class SignupService {
     private readonly legacy: LegacyService
   ) {}
 
-  async startSelfServeSignup(name: string | undefined, rawEmail: string | undefined, password: string | undefined, ip: string, ua?: string | null): Promise<void> {
+  async startSelfServeSignup(
+    firstName: string | undefined,
+    lastName: string | undefined,
+    rawEmail: string | undefined,
+    password: string | undefined,
+    ip: string,
+    ua?: string | null
+  ): Promise<void> {
     const email = this.validateEmail(rawEmail);
-    const trimmedName = this.validateName(name);
+    // Validated separately (product cap of 50, not the shared 100 every other "Name" field here
+    // uses) so a too-long first or last name is reported against the field the user actually typed
+    // into, rather than a combined string that only exists after this validation would pass.
+    const trimmedFirstName = validatePersonName(firstName, "First name", 50);
+    const trimmedLastName = validatePersonName(lastName, "Last name", 50);
+    const trimmedName = `${trimmedFirstName} ${trimmedLastName}`;
     this.validatePassword(password);
 
     const existing = await this.db.query<{ id: string }>("SELECT id FROM users WHERE email = $1", [email]);

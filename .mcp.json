@@ -3,6 +3,10 @@
     "BetterBugs": {
       "type": "http",
       "url": "https://mcp.betterbugs.io/mcp"
+    },
+    "langfuse-docs": {
+      "type": "http",
+      "url": "https://langfuse.com/api/mcp"
     }
   }
 }

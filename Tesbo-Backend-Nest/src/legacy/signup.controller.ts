@@ -3,7 +3,7 @@ import type { Response } from "express";
 import { AuthenticatedRequest } from "../common/request.types";
 import { SignupService } from "./signup.service";
 
-type SelfServeStartBody = { name?: string; email?: string; password?: string };
+type SelfServeStartBody = { firstName?: string; lastName?: string; email?: string; password?: string };
 type SelfServeVerifyBody = { email?: string; code?: string };
 type InviteRegisterStartBody = { name?: string; password?: string };
 type InviteOtpStartBody = { name?: string };
@@ -16,7 +16,14 @@ export class SignupController {
   @Post("/api/auth/signup/start")
   @HttpCode(204)
   startSelfServeSignup(@Body() body: SelfServeStartBody, @Req() req: AuthenticatedRequest) {
-    return this.signup.startSelfServeSignup(body.name, body.email, body.password, this.ip(req), req.get("user-agent"));
+    return this.signup.startSelfServeSignup(
+      body.firstName,
+      body.lastName,
+      body.email,
+      body.password,
+      this.ip(req),
+      req.get("user-agent")
+    );
   }
 
   @Post("/api/auth/signup/verify")

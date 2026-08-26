@@ -5,7 +5,7 @@ import type { Job } from "bullmq";
 import { DatabaseService } from "../database/database.service";
 import { embedTexts, resolveEmbeddingAllocation } from "./rag-ai-allocation";
 import { RagChunkingService } from "./rag-chunking.service";
-import { RAG_EMBEDDING_BATCH_SIZE, RAG_EMBEDDING_DIMENSION, RAG_EMBEDDING_MODEL, RAG_EMBEDDING_QUEUE } from "./rag.constants";
+import { RAG_EMBEDDING_BATCH_SIZE, RAG_EMBEDDING_DIMENSION, RAG_EMBEDDING_QUEUE } from "./rag.constants";
 import { EmbeddingJobPayload } from "./rag.types";
 
 // Consumer side of the embedding pipeline. Deliberately resolves its own AI-key allocation
@@ -48,9 +48,17 @@ export class RagEmbeddingProcessor extends WorkerHost {
       return;
     }
 
-    const allocation = await resolveEmbeddingAllocation(this.db, projectId);
+    const { allocation, reason } = await resolveEmbeddingAllocation(this.db, projectId);
     if (!allocation) {
-      await this.setStatus(table, sourceId, "unsupported");
+      // Deliberately 'pending', not 'unsupported'. 'unsupported' means *this source* can never
+      // be embedded (no extractable text); it is terminal, and resumeInterruptedEmbeddings()
+      // never revisits it. A missing workspace key is not a property of the source at all — it
+      // is a temporary state of the workspace that ends the moment someone adds a key. Marking
+      // it terminal is what left 1,237 documents and 43 files permanently dark once the
+      // OpenAI-only allocator started refusing every Anthropic project. Leaving it pending lets
+      // the boot-time sweep pick it up for free as soon as a key exists.
+      this.logger.warn(`Cannot embed ${sourceType}:${sourceId} — ${reason}`);
+      await this.setStatus(table, sourceId, "pending");
       return;
     }
 
@@ -68,7 +76,7 @@ export class RagEmbeddingProcessor extends WorkerHost {
     const embeddings: number[][] = [];
     for (let i = 0; i < chunks.length; i += RAG_EMBEDDING_BATCH_SIZE) {
       const batch = chunks.slice(i, i + RAG_EMBEDDING_BATCH_SIZE);
-      const vectors = await embedTexts(allocation, batch.map((c) => c.content), RAG_EMBEDDING_MODEL);
+      const vectors = await embedTexts(allocation, batch.map((c) => c.content));
       embeddings.push(...vectors);
     }
 
@@ -81,7 +89,17 @@ export class RagEmbeddingProcessor extends WorkerHost {
       for (let i = 0; i < chunks.length; i += 1) {
         const chunk = chunks[i];
         const vector = embeddings[i];
-        if (!vector || vector.length !== RAG_EMBEDDING_DIMENSION) continue;
+        // Width is checked against the platform constant, which is what the column and its
+        // HNSW index are declared at — not against whatever the provider happened to return.
+        // A mismatch means the model or its `dimensions` handling is misconfigured; skipping
+        // is the only safe response, because slicing a non-Matryoshka vector to fit would
+        // store something that indexes cleanly and ranks nonsense.
+        if (!vector || vector.length !== RAG_EMBEDDING_DIMENSION) {
+          this.logger.warn(
+            `Discarding chunk ${chunk.chunkIndex} of ${sourceType}:${sourceId} — ${allocation.provider}/${allocation.model} returned ${vector?.length ?? 0} dimensions, expected ${RAG_EMBEDDING_DIMENSION}.`
+          );
+          continue;
+        }
         await client.query(
           `INSERT INTO knowledge_document_chunks
              (organization_id, project_id, source_type, source_id, chunk_index, heading_path, content, token_count, content_hash, embedding_model, embedding)
@@ -96,7 +114,7 @@ export class RagEmbeddingProcessor extends WorkerHost {
             chunk.content,
             chunk.tokenCount,
             contentHash,
-            RAG_EMBEDDING_MODEL,
+            allocation.model,
             `[${vector.join(",")}]`
           ]
         );

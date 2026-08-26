@@ -76,9 +76,9 @@ export class OtpService {
     await this.db.query("DELETE FROM sessions WHERE token_hash = $1", [this.hash(sessionToken)]);
   }
 
-  /** Signs the user out everywhere except the session identified by `keepToken`. */
-  async invalidateOtherSessions(userId: string, keepToken: string): Promise<void> {
-    await this.db.query("DELETE FROM sessions WHERE user_id = $1 AND token_hash != $2", [userId, this.hash(keepToken)]);
+  /** Signs the user out of every session, including the one making this call. */
+  async invalidateAllSessions(userId: string): Promise<void> {
+    await this.db.query("DELETE FROM sessions WHERE user_id = $1", [userId]);
   }
 
   private async markOtpUsed(otpId: string): Promise<void> {

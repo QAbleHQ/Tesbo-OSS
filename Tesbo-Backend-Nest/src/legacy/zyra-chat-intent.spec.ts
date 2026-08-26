@@ -264,6 +264,70 @@ describe("Zyra chat AI routing", () => {
       const notATable = "| this is not really a table\n| just some piped lines";
       expect(internals(svc).stripZyraTestcaseTables(notATable, false)).toBe(notATable);
     });
+
+    /*
+     * The fixtures above ("| Module | Existing | Missing |", "| Ticket | Summary | Linked |") both
+     * dodge the failure: neither header contains the phrase "test case", so neither reaches the
+     * anchor test. The tables Zyra really writes for a coverage answer DO — a coverage table's
+     * natural column for "which cases cover this" is literally headed "Test Cases".
+     *
+     * Verbatim from a reported prod session (zyra_chat_messages, project TTM Testing - Web): the
+     * reply's whole "What's Covered" section was this table, and the user saw the heading with
+     * nothing under it, plus a footer implying their cases had gone missing.
+     */
+    const coveredAreasTable = [
+      "### ✅ What's Covered",
+      "",
+      "| Area | Test Cases |",
+      "|---|---|",
+      "| Happy-path login (email + OTP) | TTM-TC-1 |",
+      "| Invalid password on login | TTM-TC-2 |",
+      "",
+      "### 🔴 Critical Missing Coverage"
+    ].join("\n");
+
+    it("leaves the covered-areas table alone — a 'Test Cases' column of ids is not a testcase table", () => {
+      expect(internals(svc).stripZyraTestcaseTables(coveredAreasTable, false)).toBe(coveredAreasTable);
+    });
+
+    it("does not append the 'never saved' footer to a coverage answer that created nothing", () => {
+      // hasRows=false is correct for a coverage answer — it saved nothing because it was never
+      // asked to. That must not be dressed up as cases that went missing.
+      expect(internals(svc).stripZyraTestcaseTables(coveredAreasTable, false)).not.toContain("were not saved");
+    });
+
+    it("leaves a per-module coverage table alone even with a Status column", () => {
+      const perModule = ["| Module | Test Cases | Status |", "|---|---|---|", "| Billing | 12 | Good |"].join("\n");
+      expect(internals(svc).stripZyraTestcaseTables(perModule, false)).toBe(perModule);
+    });
+
+    it("leaves a Jira comparison table alone when it references linked cases by id", () => {
+      const jira = ["| Ticket | Linked Test Case | Priority |", "|---|---|---|", "| TTM-95 | TTM-TC-4 | P1 |"].join("\n");
+      expect(internals(svc).stripZyraTestcaseTables(jira, false)).toBe(jira);
+    });
+
+    it("leaves a suite summary table alone", () => {
+      const suites = ["| Suite | Test Case Count |", "|---|---|", "| Login | 10 |"].join("\n");
+      expect(internals(svc).stripZyraTestcaseTables(suites, false)).toBe(suites);
+    });
+
+    it("still strips a table that carries authored testcase content", () => {
+      const authored = [
+        "| ID | Title | Steps | Expected |",
+        "|---|---|---|---|",
+        "| 1 | Login with valid credentials | Open /login | Dashboard loads |"
+      ].join("\n");
+      const out = internals(svc).stripZyraTestcaseTables(authored, false);
+      expect(out).not.toContain("Login with valid credentials");
+      expect(out).toContain("were not saved to the repository");
+    });
+
+    it("strips only the authored table when a reply carries both kinds", () => {
+      const both = [coveredAreasTable, "", "| Title | Priority | Status |", "|---|---|---|", "| New login case | P1 | Draft |"].join("\n");
+      const out = internals(svc).stripZyraTestcaseTables(both, true);
+      expect(out, "the coverage table is the answer and must survive").toContain("| Area | Test Cases |");
+      expect(out, "the authored rows belong in the structured array").not.toContain("New login case");
+    });
   });
 
   describe("Jira context selection", () => {

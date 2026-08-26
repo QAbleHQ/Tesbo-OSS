@@ -21,7 +21,6 @@ export default function AccountPage() {
   const [newPasswordError, setNewPasswordError] = useState("");
   const [confirmPasswordError, setConfirmPasswordError] = useState("");
   const [formError, setFormError] = useState("");
-  const [toast, setToast] = useState("");
 
   const load = useCallback(async () => {
     const me = await authMe();
@@ -36,11 +35,6 @@ export default function AccountPage() {
   }, [router]);
 
   useEffect(() => { void load(); }, [load]);
-
-  function showToast(msg: string) {
-    setToast(msg);
-    setTimeout(() => setToast(""), 4000);
-  }
 
   function clearErrors() {
     setCurrentPasswordError("");
@@ -108,11 +102,10 @@ export default function AccountPage() {
     setSaving(true);
     try {
       await changePassword(hasPassword ? currentPassword : null, newPassword);
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setHasPassword(true);
-      showToast("Password changed. You've been signed out of all other sessions.");
+      // The backend invalidates every session on a successful change, including this one, so the
+      // current tab is signed out along with everywhere else — send it to /login to reflect that
+      // rather than leaving the form sitting on a session that no longer exists server-side.
+      router.push("/login?passwordChanged=1");
     } catch (err) {
       applyServerError(err instanceof Error ? err.message : "Failed to change password");
     } finally {
@@ -130,12 +123,6 @@ export default function AccountPage() {
         <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">My Account</h1>
         <p className="mt-1 text-[13px] text-[var(--muted-soft)]">Manage your personal account settings.</p>
       </div>
-
-      {toast && (
-        <div className="fixed bottom-5 right-5 z-50 rounded-[var(--radius-control)] bg-[var(--toast-surface)] px-4 py-2.5 text-sm text-[var(--toast-foreground)] shadow-lg">
-          {toast}
-        </div>
-      )}
 
       <Card className="p-5 space-y-4">
         <div>
@@ -171,8 +158,8 @@ export default function AccountPage() {
           </h2>
           <p className="mt-1 text-sm text-[var(--muted)]">
             {hasPassword
-              ? "You'll be signed out of all other active sessions after changing your password."
-              : "You signed in with a one-time code so far. Set a password to also sign in that way."}
+              ? "You'll be signed out everywhere, including here, after changing your password."
+              : "You signed in with a one-time code so far. Set a password to also sign in that way — you'll be signed out everywhere afterward, so you can sign back in with it."}
           </p>
         </div>
 

@@ -245,10 +245,28 @@ export class PlanLimitsService {
     });
   }
 
-  async assertStorageAvailable(organizationId: string, incomingBytes: number): Promise<void> {
+  /**
+   * Whether an upload of `incomingBytes` fits, WITHOUT throwing when it doesn't.
+   *
+   * Split out of assertStorageAvailable for the automation ingest (Basecamp 10189985971 §5), which
+   * needs the opposite outcome to every other upload path: "at 100% of quota, new evidence uploads
+   * are skipped going forward, but the pass/fail/skip result itself still records normally — a full
+   * quota must never block test result reporting, only evidence attachment." A CI pipeline that
+   * loses its screenshots is inconvenienced; one that loses its results is broken, and a workspace
+   * that quietly stops recording test outcomes because someone uploaded a large video is a far
+   * worse failure than a missing screenshot.
+   *
+   * Same computation, same thresholds, same warning email as the throwing version — which now
+   * delegates here, so the two can never drift apart.
+   */
+  async checkStorageAvailable(
+    organizationId: string,
+    incomingBytes: number
+  ): Promise<{ allowed: boolean; reason: string | null; usedBytes: number; limitBytes: number }> {
     const { effectivePlan, plan } = await this.getEntitlement(organizationId);
     const limit = STORAGE_LIMITS_BYTES[effectivePlan];
     const used = await this.getStorageUsedBytes(organizationId);
+
     if (used + incomingBytes > limit) {
       if (plan === "launch" && effectivePlan === "launch") await this.notifyGraceEndedOnce(organizationId);
       // A Pro workspace is already on the largest plan, so "upgrade" is not an answer — point it at
@@ -257,14 +275,23 @@ export class PlanLimitsService {
         effectivePlan === "pro"
           ? ` You're on our largest plan — contact ${this.config.supportContactEmail} to add more storage.`
           : " Upgrade to Pro for 5GB of storage.";
-      throw new ForbiddenException({
-        error: `This upload would exceed your workspace's ${formatBytes(limit)} storage limit.${nextStep}`
-      });
+      return {
+        allowed: false,
+        reason: `This upload would exceed your workspace's ${formatBytes(limit)} storage limit.${nextStep}`,
+        usedBytes: used,
+        limitBytes: limit
+      };
     }
 
     // Warn on the way up, after confirming the upload fits, so the owner hears about 80% before
     // they hit the wall at 100%.
     await this.maybeWarnStorage(organizationId, used + incomingBytes, limit, effectivePlan === "pro");
+    return { allowed: true, reason: null, usedBytes: used, limitBytes: limit };
+  }
+
+  async assertStorageAvailable(organizationId: string, incomingBytes: number): Promise<void> {
+    const check = await this.checkStorageAvailable(organizationId, incomingBytes);
+    if (!check.allowed) throw new ForbiddenException({ error: check.reason });
   }
 
   /**
