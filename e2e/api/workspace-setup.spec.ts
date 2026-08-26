@@ -54,7 +54,7 @@ test.describe("workspace setup and analytics", () => {
 
   // ─── First workspace ───────────────────────────────────────────────────────
 
-  test("a user with no workspace can create their first one and owns it", async () => {
+  test("a user with no workspace can create their first one and owns it", { tag: '@tesbo.testId("TES-TC-583")' }, async () => {
     const email = testAddress("setup-newuser");
     const user = seedFixtureUser(email, "E2E Fresh User");
     const api = await loginAs(user);
@@ -90,7 +90,7 @@ test.describe("workspace setup and analytics", () => {
     }
   });
 
-  test("creating a workspace requires a name", async () => {
+  test("creating a workspace requires a name", { tag: '@tesbo.testId("TES-TC-584")' }, async () => {
     const email = testAddress("setup-noname");
     const user = seedFixtureUser(email, "E2E No Name User");
     const api = await loginAs(user);
@@ -107,7 +107,7 @@ test.describe("workspace setup and analytics", () => {
     }
   });
 
-  test("creating a workspace needs a session", async () => {
+  test("creating a workspace needs a session", { tag: '@tesbo.testId("TES-TC-585")' }, async () => {
     const res = await anon.post("/api/onboarding/workspace", {
       data: { orgName: `E2E Anon Workspace ${Date.now()}` },
       failOnStatusCode: false,
@@ -117,7 +117,7 @@ test.describe("workspace setup and analytics", () => {
 
   // ─── Workspace analytics ───────────────────────────────────────────────────
 
-  test("workspace analytics reports coherent totals for the whole workspace", async () => {
+  test("workspace analytics reports coherent totals for the whole workspace", { tag: '@tesbo.testId("TES-TC-586")' }, async () => {
     const res = await asOwner.get("/api/workspace/analytics");
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
@@ -154,7 +154,7 @@ test.describe("workspace setup and analytics", () => {
     expect(summed).toBe(body.executionTotal);
   });
 
-  test("workspace analytics counts a new project, and stops counting an archived one", async () => {
+  test("workspace analytics counts a new project, and stops counting an archived one", { tag: '@tesbo.testId("TES-TC-587")' }, async () => {
     const suffix = Date.now().toString().slice(-8);
     const before = await (await asOwner.get("/api/workspace/analytics")).json();
 
@@ -178,7 +178,7 @@ test.describe("workspace setup and analytics", () => {
     expect(after.projectCount).toBe(before.projectCount);
   });
 
-  test("workspace analytics needs a session", async () => {
+  test("workspace analytics needs a session", { tag: '@tesbo.testId("TES-TC-588")' }, async () => {
     const res = await anon.get("/api/workspace/analytics", { failOnStatusCode: false });
     expect([400, 401]).toContain(res.status());
   });
@@ -215,7 +215,7 @@ test.describe("workspace setup and analytics", () => {
     return Number(scalar(`SELECT COUNT(*) FROM suites WHERE project_id = ${literal(projectId)};`));
   }
 
-  test("WSA-A-01 the Projects tile counts the same projects the projects list shows", async () => {
+  test("WSA-A-01 the Projects tile counts the same projects the projects list shows", { tag: '@tesbo.testId("TES-TC-977")' }, async () => {
     // A project in this workspace that the owner is deliberately not a member of.
     const created = await asOwner.post("/api/projects", {
       data: { name: `E2E Unjoined Project ${Date.now()}` },
@@ -256,7 +256,7 @@ test.describe("workspace setup and analytics", () => {
     }
   });
 
-  test("WSA-A-02 the Suites and Test cases tiles exclude projects the caller cannot open", async () => {
+  test("WSA-A-02 the Suites and Test cases tiles exclude projects the caller cannot open", { tag: '@tesbo.testId("TES-TC-978")' }, async () => {
     const created = await asOwner.post("/api/projects", {
       data: { name: `E2E Unjoined Counted ${Date.now()}` },
       failOnStatusCode: false,

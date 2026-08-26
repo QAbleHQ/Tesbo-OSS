@@ -48,6 +48,7 @@ test.describe("workspace dashboard — reported tickets", () => {
 
   test(
     ticket("REG-DSH-01", "10226480729", "the workspace dashboard tiles match the vocabulary the rest of the app uses"),
+    { tag: '@tesbo.testId("TES-TC-1290")' },
     async ({ page }) => {
       /*
        * The card asked for "Total Suites", "Test Plans" and "Test Runs", and it was right to: the
@@ -68,6 +69,7 @@ test.describe("workspace dashboard — reported tickets", () => {
 
   test(
     ticket("REG-DSH-02", "10221720616", "the workspace execution bars are painted in a visible status colour"),
+    { tag: '@tesbo.testId("TES-TC-1291")' },
     async ({ page }) => {
       /*
        * The breakdown painted each bar with the same class it used for the status BADGE — a hardcoded
@@ -123,6 +125,7 @@ test.describe("projects list — the list view reports failures", () => {
 
   test(
     ticket("REG-PRJ-01", "10221710841", "a project with failures shows a failed segment and count in the list row"),
+    { tag: '@tesbo.testId("TES-TC-1292")' },
     async ({ page }) => {
       /*
        * The grid card has always carried the full breakdown — a segmented bar plus "N passed · N

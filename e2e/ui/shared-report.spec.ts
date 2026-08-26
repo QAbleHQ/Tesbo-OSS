@@ -199,7 +199,7 @@ function describeRing(ring: (BucketLabel | null)[]) {
 }
 
 test.describe("public shared run report", () => {
-  test("SRP-01 the donut closes the full ring, one arc per bucket, sized to its share", async ({ page }) => {
+  test("SRP-01 the donut closes the full ring, one arc per bucket, sized to its share", { tag: '@tesbo.testId("TES-TC-1067")' }, async ({ page }) => {
     // The reported mix: 15 cases as 6 Passed / 2 Failed / 1 Skipped / 2 Blocked / 4 Pending.
     const counts = { Passed: 6, Failed: 2, Skipped: 1, Blocked: 2, Pending: 4 } as const;
     let seeded: SharedRun | null = null;
@@ -260,7 +260,7 @@ test.describe("public shared run report", () => {
     }
   });
 
-  test("SRP-02 a run with one status paints the whole ring in that colour", async ({ page }) => {
+  test("SRP-02 a run with one status paints the whole ring in that colour", { tag: '@tesbo.testId("TES-TC-1068")' }, async ({ page }) => {
     // The boundary the buggy formula came closest to getting right, and the one where a fix that
     // computes the gap as C - dash has to cope with a zero-length gap.
     let seeded: SharedRun | null = null;
@@ -282,7 +282,7 @@ test.describe("public shared run report", () => {
     }
   });
 
-  test("SRP-03 a single case out of fifteen gets a proportional arc, not an inflated one", async ({ page }) => {
+  test("SRP-03 a single case out of fifteen gets a proportional arc, not an inflated one", { tag: '@tesbo.testId("TES-TC-1069")' }, async ({ page }) => {
     // 1/15 = 6.67% = 24 of 360 samples. With strokeLinecap="round" this slice painted ~11% of the
     // ring and ate into its neighbour, so this is the cap regression on its own.
     let seeded: SharedRun | null = null;
@@ -300,7 +300,7 @@ test.describe("public shared run report", () => {
     }
   });
 
-  test("SRP-04 a shared run with no cases shows the No data ring and charts nothing", async ({ page }) => {
+  test("SRP-04 a shared run with no cases shows the No data ring and charts nothing", { tag: '@tesbo.testId("TES-TC-1070")' }, async ({ page }) => {
     let seeded: SharedRun | null = null;
     try {
       seeded = await seedSharedRun({});
@@ -317,7 +317,7 @@ test.describe("public shared run report", () => {
     }
   });
 
-  test("SRP-05 a revoked or unknown token shows the unavailable message and no chart", async ({ page }) => {
+  test("SRP-05 a revoked or unknown token shows the unavailable message and no chart", { tag: '@tesbo.testId("TES-TC-1071")' }, async ({ page }) => {
     let seeded: SharedRun | null = null;
     try {
       seeded = await seedSharedRun({ Passed: 2, Failed: 1 });

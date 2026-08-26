@@ -67,7 +67,7 @@ test.describe("bug evidence validation", () => {
     test.skip(skipReason !== null, skipReason ?? "");
   });
 
-  test("BUG-U-01 the picker advertises the types it accepts", async ({ page }) => {
+  test("BUG-U-01 the picker advertises the types it accepts", { tag: '@tesbo.testId("TES-TC-1311")' }, async ({ page }) => {
     await openReportModal(page, projectId);
     // Advisory only — the dialog can always be switched to "All files" — but without it the OS
     // picker offers no guidance at all, which is half of why unsupported files were being chosen.
@@ -78,7 +78,7 @@ test.describe("bug evidence validation", () => {
     expect(accept).not.toContain(".exe");
   });
 
-  test("BUG-U-02 an unsupported file is named and refused without being staged", async ({ page }) => {
+  test("BUG-U-02 an unsupported file is named and refused without being staged", { tag: '@tesbo.testId("TES-TC-1312")' }, async ({ page }) => {
     await openReportModal(page, projectId);
     await fileInput(page).setInputFiles({
       name: "malware.exe",
@@ -94,7 +94,7 @@ test.describe("bug evidence validation", () => {
     await expect(page.getByText("malware.exe", { exact: true })).toHaveCount(0);
   });
 
-  test("BUG-U-03 an oversized file is refused with the limit, before any upload", async ({ page }) => {
+  test("BUG-U-03 an oversized file is refused with the limit, before any upload", { tag: '@tesbo.testId("TES-TC-1313")' }, async ({ page }) => {
     await openReportModal(page, projectId);
 
     // Nothing should reach the API: the point of the client-side check is that a 26MB file is never
@@ -118,7 +118,7 @@ test.describe("bug evidence validation", () => {
     expect(uploadAttempted, "an oversized file must not be uploaded before it is rejected").toBeFalsy();
   });
 
-  test("BUG-U-04 a mixed selection keeps the good files and drops only the bad one", async ({ page }) => {
+  test("BUG-U-04 a mixed selection keeps the good files and drops only the bad one", { tag: '@tesbo.testId("TES-TC-1314")' }, async ({ page }) => {
     await openReportModal(page, projectId);
     await fileInput(page).setInputFiles([
       { name: "shot-a.png", mimeType: "image/png", buffer: Buffer.from("a") },
@@ -132,7 +132,7 @@ test.describe("bug evidence validation", () => {
     await expect(page.getByText("shot-b.png")).toBeVisible();
   });
 
-  test("BUG-U-05 a server-side rejection is shown, and the button leaves Saving", async ({ page }) => {
+  test("BUG-U-05 a server-side rejection is shown, and the button leaves Saving", { tag: '@tesbo.testId("TES-TC-1315")' }, async ({ page }) => {
     /*
      * The original defect, reproduced from the other side: the client check is bypassed here (the
      * file is a perfectly valid PNG) and the API is made to refuse the upload. Before the fix the
@@ -211,7 +211,7 @@ test.describe("bugs list — controls and filters", () => {
     await expect(page.getByRole("columnheader", { name: "Severity" })).toBeVisible();
   });
 
-  test("BUG-U-06 the row's edit and delete controls are labelled and legibly sized", async ({ page }) => {
+  test("BUG-U-06 the row's edit and delete controls are labelled and legibly sized", { tag: '@tesbo.testId("TES-TC-1316")' }, async ({ page }) => {
     const edit = page.getByRole("button", { name: "Edit bug" }).first();
     const del = page.getByRole("button", { name: "Delete bug" }).first();
 
@@ -237,7 +237,7 @@ test.describe("bugs list — controls and filters", () => {
     expect(deleteColor, "delete should be distinguishable from edit by colour").not.toBe(editColor);
   });
 
-  test("BUG-U-07 a long title is clamped and carries its full text as a tooltip", async ({ page }) => {
+  test("BUG-U-07 a long title is clamped and carries its full text as a tooltip", { tag: '@tesbo.testId("TES-TC-1317")' }, async ({ page }) => {
     const title = page.locator("td span[title]").filter({ hasText: "E2E long bug title" }).first();
     await expect(title).toBeVisible();
 
@@ -250,7 +250,7 @@ test.describe("bugs list — controls and filters", () => {
     expect(box!.height, "the title cell should be clamped, not six lines tall").toBeLessThanOrEqual(lineHeight * 2.6);
   });
 
-  test("BUG-U-08 the severity filter narrows the list and clears back", async ({ page }) => {
+  test("BUG-U-08 the severity filter narrows the list and clears back", { tag: '@tesbo.testId("TES-TC-1318")' }, async ({ page }) => {
     const rows = page.locator("tbody tr");
     const before = await rows.count();
     expect(before, "the fixture seeds two bugs of different severities").toBeGreaterThanOrEqual(2);
@@ -264,7 +264,7 @@ test.describe("bugs list — controls and filters", () => {
     await expect(rows).toHaveCount(before);
   });
 
-  test("BUG-U-09 the severity filter is available on the board too", async ({ page }) => {
+  test("BUG-U-09 the severity filter is available on the board too", { tag: '@tesbo.testId("TES-TC-1319")' }, async ({ page }) => {
     // Neither filter is gated on the view: both feed the same `filtered` list, which the board's
     // columns are built from as well (see BUG-U-14 below). "Show me the Critical ones" is exactly
     // what the board is for.
@@ -276,7 +276,7 @@ test.describe("bugs list — controls and filters", () => {
     await expect(page.getByText("E2E long bug title")).toHaveCount(0);
   });
 
-  test("BUG-U-10 the edit modal scrolls to its own footer instead of the page behind it", async ({ page }) => {
+  test("BUG-U-10 the edit modal scrolls to its own footer instead of the page behind it", { tag: '@tesbo.testId("TES-TC-1320")' }, async ({ page }) => {
     /*
      * Basecamp 10217828537 — "Bug edit pop up is not scrollable thus not able to update bug". Fixed
      * upstream in components/ui/Modal.tsx (dev commit e95da92) by locking the app-shell scroller and
@@ -341,7 +341,7 @@ test.describe("bug priority", () => {
     await expect(page.getByRole("columnheader", { name: "Priority" })).toBeVisible();
   });
 
-  test("BUG-U-11 the list shows a priority per bug, and an em dash when untriaged", async ({ page }) => {
+  test("BUG-U-11 the list shows a priority per bug, and an em dash when untriaged", { tag: '@tesbo.testId("TES-TC-1321")' }, async ({ page }) => {
     const triagedRow = page.locator("tbody tr").filter({ hasText: triagedTitle });
     await expect(triagedRow.getByText("P1", { exact: true })).toBeVisible();
 
@@ -351,7 +351,7 @@ test.describe("bug priority", () => {
     await expect(untriagedRow.getByText(/^P[0-3]$/)).toHaveCount(0);
   });
 
-  test("BUG-U-12 the report form offers priority, defaulting to not set", async ({ page }) => {
+  test("BUG-U-12 the report form offers priority, defaulting to not set", { tag: '@tesbo.testId("TES-TC-1322")' }, async ({ page }) => {
     await page.getByRole("button", { name: /report a bug/i }).first().click();
     await expect(page.getByText("Report a Bug", { exact: true })).toBeVisible();
 
@@ -365,7 +365,7 @@ test.describe("bug priority", () => {
     }
   });
 
-  test("BUG-U-13 editing a bug changes its priority and can clear it again", async ({ page }) => {
+  test("BUG-U-13 editing a bug changes its priority and can clear it again", { tag: '@tesbo.testId("TES-TC-1323")' }, async ({ page }) => {
     const row = page.locator("tbody tr").filter({ hasText: triagedTitle });
     await row.getByRole("button", { name: "Edit bug" }).click();
 
@@ -475,7 +475,7 @@ test.describe("bugs — status filter and search consistency across Board and Li
     for (const id of ids) await api.delete(`/api/bugs/${id}`, { failOnStatusCode: false });
   }
 
-  test("BUG-U-14 a status filter applied in List stays visible and applied after switching to Board", async ({
+  test("BUG-U-14 a status filter applied in List stays visible and applied after switching to Board", { tag: '@tesbo.testId("TES-TC-1324")' }, async ({
     page,
   }) => {
     const { openTitle, inProgressTitle, ids } = await seedPair();
@@ -505,7 +505,7 @@ test.describe("bugs — status filter and search consistency across Board and Li
     }
   });
 
-  test("BUG-U-15 the filter round-trips back to List unchanged", async ({ page }) => {
+  test("BUG-U-15 the filter round-trips back to List unchanged", { tag: '@tesbo.testId("TES-TC-1325")' }, async ({ page }) => {
     const { openTitle, inProgressTitle, ids } = await seedPair();
     try {
       await page.goto(`/projects/${projectId}/bugs`);
@@ -525,7 +525,7 @@ test.describe("bugs — status filter and search consistency across Board and Li
     }
   });
 
-  test("BUG-U-16 a filter that excludes both bugs hides them in both views", async ({ page }) => {
+  test("BUG-U-16 a filter that excludes both bugs hides them in both views", { tag: '@tesbo.testId("TES-TC-1326")' }, async ({ page }) => {
     const { openTitle, inProgressTitle, ids } = await seedPair();
     try {
       await page.goto(`/projects/${projectId}/bugs`);
@@ -544,7 +544,7 @@ test.describe("bugs — status filter and search consistency across Board and Li
     }
   });
 
-  test("BUG-U-17 clearing the filter back to All Statuses from Board restores both bugs", async ({ page }) => {
+  test("BUG-U-17 clearing the filter back to All Statuses from Board restores both bugs", { tag: '@tesbo.testId("TES-TC-1327")' }, async ({ page }) => {
     const { openTitle, inProgressTitle, ids } = await seedPair();
     try {
       await page.goto(`/projects/${projectId}/bugs`);
@@ -563,7 +563,7 @@ test.describe("bugs — status filter and search consistency across Board and Li
     }
   });
 
-  test("BUG-U-18 a search term persists and keeps filtering after switching views", async ({ page }) => {
+  test("BUG-U-18 a search term persists and keeps filtering after switching views", { tag: '@tesbo.testId("TES-TC-1328")' }, async ({ page }) => {
     const suffix = uniqueSuffix();
     const wantedTitle = `E2E Bug Search ${suffix}`;
     const otherTitle = `E2E Bug Search Other ${suffix}`;

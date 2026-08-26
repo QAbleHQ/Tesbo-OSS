@@ -41,6 +41,7 @@ import {
 test.describe("test plan runs — reported tickets", () => {
   test(
     ticket("REG-PLAN-01", "10221925706", "the picker offers an unlinked run instead of claiming there are none"),
+    { tag: '@tesbo.testId("TES-TC-1295")' },
     async ({ page }) => {
       const api = await apiContext();
       const projectId = accountA().projectId;
@@ -84,6 +85,7 @@ test.describe("test plan runs — reported tickets", () => {
 
   test(
     ticket("REG-PLAN-02", "10221925706", "a linked run shows on the plan and is excluded from the picker"),
+    { tag: '@tesbo.testId("TES-TC-1296")' },
     async ({ page }) => {
       /*
        * The other direction, and the one that keeps REG-PLAN-01 honest: the message itself is correct
@@ -170,6 +172,7 @@ function runRow(page: Page, name: string): Locator {
 test.describe("test plan detail — progress, counts and editing", () => {
   test(
     ticket("REG-PLAN-03", "10213208002", "the progress header equals the sum of the runs listed beneath it"),
+    { tag: '@tesbo.testId("TES-TC-1297")' },
     async ({ page }) => {
       /*
        * "Test plan: Overall progress percentage not matching", reported as the header disagreeing
@@ -239,6 +242,7 @@ test.describe("test plan detail — progress, counts and editing", () => {
 
   test(
     ticket("REG-PLAN-04", "10221932189", "the header's test case count is the plan's actual cases, not its pinned items"),
+    { tag: '@tesbo.testId("TES-TC-1298")' },
     async ({ page }) => {
       /*
        * The header chip counted pinned plan_items while the panel below counted the cases in the
@@ -268,6 +272,7 @@ test.describe("test plan detail — progress, counts and editing", () => {
 
   test(
     ticket("REG-PLAN-05", "10221983132", "the empty Plan items tab explains where the plan's cases come from"),
+    { tag: '@tesbo.testId("TES-TC-1299")' },
     async ({ page }) => {
       /*
        * "Plan items shows 0 count and message 'no planed items'". The count was accurate — nothing
@@ -297,6 +302,7 @@ test.describe("test plan detail — progress, counts and editing", () => {
 
   test(
     ticket("REG-PLAN-06", "10221977100", "the inline edit form labels every field"),
+    { tag: '@tesbo.testId("TES-TC-1300")' },
     async ({ page }) => {
       const api = await apiContext();
       const projectId = accountA().projectId;

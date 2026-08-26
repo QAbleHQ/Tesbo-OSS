@@ -186,7 +186,7 @@ test.describe("test case repository (UI)", () => {
 
   // ─── The counters after a delete ───────────────────────────────────────────
 
-  test("TCR-01 every counter on the screen agrees before anything is deleted", async ({ browser }) => {
+  test("TCR-01 every counter on the screen agrees before anything is deleted", { tag: '@tesbo.testId("TES-TC-1072")' }, async ({ browser }) => {
     const suiteName = stamp("CountSuite");
     const suiteId = await seedSuite(suiteName);
     const titles = [stamp("CountA"), stamp("CountB"), stamp("CountC")];
@@ -201,7 +201,7 @@ test.describe("test case repository (UI)", () => {
     await expect(pagination(page)).toContainText("3 results");
   });
 
-  test("TCR-02 deleting one test case decrements every counter", async ({ browser }) => {
+  test("TCR-02 deleting one test case decrements every counter", { tag: '@tesbo.testId("TES-TC-1073")' }, async ({ browser }) => {
     const suiteId = await seedSuite(stamp("DeleteOneSuite"));
     const titles = [stamp("DelA"), stamp("DelB"), stamp("DelC")];
     for (const title of titles) await seedCase(title, { suiteId, status: "Approved" });
@@ -221,7 +221,7 @@ test.describe("test case repository (UI)", () => {
     expect(storedCaseCount(), "and the screen agrees with the database").toBe(2);
   });
 
-  test("TCR-03 a bulk delete decrements every counter by the number removed", async ({ browser }) => {
+  test("TCR-03 a bulk delete decrements every counter by the number removed", { tag: '@tesbo.testId("TES-TC-1074")' }, async ({ browser }) => {
     const suiteId = await seedSuite(stamp("BulkDeleteSuite"));
     const titles = [stamp("BulkA"), stamp("BulkB"), stamp("BulkC"), stamp("BulkD"), stamp("BulkE")];
     for (const title of titles) await seedCase(title, { suiteId, status: "Approved" });
@@ -239,7 +239,7 @@ test.describe("test case repository (UI)", () => {
     for (const kept of titles.slice(3)) await expect(row(page, kept)).toBeVisible();
   });
 
-  test("TCR-04 the suite tree's count follows a delete too", async ({ browser }) => {
+  test("TCR-04 the suite tree's count follows a delete too", { tag: '@tesbo.testId("TES-TC-1075")' }, async ({ browser }) => {
     const suiteName = stamp("TreeCountSuite");
     const suiteId = await seedSuite(suiteName);
     const titles = [stamp("TreeA"), stamp("TreeB"), stamp("TreeC")];
@@ -261,7 +261,7 @@ test.describe("test case repository (UI)", () => {
     await expect(page.getByText("All test cases").locator("..")).toContainText("1");
   });
 
-  test("TCR-05 the search box offers a control to clear it", async ({ browser }) => {
+  test("TCR-05 the search box offers a control to clear it", { tag: '@tesbo.testId("TES-TC-1076")' }, async ({ browser }) => {
     const titles = [stamp("ClearHit"), stamp("ClearMiss")];
     for (const title of titles) await seedCase(title);
 
@@ -294,7 +294,7 @@ test.describe("test case repository (UI)", () => {
 
   // ─── The column picker ─────────────────────────────────────────────────────
 
-  test("TCR-06 ID, title and priority cannot be switched off", async ({ browser }) => {
+  test("TCR-06 ID, title and priority cannot be switched off", { tag: '@tesbo.testId("TES-TC-1077")' }, async ({ browser }) => {
     await seedCase(stamp("ColumnsCase"));
     const page = await openRepository(browser);
 
@@ -312,7 +312,7 @@ test.describe("test case repository (UI)", () => {
     }
   });
 
-  test("TCR-07 the table can never be left with no data columns", async ({ browser }) => {
+  test("TCR-07 the table can never be left with no data columns", { tag: '@tesbo.testId("TES-TC-1078")' }, async ({ browser }) => {
     const title = stamp("NoBlankTable");
     await seedCase(title);
     const page = await openRepository(browser);
@@ -351,7 +351,7 @@ test.describe("test case repository (UI)", () => {
    *
    * TCR-08 fails against that code: the badge and the subtitle read 1 instead of 4.
    */
-  test("TCR-08 the repository counters include cases that belong to no suite", async ({ browser }) => {
+  test("TCR-08 the repository counters include cases that belong to no suite", { tag: '@tesbo.testId("TES-TC-1079")' }, async ({ browser }) => {
     const suiteName = stamp("FiledSuite");
     const suiteId = await seedSuite(suiteName);
     const filed = stamp("Filed");
@@ -397,7 +397,7 @@ test.describe("test case repository (UI)", () => {
    *
    * Fails against the old screen: there is no "No suites" node at all.
    */
-  test("TCR-09 a No suites node lists the cases that belong to no suite", async ({ browser }) => {
+  test("TCR-09 a No suites node lists the cases that belong to no suite", { tag: '@tesbo.testId("TES-TC-1080")' }, async ({ browser }) => {
     const suiteName = stamp("FiledSuite");
     const suiteId = await seedSuite(suiteName);
     const filed = stamp("Filed");
@@ -427,7 +427,7 @@ test.describe("test case repository (UI)", () => {
     );
   });
 
-  test("TCR-10 the No suites node disappears once every case is filed", async ({ browser }) => {
+  test("TCR-10 the No suites node disappears once every case is filed", { tag: '@tesbo.testId("TES-TC-1081")' }, async ({ browser }) => {
     // The node is only meaningful when something is unfiled; a tidy project should not gain an
     // empty row in its tree.
     const suiteId = await seedSuite(stamp("AllFiledSuite"));
@@ -447,7 +447,7 @@ test.describe("test case repository (UI)", () => {
    * above "30 results" is the same count confusion this screen was already reported for), and an
    * archived row must not look like a live one when it IS shown.
    */
-  test("TCR-11 archived cases are hidden by default, disclosed, and marked when shown", async ({
+  test("TCR-11 archived cases are hidden by default, disclosed, and marked when shown", { tag: '@tesbo.testId("TES-TC-1082")' }, async ({
     browser,
   }) => {
     const liveTitle = stamp("Live case");
@@ -492,7 +492,7 @@ test.describe("test case repository (UI)", () => {
    * COALESCEs an omitted one). TCR-12 fails against the old modal: the untouched fields come back
    * rewritten.
    */
-  test("TCR-12 a bulk edit changes only the field that was set, leaving the others alone", async ({
+  test("TCR-12 a bulk edit changes only the field that was set, leaving the others alone", { tag: '@tesbo.testId("TES-TC-1083")' }, async ({
     browser,
   }) => {
     const title = stamp("BulkScoped");
@@ -547,7 +547,7 @@ test.describe("test case repository (UI)", () => {
     ).toBe("Automated");
   });
 
-  test("TCR-13 a bulk edit can still set several fields at once when they are chosen", async ({
+  test("TCR-13 a bulk edit can still set several fields at once when they are chosen", { tag: '@tesbo.testId("TES-TC-1084")' }, async ({
     browser,
   }) => {
     // The opt-in default must not have cost the ability to change more than one field deliberately.

@@ -21,6 +21,7 @@ test.use({ storageState: { cookies: [], origins: [] } });
 test.describe("signup and login forms — reported tickets", () => {
   test(
     ticket("REG-AUTH-01", "10230858713", "required fields on the signup form are marked as required"),
+    { tag: '@tesbo.testId("TES-TC-1273")' },
     async ({ page }) => {
       /*
        * EXPECTED RED. app/signup/page.tsx renders each FieldLabel as bare text — "First name",
@@ -72,6 +73,7 @@ test.describe("signup and login forms — reported tickets", () => {
 
   test(
     ticket("REG-AUTH-02", "10230858713", "required fields on the login form are marked as required"),
+    { tag: '@tesbo.testId("TES-TC-1274")' },
     async ({ page }) => {
       // EXPECTED RED, same defect on the other form the card names. app/login/page.tsx labels
       // "Email" and "Password" the same bare way.
@@ -114,6 +116,7 @@ test.describe("signup and login forms — reported tickets", () => {
 
   test(
     ticket("REG-AUTH-03", "10230858713", "a rejected login reports the problem without leaving the form"),
+    { tag: '@tesbo.testId("TES-TC-1275")' },
     async ({ page }) => {
       /*
        * The second half of BetterBugs 6a7d6f64 — "inline validations should be available below

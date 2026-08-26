@@ -155,6 +155,7 @@ test.describe("zyra chat — reported tickets", () => {
 
   test(
     ticket("REG-ZYRA-01", "10231190735", "confirming a proposed change either carries it out or does not claim it did"),
+    { tag: '@tesbo.testId("TES-TC-1263")' },
     async () => {
       /*
        * The reporter's exact sequence, and the sharpest form of the defect. Zyra proposed archiving
@@ -190,6 +191,7 @@ test.describe("zyra chat — reported tickets", () => {
 
   test(
     ticket("REG-ZYRA-02", "10231274688", "a second request in the same session is not reported as created unless it was"),
+    { tag: '@tesbo.testId("TES-TC-1264")' },
     async () => {
       /*
        * Card 10231274688: the first request really did create ten cases; a second request in the SAME
@@ -228,6 +230,7 @@ test.describe("zyra chat — reported tickets", () => {
 
   test(
     ticket("REG-ZYRA-03", "10231965612", "no turn puts a parser diagnostic in front of the user"),
+    { tag: '@tesbo.testId("TES-TC-1265")' },
     async () => {
       /*
        * "⚠️ I couldn't produce the test cases this time (AI testcase generation returned invalid
@@ -263,6 +266,7 @@ test.describe("zyra chat — reported tickets", () => {
 
   test(
     ticket("REG-ZYRA-04", "10231923903", "an ungrounded request is answered once, not with a failure and a success"),
+    { tag: '@tesbo.testId("TES-TC-1266")' },
     async () => {
       /*
        * The reporter's own prompt, against a project whose knowledge base has no such feature. What

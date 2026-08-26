@@ -11,10 +11,13 @@ import type {
 import { TesboClient, type ResultBody } from "./client";
 import { detectRunSource } from "./ci";
 import { extractCaseId, tesboTag } from "./tag";
+import { resolveConfig } from "./config";
 
 export { tesboTag } from "./tag";
 export { TesboClient } from "./client";
 export { detectRunSource } from "./ci";
+export { resolveConfig, normalizeBaseUrl, maskToken } from "./config";
+export type { TesboConfigInput, ResolvedTesboConfig, ConfigResolution } from "./config";
 
 /**
  * Tesbo reporter for Playwright — Basecamp 10189985971, build sequence item 2.
@@ -23,7 +26,7 @@ export { detectRunSource } from "./ci";
  *
  *     reporter: [
  *       ['list'],
- *       ['@tesbo/playwright-reporter', { projectId: process.env.TESBO_PROJECT_ID }],
+ *       ['@tesbox/playwright-reporter', { projectId: process.env.TESBO_PROJECT_ID }],
  *     ]
  *
  * and tag each test with the case it validates:
@@ -48,7 +51,13 @@ export interface TesboReporterOptions {
   projectId?: string;
   /** Project API token (`tsbo_...`). Defaults to `TESBO_API_TOKEN`. Never hard-code it. */
   token?: string;
-  /** Tesbo base URL. Defaults to `TESBO_BASE_URL`, then `https://app.tesbo.io`. */
+  /**
+   * Tesbo API base URL, e.g. `https://api-app.tesbo.io`. Defaults to `TESBO_BASE_URL`.
+   *
+   * **No fallback default.** It used to default to `https://app.tesbo.io` — the web app, not the
+   * API — which 404'd every ingest call while the suite stayed green, because the client logs
+   * failures rather than throwing. There is also no correct default for a self-hosted install.
+   */
   baseUrl?: string;
   /** Run name. Defaults to a name derived from the CI context. */
   runName?: string;
@@ -65,6 +74,14 @@ export interface TesboReporterOptions {
   strict?: boolean;
   /** Which results get evidence. 'failed' (default) matches §5; 'always' costs storage. */
   attachEvidence?: "failed" | "always" | "never";
+  /**
+   * Treat a completely unconfigured environment as an error instead of an opt-out.
+   *
+   * Off by default so a fork's pull request build, which has no secrets, keeps working — card §7.
+   * A *partially* configured environment is always a hard failure regardless of this flag: that is
+   * a typo or a secret that did not reach the runner, never a deliberate choice.
+   */
+  requireConfig?: boolean;
   /** Disable entirely without editing the config — e.g. on a fork's PR with no token. */
   enabled?: boolean;
   timeoutMs?: number;
@@ -143,13 +160,6 @@ export default class TesboReporter implements Reporter {
     return true;
   }
 
-  private resolveConfig() {
-    const projectId = this.options.projectId ?? process.env.TESBO_PROJECT_ID;
-    const token = this.options.token ?? process.env.TESBO_API_TOKEN;
-    const baseUrl = this.options.baseUrl ?? process.env.TESBO_BASE_URL ?? "https://app.tesbo.io";
-    return { projectId, token, baseUrl };
-  }
-
   /**
    * Opens the run and validates the suite's case ids.
    *
@@ -160,14 +170,29 @@ export default class TesboReporter implements Reporter {
    */
   async onBegin(config: FullConfig, suite: Suite): Promise<void> {
     if (!this.enabled) return;
-    const { projectId, token, baseUrl } = this.resolveConfig();
 
-    if (!projectId || !token) {
-      // Missing credentials is a configuration state, not an error: a fork's PR build legitimately
-      // has no token. Say so once and stay out of the way rather than failing the suite.
-      this.disable("TESBO_PROJECT_ID and TESBO_API_TOKEN are not both set — results will not be reported to Tesbo.");
+    /*
+     * Three outcomes, not two — see the ConfigResolution doc in config.ts.
+     *
+     * `incomplete` and `invalid` throw here even when `requireConfig` is off, and that is the point
+     * of separating them from `unconfigured`: somebody who set two of the three values meant to
+     * report, so silently reporting nothing and exiting 0 hides their typo indefinitely. Only the
+     * genuinely-unconfigured case is allowed to degrade quietly.
+     */
+    const resolution = resolveConfig(this.options);
+    if (resolution.state === "incomplete" || resolution.state === "invalid") {
+      throw new Error(`[tesbo] ${resolution.message}`);
+    }
+    if (resolution.state === "unconfigured") {
+      if (this.options.requireConfig) throw new Error(`[tesbo] ${resolution.message}`);
+      this.disable(resolution.message);
       return;
     }
+
+    const { baseUrl, projectId, token } = resolution.config;
+    // Notes are how a forgiving baseUrl stays honest: anything that was trimmed, inferred or looks
+    // suspicious is stated rather than applied silently.
+    for (const note of resolution.notes) console.warn(`[tesbo] ${note}`);
 
     this.client = new TesboClient({
       baseUrl,

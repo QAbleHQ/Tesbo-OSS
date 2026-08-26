@@ -19,6 +19,7 @@ import { ticket } from "../fixtures";
 test.describe("app shell — reported tickets", () => {
   test(
     ticket("REG-SHELL-01", "10230849105", "logging out asks for confirmation before ending the session"),
+    { tag: '@tesbo.testId("TES-TC-1269")' },
     async ({ page }) => {
       /*
        * EXPECTED RED. Sidebar.tsx wires the button straight to onLogout() — there is no dialog on
@@ -69,6 +70,7 @@ test.describe("app shell — reported tickets", () => {
 
   test(
     ticket("REG-SHELL-02", "10230848426", "the project search box offers a control to clear what was typed"),
+    { tag: '@tesbo.testId("TES-TC-1270")' },
     async ({ page }) => {
       /*
        * EXPECTED RED. TopBar.tsx renders the ⌘K hint only while the box is empty and puts nothing in
@@ -95,6 +97,7 @@ test.describe("app shell — reported tickets", () => {
 
   test(
     ticket("REG-SHELL-03", "10230848426", "the search shortcut works on a non-Mac keyboard"),
+    { tag: '@tesbo.testId("TES-TC-1271")' },
     async ({ page }) => {
       /*
        * The other half of card 10230848426, and this half is GREEN — worth pinning precisely because
@@ -117,6 +120,7 @@ test.describe("app shell — reported tickets", () => {
 
   test(
     ticket("REG-SHELL-04", "10230846264", "moving between sidebar sections never blanks the app shell"),
+    { tag: '@tesbo.testId("TES-TC-1272")' },
     async ({ page }) => {
       /*
        * Card 10230846264 reports a blank "Loading..." screen for 2–3 seconds when switching sidebar

@@ -176,7 +176,7 @@ test.describe("zyra / agents (UI)", () => {
 
   // ─── The agent picker ──────────────────────────────────────────────────────
 
-  test("ZYU-01 the agent picker offers Zyra and marks the two planned agents unavailable", async ({
+  test("ZYU-01 the agent picker offers Zyra and marks the two planned agents unavailable", { tag: '@tesbo.testId("TES-TC-1086")' }, async ({
     browser,
   }) => {
     const page = await open(browser, "/agents");
@@ -192,7 +192,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByText("Not yet available")).toHaveCount(2);
   });
 
-  test("ZYU-02 the Zyra card opens a detail modal that routes to the workspace and the board", async ({
+  test("ZYU-02 the Zyra card opens a detail modal that routes to the workspace and the board", { tag: '@tesbo.testId("TES-TC-1087")' }, async ({
     browser,
   }) => {
     const page = await open(browser, "/agents");
@@ -211,7 +211,7 @@ test.describe("zyra / agents (UI)", () => {
 
   // ─── The unconfigured-provider state, which is most workspaces ─────────────
 
-  test("ZYU-03 the chat says the provider is not connected and points at where to fix it", async ({
+  test("ZYU-03 the chat says the provider is not connected and points at where to fix it", { tag: '@tesbo.testId("TES-TC-1088")' }, async ({
     browser,
   }) => {
     const page = await open(browser, "/agents/zyra");
@@ -225,7 +225,7 @@ test.describe("zyra / agents (UI)", () => {
     );
   });
 
-  test("ZYU-04 settings reports the missing key and links to the workspace providers page", async ({
+  test("ZYU-04 settings reports the missing key and links to the workspace providers page", { tag: '@tesbo.testId("TES-TC-1089")' }, async ({
     browser,
   }) => {
     const page = await open(browser, "/agents/zyra/settings");
@@ -239,7 +239,7 @@ test.describe("zyra / agents (UI)", () => {
     );
   });
 
-  test("ZYU-05 the board's Create task is disabled without a provider", async ({ browser }) => {
+  test("ZYU-05 the board's Create task is disabled without a provider", { tag: '@tesbo.testId("TES-TC-1090")' }, async ({ browser }) => {
     const page = await open(browser, "/agents/tasks");
 
     // The gate is on the control, not only in the API: a workspace with no key cannot start a task
@@ -249,7 +249,7 @@ test.describe("zyra / agents (UI)", () => {
 
   // ─── Settings that are ours, not the model's ───────────────────────────────
 
-  test("ZYU-06 a capability toggle persists across a reload", async ({ browser }) => {
+  test("ZYU-06 a capability toggle persists across a reload", { tag: '@tesbo.testId("TES-TC-1091")' }, async ({ browser }) => {
     const page = await open(browser, "/agents/zyra/settings");
 
     const knowledgeBase = page.getByRole("switch").nth(1);
@@ -266,7 +266,7 @@ test.describe("zyra / agents (UI)", () => {
     ).not.toBeChecked();
   });
 
-  test("ZYU-07 the test-cases-per-task choice persists across a reload", async ({ browser }) => {
+  test("ZYU-07 the test-cases-per-task choice persists across a reload", { tag: '@tesbo.testId("TES-TC-1092")' }, async ({ browser }) => {
     const page = await open(browser, "/agents/zyra/settings");
 
     await page.getByRole("button", { name: /10–30 Broad/ }).click();
@@ -287,7 +287,7 @@ test.describe("zyra / agents (UI)", () => {
     expect(state.settings.testcaseRange, "the choice is persisted, not just rendered").toBe("10-30");
   });
 
-  test("ZYU-08 reset to defaults puts every capability back on", async ({ browser }) => {
+  test("ZYU-08 reset to defaults puts every capability back on", { tag: '@tesbo.testId("TES-TC-1093")' }, async ({ browser }) => {
     const page = await open(browser, "/agents/zyra/settings");
 
     const first = page.getByRole("switch").first();
@@ -304,14 +304,14 @@ test.describe("zyra / agents (UI)", () => {
 
   // ─── The task board ────────────────────────────────────────────────────────
 
-  test("ZYU-09 a project with no tasks says so rather than rendering an empty table", async ({
+  test("ZYU-09 a project with no tasks says so rather than rendering an empty table", { tag: '@tesbo.testId("TES-TC-1094")' }, async ({
     browser,
   }) => {
     const page = await open(browser, "/agents/tasks");
     await expect(page.getByText("No tasks in queue")).toBeVisible();
   });
 
-  test("ZYU-10 a task appears on the board with its status, draft count and token total", async ({
+  test("ZYU-10 a task appears on the board with its status, draft count and token total", { tag: '@tesbo.testId("TES-TC-1095")' }, async ({
     browser,
   }) => {
     const userStory = stamp("Board story");
@@ -327,7 +327,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(card, "the board summarises how much was generated").toContainText("2 testcases");
   });
 
-  test("ZYU-11 the board switches to the Kanban view and keeps the task", async ({ browser }) => {
+  test("ZYU-11 the board switches to the Kanban view and keeps the task", { tag: '@tesbo.testId("TES-TC-1096")' }, async ({ browser }) => {
     const userStory = stamp("Kanban story");
     seedTask({ userStory });
 
@@ -424,7 +424,7 @@ test.describe("zyra / agents (UI)", () => {
 
   // ─── The review table, which is where the writes happen ────────────────────
 
-  test("ZYU-12 the task detail lists every generated draft with its priority", async ({ browser }) => {
+  test("ZYU-12 the task detail lists every generated draft with its priority", { tag: '@tesbo.testId("TES-TC-1097")' }, async ({ browser }) => {
     const taskId = seedTask();
     const page = await open(browser, `/agents/tasks/${taskId}`);
 
@@ -440,7 +440,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByRole("button", { name: "Sources (1)" })).toBeVisible();
   });
 
-  test("ZYU-13 selection drives the bulk actions", async ({ browser }) => {
+  test("ZYU-13 selection drives the bulk actions", { tag: '@tesbo.testId("TES-TC-1098")' }, async ({ browser }) => {
     const taskId = seedTask();
     const page = await open(browser, `/agents/tasks/${taskId}`);
 
@@ -457,7 +457,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByRole("button", { name: "Delete selected" })).toBeDisabled();
   });
 
-  test("ZYU-14 saving a draft into a new suite creates a real test case", async ({ browser }) => {
+  test("ZYU-14 saving a draft into a new suite creates a real test case", { tag: '@tesbo.testId("TES-TC-1099")' }, async ({ browser }) => {
     const taskId = seedTask();
     const suiteName = stamp("Suite");
     const page = await open(browser, `/agents/tasks/${taskId}`);
@@ -484,7 +484,7 @@ test.describe("zyra / agents (UI)", () => {
       .toBe(1);
   });
 
-  test("ZYU-15 deleting a draft removes it from the task and leaves the rest", async ({ browser }) => {
+  test("ZYU-15 deleting a draft removes it from the task and leaves the rest", { tag: '@tesbo.testId("TES-TC-1100")' }, async ({ browser }) => {
     const taskId = seedTask();
     const page = await open(browser, `/agents/tasks/${taskId}`);
 
@@ -499,7 +499,7 @@ test.describe("zyra / agents (UI)", () => {
       .toEqual(["Sign in with a wrong password"]);
   });
 
-  test("ZYU-16 a task whose drafts are all gone says so", async ({ browser }) => {
+  test("ZYU-16 a task whose drafts are all gone says so", { tag: '@tesbo.testId("TES-TC-1101")' }, async ({ browser }) => {
     const taskId = seedTask({ drafts: [] });
     const page = await open(browser, `/agents/tasks/${taskId}`);
 
@@ -513,7 +513,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByRole("button", { name: "Save selected" }).last()).toBeDisabled();
   });
 
-  test("ZYU-17 closing a task records the new status", async ({ browser }) => {
+  test("ZYU-17 closing a task records the new status", { tag: '@tesbo.testId("TES-TC-1102")' }, async ({ browser }) => {
     const taskId = seedTask();
     const page = await open(browser, `/agents/tasks/${taskId}`);
 
@@ -532,7 +532,7 @@ test.describe("zyra / agents (UI)", () => {
 
   // ─── Authorization ─────────────────────────────────────────────────────────
 
-  test("ZYU-20 a workspace member with no project access cannot use the task board", async ({
+  test("ZYU-20 a workspace member with no project access cannot use the task board", { tag: '@tesbo.testId("TES-TC-1103")' }, async ({
     browser,
   }) => {
     seedTask();
@@ -544,7 +544,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByRole("tab", { name: "Kanban board" })).toHaveCount(0);
   });
 
-  test("ZYU-21 another project's task is not reachable through this project's URL", async ({
+  test("ZYU-21 another project's task is not reachable through this project's URL", { tag: '@tesbo.testId("TES-TC-1104")' }, async ({
     browser,
   }) => {
     const foreignTask = seedTask({ projectId: tenant!.secondProjectId });
@@ -561,7 +561,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.getByRole("button", { name: "Close task" })).toHaveCount(0);
   });
 
-  test("ZYU-22 a malformed task id does not throw in the page", async ({ browser }) => {
+  test("ZYU-22 a malformed task id does not throw in the page", { tag: '@tesbo.testId("TES-TC-1105")' }, async ({ browser }) => {
     const ctx = await browser.newContext({ storageState: states.get("owner") });
     contexts.push(ctx);
     const page = await ctx.newPage();
@@ -576,7 +576,7 @@ test.describe("zyra / agents (UI)", () => {
     await expect(page.locator("body")).not.toContainText("Application error");
   });
 
-  test("ZYU-23 a qa_engineer can open Zyra and review a task", async ({ browser }) => {
+  test("ZYU-23 a qa_engineer can open Zyra and review a task", { tag: '@tesbo.testId("TES-TC-1106")' }, async ({ browser }) => {
     const taskId = seedTask();
     const page = await open(browser, `/agents/tasks/${taskId}`, "qa");
 

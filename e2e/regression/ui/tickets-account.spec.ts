@@ -18,6 +18,7 @@ import { alerts, apiContext, ticket } from "../fixtures";
 test.describe("My Account — reported tickets", () => {
   test(
     ticket("REG-ACC-01", "10230839912", "a mismatched confirmation is reported next to the field it concerns"),
+    { tag: '@tesbo.testId("TES-TC-1267")' },
     async ({ page }) => {
       /*
        * EXPECTED RED. app/(app)/account/page.tsx holds ONE `error` string for the whole form and
@@ -63,6 +64,7 @@ test.describe("My Account — reported tickets", () => {
 
   test(
     ticket("REG-ACC-02", "10230839912", "a rejected password change leaves the stored password usable"),
+    { tag: '@tesbo.testId("TES-TC-1268")' },
     async ({ page }) => {
       /*
        * The invariant that makes REG-ACC-01 safe to run at all, asserted rather than assumed.

@@ -99,7 +99,7 @@ test.describe("login redirect loop", () => {
     });
   }
 
-  test("a destination that works is still redirected to immediately", async ({ page }) => {
+  test("a destination that works is still redirected to immediately", { tag: '@tesbo.testId("TES-TC-1028")' }, async ({ page }) => {
     // The guard above must not fire on the happy path: with no gate installed, /projects loads and
     // the user never sees the login form.
     await page.goto("/login?redirect=%2Fprojects");
@@ -108,7 +108,7 @@ test.describe("login redirect loop", () => {
     await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
-  test("an auth check that never answers still ends up showing the form", async ({ page }) => {
+  test("an auth check that never answers still ends up showing the form", { tag: '@tesbo.testId("TES-TC-1029")' }, async ({ page }) => {
     /*
      * The loop guard can only fire on a fresh mount. This covers everything else that would leave
      * the promise chain unresolved — here, /api/auth/me simply never answers. The reported symptom
@@ -124,7 +124,7 @@ test.describe("login redirect loop", () => {
     await expect(page.locator('p[role="alert"]')).toContainText("taking longer than expected");
   });
 
-  test("a bounce does not leave the tab permanently unable to redirect", async ({ page }) => {
+  test("a bounce does not leave the tab permanently unable to redirect", { tag: '@tesbo.testId("TES-TC-1030")' }, async ({ page }) => {
     // Giving up once must not be sticky: the marker is cleared as soon as it is acted on (and is
     // time-boxed besides), so a destination that recovers is redirected to normally.
     const bounces = await installBounceGate(page, "/projects");
@@ -159,7 +159,7 @@ test.describe("login redirect target validation", () => {
 test.describe("login redirect after signing in through the form", () => {
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("honours a legitimate redirect", async ({ page }) => {
+  test("honours a legitimate redirect", { tag: '@tesbo.testId("TES-TC-1034")' }, async ({ page }) => {
     await page.goto("/login?redirect=%2Fsettings");
     await page.getByLabel("Email", { exact: true }).fill(env.testEmail);
     await page.getByLabel("Password", { exact: true }).fill(env.testPassword);
@@ -168,7 +168,7 @@ test.describe("login redirect after signing in through the form", () => {
     await page.waitForURL(/\/settings/);
   });
 
-  test("drops a hostile redirect and falls back to /projects", async ({ page }) => {
+  test("drops a hostile redirect and falls back to /projects", { tag: '@tesbo.testId("TES-TC-1035")' }, async ({ page }) => {
     const offSite = await blockOffSiteNavigation(page);
 
     await page.goto("/login?redirect=%2F%2Fexample.com");
@@ -241,7 +241,7 @@ test.describe("login reached from an already-accepted invite", () => {
     return token;
   }
 
-  test("a spent invite link says so and its Sign in button reaches a usable form", async ({ browser }) => {
+  test("a spent invite link says so and its Sign in button reaches a usable form", { tag: '@tesbo.testId("TES-TC-1036")' }, async ({ browser }) => {
     const token = await spentInvite("usable");
     // No session: this is somebody following a link out of their mail client.
     const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
@@ -264,7 +264,7 @@ test.describe("login reached from an already-accepted invite", () => {
     }
   });
 
-  test("and the form it reaches actually signs the invitee in", async ({ browser }) => {
+  test("and the form it reaches actually signs the invitee in", { tag: '@tesbo.testId("TES-TC-1037")' }, async ({ browser }) => {
     const token = await spentInvite("signsin");
     const email = inviteeEmails[inviteeEmails.length - 1];
     const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
@@ -346,7 +346,7 @@ test.describe("login reached from an invite while signed in as a different email
     return { token, email };
   }
 
-  test("the mismatch screen's sign-in link reaches a clean form, not a stale bounce error", async ({
+  test("the mismatch screen's sign-in link reaches a clean form, not a stale bounce error", { tag: '@tesbo.testId("TES-TC-1342")' }, async ({
     browser,
   }) => {
     const { token, email } = await pendingInvite("clean");
@@ -369,7 +369,7 @@ test.describe("login reached from an invite while signed in as a different email
     }
   });
 
-  test("and the invitee can still sign in through it and accept the invitation", async ({ browser }) => {
+  test("and the invitee can still sign in through it and accept the invitation", { tag: '@tesbo.testId("TES-TC-1343")' }, async ({ browser }) => {
     const { token, email } = await pendingInvite("accepts");
     const ctx = await browser.newContext({ storageState: wrongAccountState });
     try {

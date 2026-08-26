@@ -79,6 +79,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-01", "10226296533", "an unsupported file type is refused, naming the file and what is supported"),
+    { tag: '@tesbo.testId("TES-TC-1215")' },
     async () => {
       const name = `malware-${Date.now()}.exe`;
       const res = await upload(api, [{ name, mimeType: "application/octet-stream", body: Buffer.from("MZ") }]);
@@ -96,6 +97,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-02", "10226296533", "an extensionless file is refused, naming what is supported"),
+    { tag: '@tesbo.testId("TES-TC-1216")' },
     async () => {
       /*
        * A deliberate reversal of the endpoint's old behaviour: an extensionless upload used to be
@@ -113,7 +115,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
     },
   );
 
-  test(ticket("REG-ATT-03", "10226296533", "a zero-byte file is refused"), async () => {
+  test(ticket("REG-ATT-03", "10226296533", "a zero-byte file is refused"), { tag: '@tesbo.testId("TES-TC-1217")' }, async () => {
     // A zero-byte upload is a failed drag-and-drop or a file still being written; storing it costs
     // an attachment row and a storage key for nothing.
     const res = await upload(api, [sizedFile(`empty-${Date.now()}.png`, 0, "image/png")]);
@@ -123,6 +125,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-04", "10226296533", "a zip is refused even though it is an ordinary document bundle"),
+    { tag: '@tesbo.testId("TES-TC-1218")' },
     async () => {
       // Deliberate, and inherited from the knowledge base's list: an extension check cannot see what
       // is inside an archive, so accepting .zip would accept everything the allowlist just refused.
@@ -135,6 +138,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-05", "10226296533", "a file over the evidence limit is refused, with the limit in the message"),
+    { tag: '@tesbo.testId("TES-TC-1219")' },
     async () => {
       /*
        * The size half of the card, and the one that produced the stuck "Saving…": over the limit but
@@ -157,6 +161,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-06", "10226296533", "one bad file in a batch refuses the whole batch"),
+    { tag: '@tesbo.testId("TES-TC-1220")' },
     async () => {
       /*
        * The all-or-nothing property the service comment commits to. If validation were per-file and
@@ -181,6 +186,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-07", "10226296533", "a spread of the allowed evidence types is accepted and downloads back"),
+    { tag: '@tesbo.testId("TES-TC-1221")' },
     async () => {
       /*
        * The other direction, and what keeps the tests above honest: a validation that refused
@@ -210,7 +216,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
     },
   );
 
-  test(ticket("REG-ATT-08", "10226296533", "a file at exactly the limit is accepted"), async () => {
+  test(ticket("REG-ATT-08", "10226296533", "a file at exactly the limit is accepted"), { tag: '@tesbo.testId("TES-TC-1222")' }, async () => {
     // The boundary itself, from the allowed side. A check written with >= instead of > would refuse
     // a legitimate 25MB screenshot and read to the reporter as the same bug all over again.
     const res = await upload(api, [sizedFile(`limit-${Date.now()}.png`, EVIDENCE_MAX_BYTES, "image/png")]);
@@ -229,6 +235,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-09", "10226296533", "an empty submission is refused before any validation runs"),
+    { tag: '@tesbo.testId("TES-TC-1223")' },
     async () => {
       const res = await api.post(`/api/projects/${projectId}/bugs/${bugId}/attachments`, {
         multipart: {},
@@ -241,6 +248,7 @@ test.describe("bug evidence validation — reported ticket 10226296533", () => {
 
   test(
     ticket("REG-ATT-10", "10226296533", "evidence cannot be uploaded without a session, or from another tenant"),
+    { tag: '@tesbo.testId("TES-TC-1224")' },
     async () => {
       // Uploading bills storage to the workspace's plan allowance, so an unauthenticated or
       // cross-tenant caller reaching this route is a billing problem as well as a privacy one.

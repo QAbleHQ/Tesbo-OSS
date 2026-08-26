@@ -99,13 +99,13 @@ test.describe("screens sweep — the pages no other spec opens", () => {
 
   // ─── Repository screens ───────────────────────────────────────────────────
 
-  test("SWP-01 the suites screen lists the project's suites", async ({ page }) => {
+  test("SWP-01 the suites screen lists the project's suites", { tag: '@tesbo.testId("TES-TC-807")' }, async ({ page }) => {
     const result = await renderCheck(page, `/projects/${projectId()}/suites`);
     await expect(page.getByRole("heading", { name: /suite/i }).first()).toBeVisible();
     expect(thrownExceptions(result)).toEqual([]);
   });
 
-  test("SWP-02 a test case's detail screen opens on a real test case", async ({ page }) => {
+  test("SWP-02 a test case's detail screen opens on a real test case", { tag: '@tesbo.testId("TES-TC-808")' }, async ({ page }) => {
     // Created through the API so the screen has something real to render — a detail page reached with
     // an invented id would only ever exercise its not-found branch.
     const title = `E2E Sweep Case ${Date.now()}`;
@@ -127,7 +127,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     }
   });
 
-  test("SWP-03 a test case detail screen for an id that does not exist says so", async ({ page }) => {
+  test("SWP-03 a test case detail screen for an id that does not exist says so", { tag: '@tesbo.testId("TES-TC-809")' }, async ({ page }) => {
     const result = await renderCheck(page, `/projects/${projectId()}/testcases/11111111-1111-4111-8111-111111111111`);
     // The not-found branch has to render a message rather than an empty frame or a thrown error.
     expect(thrownExceptions(result)).toEqual([]);
@@ -137,7 +137,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
 
   // ─── Knowledge Base ───────────────────────────────────────────────────────
 
-  test("SWP-04 a knowledge base document opens in the editor", async ({ page }) => {
+  test("SWP-04 a knowledge base document opens in the editor", { tag: '@tesbo.testId("TES-TC-810")' }, async ({ page }) => {
     const rootFolderId = await ensureKnowledgeRoot(page);
     const title = `E2E Sweep Doc ${Date.now()}`;
     const created = await page.request.post(api(`/api/projects/${projectId()}/knowledge-base/documents`), {
@@ -174,7 +174,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
 
   // ─── Execution ────────────────────────────────────────────────────────────
 
-  test("SWP-05 the execute screen opens on a run with a case in it", async ({ page }) => {
+  test("SWP-05 the execute screen opens on a run with a case in it", { tag: '@tesbo.testId("TES-TC-811")' }, async ({ page }) => {
     const title = `E2E Sweep Exec Case ${Date.now()}`;
     const caseRes = await page.request.post(api(`/api/projects/${projectId()}/testcases`), {
       data: { title },
@@ -210,7 +210,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     }
   });
 
-  test("SWP-06 the run schedule screen opens and does not claim a schedule was saved", async ({ page }) => {
+  test("SWP-06 the run schedule screen opens and does not claim a schedule was saved", { tag: '@tesbo.testId("TES-TC-812")' }, async ({ page }) => {
     const result = await renderCheck(page, `/projects/${projectId()}/cycles/schedule`);
     expect(thrownExceptions(result)).toEqual([]);
     // Scheduled runs are not implemented (see api/execution-ops.spec.ts EXO-A-08b). The screen may
@@ -219,7 +219,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     expect(body).not.toContain("local-schedule");
   });
 
-  test("SWP-07 a shared run opens for a visitor with no session", async ({ browser }) => {
+  test("SWP-07 a shared run opens for a visitor with no session", { tag: '@tesbo.testId("TES-TC-813")' }, async ({ browser }) => {
     // The one screen here that must work with NO session — that is what a share link is.
     const owner = await browser.newContext({ storageState: path.join(__dirname, "../.auth/state-screens.json") });
     const ownerPage = await owner.newPage();
@@ -259,7 +259,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
 
   // ─── Zyra ─────────────────────────────────────────────────────────────────
 
-  test("SWP-08 the Zyra chat screen opens on a workspace with no AI provider configured", async ({ page }) => {
+  test("SWP-08 the Zyra chat screen opens on a workspace with no AI provider configured", { tag: '@tesbo.testId("TES-TC-814")' }, async ({ page }) => {
     // The state every workspace starts in. The screen has to render the "connect a provider" path
     // rather than throwing on an agent payload it did not get.
     const result = await renderCheck(page, `/projects/${projectId()}/agents/zyra`);
@@ -267,13 +267,13 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     await expect(page.locator("body")).toContainText(/zyra/i);
   });
 
-  test("SWP-09 the Zyra settings screen opens", async ({ page }) => {
+  test("SWP-09 the Zyra settings screen opens", { tag: '@tesbo.testId("TES-TC-815")' }, async ({ page }) => {
     const result = await renderCheck(page, `/projects/${projectId()}/agents/zyra/settings`);
     expect(thrownExceptions(result)).toEqual([]);
     await expect(page.locator("body")).toContainText(/setting|range|generat/i);
   });
 
-  test("SWP-10 the agent tasks list opens, empty and with a task in it", async ({ page }) => {
+  test("SWP-10 the agent tasks list opens, empty and with a task in it", { tag: '@tesbo.testId("TES-TC-816")' }, async ({ page }) => {
     const empty = await renderCheck(page, `/projects/${projectId()}/agents/tasks`);
     expect(thrownExceptions(empty)).toEqual([]);
 
@@ -306,7 +306,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
 
   // ─── Settings screens ─────────────────────────────────────────────────────
 
-  test("SWP-11 the project API tokens screen opens and shows no secret at rest", async ({ page }) => {
+  test("SWP-11 the project API tokens screen opens and shows no secret at rest", { tag: '@tesbo.testId("TES-TC-817")' }, async ({ page }) => {
     const result = await renderCheck(page, `/projects/${projectId()}/settings/api-tokens`);
     expect(thrownExceptions(result)).toEqual([]);
     await expect(page.locator("body")).toContainText(/token|key/i);
@@ -316,7 +316,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     expect(body).not.toMatch(/tsb_[A-Za-z0-9]{16,}/);
   });
 
-  test("SWP-12 the workspace integration screens open with nothing connected", async ({ page }) => {
+  test("SWP-12 the workspace integration screens open with nothing connected", { tag: '@tesbo.testId("TES-TC-818")' }, async ({ page }) => {
     for (const provider of ["jira", "linear"]) {
       const result = await renderCheck(page, `/settings/integrations/${provider}`);
       expect(thrownExceptions(result), `/settings/integrations/${provider} threw`).toEqual([]);
@@ -324,7 +324,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     }
   });
 
-  test("SWP-13 the project integration screens open with nothing connected", async ({ page }) => {
+  test("SWP-13 the project integration screens open with nothing connected", { tag: '@tesbo.testId("TES-TC-819")' }, async ({ page }) => {
     for (const provider of ["jira", "linear"]) {
       const result = await renderCheck(page, `/projects/${projectId()}/settings/integrations/${provider}`);
       expect(thrownExceptions(result), `project ${provider} integration screen threw`).toEqual([]);
@@ -332,7 +332,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     }
   });
 
-  test("SWP-14 the AI providers screens open", async ({ page }) => {
+  test("SWP-14 the AI providers screens open", { tag: '@tesbo.testId("TES-TC-820")' }, async ({ page }) => {
     const list = await renderCheck(page, "/settings/ai-providers");
     expect(thrownExceptions(list)).toEqual([]);
     await expect(page.locator("body")).toContainText(/provider|openai|anthropic|model/i);
@@ -347,7 +347,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
 
   // ─── Pre-auth and onboarding screens ──────────────────────────────────────
 
-  test("SWP-15 the OTP verification screen opens for a visitor with no session", async ({ browser }) => {
+  test("SWP-15 the OTP verification screen opens for a visitor with no session", { tag: '@tesbo.testId("TES-TC-821")' }, async ({ browser }) => {
     const visitor = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     const page = await visitor.newPage();
     try {
@@ -360,7 +360,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     }
   });
 
-  test("SWP-16 an invitation link opens for a visitor with no session, valid and invalid", async ({ browser }) => {
+  test("SWP-16 an invitation link opens for a visitor with no session, valid and invalid", { tag: '@tesbo.testId("TES-TC-822")' }, async ({ browser }) => {
     const visitor = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     const page = await visitor.newPage();
     try {
@@ -376,7 +376,7 @@ test.describe("screens sweep — the pages no other spec opens", () => {
     }
   });
 
-  test("SWP-17 the onboarding screen opens for a signed-in user", async ({ page }) => {
+  test("SWP-17 the onboarding screen opens for a signed-in user", { tag: '@tesbo.testId("TES-TC-823")' }, async ({ page }) => {
     // Reached straight after signup, before a workspace exists. This account already has one, so the
     // screen may redirect — what it must not do is throw or come up blank.
     const result = await renderCheck(page, "/onboarding");

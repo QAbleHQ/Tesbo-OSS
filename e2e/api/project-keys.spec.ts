@@ -43,7 +43,7 @@ async function createProject(name: string, extra: Record<string, unknown> = {}) 
 }
 
 test.describe("project key derivation", () => {
-  test("PKY-A-01 two projects whose names share a long prefix can both be created", async () => {
+  test("PKY-A-01 two projects whose names share a long prefix can both be created", { tag: '@tesbo.testId("TES-TC-402")' }, async () => {
     const stamp = Date.now();
     const first = await createProject(`${SHARED_PREFIX} Payments ${stamp}`);
     expect(first.status(), await first.text()).toBe(201);
@@ -69,7 +69,7 @@ test.describe("project key derivation", () => {
     }
   });
 
-  test("PKY-A-02 an explicitly requested key that is already taken is refused or made unique, never a 500", async () => {
+  test("PKY-A-02 an explicitly requested key that is already taken is refused or made unique, never a 500", { tag: '@tesbo.testId("TES-TC-403")' }, async () => {
     const stamp = Date.now();
     const first = await createProject(`E2E Explicit Key A ${stamp}`, { key: `EXPL${stamp}` });
     expect(first.status(), await first.text()).toBe(201);
@@ -90,7 +90,7 @@ test.describe("project key derivation", () => {
     }
   });
 
-  test("PKY-A-03 a name made entirely of punctuation still yields a usable key", async () => {
+  test("PKY-A-03 a name made entirely of punctuation still yields a usable key", { tag: '@tesbo.testId("TES-TC-404")' }, async () => {
     const first = await createProject("E2E ??? !!! ---");
     expect(first.status(), await first.text()).toBe(201);
     const firstBody = await first.json();

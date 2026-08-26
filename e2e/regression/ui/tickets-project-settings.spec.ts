@@ -85,6 +85,7 @@ test.describe("project settings — test environments", () => {
 
   test(
     ticket("REG-ENV-01", "10221899361", "adding a name with no URL is refused"),
+    { tag: '@tesbo.testId("TES-TC-1301")' },
     async ({ page }) => {
       await page.goto(settingsUrl());
 
@@ -100,6 +101,7 @@ test.describe("project settings — test environments", () => {
 
   test(
     ticket("REG-ENV-02", "10221899361", "adding a URL with no name is refused"),
+    { tag: '@tesbo.testId("TES-TC-1302")' },
     async ({ page }) => {
       await page.goto(settingsUrl());
 
@@ -113,6 +115,7 @@ test.describe("project settings — test environments", () => {
 
   test(
     ticket("REG-ENV-03", "10221899361", "a complete environment stages, saves, and reads back from the API"),
+    { tag: '@tesbo.testId("TES-TC-1303")' },
     async ({ page }) => {
       // The happy path, so that a future tightening of the validation cannot start refusing valid
       // input and still pass REG-ENV-01/02.
@@ -141,6 +144,7 @@ test.describe("project settings — test environments", () => {
 
   test(
     ticket("REG-ENV-04", "10221899361", "a duplicate environment name is refused, whatever its casing"),
+    { tag: '@tesbo.testId("TES-TC-1304")' },
     async ({ page }) => {
       /*
        * The second validation the fix added. Asserted with a DIFFERENT CASING on purpose: the check

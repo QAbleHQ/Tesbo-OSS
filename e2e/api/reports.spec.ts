@@ -272,7 +272,7 @@ async function getJson(api: APIRequestContext, url: string): Promise<any> {
 }
 
 test.describe("project analytics counters", () => {
-  test("RPT-A-01 counts the project's cases, suites, plans, runs and execution statuses", async () => {
+  test("RPT-A-01 counts the project's cases, suites, plans, runs and execution statuses", { tag: '@tesbo.testId("TES-TC-461")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/analytics`);
     expect(body.projectCount).toBe(1);
     expect(body.testCaseCount).toBe(6);
@@ -284,7 +284,7 @@ test.describe("project analytics counters", () => {
     expect(body.executionStatus).toEqual({ Passed: 18, Failed: 6, Untested: 1 });
   });
 
-  test("RPT-A-02 a soft-deleted test case leaves the counters, and a soft-deleted execution leaves the status map", async () => {
+  test("RPT-A-02 a soft-deleted test case leaves the counters, and a soft-deleted execution leaves the status map", { tag: '@tesbo.testId("TES-TC-462")' }, async () => {
     const before = await getJson(asOwner, `/api/projects/${fixture.projectId}/analytics`);
 
     const throwaway = await seedTestCase(asOwner, fixture.projectId, { title: "E2E Reports soon-deleted case" });
@@ -314,7 +314,7 @@ test.describe("project analytics counters", () => {
     }
   });
 
-  test("RPT-A-03 an empty project reports zeros rather than nulls or an error", async () => {
+  test("RPT-A-03 an empty project reports zeros rather than nulls or an error", { tag: '@tesbo.testId("TES-TC-463")' }, async () => {
     await withEmptyProject(async (projectId) => {
       const body = await getJson(asOwner, `/api/projects/${projectId}/analytics`);
       expect(body).toEqual({
@@ -331,7 +331,7 @@ test.describe("project analytics counters", () => {
 });
 
 test.describe("execution report grouping", () => {
-  test("RPT-A-04 the default grouping is one row per run, and the counters add up to the run's items", async () => {
+  test("RPT-A-04 the default grouping is one row per run, and the counters add up to the run's items", { tag: '@tesbo.testId("TES-TC-464")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution`);
     expect(body.filterBy).toBe("overall");
     expect(body.filterValue).toBeNull();
@@ -352,19 +352,19 @@ test.describe("execution report grouping", () => {
     expect(totals).toBe(25);
   });
 
-  test("RPT-A-05 rows come back busiest first", async () => {
+  test("RPT-A-05 rows come back busiest first", { tag: '@tesbo.testId("TES-TC-465")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution`);
     const totals = body.rows.map((r: any) => r.total);
     expect(totals).toEqual([...totals].sort((a: number, b: number) => b - a));
   });
 
-  test("RPT-A-06 grouping by run is the same report as the default", async () => {
+  test("RPT-A-06 grouping by run is the same report as the default", { tag: '@tesbo.testId("TES-TC-466")' }, async () => {
     const overall = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution`);
     const byRun = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution?filterBy=run`);
     expect(byRun.rows).toEqual(overall.rows);
   });
 
-  test("RPT-A-07 grouping by person names the assignee and buckets the rest as Unassigned", async () => {
+  test("RPT-A-07 grouping by person names the assignee and buckets the rest as Unassigned", { tag: '@tesbo.testId("TES-TC-467")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution?filterBy=person`);
     const names = body.rows.map((r: any) => r.groupName);
     expect(names).toContain("Unassigned");
@@ -379,7 +379,7 @@ test.describe("execution report grouping", () => {
     expect(unassigned.total).toBe(25 - 6);
   });
 
-  test("RPT-A-08 filtering by person narrows the report to that person's executions", async () => {
+  test("RPT-A-08 filtering by person narrows the report to that person's executions", { tag: '@tesbo.testId("TES-TC-468")' }, async () => {
     const body = await getJson(
       asOwner,
       `/api/projects/${fixture.projectId}/reports/execution?filterBy=person&filterValue=${tenant!.manager.userId}`,
@@ -389,7 +389,7 @@ test.describe("execution report grouping", () => {
     expect(body.rows[0].total).toBe(6);
   });
 
-  test("RPT-A-09 grouping by plan separates the planned run from the unplanned ones", async () => {
+  test("RPT-A-09 grouping by plan separates the planned run from the unplanned ones", { tag: '@tesbo.testId("TES-TC-469")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution?filterBy=plan`);
     const planned = body.rows.find((r: any) => r.groupId === fixture.planId);
     const unplanned = body.rows.find((r: any) => r.groupId === "none");
@@ -399,7 +399,7 @@ test.describe("execution report grouping", () => {
     expect(unplanned.total).toBe(21);
   });
 
-  test("RPT-A-10 grouping by suite covers the suiteless cases under No Suite", async () => {
+  test("RPT-A-10 grouping by suite covers the suiteless cases under No Suite", { tag: '@tesbo.testId("TES-TC-470")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution?filterBy=suite`);
     const alpha = body.rows.find((r: any) => r.groupId === fixture.alphaSuiteId);
     const noSuite = body.rows.find((r: any) => r.groupId === "none");
@@ -411,7 +411,7 @@ test.describe("execution report grouping", () => {
     expect(body.rows.some((r: any) => r.groupId === fixture.betaSuiteId)).toBeFalsy();
   });
 
-  test("RPT-A-11 grouping by priority reports each priority band separately", async () => {
+  test("RPT-A-11 grouping by priority reports each priority band separately", { tag: '@tesbo.testId("TES-TC-471")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution?filterBy=priority`);
     const byName = new Map(body.rows.map((r: any) => [r.groupName, r]));
     expect((byName.get("P1") as any).total).toBe(6); // stable
@@ -420,7 +420,7 @@ test.describe("execution report grouping", () => {
     for (const row of body.rows) expect(row.groupId).toBe(row.groupName);
   });
 
-  test("RPT-A-12 grouping by tags counts a multi-tagged case under each tag and untagged ones under Untagged", async () => {
+  test("RPT-A-12 grouping by tags counts a multi-tagged case under each tag and untagged ones under Untagged", { tag: '@tesbo.testId("TES-TC-472")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution?filterBy=tags`);
     const byName = new Map(body.rows.map((r: any) => [r.groupName, r]));
     expect((byName.get("smoke") as any).total).toBe(17); // flaky 11 + stable 6
@@ -429,7 +429,7 @@ test.describe("execution report grouping", () => {
     expect((byName.get("Untagged") as any).total).toBe(7); // lowFlake 6 + old 1
   });
 
-  test("RPT-A-13 filtering by one tag still reports the other tags carried by the matching cases", async () => {
+  test("RPT-A-13 filtering by one tag still reports the other tags carried by the matching cases", { tag: '@tesbo.testId("TES-TC-473")' }, async () => {
     // Documented, not weakened: a row that matches the tag filter is then added to a group for EVERY
     // tag it carries, so filtering by "regression" also produces a "smoke" group. Pinned so the
     // behaviour can't drift silently — see the finding in docs/e2e-coverage-waves.md.
@@ -444,7 +444,7 @@ test.describe("execution report grouping", () => {
     expect(byName.has("Untagged")).toBeFalsy();
   });
 
-  test("RPT-A-14 a filterValue is ignored when the grouping is overall", async () => {
+  test("RPT-A-14 a filterValue is ignored when the grouping is overall", { tag: '@tesbo.testId("TES-TC-474")' }, async () => {
     const unfiltered = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution`);
     const withValue = await getJson(
       asOwner,
@@ -454,7 +454,7 @@ test.describe("execution report grouping", () => {
     expect(withValue.rows).toEqual(unfiltered.rows);
   });
 
-  test("RPT-A-15 a filterValue that matches nothing returns an empty report, not an error", async () => {
+  test("RPT-A-15 a filterValue that matches nothing returns an empty report, not an error", { tag: '@tesbo.testId("TES-TC-475")' }, async () => {
     const body = await getJson(
       asOwner,
       `/api/projects/${fixture.projectId}/reports/execution?filterBy=suite&filterValue=00000000-0000-0000-0000-000000000000`,
@@ -462,7 +462,7 @@ test.describe("execution report grouping", () => {
     expect(body.rows).toEqual([]);
   });
 
-  test("RPT-A-16 an unknown grouping falls back to per-run rows instead of failing", async () => {
+  test("RPT-A-16 an unknown grouping falls back to per-run rows instead of failing", { tag: '@tesbo.testId("TES-TC-476")' }, async () => {
     const res = await asOwner.get(
       `/api/projects/${fixture.projectId}/reports/execution?filterBy=unicorn&filterValue=whatever`,
     );
@@ -472,7 +472,7 @@ test.describe("execution report grouping", () => {
     expect(body.rows).toHaveLength(11);
   });
 
-  test("RPT-A-17 a status outside the six reported buckets is counted as Untested", async () => {
+  test("RPT-A-17 a status outside the six reported buckets is counted as Untested", { tag: '@tesbo.testId("TES-TC-477")' }, async () => {
     const run = await seedRun(asOwner, fixture.projectId, { name: `E2E Reports Odd Status Run ${Date.now()}` });
     const throwaway = await seedTestCase(asOwner, fixture.projectId, { title: "E2E Reports odd-status case" });
     try {
@@ -494,7 +494,7 @@ test.describe("execution report grouping", () => {
     }
   });
 
-  test("RPT-A-18 an empty project reports no rows", async () => {
+  test("RPT-A-18 an empty project reports no rows", { tag: '@tesbo.testId("TES-TC-478")' }, async () => {
     await withEmptyProject(async (projectId) => {
       const body = await getJson(asOwner, `/api/projects/${projectId}/reports/execution`);
       expect(body).toEqual({ filterBy: "overall", filterValue: null, rows: [] });
@@ -503,7 +503,7 @@ test.describe("execution report grouping", () => {
 });
 
 test.describe("traceability matrix", () => {
-  test("RPT-A-19 every live test case appears, once per run it belongs to", async () => {
+  test("RPT-A-19 every live test case appears, once per run it belongs to", { tag: '@tesbo.testId("TES-TC-479")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/requirement-matrix`);
     const rowsFor = (testcaseId: string) => body.rows.filter((r: any) => r.testcaseId === testcaseId);
 
@@ -517,7 +517,7 @@ test.describe("traceability matrix", () => {
     expect(untested[0].suiteName).toBe("Beta");
   });
 
-  test("RPT-A-20 the payload is camelCased and carries the linked bug", async () => {
+  test("RPT-A-20 the payload is camelCased and carries the linked bug", { tag: '@tesbo.testId("TES-TC-480")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/requirement-matrix`);
     const withBug = body.rows.find((r: any) => r.bugTitle === fixture.bugTitles.thisWeek);
     expect(withBug, "the bug linked to a failed execution should surface in the matrix").toBeTruthy();
@@ -532,13 +532,13 @@ test.describe("traceability matrix", () => {
     expect(Object.keys(withBug).some((k) => k.includes("_"))).toBeFalsy();
   });
 
-  test("RPT-A-21 rows are ordered by test case id", async () => {
+  test("RPT-A-21 rows are ordered by test case id", { tag: '@tesbo.testId("TES-TC-481")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/requirement-matrix`);
     const externalIds = body.rows.map((r: any) => r.externalId);
     expect(externalIds).toEqual([...externalIds].sort());
   });
 
-  test("RPT-A-22 a soft-deleted case leaves the matrix, and a soft-deleted execution empties its result", async () => {
+  test("RPT-A-22 a soft-deleted case leaves the matrix, and a soft-deleted execution empties its result", { tag: '@tesbo.testId("TES-TC-482")' }, async () => {
     const throwaway = await seedTestCase(asOwner, fixture.projectId, {
       title: "E2E Reports matrix soft-delete case",
     });
@@ -575,7 +575,7 @@ test.describe("traceability matrix", () => {
     }
   });
 
-  test("RPT-A-23 an empty project returns no rows", async () => {
+  test("RPT-A-23 an empty project returns no rows", { tag: '@tesbo.testId("TES-TC-483")' }, async () => {
     await withEmptyProject(async (projectId) => {
       const body = await getJson(asOwner, `/api/projects/${projectId}/reports/requirement-matrix`);
       expect(body).toEqual({ rows: [] });
@@ -584,7 +584,7 @@ test.describe("traceability matrix", () => {
 });
 
 test.describe("repository summary", () => {
-  test("RPT-A-24 totals, suites, statuses and priorities describe the live test cases", async () => {
+  test("RPT-A-24 totals, suites, statuses and priorities describe the live test cases", { tag: '@tesbo.testId("TES-TC-484")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/repository-summary`);
     expect(body.totalTestCases).toBe(6);
 
@@ -606,7 +606,7 @@ test.describe("repository summary", () => {
     expect(byPriority.get("P3")).toBe(1);
   });
 
-  test("RPT-A-25 the additions series is exactly 30 ascending daily buckets ending today", async () => {
+  test("RPT-A-25 the additions series is exactly 30 ascending daily buckets ending today", { tag: '@tesbo.testId("TES-TC-485")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/repository-summary`);
     expect(body.addedByDate).toHaveLength(30);
 
@@ -622,7 +622,7 @@ test.describe("repository summary", () => {
     expect(body.totalTestCases).toBe(6);
   });
 
-  test("RPT-A-26 the updated-recently counters follow updated_at, not created_at", async () => {
+  test("RPT-A-26 the updated-recently counters follow updated_at, not created_at", { tag: '@tesbo.testId("TES-TC-486")' }, async () => {
     const before = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/repository-summary`);
 
     const staleCase = await seedTestCase(asOwner, fixture.projectId, {
@@ -651,7 +651,7 @@ test.describe("repository summary", () => {
     }
   });
 
-  test("RPT-A-27 an empty project still returns a full 30-day series of zeros", async () => {
+  test("RPT-A-27 an empty project still returns a full 30-day series of zeros", { tag: '@tesbo.testId("TES-TC-487")' }, async () => {
     await withEmptyProject(async (projectId) => {
       const body = await getJson(asOwner, `/api/projects/${projectId}/reports/repository-summary`);
       expect(body.totalTestCases).toBe(0);
@@ -668,7 +668,7 @@ test.describe("repository summary", () => {
 });
 
 test.describe("reports overview", () => {
-  test("RPT-A-28 the pass rate series is capped at the last ten runs, oldest first", async () => {
+  test("RPT-A-28 the pass rate series is capped at the last ten runs, oldest first", { tag: '@tesbo.testId("TES-TC-488")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
     expect(body.passRateTrend).toHaveLength(10);
     // Eleven runs exist, so the oldest one is dropped rather than the newest.
@@ -679,7 +679,7 @@ test.describe("reports overview", () => {
     expect(timestamps).toEqual([...timestamps].sort((a: number, b: number) => a - b));
   });
 
-  test("RPT-A-29 each run's pass rate is passed over executed, ignoring untested items", async () => {
+  test("RPT-A-29 each run's pass rate is passed over executed, ignoring untested items", { tag: '@tesbo.testId("TES-TC-489")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
     const byName = new Map(body.passRateTrend.map((p: any) => [p.name, p]));
 
@@ -694,7 +694,7 @@ test.describe("reports overview", () => {
     expect(run11.passRate).toBe(100);
   });
 
-  test("RPT-A-30 a run with nothing executed reports a null pass rate rather than zero", async () => {
+  test("RPT-A-30 a run with nothing executed reports a null pass rate rather than zero", { tag: '@tesbo.testId("TES-TC-490")' }, async () => {
     const run = await seedRun(asOwner, fixture.projectId, { name: `E2E Reports Unrun Run ${Date.now()}` });
     try {
       await addRunCases(asOwner, run.id, [fixture.cases.untestedP1.id]);
@@ -709,13 +709,13 @@ test.describe("reports overview", () => {
     }
   });
 
-  test("RPT-A-31 the trend delta compares the newest run in the window against the oldest", async () => {
+  test("RPT-A-31 the trend delta compares the newest run in the window against the oldest", { tag: '@tesbo.testId("TES-TC-491")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
     const rated = body.passRateTrend.filter((p: any) => p.passRate !== null);
     expect(body.trendDelta).toBe(rated[rated.length - 1].passRate - rated[0].passRate);
   });
 
-  test("RPT-A-32 suite health reports per-suite percentages and marks a never-run suite as not run", async () => {
+  test("RPT-A-32 suite health reports per-suite percentages and marks a never-run suite as not run", { tag: '@tesbo.testId("TES-TC-492")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
     const bySuite = new Map(body.suiteHealth.map((s: any) => [s.suiteName, s]));
 
@@ -735,7 +735,7 @@ test.describe("reports overview", () => {
     expect(unassigned.passedPct).toBe(100);
   });
 
-  test("RPT-A-33 the flaky, coverage-gap and untested-P1 counts reflect the seeded history", async () => {
+  test("RPT-A-33 the flaky, coverage-gap and untested-P1 counts reflect the seeded history", { tag: '@tesbo.testId("TES-TC-493")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
     // flaky (alternates every run) and lowFlake (one flip in six) — stable is not flaky.
     expect(body.flakyCount).toBe(2);
@@ -745,7 +745,7 @@ test.describe("reports overview", () => {
     expect(body.untestedP1Count).toBe(1);
   });
 
-  test("RPT-A-34 the AI summary names the flaky suite, the coverage gap and the trend direction", async () => {
+  test("RPT-A-34 the AI summary names the flaky suite, the coverage gap and the trend direction", { tag: '@tesbo.testId("TES-TC-494")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
     expect(body.aiSummary).toContain("Alpha suite has a flaky test");
     expect(body.aiSummary).toContain(fixture.cases.flaky.externalId);
@@ -754,7 +754,7 @@ test.describe("reports overview", () => {
     expect(body.aiSummary).toMatch(/Overall pass rate (improved|declined) \d+% over the last \d+ runs\./);
   });
 
-  test("RPT-A-35 an empty project says there is not enough history instead of inventing insights", async () => {
+  test("RPT-A-35 an empty project says there is not enough history instead of inventing insights", { tag: '@tesbo.testId("TES-TC-495")' }, async () => {
     await withEmptyProject(async (projectId) => {
       const body = await getJson(asOwner, `/api/projects/${projectId}/reports/overview`);
       expect(body.passRateTrend).toEqual([]);
@@ -769,7 +769,7 @@ test.describe("reports overview", () => {
 });
 
 test.describe("AI insights", () => {
-  test("RPT-A-36 flaky tests are ranked by flip count and labelled by flip rate", async () => {
+  test("RPT-A-36 flaky tests are ranked by flip count and labelled by flip rate", { tag: '@tesbo.testId("TES-TC-496")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/insights`);
     expect(body.flakyTests).toHaveLength(2);
 
@@ -791,7 +791,7 @@ test.describe("AI insights", () => {
     expect(body.flakyTests.some((f: any) => f.testcaseId === fixture.cases.stable.id)).toBeFalsy();
   });
 
-  test("RPT-A-37 a case that flips half its runs is labelled Medium", async () => {
+  test("RPT-A-37 a case that flips half its runs is labelled Medium", { tag: '@tesbo.testId("TES-TC-497")' }, async () => {
     // Four runs, one flip -> 1/3 = 0.33, which is Medium: between the 0.25 and 0.5 thresholds.
     const mediumCase = await seedTestCase(asOwner, fixture.projectId, {
       title: "E2E Reports medium flake",
@@ -822,7 +822,7 @@ test.describe("AI insights", () => {
     }
   });
 
-  test("RPT-A-38 coverage gaps are the sub-70% slice of coverage by suite", async () => {
+  test("RPT-A-38 coverage gaps are the sub-70% slice of coverage by suite", { tag: '@tesbo.testId("TES-TC-498")' }, async () => {
     const body = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/insights`);
     const bySuite = new Map(body.coverageBySuite.map((c: any) => [c.suiteName, c]));
     expect(bySuite.get("Alpha")).toEqual({ suiteName: "Alpha", total: 4, covered: 3, pct: 75 });
@@ -833,7 +833,7 @@ test.describe("AI insights", () => {
     expect(body.coverageGaps.every((c: any) => c.pct < 70)).toBeTruthy();
   });
 
-  test("RPT-A-39 the health score follows the documented weighting and stays inside 0-100", async () => {
+  test("RPT-A-39 the health score follows the documented weighting and stays inside 0-100", { tag: '@tesbo.testId("TES-TC-499")' }, async () => {
     const insights = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/insights`);
     const overview = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
 
@@ -861,7 +861,7 @@ test.describe("AI insights", () => {
     expect(insights.healthLabel).toBe(expectedLabel);
   });
 
-  test("RPT-A-40 a project with nothing to judge scores 10 and reads as At risk", async () => {
+  test("RPT-A-40 a project with nothing to judge scores 10 and reads as At risk", { tag: '@tesbo.testId("TES-TC-500")' }, async () => {
     // Pinned deliberately: an untouched project is reported as "At risk" with a score of 10, because
     // the heuristic gives a 10-point bonus for having no untested P1s and nothing else applies.
     // Whether that is the right thing to tell a user is a product question — see the finding in
@@ -879,7 +879,7 @@ test.describe("AI insights", () => {
 });
 
 test.describe("trends", () => {
-  test("RPT-A-41 the trend window holds twelve runs where the overview holds ten", async () => {
+  test("RPT-A-41 the trend window holds twelve runs where the overview holds ten", { tag: '@tesbo.testId("TES-TC-501")' }, async () => {
     const trends = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/trends`);
     const overview = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
 
@@ -893,14 +893,14 @@ test.describe("trends", () => {
     expect(trends.trendDelta).toBe(rated[rated.length - 1].passRate - rated[0].passRate);
   });
 
-  test("RPT-A-42 execution velocity mirrors the series' executed counts run for run", async () => {
+  test("RPT-A-42 execution velocity mirrors the series' executed counts run for run", { tag: '@tesbo.testId("TES-TC-502")' }, async () => {
     const trends = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/trends`);
     expect(trends.executionVelocity).toEqual(
       trends.passRateTrend.map((p: any) => ({ name: p.name, count: p.executed })),
     );
   });
 
-  test("RPT-A-43 bug discovery is seven Monday-aligned weekly buckets, and older bugs fall outside", async () => {
+  test("RPT-A-43 bug discovery is seven Monday-aligned weekly buckets, and older bugs fall outside", { tag: '@tesbo.testId("TES-TC-503")' }, async () => {
     const trends = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/trends`);
     expect(trends.bugDiscoveryRate).toHaveLength(7);
 
@@ -917,7 +917,7 @@ test.describe("trends", () => {
     expect(trends.bugDiscoveryRate[trends.bugDiscoveryRate.length - 1].count).toBe(1);
   });
 
-  test("RPT-A-44 an empty project still returns the seven-week skeleton", async () => {
+  test("RPT-A-44 an empty project still returns the seven-week skeleton", { tag: '@tesbo.testId("TES-TC-504")' }, async () => {
     await withEmptyProject(async (projectId) => {
       const body = await getJson(asOwner, `/api/projects/${projectId}/reports/trends`);
       expect(body.passRateTrend).toEqual([]);
@@ -930,7 +930,7 @@ test.describe("trends", () => {
 });
 
 test.describe("cross-endpoint consistency", () => {
-  test("RPT-A-45 the counters agree with the repository summary and the matrix", async () => {
+  test("RPT-A-45 the counters agree with the repository summary and the matrix", { tag: '@tesbo.testId("TES-TC-505")' }, async () => {
     const analytics = await getJson(asOwner, `/api/projects/${fixture.projectId}/analytics`);
     const repository = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/repository-summary`);
     const matrix = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/requirement-matrix`);
@@ -944,7 +944,7 @@ test.describe("cross-endpoint consistency", () => {
     expect(reported).toBe(analytics.executionTotal);
   });
 
-  test("RPT-A-46 the flaky and coverage figures agree between overview and insights", async () => {
+  test("RPT-A-46 the flaky and coverage figures agree between overview and insights", { tag: '@tesbo.testId("TES-TC-506")' }, async () => {
     const overview = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/overview`);
     const insights = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/insights`);
     expect(overview.flakyCount).toBe(insights.flakyTests.length);
@@ -954,7 +954,7 @@ test.describe("cross-endpoint consistency", () => {
 });
 
 test.describe("the per-run report summary endpoint", () => {
-  test("RPT-A-47 returns a hardcoded all-zero summary regardless of the run's real results", async () => {
+  test("RPT-A-47 returns a hardcoded all-zero summary regardless of the run's real results", { tag: '@tesbo.testId("TES-TC-507")' }, async () => {
     // KNOWN STUB (documented, not test.fail()): legacy.controller.ts's cycleSummary() takes no
     // parameters at all and returns a fixed object. Run 6 below really does hold three results, so
     // if this endpoint ever starts reporting them this assertion is the thing that notices. It has
@@ -969,7 +969,7 @@ test.describe("the per-run report summary endpoint", () => {
     expect(realRun.executed).toBe(3);
   });
 
-  test("RPT-A-48 answers the same zeros for a run id that doesn't exist", async () => {
+  test("RPT-A-48 answers the same zeros for a run id that doesn't exist", { tag: '@tesbo.testId("TES-TC-508")' }, async () => {
     const res = await asOwner.get("/api/cycles/00000000-0000-0000-0000-000000000000/report/summary", {
       failOnStatusCode: false,
     });
@@ -1064,7 +1064,7 @@ test.describe("report export", () => {
     });
   }
 
-  test("RPT-A-57 the execution export is the execution report, row for row", async () => {
+  test("RPT-A-57 the execution export is the execution report, row for row", { tag: '@tesbo.testId("TES-TC-1200")' }, async () => {
     const json = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/execution`);
     const rows = csvRows(await (await asOwner.get(exportUrl("execution", "csv"))).text());
 
@@ -1079,7 +1079,7 @@ test.describe("report export", () => {
     }
   });
 
-  test("RPT-A-58 the export carries the tab's filter, not the whole project", async () => {
+  test("RPT-A-58 the export carries the tab's filter, not the whole project", { tag: '@tesbo.testId("TES-TC-1201")' }, async () => {
     // The screen filters by plan/run/suite/person/priority/tag. Exporting while looking at one run
     // and getting every run back would be a quietly wrong file — worse than no export at all.
     const run = fixture.runs[5];
@@ -1097,13 +1097,13 @@ test.describe("report export", () => {
     );
   });
 
-  test("RPT-A-59 the traceability export matches the matrix row for row", async () => {
+  test("RPT-A-59 the traceability export matches the matrix row for row", { tag: '@tesbo.testId("TES-TC-1202")' }, async () => {
     const json = await getJson(asOwner, `/api/projects/${fixture.projectId}/reports/requirement-matrix`);
     const rows = csvRows(await (await asOwner.get(exportUrl("matrix", "csv"))).text());
     expect(rows.length - 1).toBe(json.rows.length);
   });
 
-  test("RPT-A-60 a title carrying commas, quotes and newlines survives the CSV", async () => {
+  test("RPT-A-60 a title carrying commas, quotes and newlines survives the CSV", { tag: '@tesbo.testId("TES-TC-1203")' }, async () => {
     // rowsToCsv quotes and doubles quotes; the risk is a cell that silently becomes two columns and
     // shifts every field after it on that row.
     //
@@ -1127,7 +1127,7 @@ test.describe("report export", () => {
     }
   });
 
-  test("RPT-A-61 an unknown view is refused, naming the ones that exist", async () => {
+  test("RPT-A-61 an unknown view is refused, naming the ones that exist", { tag: '@tesbo.testId("TES-TC-1204")' }, async () => {
     const res = await asOwner.get(exportUrl("everything", "csv"), { failOnStatusCode: false });
     expect(res.status()).toBe(400);
     const { error } = await res.json();
@@ -1135,7 +1135,7 @@ test.describe("report export", () => {
     for (const view of EXPORT_VIEWS) expect(error).toContain(view);
   });
 
-  test("RPT-A-62 an unsupported format is refused", async () => {
+  test("RPT-A-62 an unsupported format is refused", { tag: '@tesbo.testId("TES-TC-1205")' }, async () => {
     for (const format of ["pdf", "json", "csv.exe"]) {
       const res = await asOwner.get(
         `/api/projects/${fixture.projectId}/reports/export/${format}?view=overview`,
@@ -1145,7 +1145,7 @@ test.describe("report export", () => {
     }
   });
 
-  test("RPT-A-63 no view at all falls back to the overview rather than failing", async () => {
+  test("RPT-A-63 no view at all falls back to the overview rather than failing", { tag: '@tesbo.testId("TES-TC-1206")' }, async () => {
     const res = await asOwner.get(`/api/projects/${fixture.projectId}/reports/export/csv`, {
       failOnStatusCode: false,
     });
@@ -1153,7 +1153,7 @@ test.describe("report export", () => {
     expect(res.headers()["content-disposition"]).toContain('filename="report-overview.csv"');
   });
 
-  test("RPT-A-64 an empty project exports headers and no rows", async () => {
+  test("RPT-A-64 an empty project exports headers and no rows", { tag: '@tesbo.testId("TES-TC-1207")' }, async () => {
     // The empty-result edge: a brand new project has no runs, no cases and no bugs, and every view
     // still has to produce a file a spreadsheet can open.
     const emptyId = await seedProject(asOwner, `E2E Export Empty ${Date.now()}`);
@@ -1185,35 +1185,35 @@ test.describe("malformed and unknown identifiers", () => {
 });
 
 test.describe("authorization", () => {
-  test("RPT-A-50 a project member can read every report", async () => {
+  test("RPT-A-50 a project member can read every report", { tag: '@tesbo.testId("TES-TC-511")' }, async () => {
     for (const path of reportPaths(fixture.projectId)) {
       const res = await asQa.get(path, { failOnStatusCode: false });
       expect(res.status(), `${path} should be readable by a project member`).toBe(200);
     }
   });
 
-  test("RPT-A-51 an anonymous caller is refused everywhere", async () => {
+  test("RPT-A-51 an anonymous caller is refused everywhere", { tag: '@tesbo.testId("TES-TC-512")' }, async () => {
     for (const path of reportPaths(fixture.projectId)) {
       const res = await anon.get(path, { failOnStatusCode: false });
       expect([400, 401, 403, 404], `${path} should refuse a caller with no session`).toContain(res.status());
     }
   });
 
-  test("RPT-A-52 a workspace member with no access to the project is refused everywhere", async () => {
+  test("RPT-A-52 a workspace member with no access to the project is refused everywhere", { tag: '@tesbo.testId("TES-TC-513")' }, async () => {
     for (const path of reportPaths(fixture.projectId)) {
       const res = await asGuest.get(path, { failOnStatusCode: false });
       expect([401, 403, 404], `${path} should refuse a non-member of the project`).toContain(res.status());
     }
   });
 
-  test("RPT-A-53 another tenant's project leaks nothing", async () => {
+  test("RPT-A-53 another tenant's project leaks nothing", { tag: '@tesbo.testId("TES-TC-514")' }, async () => {
     for (const path of reportPaths(ACCOUNT_A.projectId)) {
       const res = await asOwner.get(path, { failOnStatusCode: false });
       expect([401, 403, 404], `${path} should refuse a caller from another workspace`).toContain(res.status());
     }
   });
 
-  test("RPT-A-54 the reports of a project locked by a downgrade stay readable", async () => {
+  test("RPT-A-54 the reports of a project locked by a downgrade stay readable", { tag: '@tesbo.testId("TES-TC-515")' }, async () => {
     // ProjectWriteLockGuard exempts safe methods on purpose: "customers can always see and export
     // their data". This is the test of that promise — a project past the Launch allowance with its
     // grace window closed refuses writes but must still answer every report.

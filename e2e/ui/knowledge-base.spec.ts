@@ -201,7 +201,7 @@ test.describe("knowledge base (UI)", () => {
 
   // ─── The primary flow ──────────────────────────────────────────────────────
 
-  test("KBU-01 a folder is created from the New menu and appears in the table and the tree", async ({
+  test("KBU-01 a folder is created from the New menu and appears in the table and the tree", { tag: '@tesbo.testId("TES-TC-1000")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -218,7 +218,7 @@ test.describe("knowledge base (UI)", () => {
     await expect(page.getByRole("button", { name, exact: true }).first()).toBeVisible();
   });
 
-  test("KBU-02 a document created from a template is stored with the template's body", async ({
+  test("KBU-02 a document created from a template is stored with the template's body", { tag: '@tesbo.testId("TES-TC-1001")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -252,7 +252,7 @@ test.describe("knowledge base (UI)", () => {
     expect(body.trim(), "a templated document is created with its body already filled in").not.toBe("");
   });
 
-  test("KBU-03 a document is opened, edited, saved, and the change survives a reload", async ({ browser }) => {
+  test("KBU-03 a document is opened, edited, saved, and the change survives a reload", { tag: '@tesbo.testId("TES-TC-1002")' }, async ({ browser }) => {
     const created = await api.post(kbUrl("/documents"), {
       data: { title: stamp("Editable"), folderId: rootFolderId, documentType: "general" },
     });
@@ -284,7 +284,7 @@ test.describe("knowledge base (UI)", () => {
     await expect(page.locator(".ProseMirror").first()).toContainText(sentence);
   });
 
-  test("KBU-04 an uploaded file appears in the table and is counted in the summary", async ({ browser }) => {
+  test("KBU-04 an uploaded file appears in the table and is counted in the summary", { tag: '@tesbo.testId("TES-TC-1003")' }, async ({ browser }) => {
     const page = await openKb(browser);
     const fileName = `kbu-04-${Date.now()}.txt`;
 
@@ -306,7 +306,7 @@ test.describe("knowledge base (UI)", () => {
 
   // ─── Validation ────────────────────────────────────────────────────────────
 
-  test("KBU-05 the create button stays disabled for an empty or whitespace-only folder name", async ({
+  test("KBU-05 the create button stays disabled for an empty or whitespace-only folder name", { tag: '@tesbo.testId("TES-TC-1004")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -359,7 +359,7 @@ test.describe("knowledge base (UI)", () => {
     expect(nested.status(), "the same name under a different parent is allowed").toBe(201);
   });
 
-  test("KBU-07 the create button stays disabled for an empty or whitespace-only document title", async ({
+  test("KBU-07 the create button stays disabled for an empty or whitespace-only document title", { tag: '@tesbo.testId("TES-TC-1005")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -378,7 +378,7 @@ test.describe("knowledge base (UI)", () => {
 
   // ─── Delete, and the native confirm ────────────────────────────────────────
 
-  test("KBU-08 cancelling the delete confirmation leaves the item alone", async ({ browser }) => {
+  test("KBU-08 cancelling the delete confirmation leaves the item alone", { tag: '@tesbo.testId("TES-TC-1006")' }, async ({ browser }) => {
     const page = await openKb(browser);
     const name = stamp("Keep");
     await createFolder(page, name);
@@ -404,7 +404,7 @@ test.describe("knowledge base (UI)", () => {
     expect(folderCount(), "dismissing the confirm must not delete anything").toBe(1);
   });
 
-  test("KBU-09 accepting the confirmation soft-deletes the item and drops it from the table", async ({
+  test("KBU-09 accepting the confirmation soft-deletes the item and drops it from the table", { tag: '@tesbo.testId("TES-TC-1007")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -440,7 +440,7 @@ test.describe("knowledge base (UI)", () => {
    * folder gave no hint that everything inside went with it. Two tests, because a fix that only
    * addresses one direction is still wrong.
    */
-  test("KBU-10 deleting a folder with contents warns that the contents go too", async ({ browser }) => {
+  test("KBU-10 deleting a folder with contents warns that the contents go too", { tag: '@tesbo.testId("TES-TC-1008")' }, async ({ browser }) => {
     const parent = stamp("Parent");
     const folder = await api.post(kbUrl("/folders"), { data: { name: parent, parentFolderId: rootFolderId } });
     const parentId = (await folder.json()).id;
@@ -464,7 +464,7 @@ test.describe("knowledge base (UI)", () => {
       .toContain("contents");
   });
 
-  test("KBU-10b deleting an EMPTY folder from the tree does not claim it has contents", async ({
+  test("KBU-10b deleting an EMPTY folder from the tree does not claim it has contents", { tag: '@tesbo.testId("TES-TC-1009")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -493,7 +493,7 @@ test.describe("knowledge base (UI)", () => {
 
   // ─── Browsing: filter, search, empty states ────────────────────────────────
 
-  test("KBU-11 an empty knowledge base renders its zero counts rather than an error", async ({ browser }) => {
+  test("KBU-11 an empty knowledge base renders its zero counts rather than an error", { tag: '@tesbo.testId("TES-TC-1010")' }, async ({ browser }) => {
     const page = await openKb(browser);
 
     // A fresh project has the root folder and nothing in it. The header states that in words —
@@ -506,7 +506,7 @@ test.describe("knowledge base (UI)", () => {
     expect(summary.files).toBe(0);
   });
 
-  test("KBU-12 the type filter narrows the table to folders or documents", async ({ browser }) => {
+  test("KBU-12 the type filter narrows the table to folders or documents", { tag: '@tesbo.testId("TES-TC-1011")' }, async ({ browser }) => {
     const folderName = stamp("FilterFolder");
     const docTitle = stamp("FilterDoc");
     await api.post(kbUrl("/folders"), { data: { name: folderName, parentFolderId: rootFolderId } });
@@ -534,7 +534,7 @@ test.describe("knowledge base (UI)", () => {
     await expect(row(page, docTitle)).toBeVisible();
   });
 
-  test("KBU-13 search matches a document's body, not only its title", async ({ browser }) => {
+  test("KBU-13 search matches a document's body, not only its title", { tag: '@tesbo.testId("TES-TC-1012")' }, async ({ browser }) => {
     const title = stamp("Findable");
     const needle = `kbu13needle${Date.now()}`;
     const created = await api.post(kbUrl("/documents"), {
@@ -567,7 +567,7 @@ test.describe("knowledge base (UI)", () => {
     await expect(row(page, decoyTitle), "a non-matching document must drop out").toHaveCount(0);
   });
 
-  test("KBU-14 a whitespace-only search term matches nothing rather than everything", async ({ browser }) => {
+  test("KBU-14 a whitespace-only search term matches nothing rather than everything", { tag: '@tesbo.testId("TES-TC-1013")' }, async ({ browser }) => {
     const present = stamp("Present");
     await api.post(kbUrl("/folders"), { data: { name: present, parentFolderId: rootFolderId } });
 
@@ -585,7 +585,7 @@ test.describe("knowledge base (UI)", () => {
 
   // ─── Authorization, which this page does not gate ──────────────────────────
 
-  test("KBU-20 a qa_engineer is shown the controls and can create — the page has no role gate", async ({
+  test("KBU-20 a qa_engineer is shown the controls and can create — the page has no role gate", { tag: '@tesbo.testId("TES-TC-1014")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser, "qa");
@@ -601,7 +601,7 @@ test.describe("knowledge base (UI)", () => {
     expect(folderCount()).toBe(1);
   });
 
-  test("KBU-21 a workspace member with no access to the project cannot use the knowledge base", async ({
+  test("KBU-21 a workspace member with no access to the project cannot use the knowledge base", { tag: '@tesbo.testId("TES-TC-1015")' }, async ({
     browser,
   }) => {
     const ctx = await browser.newContext({ storageState: states.get("guest") });
@@ -616,7 +616,7 @@ test.describe("knowledge base (UI)", () => {
     await expect(page.getByRole("button", { name: "New", exact: true })).toHaveCount(0);
   });
 
-  test("KBU-22 a folder from another project is not reachable through this project's URL", async ({
+  test("KBU-22 a folder from another project is not reachable through this project's URL", { tag: '@tesbo.testId("TES-TC-1016")' }, async ({
     browser,
   }) => {
     const secondRoot = (await (await api.get(kbUrl("/folders/tree", tenant!.secondProjectId))).json()).id;
@@ -637,7 +637,7 @@ test.describe("knowledge base (UI)", () => {
     );
   });
 
-  test("KBU-23 a malformed document id in the URL does not throw in the page", async ({ browser }) => {
+  test("KBU-23 a malformed document id in the URL does not throw in the page", { tag: '@tesbo.testId("TES-TC-1017")' }, async ({ browser }) => {
     const ctx = await browser.newContext({ storageState: states.get("owner") });
     contexts.push(ctx);
     const page = await ctx.newPage();
@@ -654,7 +654,7 @@ test.describe("knowledge base (UI)", () => {
 
   // ─── The gap this suite is here to pin ─────────────────────────────────────
 
-  test("KBU-24 deleted items are unreachable from the UI — restore is API-only", async ({ browser }) => {
+  test("KBU-24 deleted items are unreachable from the UI — restore is API-only", { tag: '@tesbo.testId("TES-TC-1018")' }, async ({ browser }) => {
     const name = stamp("Trashed");
     const created = await api.post(kbUrl("/folders"), { data: { name, parentFolderId: rootFolderId } });
     const folderId = (await created.json()).id;
@@ -686,7 +686,7 @@ test.describe("knowledge base (UI)", () => {
   // cleared to nothing and autosaved, and the document then shows as "Untitled" everywhere it is
   // listed. Both tests are expected RED until the editor validates before saving.
 
-  test("KBU-25 a document's title cannot be emptied and saved", async ({ browser }) => {
+  test("KBU-25 a document's title cannot be emptied and saved", { tag: '@tesbo.testId("TES-TC-1019")' }, async ({ browser }) => {
     const title = stamp("KeepsTitle");
     const created = await api.post(kbUrl("/documents"), {
       data: { title, folderId: rootFolderId, documentType: "general" },
@@ -714,7 +714,7 @@ test.describe("knowledge base (UI)", () => {
     ).toBe(title);
   });
 
-  test("KBU-26 a whitespace-only title is refused the same way an empty one is", async ({ browser }) => {
+  test("KBU-26 a whitespace-only title is refused the same way an empty one is", { tag: '@tesbo.testId("TES-TC-1020")' }, async ({ browser }) => {
     const title = stamp("WhitespaceTitle");
     const created = await api.post(kbUrl("/documents"), {
       data: { title, folderId: rootFolderId, documentType: "general" },
@@ -740,7 +740,7 @@ test.describe("knowledge base (UI)", () => {
 
   // ─── Search feedback while typing (BetterBugs 6a7dae14) ────────────────────
 
-  test("KBU-27 search either filters as you type or offers a visible Search control", async ({ browser }) => {
+  test("KBU-27 search either filters as you type or offers a visible Search control", { tag: '@tesbo.testId("TES-TC-1021")' }, async ({ browser }) => {
     const present = stamp("TypeAheadHit");
     const absent = stamp("TypeAheadMiss");
     for (const name of [present, absent]) {
@@ -798,7 +798,7 @@ test.describe("knowledge base (UI)", () => {
    * Expected RED. The assertion is deliberately about the limits being DISCLOSED, not about exact
    * wording — any copy naming the formats and the size satisfies it.
    */
-  test("KBU-28 the upload modal states which files are allowed and how large they may be", async ({
+  test("KBU-28 the upload modal states which files are allowed and how large they may be", { tag: '@tesbo.testId("TES-TC-1022")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -845,7 +845,7 @@ test.describe("knowledge base (UI)", () => {
    *
    * Expected RED until the diagnostic moves to the console and the user gets plain copy.
    */
-  test("KBU-29 a failed upload shows plain copy, not the API/CORS diagnostic", async ({ browser }) => {
+  test("KBU-29 a failed upload shows plain copy, not the API/CORS diagnostic", { tag: '@tesbo.testId("TES-TC-1023")' }, async ({ browser }) => {
     const page = await openKb(browser);
 
     await page.route(/\/knowledge-base\/files/, (route) =>
@@ -878,7 +878,7 @@ test.describe("knowledge base (UI)", () => {
    *
    * Expected RED.
    */
-  test("KBU-30 a long folder name is readable in full from a tooltip", async ({ browser }) => {
+  test("KBU-30 a long folder name is readable in full from a tooltip", { tag: '@tesbo.testId("TES-TC-1024")' }, async ({ browser }) => {
     /*
      * Comfortably past the tree's width, so it genuinely truncates, but within the folder-name cap.
      *
@@ -920,7 +920,7 @@ test.describe("knowledge base (UI)", () => {
    * Asserts the behaviour is non-destructive AND that the screen says so. Fails against the old UI on
    * the chip locator and on the empty-state wording.
    */
-  test("KBU-31 resolving a comment hides it without ever looking like a deletion", async ({ browser }) => {
+  test("KBU-31 resolving a comment hides it without ever looking like a deletion", { tag: '@tesbo.testId("TES-TC-1025")' }, async ({ browser }) => {
     const docName = stamp("Comment doc");
     const created = await api.post(kbUrl("/documents"), {
       data: { title: docName, folderId: rootFolderId, contentText: "Body under discussion." },
@@ -989,7 +989,7 @@ test.describe("knowledge base (UI)", () => {
   // subtree), and a permission refusal — which isn't about any field on screen — floats above the
   // dialog as a toast instead of hiding behind it.
 
-  test("KBU-32 renaming a folder to a name already taken under the same parent is refused inline, not as a toast", async ({
+  test("KBU-32 renaming a folder to a name already taken under the same parent is refused inline, not as a toast", { tag: '@tesbo.testId("TES-TC-1339")' }, async ({
     browser,
   }) => {
     const page = await openKb(browser);
@@ -1015,7 +1015,7 @@ test.describe("knowledge base (UI)", () => {
     ).toBe(toRename);
   });
 
-  test("KBU-33 moving a folder into its own subfolder is refused inline under the destination field, not as a toast", async ({
+  test("KBU-33 moving a folder into its own subfolder is refused inline under the destination field, not as a toast", { tag: '@tesbo.testId("TES-TC-1340")' }, async ({
     browser,
   }) => {
     const parentName = stamp("MoveParent");
@@ -1048,7 +1048,7 @@ test.describe("knowledge base (UI)", () => {
     ).toBe(rootFolderId);
   });
 
-  test("KBU-34 a permission refusal on rename floats above the still-open dialog as a toast, not a hidden page banner", async ({
+  test("KBU-34 a permission refusal on rename floats above the still-open dialog as a toast, not a hidden page banner", { tag: '@tesbo.testId("TES-TC-1341")' }, async ({
     browser,
   }) => {
     const ownersFolder = stamp("OwnersFolder");

@@ -138,7 +138,7 @@ test.describe("knowledge base v2 — files", () => {
 
   // ─── Upload ───────────────────────────────────────────────────────────────
 
-  test("KBF-A-01 a file uploads into a folder, reads back with its metadata, and downloads byte-for-byte", async () => {
+  test("KBF-A-01 a file uploads into a folder, reads back with its metadata, and downloads byte-for-byte", { tag: '@tesbo.testId("TES-TC-306")' }, async () => {
     const folder = await createFolder(stamp("Files"));
     const contents = `knowledge base contents ${Date.now()}`;
     const file = await uploadOne(textFile("notes.txt", contents), folder.id);
@@ -169,7 +169,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(download.headers()["content-disposition"]).toContain("notes.txt");
   });
 
-  test("KBF-A-02 several files upload in one request and all land in the folder", async () => {
+  test("KBF-A-02 several files upload in one request and all land in the folder", { tag: '@tesbo.testId("TES-TC-307")' }, async () => {
     const folder = await createFolder(stamp("Batch"));
     const res = await upload([textFile("one.txt", "1"), pngFile("two.png"), textFile("three.md", "# 3")], folder.id);
     expect(res.status()).toBe(201);
@@ -181,7 +181,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(items.items.filter((i: any) => i.type === "file")).toHaveLength(3);
   });
 
-  test("KBF-A-03 an unsupported file type is refused, and refuses the whole batch with it", async () => {
+  test("KBF-A-03 an unsupported file type is refused, and refuses the whole batch with it", { tag: '@tesbo.testId("TES-TC-308")' }, async () => {
     const folder = await createFolder(stamp("Rejects"));
     const res = await upload([textFile("fine.txt", "ok"), { name: "payload.exe", mimeType: "application/octet-stream", body: Buffer.from("MZ") }], folder.id);
     expect(res.status()).toBe(400);
@@ -194,7 +194,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(items.items).toEqual([]);
   });
 
-  test("KBF-A-04 an upload with no files, and one with no folder, are both refused", async () => {
+  test("KBF-A-04 an upload with no files, and one with no folder, are both refused", { tag: '@tesbo.testId("TES-TC-309")' }, async () => {
     const folder = await createFolder(stamp("Empty upload"));
 
     const noFiles = await upload([], folder.id);
@@ -217,7 +217,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(fileCount()).toBe(0);
   });
 
-  test("KBF-A-05 two files with the same name in one folder are kept apart by a numbered suffix", async () => {
+  test("KBF-A-05 two files with the same name in one folder are kept apart by a numbered suffix", { tag: '@tesbo.testId("TES-TC-310")' }, async () => {
     const folder = await createFolder(stamp("Collisions"));
     const first = await uploadOne(textFile("report.txt", "first"), folder.id);
     const second = await uploadOne(textFile("report.txt", "second"), folder.id);
@@ -241,7 +241,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(fresh.originalFileName).toBe("report.txt");
   });
 
-  test("KBF-A-06 a zero-byte file is accepted and downloads as zero bytes", async () => {
+  test("KBF-A-06 a zero-byte file is accepted and downloads as zero bytes", { tag: '@tesbo.testId("TES-TC-311")' }, async () => {
     const folder = await createFolder(stamp("Empty file"));
     const file = await uploadOne({ name: "empty.txt", mimeType: "text/plain", body: Buffer.alloc(0) }, folder.id);
     expect(Number(file.fileSize)).toBe(0);
@@ -251,7 +251,7 @@ test.describe("knowledge base v2 — files", () => {
     expect((await download.body()).length).toBe(0);
   });
 
-  test("KBF-A-07 text is extracted from readable formats so the AI context can see inside a file", async () => {
+  test("KBF-A-07 text is extracted from readable formats so the AI context can see inside a file", { tag: '@tesbo.testId("TES-TC-312")' }, async () => {
     const folder = await createFolder(stamp("Extraction"));
     const marker = `extractable${Date.now()}`;
     const txt = await uploadOne(textFile("readable.txt", `a line with ${marker} in it`), folder.id);
@@ -270,7 +270,7 @@ test.describe("knowledge base v2 — files", () => {
 
   // ─── Preview and download ─────────────────────────────────────────────────
 
-  test("KBF-A-08 a plaintext preview is served inline by our own API rather than redirected", async () => {
+  test("KBF-A-08 a plaintext preview is served inline by our own API rather than redirected", { tag: '@tesbo.testId("TES-TC-313")' }, async () => {
     const folder = await createFolder(stamp("Preview"));
     const contents = "line one\nline two";
     const file = await uploadOne(textFile("preview.txt", contents), folder.id);
@@ -282,7 +282,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(res.headers()["content-type"]).toContain("text/plain");
   });
 
-  test("KBF-A-09 a binary preview serves the bytes or redirects, but never leaks the storage key", async () => {
+  test("KBF-A-09 a binary preview serves the bytes or redirects, but never leaks the storage key", { tag: '@tesbo.testId("TES-TC-314")' }, async () => {
     const folder = await createFolder(stamp("Binary preview"));
     const file = await uploadOne(pngFile("image.png"), folder.id);
 
@@ -301,7 +301,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(JSON.stringify(res.headers())).not.toContain(storageKey);
   });
 
-  test("KBF-A-10 a file whose stored object has vanished reports it rather than serving an empty body", async () => {
+  test("KBF-A-10 a file whose stored object has vanished reports it rather than serving an empty body", { tag: '@tesbo.testId("TES-TC-315")' }, async () => {
     const folder = await createFolder(stamp("Dangling"));
     const file = await uploadOne(textFile("gone.txt", "will vanish"), folder.id);
     // Points the row at an object that was never written, which is what a storage object deleted
@@ -323,7 +323,7 @@ test.describe("knowledge base v2 — files", () => {
 
   // ─── Rename, move, delete, restore ────────────────────────────────────────
 
-  test("KBF-A-11 a file is renamed, and the rename is what the download serves it as", async () => {
+  test("KBF-A-11 a file is renamed, and the rename is what the download serves it as", { tag: '@tesbo.testId("TES-TC-316")' }, async () => {
     const folder = await createFolder(stamp("Renames"));
     const file = await uploadOne(textFile("before.txt", "body"), folder.id);
 
@@ -340,7 +340,7 @@ test.describe("knowledge base v2 — files", () => {
     expect((await download.body()).toString("utf-8")).toBe("body");
   });
 
-  test("KBF-A-12 a file moves between folders and refuses a move with no destination", async () => {
+  test("KBF-A-12 a file moves between folders and refuses a move with no destination", { tag: '@tesbo.testId("TES-TC-317")' }, async () => {
     const from = await createFolder(stamp("From"));
     const to = await createFolder(stamp("To"));
     const file = await uploadOne(textFile("moving.txt", "x"), from.id);
@@ -365,7 +365,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(unknown.status()).toBe(404);
   });
 
-  test("KBF-A-13 a deleted file disappears from the listing and its bytes stop being served", async () => {
+  test("KBF-A-13 a deleted file disappears from the listing and its bytes stop being served", { tag: '@tesbo.testId("TES-TC-318")' }, async () => {
     const folder = await createFolder(stamp("Deletes"));
     const file = await uploadOne(textFile("doomed.txt", "secret"), folder.id);
 
@@ -382,7 +382,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(items.items).toEqual([]);
   });
 
-  test("KBF-A-14 a deleted file is restored by an owner but not by the qa_engineer who uploaded it", async () => {
+  test("KBF-A-14 a deleted file is restored by an owner but not by the qa_engineer who uploaded it", { tag: '@tesbo.testId("TES-TC-319")' }, async () => {
     const folder = await createFolder(stamp("Restores"));
     const file = await uploadOne(textFile("recoverable.txt", "x"), folder.id, asQa);
 
@@ -400,7 +400,7 @@ test.describe("knowledge base v2 — files", () => {
     expect((await asOwner.get(kbUrl(`/files/${file.id}`), { failOnStatusCode: false })).status()).toBe(200);
   });
 
-  test("KBF-A-15 deleting a folder takes its files with it", async () => {
+  test("KBF-A-15 deleting a folder takes its files with it", { tag: '@tesbo.testId("TES-TC-320")' }, async () => {
     const folder = await createFolder(stamp("Cascade"));
     const file = await uploadOne(textFile("inside.txt", "x"), folder.id);
 
@@ -409,7 +409,7 @@ test.describe("knowledge base v2 — files", () => {
     expect((await asOwner.get(kbUrl(`/files/${file.id}`), { failOnStatusCode: false })).status()).toBe(404);
   });
 
-  test("KBF-A-16 the summary counts files, and stops counting a deleted one", async () => {
+  test("KBF-A-16 the summary counts files, and stops counting a deleted one", { tag: '@tesbo.testId("TES-TC-321")' }, async () => {
     const folder = await createFolder(stamp("Counted"));
     await uploadOne(textFile("counted.txt", "x"), folder.id);
     const second = await uploadOne(pngFile("counted.png"), folder.id);
@@ -422,7 +422,7 @@ test.describe("knowledge base v2 — files", () => {
     expect((await (await asOwner.get(kbUrl("/summary"))).json()).files).toBe(1);
   });
 
-  test("KBF-A-17 search finds a file by name and by extension", async () => {
+  test("KBF-A-17 search finds a file by name and by extension", { tag: '@tesbo.testId("TES-TC-322")' }, async () => {
     const folder = await createFolder(stamp("Searchable"));
     const marker = `kbf${Date.now()}`;
     const file = await uploadOne(textFile(`${marker}.csv`, "a,b,c"), folder.id);
@@ -439,7 +439,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(asDocument.list.map((i: any) => i.id)).not.toContain(file.id);
   });
 
-  test("KBF-A-18 a folder export carries the file's real bytes under its original name", async () => {
+  test("KBF-A-18 a folder export carries the file's real bytes under its original name", { tag: '@tesbo.testId("TES-TC-323")' }, async () => {
     const folder = await createFolder(stamp("Exported"));
     await uploadOne(textFile("bundled.txt", "bundled contents"), folder.id);
 
@@ -455,7 +455,7 @@ test.describe("knowledge base v2 — files", () => {
 
   // ─── Plan limits ──────────────────────────────────────────────────────────
 
-  test("KBF-A-19 an upload that would cross the plan's storage ceiling is refused and stores nothing", async () => {
+  test("KBF-A-19 an upload that would cross the plan's storage ceiling is refused and stores nothing", { tag: '@tesbo.testId("TES-TC-324")' }, async () => {
     const folder = await createFolder(stamp("Storage"));
     try {
       // Launch allows 500MB. A file larger than the whole allowance has to be refused before a byte
@@ -476,7 +476,7 @@ test.describe("knowledge base v2 — files", () => {
     }
   });
 
-  test("KBF-A-20 uploaded bytes are counted against the workspace's storage usage and released on delete", async () => {
+  test("KBF-A-20 uploaded bytes are counted against the workspace's storage usage and released on delete", { tag: '@tesbo.testId("TES-TC-325")' }, async () => {
     const folder = await createFolder(stamp("Accounting"));
     const before = Number(
       scalar(
@@ -507,7 +507,7 @@ test.describe("knowledge base v2 — files", () => {
 
   // ─── Authorization ────────────────────────────────────────────────────────
 
-  test("KBF-A-21 no file route answers a caller with no session", async () => {
+  test("KBF-A-21 no file route answers a caller with no session", { tag: '@tesbo.testId("TES-TC-326")' }, async () => {
     const folder = await createFolder(stamp("Guarded"));
     const file = await uploadOne(textFile("guarded.txt", "secret"), folder.id);
 
@@ -542,7 +542,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(scalar(`SELECT original_file_name FROM knowledge_files WHERE id = ${literal(file.id)};`)).toBe("guarded.txt");
   });
 
-  test("KBF-A-22 a workspace member with no project access reaches none of it", async () => {
+  test("KBF-A-22 a workspace member with no project access reaches none of it", { tag: '@tesbo.testId("TES-TC-327")' }, async () => {
     const folder = await createFolder(stamp("Members only"));
     const file = await uploadOne(textFile("members.txt", "secret"), folder.id);
 
@@ -562,7 +562,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(fileCount()).toBe(1);
   });
 
-  test("KBF-A-23 a file in another project is not reachable through this project's URL", async () => {
+  test("KBF-A-23 a file in another project is not reachable through this project's URL", { tag: '@tesbo.testId("TES-TC-328")' }, async () => {
     const secondRoot = (await (await asOwner.get(kbUrl("/folders/tree", tenant!.secondProjectId))).json()).id;
     const created = await asOwner.post(kbUrl("/files/upload", tenant!.secondProjectId), {
       multipart: filesFormWith({ folderId: secondRoot }, [textFile("foreign.txt", "other project")]),
@@ -589,7 +589,7 @@ test.describe("knowledge base v2 — files", () => {
     }
   });
 
-  test("KBF-A-24 a qa_engineer manages their own files but not someone else's", async () => {
+  test("KBF-A-24 a qa_engineer manages their own files but not someone else's", { tag: '@tesbo.testId("TES-TC-329")' }, async () => {
     const folder = await createFolder(stamp("Ownership"));
     const mine = await uploadOne(textFile("qa.txt", "mine"), folder.id, asQa);
     const theirs = await uploadOne(textFile("owner.txt", "theirs"), folder.id);
@@ -616,7 +616,7 @@ test.describe("knowledge base v2 — files", () => {
     expect((await asManager.delete(kbUrl(`/files/${theirs.id}`), { failOnStatusCode: false })).status()).toBe(200);
   });
 
-  test("KBF-A-26 an image the OCR engine cannot decode does not take the API down with it", async () => {
+  test("KBF-A-26 an image the OCR engine cannot decode does not take the API down with it", { tag: '@tesbo.testId("TES-TC-330")' }, async () => {
     // Regression test. The knowledge-base upload runs OCR over png/jpg to make the contents
     // searchable, and tesseract.js's worker message handler rethrows on failure — `if (errorHandler)
     // errorHandler(data); else throw Error(data)`. That throw is outside the promise recognize()
@@ -644,7 +644,7 @@ test.describe("knowledge base v2 — files", () => {
     expect(again.status()).toBe(201);
   });
 
-  test("KBF-A-25 a malformed file id is a 404, not a 500", async () => {
+  test("KBF-A-25 a malformed file id is a 404, not a 500", { tag: '@tesbo.testId("TES-TC-331")' }, async () => {
     for (const bad of ["not-a-uuid", "0"]) {
       for (const attempt of [
         asOwner.get(kbUrl(`/files/${bad}`), { failOnStatusCode: false }),

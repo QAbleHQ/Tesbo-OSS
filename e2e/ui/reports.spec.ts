@@ -65,7 +65,7 @@ test.describe("reports export controls", () => {
     await expect(page.getByRole("heading", { name: "Reports & Insights" })).toBeVisible();
   });
 
-  test("RPT-U-01 the Export button is a live control, not a Coming soon placeholder", async ({ page }) => {
+  test("RPT-U-01 the Export button is a live control, not a Coming soon placeholder", { tag: '@tesbo.testId("TES-TC-1360")' }, async ({ page }) => {
     const button = exportButton(page);
     await expect(button).toBeVisible();
     await expect(button).toBeEnabled();
@@ -77,7 +77,7 @@ test.describe("reports export controls", () => {
     await expect(page.getByText("Export PDF")).toHaveCount(0);
   });
 
-  test("RPT-U-02 the menu offers CSV and Excel for the view on screen", async ({ page }) => {
+  test("RPT-U-02 the menu offers CSV and Excel for the view on screen", { tag: '@tesbo.testId("TES-TC-1361")' }, async ({ page }) => {
     const menu = await openExportMenu(page);
     await expect(menu).toContainText("Overview");
 
@@ -91,7 +91,7 @@ test.describe("reports export controls", () => {
     );
   });
 
-  test("RPT-U-03 switching tabs switches what gets exported", async ({ page }) => {
+  test("RPT-U-03 switching tabs switches what gets exported", { tag: '@tesbo.testId("TES-TC-1362")' }, async ({ page }) => {
     // Six views share one button, so the link has to follow the nav — exporting the overview while
     // looking at Traceability is the quietly-wrong-file failure this guards.
     const cases: [string, string][] = [
@@ -115,7 +115,7 @@ test.describe("reports export controls", () => {
     }
   });
 
-  test("RPT-U-04 the nav's own export rows point at the same file", async ({ page }) => {
+  test("RPT-U-04 the nav's own export rows point at the same file", { tag: '@tesbo.testId("TES-TC-1363")' }, async ({ page }) => {
     await expect(page.getByTestId("reports-nav-export-csv")).toHaveAttribute(
       "href",
       /\/reports\/export\/csv\?view=overview/,
@@ -126,7 +126,7 @@ test.describe("reports export controls", () => {
     );
   });
 
-  test("RPT-U-05 the CSV link really serves a file to this session", async ({ page }) => {
+  test("RPT-U-05 the CSV link really serves a file to this session", { tag: '@tesbo.testId("TES-TC-1364")' }, async ({ page }) => {
     /*
      * Followed with page.request rather than by clicking: the anchor opens in a new tab, and a
      * download that starts inside a popup emits its event on the popup rather than this page, which
@@ -146,7 +146,7 @@ test.describe("reports export controls", () => {
     expect(body.length).toBeGreaterThan("section,label,metric,value".length);
   });
 
-  test("RPT-U-06 the Execution Report's filter travels with its export", async ({ page }) => {
+  test("RPT-U-06 the Execution Report's filter travels with its export", { tag: '@tesbo.testId("TES-TC-1365")' }, async ({ page }) => {
     await page.getByRole("button", { name: /Execution Report/i }).first().click();
 
     // The tab's "Filter by" select; its options are the grouping dimensions.

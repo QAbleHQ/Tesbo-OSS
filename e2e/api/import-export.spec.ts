@@ -166,7 +166,7 @@ test.describe("import / export", () => {
 
   /* ───────────────────────── test case CSV export ───────────────────────── */
 
-  test("exports every live test case under the documented header row", async () => {
+  test("exports every live test case under the documented header row", { tag: '@tesbo.testId("TES-TC-197")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Export Contents ${stamp}`);
     const suite = await (
@@ -219,7 +219,7 @@ test.describe("import / export", () => {
     expect(records.find((r) => r.title === inSuite.title)!.suite).toBe(suite.name);
   });
 
-  test("serialises each step as \"action => expected result\", joined by \" | \"", async () => {
+  test("serialises each step as \"action => expected result\", joined by \" | \"", { tag: '@tesbo.testId("TES-TC-198")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Export Steps ${stamp}`);
     const seeded = await seedCase(
@@ -241,7 +241,7 @@ test.describe("import / export", () => {
     );
   });
 
-  test("quotes values containing commas, quotes and newlines so they survive the round trip", async () => {
+  test("quotes values containing commas, quotes and newlines so they survive the round trip", { tag: '@tesbo.testId("TES-TC-199")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Export Quoting ${stamp}`);
     const title = `E2E Export "quoted", comma ${stamp}`;
@@ -257,7 +257,7 @@ test.describe("import / export", () => {
     expect(body).toContain('"E2E Export ""quoted"", comma');
   });
 
-  test("orders rows by most recently updated", async () => {
+  test("orders rows by most recently updated", { tag: '@tesbo.testId("TES-TC-200")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Export Order ${stamp}`);
     const first = await seedCase({ title: `E2E Export Order A ${stamp}` }, project);
@@ -270,7 +270,7 @@ test.describe("import / export", () => {
     expect(records.map((r) => r.title)).toEqual([first.title, second.title]);
   });
 
-  test("a project with no test cases exports the header row and nothing else", async () => {
+  test("a project with no test cases exports the header row and nothing else", { tag: '@tesbo.testId("TES-TC-201")' }, async () => {
     const project = await newProject(`E2E Export Empty ${Date.now()}`);
     const res = await exportCsv(asOwner, project);
     expect(res.status()).toBe(200);
@@ -278,13 +278,13 @@ test.describe("import / export", () => {
     expect(rows).toEqual([EXPORT_HEADERS]);
   });
 
-  test("sends the CSV as a named attachment", async () => {
+  test("sends the CSV as a named attachment", { tag: '@tesbo.testId("TES-TC-202")' }, async () => {
     const res = await exportCsv(asOwner);
     expect(res.headers()["content-type"]).toContain("text/csv");
     expect(res.headers()["content-disposition"]).toBe('attachment; filename="testcases.csv"');
   });
 
-  test("adds a cf_<key> column for each active custom field, and drops archived ones", async () => {
+  test("adds a cf_<key> column for each active custom field, and drops archived ones", { tag: '@tesbo.testId("TES-TC-203")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Export Custom Fields ${stamp}`);
     const text = await (
@@ -334,7 +334,7 @@ test.describe("import / export", () => {
 
   /* ───────────────────────── test case XLSX export ───────────────────────── */
 
-  test("exports a workbook whose \"Test Cases\" sheet matches the CSV", async () => {
+  test("exports a workbook whose \"Test Cases\" sheet matches the CSV", { tag: '@tesbo.testId("TES-TC-204")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Export Workbook ${stamp}`);
     const seeded = await seedCase(
@@ -365,7 +365,7 @@ test.describe("import / export", () => {
     });
   });
 
-  test("a project with no test cases still exports a workbook carrying the header row", async () => {
+  test("a project with no test cases still exports a workbook carrying the header row", { tag: '@tesbo.testId("TES-TC-205")' }, async () => {
     // Red: sendWorkbook builds the sheet with XLSX.utils.json_to_sheet(rows), which derives its
     // header from the first row's keys — so with no rows there is no header either, and the
     // downloaded file opens as a completely blank sheet with no columns to fill in. The CSV export
@@ -408,7 +408,7 @@ test.describe("import / export", () => {
 
   /* ───────────────────────── import template ───────────────────────── */
 
-  test("the CSV template documents every importable column with a worked example", async () => {
+  test("the CSV template documents every importable column with a worked example", { tag: '@tesbo.testId("TES-TC-210")' }, async () => {
     const res = await asOwner.get(`/api/projects/${projectId}/testcases/import/template`);
     expect(res.status()).toBe(200);
     expect(res.headers()["content-type"]).toContain("text/csv");
@@ -427,7 +427,7 @@ test.describe("import / export", () => {
     expect(records[0].title).toBeTruthy();
   });
 
-  test("format=xlsx returns the same template as a workbook", async () => {
+  test("format=xlsx returns the same template as a workbook", { tag: '@tesbo.testId("TES-TC-211")' }, async () => {
     const res = await asOwner.get(
       `/api/projects/${projectId}/testcases/import/template?format=xlsx`,
     );
@@ -444,7 +444,7 @@ test.describe("import / export", () => {
     expect(Object.keys(rows[0])).toEqual(TEMPLATE_HEADERS);
   });
 
-  test("an unrecognised format falls back to the CSV template", async () => {
+  test("an unrecognised format falls back to the CSV template", { tag: '@tesbo.testId("TES-TC-212")' }, async () => {
     const res = await asOwner.get(
       `/api/projects/${projectId}/testcases/import/template?format=json`,
     );
@@ -453,7 +453,7 @@ test.describe("import / export", () => {
     expect(parseCsv(await res.text())[0]).toEqual(TEMPLATE_HEADERS);
   });
 
-  test("the template is project-scoped and needs a session", async () => {
+  test("the template is project-scoped and needs a session", { tag: '@tesbo.testId("TES-TC-213")' }, async () => {
     // Red: template() takes neither @Req() nor a look at the project id, so it serves the same file
     // to an anonymous caller and to a request naming a project that doesn't exist. Nothing tenant-
     // specific leaks — the payload is a constant — but it is the only route under
@@ -476,7 +476,7 @@ test.describe("import / export", () => {
 
   /* ───────────────────────── the server-side import routes ───────────────────────── */
 
-  test("the import routes refuse an anonymous caller", async () => {
+  test("the import routes refuse an anonymous caller", { tag: '@tesbo.testId("TES-TC-214")' }, async () => {
     // Red: previewImport()/executeImport() take no @Req() and no @Body() — they return a fixed
     // payload to anyone. Harmless today only because they do nothing at all.
     for (const path of [
@@ -490,7 +490,7 @@ test.describe("import / export", () => {
     }
   });
 
-  test("the import routes do not report a success they didn't perform", async () => {
+  test("the import routes do not report a success they didn't perform", { tag: '@tesbo.testId("TES-TC-215")' }, async () => {
     // Red: both routes are stubs. preview returns {uploadId:"local-upload", totalRows:0} for any
     // file, and import returns {imported:0} without reading its body — so a client that trusts
     // either one silently imports nothing and is told everything went fine.
@@ -534,7 +534,7 @@ test.describe("import / export", () => {
       testcaseId: string;
     }[];
 
-  test("exports one row per execution with the result that was recorded", async () => {
+  test("exports one row per execution with the result that was recorded", { tag: '@tesbo.testId("TES-TC-216")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Run Export ${stamp}`);
     const passed = await seedCase({ title: `E2E Run Export Passed ${stamp}`, priority: "P1", type: "Smoke" }, project);
@@ -586,7 +586,7 @@ test.describe("import / export", () => {
     });
   });
 
-  test("keeps the snapshot title of a case that was deleted after the run was built", async () => {
+  test("keeps the snapshot title of a case that was deleted after the run was built", { tag: '@tesbo.testId("TES-TC-217")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Run Export Snapshot ${stamp}`);
     const seeded = await seedCase({ title: `E2E Run Export Snapshot Case ${stamp}` }, project);
@@ -601,7 +601,7 @@ test.describe("import / export", () => {
     expect(records[0].externalId, "the case's own columns are empty once it's deleted").toBe("");
   });
 
-  test("excludes soft-deleted executions", async () => {
+  test("excludes soft-deleted executions", { tag: '@tesbo.testId("TES-TC-218")' }, async () => {
     const stamp = Date.now();
     const project = await newProject(`E2E Run Export Deleted ${stamp}`);
     const kept = await seedCase({ title: `E2E Run Export Kept ${stamp}` }, project);
@@ -621,14 +621,14 @@ test.describe("import / export", () => {
     expect(records.map((r) => r.title)).toEqual([kept.title]);
   });
 
-  test("a run with no cases exports the header row and nothing else", async () => {
+  test("a run with no cases exports the header row and nothing else", { tag: '@tesbo.testId("TES-TC-219")' }, async () => {
     const cycleId = await seedRun(`E2E Run Export Empty ${Date.now()}`);
     const res = await asOwner.get(`/api/cycles/${cycleId}/export/csv`);
     expect(res.status()).toBe(200);
     expect(parseCsv(await res.text())).toEqual([RUN_EXPORT_HEADERS]);
   });
 
-  test("the run export refuses callers without access to the run", async () => {
+  test("the run export refuses callers without access to the run", { tag: '@tesbo.testId("TES-TC-220")' }, async () => {
     // Red: exportCycle() takes no @Req() at all, so the whole run — case titles, external ids,
     // actual results, and the linked defect keys and URLs — is readable by anyone holding a cycle
     // id, with no session and from any workspace. This is the same "the controller method never
@@ -657,7 +657,7 @@ test.describe("import / export", () => {
     expect([403, 404], "a caller from another workspace is refused").toContain(outsiderRes.status());
   });
 
-  test("answers an unresolvable run id with 404", async () => {
+  test("answers an unresolvable run id with 404", { tag: '@tesbo.testId("TES-TC-221")' }, async () => {
     // Red on both counts: a malformed id reaches Postgres as a uuid cast and 500s, and a
     // well-formed id for a run that doesn't exist returns 200 with a header-only CSV — so a typo
     // in a run id downloads an empty "report" instead of saying the run isn't there.
@@ -675,7 +675,7 @@ test.describe("import / export", () => {
 
   /* ───────────────────────── plan gating ───────────────────────── */
 
-  test("a read-only locked project can still be exported, but not imported into", async () => {
+  test("a read-only locked project can still be exported, but not imported into", { tag: '@tesbo.testId("TES-TC-222")' }, async () => {
     // ProjectWriteLockGuard is documented as deliberately narrow: "locked projects stay fully
     // READABLE. Customers can always see and export their data." Both halves of that promise are
     // load-bearing for a workspace trying to get its data out after a downgrade, so both are

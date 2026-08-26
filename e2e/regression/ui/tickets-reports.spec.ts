@@ -57,6 +57,7 @@ test.describe("reports export controls — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-U-01", "10218723531", "the Export button is a live control, not a Coming soon placeholder"),
+    { tag: '@tesbo.testId("TES-TC-1305")' },
     async ({ page }) => {
       const button = exportButton(page);
       await expect(button).toBeVisible();
@@ -72,6 +73,7 @@ test.describe("reports export controls — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-U-02", "10218723531", "the menu offers CSV and Excel, both aimed at the current view"),
+    { tag: '@tesbo.testId("TES-TC-1306")' },
     async ({ page }) => {
       await openExportMenu(page);
       await expect(page.getByTestId("reports-export-csv")).toHaveAttribute(
@@ -87,6 +89,7 @@ test.describe("reports export controls — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-U-03", "10218723531", "switching tabs switches what gets exported"),
+    { tag: '@tesbo.testId("TES-TC-1307")' },
     async ({ page }) => {
       // Six views share one button, so the link has to follow the nav — exporting the overview while
       // looking at Traceability is the quietly-wrong-file failure this guards.
@@ -111,6 +114,7 @@ test.describe("reports export controls — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-U-04", "10218723531", "the nav's own export rows point at the same file"),
+    { tag: '@tesbo.testId("TES-TC-1308")' },
     async ({ page }) => {
       await expect(page.getByTestId("reports-nav-export-csv")).toHaveAttribute(
         "href",
@@ -125,6 +129,7 @@ test.describe("reports export controls — reported ticket 10218723531", () => {
 
   test(
     ticket("REG-RPT-U-05", "10218723531", "the CSV link really serves a file to this session"),
+    { tag: '@tesbo.testId("TES-TC-1309")' },
     async ({ page }) => {
       /*
        * Followed with page.request rather than by clicking: the anchor opens in a new tab, and a

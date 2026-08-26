@@ -96,7 +96,7 @@ test.describe("team members", () => {
 
   // ─── The roster ────────────────────────────────────────────────────────────
 
-  test("the roster lists every member with the role they hold", async ({ browser }) => {
+  test("the roster lists every member with the role they hold", { tag: '@tesbo.testId("TES-TC-670")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     await page.goto(WORKSPACE_MEMBERS_URL);
 
@@ -117,7 +117,7 @@ test.describe("team members", () => {
     await expect(rowFor(table, tenant!.guest.email)).toBeVisible();
   });
 
-  test("the role guide explains what each role can do", async ({ browser }) => {
+  test("the role guide explains what each role can do", { tag: '@tesbo.testId("TES-TC-671")' }, async ({ browser }) => {
     // The screen hands out permissions, so it has to say what it's handing out. This is the only
     // place in the product that documents the three roles.
     //
@@ -139,7 +139,7 @@ test.describe("team members", () => {
 
   // ─── Inviting ──────────────────────────────────────────────────────────────
 
-  test("an owner can invite a teammate and the invite appears as pending", async ({ browser }) => {
+  test("an owner can invite a teammate and the invite appears as pending", { tag: '@tesbo.testId("TES-TC-672")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     const email = uniqueEmail("owner");
     const api = await loginAs(tenant!.owner);
@@ -172,7 +172,7 @@ test.describe("team members", () => {
     }
   });
 
-  test("an invitation can be scoped to specific projects from the modal", async ({ browser }) => {
+  test("an invitation can be scoped to specific projects from the modal", { tag: '@tesbo.testId("TES-TC-673")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     const email = uniqueEmail("scoped");
     const api = await loginAs(tenant!.owner);
@@ -204,7 +204,7 @@ test.describe("team members", () => {
     }
   });
 
-  test("a rejected invite is explained in the modal instead of vanishing", async ({ browser }) => {
+  test("a rejected invite is explained in the modal instead of vanishing", { tag: '@tesbo.testId("TES-TC-674")' }, async ({ browser }) => {
     // The failure path: inviting an existing member is refused by the API, and the modal has to
     // stay open and say why. A silent close would read as success.
     const page = await pageAs(browser, "owner");
@@ -218,7 +218,7 @@ test.describe("team members", () => {
     await expect(page.getByText("Invite sent successfully")).toHaveCount(0);
   });
 
-  test("an empty email is caught before a request is sent", async ({ browser }) => {
+  test("an empty email is caught before a request is sent", { tag: '@tesbo.testId("TES-TC-675")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     await page.goto(WORKSPACE_MEMBERS_URL);
     await page.getByRole("button", { name: "Invite member" }).click();
@@ -227,7 +227,7 @@ test.describe("team members", () => {
     await expect(page.getByText("Email is required")).toBeVisible();
   });
 
-  test("a manager is only offered the role a manager may grant", async ({ browser }) => {
+  test("a manager is only offered the role a manager may grant", { tag: '@tesbo.testId("TES-TC-676")' }, async ({ browser }) => {
     // The API refuses a manager inviting anything but a QA engineer, so the dropdown must not
     // offer Manager at all — being shown a choice that always 403s is the bug.
     const page = await pageAs(browser, "manager");
@@ -240,7 +240,7 @@ test.describe("team members", () => {
     await expect(roleSelect).toBeDisabled();
   });
 
-  test("a QA engineer is turned away from workspace settings entirely", async ({ browser }) => {
+  test("a QA engineer is turned away from workspace settings entirely", { tag: '@tesbo.testId("TES-TC-677")' }, async ({ browser }) => {
     // Workspace settings is owner/manager only, and the page redirects rather than rendering a
     // read-only version — so the roster, the invite button and the pending invitations are all
     // simply out of reach. Landing somewhere useful matters as much as being refused: a bare
@@ -253,7 +253,7 @@ test.describe("team members", () => {
     await expect(page.getByRole("heading", { name: "Team" })).toHaveCount(0);
   });
 
-  test("a manager can see the roster but not change it", async ({ browser }) => {
+  test("a manager can see the roster but not change it", { tag: '@tesbo.testId("TES-TC-678")' }, async ({ browser }) => {
     const page = await pageAs(browser, "manager");
     await page.goto(WORKSPACE_MEMBERS_URL);
 
@@ -265,7 +265,7 @@ test.describe("team members", () => {
 
   // ─── Managing pending invitations ──────────────────────────────────────────
 
-  test("an owner can resend and then cancel a pending invitation", async ({ browser }) => {
+  test("an owner can resend and then cancel a pending invitation", { tag: '@tesbo.testId("TES-TC-679")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     const email = uniqueEmail("manage");
     const api = await loginAs(tenant!.owner);
@@ -295,7 +295,7 @@ test.describe("team members", () => {
 
   // ─── Changing roles and removing people ────────────────────────────────────
 
-  test("an owner can change a member's role from the roster", async ({ browser }) => {
+  test("an owner can change a member's role from the roster", { tag: '@tesbo.testId("TES-TC-680")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     try {
       await page.goto(WORKSPACE_MEMBERS_URL);
@@ -310,7 +310,7 @@ test.describe("team members", () => {
     }
   });
 
-  test("an owner can remove a member and the roster reflects it", async ({ browser }) => {
+  test("an owner can remove a member and the roster reflects it", { tag: '@tesbo.testId("TES-TC-681")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
     try {
       await page.goto(WORKSPACE_MEMBERS_URL);
@@ -327,7 +327,7 @@ test.describe("team members", () => {
     }
   });
 
-  test("a role change on a stale roster reports the failure instead of a success", async ({
+  test("a role change on a stale roster reports the failure instead of a success", { tag: '@tesbo.testId("TES-TC-682")' }, async ({
     browser,
   }) => {
     // The failure path that a real team hits: two owners on the settings screen at once. One
@@ -355,7 +355,7 @@ test.describe("team members", () => {
 
   // ─── Project members ───────────────────────────────────────────────────────
 
-  test("an owner can add a workspace member to a project and take the access away", async ({
+  test("an owner can add a workspace member to a project and take the access away", { tag: '@tesbo.testId("TES-TC-683")' }, async ({
     browser,
   }) => {
     const page = await pageAs(browser, "owner");
@@ -387,7 +387,7 @@ test.describe("team members", () => {
     }
   });
 
-  test("a manager can staff a project and keeps the manager-only tabs", async ({ browser }) => {
+  test("a manager can staff a project and keeps the manager-only tabs", { tag: '@tesbo.testId("TES-TC-684")' }, async ({ browser }) => {
     // The other side of the QA-engineer case below. A manager may add people to a project (as QA
     // engineers only), and Custom Fields is visible to them — that tab is hidden rather than
     // disabled below manager, so its presence is part of what distinguishes the two roles.
@@ -412,7 +412,7 @@ test.describe("team members", () => {
     }
   });
 
-  test("a QA engineer sees the project roster read-only", async ({ browser }) => {
+  test("a QA engineer sees the project roster read-only", { tag: '@tesbo.testId("TES-TC-685")' }, async ({ browser }) => {
     const page = await pageAs(browser, "qa");
     await page.goto(`/projects/${tenant!.mainProjectId}/settings?tab=members`);
     await expect(page.getByRole("heading", { name: "Project members" })).toBeVisible();
@@ -424,7 +424,7 @@ test.describe("team members", () => {
     await expect(page.getByRole("button", { name: "Custom Fields" })).toHaveCount(0);
   });
 
-  test("the project role legend describes the roles the product actually has", async ({ browser }) => {
+  test("the project role legend describes the roles the product actually has", { tag: '@tesbo.testId("TES-TC-1344")' }, async ({ browser }) => {
     // Regression for a legend that used to describe a nonexistent "Admin"/generic "Member" tier
     // (the roles were literally "Owner: ... Admin: ... Manager: ... Member: ...") while the role
     // dropdown and the backend have only ever recognised owner/manager/qa_engineer. Asserted on the
@@ -446,7 +446,7 @@ test.describe("team members", () => {
 
   // ─── Routes that only redirect ─────────────────────────────────────────────
 
-  test("the standalone team routes land on the tab that replaced them", async ({ browser }) => {
+  test("the standalone team routes land on the tab that replaced them", { tag: '@tesbo.testId("TES-TC-686")' }, async ({ browser }) => {
     const page = await pageAs(browser, "owner");
 
     for (const from of ["/settings/members", "/settings/project-access"]) {

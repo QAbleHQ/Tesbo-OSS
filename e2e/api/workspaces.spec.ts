@@ -79,7 +79,7 @@ test.describe("workspace creation — duplicate names across and within accounts
     );
   });
 
-  test("a second account can create a workspace whose name another account already owns", async () => {
+  test("a second account can create a workspace whose name another account already owns", { tag: '@tesbo.testId("TES-TC-589")' }, async () => {
     // The exact reported failure. env.orgName belongs to account A, provisioned by global-setup
     // under a different user — so this is one account claiming a name another account holds.
     const foreignOwners = scalar(
@@ -99,7 +99,7 @@ test.describe("workspace creation — duplicate names across and within accounts
     expect(body.organizationId).toBeTruthy();
   });
 
-  test("the same account can create two workspaces sharing one name", async () => {
+  test("the same account can create two workspaces sharing one name", { tag: '@tesbo.testId("TES-TC-590")' }, async () => {
     const name = `E2E Duplicate Name ${Date.now()}`;
 
     const first = await createWorkspace(asOwner, name);
@@ -110,7 +110,7 @@ test.describe("workspace creation — duplicate names across and within accounts
     expect(second.body.organizationId).not.toBe(first.body.organizationId);
   });
 
-  test("the workspace keeps the name exactly as typed — only the slug is disambiguated", async () => {
+  test("the workspace keeps the name exactly as typed — only the slug is disambiguated", { tag: '@tesbo.testId("TES-TC-591")' }, async () => {
     const name = `E2E Verbatim Name ${Date.now()}`;
 
     await createWorkspace(asOwner, name);
@@ -129,7 +129,7 @@ test.describe("workspace creation — duplicate names across and within accounts
     expect(active.slug.length).toBeLessThanOrEqual(64);
   });
 
-  test("same-named workspaces are distinct records, each owned by its creator", async () => {
+  test("same-named workspaces are distinct records, each owned by its creator", { tag: '@tesbo.testId("TES-TC-592")' }, async () => {
     const name = `E2E Ownership ${Date.now()}`;
 
     const first = await createWorkspace(asOwner, name);
@@ -166,7 +166,7 @@ test.describe("workspace creation — duplicate names across and within accounts
     for (const foreignId of otherAccountsOrgs) expect(listedIds).not.toContain(foreignId);
   });
 
-  test("switching between two same-named workspaces resolves by ID, not by name", async () => {
+  test("switching between two same-named workspaces resolves by ID, not by name", { tag: '@tesbo.testId("TES-TC-593")' }, async () => {
     const name = `E2E Switch ${Date.now()}`;
 
     const first = await createWorkspace(asOwner, name);

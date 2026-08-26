@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { IconChevronRight, IconKey } from "@tabler/icons-react";
 import {
+  API_BASE,
   authMe,
   listProjectMembers,
   listApiKeys,
@@ -169,6 +170,31 @@ export default function ApiTokensPage() {
   -H 'Content-Type: application/json' \\
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'`;
 
+  const reporterInstall = `npm install --save-dev @tesbox/playwright-reporter
+npx @tesbox/playwright-reporter init`;
+
+  /*
+   * baseUrl and projectId are prefilled and committed; the token deliberately is not. Hardcoding a
+   * token into playwright.config.ts is the one mistake this panel could actively cause, so the
+   * snippet leaves it to the environment and the row above says why.
+   */
+  const reporterConfig = `// playwright.config.ts
+import { defineConfig } from '@playwright/test';
+
+export default defineConfig({
+  reporter: [
+    ['list'],
+    ['@tesbox/playwright-reporter', {
+      baseUrl: '${API_BASE}',
+      projectId: '${projectId}',
+    }],
+  ],
+});`;
+
+  const reporterTag = `test('user can reset password', { tag: '@tesbo.testId("TES-1042")' }, async ({ page }) => {
+  // …
+});`;
+
   const header = (
     <PageHeader
       title={
@@ -177,7 +203,7 @@ export default function ApiTokensPage() {
           API &amp; MCP access
         </>
       }
-      subtitle="Create tokens and connect AI agents like Claude Code or Claude Desktop to this project."
+      subtitle="Create tokens, connect AI agents like Claude Code or Claude Desktop, and report automated test results into this project."
       breadcrumb={
         <Link
           href={`/projects/${projectId}/settings?tab=apiTokens`}
@@ -348,6 +374,106 @@ export default function ApiTokensPage() {
             </p>
           </div>
         )}
+      </Card>
+
+      <Card className="p-4 space-y-4">
+        <div>
+          <h2 className="text-base font-semibold text-[var(--foreground)]">Connect your test framework</h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">
+            Report automated results into this project. Your suite opens one Test Run and fills in each
+            case&apos;s result, linked by the case id you tag the test with.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-[var(--foreground)]">Playwright</p>
+          <p className="text-sm text-[var(--muted)]">
+            The reporter needs these three values. The first two are not secrets — commit them.
+          </p>
+          <div className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
+            <div className="flex items-start gap-3 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <code className="font-mono text-xs text-[var(--foreground)]">TESBO_BASE_URL</code>
+                <p className="mt-0.5 break-all font-mono text-xs text-[var(--muted)]">{API_BASE}</p>
+                <p className="mt-0.5 text-xs text-[var(--muted-soft)]">
+                  This project&apos;s API host. Not the web app host — pointing at the app makes every call
+                  404 while your suite stays green.
+                </p>
+              </div>
+              <CopyButton value={API_BASE} iconOnly />
+            </div>
+            <div className="flex items-start gap-3 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <code className="font-mono text-xs text-[var(--foreground)]">TESBO_PROJECT_ID</code>
+                <p className="mt-0.5 break-all font-mono text-xs text-[var(--muted)]">{projectId}</p>
+                <p className="mt-0.5 text-xs text-[var(--muted-soft)]">This project.</p>
+              </div>
+              <CopyButton value={projectId} iconOnly />
+            </div>
+            <div className="flex items-start gap-3 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <code className="font-mono text-xs text-[var(--foreground)]">TESBO_API_TOKEN</code>
+                {revealedToken ? (
+                  <p className="mt-0.5 break-all font-mono text-xs text-[var(--muted)]">{revealedToken.token}</p>
+                ) : (
+                  <p className="mt-0.5 text-xs text-[var(--muted)]">
+                    Create a token above with <strong>Read</strong> and <strong>Write</strong>. It is shown only
+                    once, so keep it in your CI secrets — never in{" "}
+                    <code className="font-mono">playwright.config.ts</code>.
+                  </p>
+                )}
+              </div>
+              {revealedToken && <CopyButton value={revealedToken.token} iconOnly />}
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-[var(--foreground)]">Install it in your Playwright project</p>
+          <div className="relative">
+            <pre className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 pr-12 font-mono text-xs text-[var(--foreground)] overflow-x-auto whitespace-pre">{reporterInstall}</pre>
+            <CopyButton value={reporterInstall} iconOnly className="absolute right-2 top-2" />
+          </div>
+          <p className="text-xs text-[var(--muted-soft)]">
+            <code className="font-mono">init</code> asks for the three values and verifies they work together
+            before you wire anything up. You can paste the MCP URL above in place of{" "}
+            <code className="font-mono">TESBO_BASE_URL</code> — it reads the host and the project id out of it.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-[var(--foreground)]">Register the reporter</p>
+          <div className="relative">
+            <pre className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 pr-12 font-mono text-xs text-[var(--foreground)] overflow-x-auto whitespace-pre">{reporterConfig}</pre>
+            <CopyButton value={reporterConfig} iconOnly className="absolute right-2 top-2" />
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <p className="text-sm font-medium text-[var(--foreground)]">Tag each test with the case it validates</p>
+          <div className="relative">
+            <pre className="rounded-lg border border-[var(--border)] bg-[var(--surface-secondary)] p-3 pr-12 font-mono text-xs text-[var(--foreground)] overflow-x-auto whitespace-pre">{reporterTag}</pre>
+            <CopyButton value={reporterTag} iconOnly className="absolute right-2 top-2" />
+          </div>
+          <p className="text-xs text-[var(--muted-soft)]">
+            Replace <code className="font-mono">TES-1042</code> with the test case&apos;s id as shown in Tesbo.
+            The leading <code className="font-mono">@</code> is required — Playwright rejects any tag without it.
+            Untagged tests are counted and skipped, not failed.
+          </p>
+        </div>
+
+        <p className="text-xs text-[var(--muted-soft)]">
+          Full setup, CI provenance, evidence and troubleshooting:{" "}
+          <a
+            href="https://www.npmjs.com/package/@tesbox/playwright-reporter"
+            target="_blank"
+            rel="noreferrer"
+            className="text-[var(--primary)] hover:underline"
+          >
+            @tesbox/playwright-reporter
+          </a>
+          .
+        </p>
       </Card>
 
       <Modal
