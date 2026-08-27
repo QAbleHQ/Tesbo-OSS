@@ -6,7 +6,7 @@ import { env } from "../utils/env";
 const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.json"), "utf-8"));
 
 test.describe("test cycle / run CRUD", () => {
-  test("supports the create -> read -> update -> list -> delete lifecycle", async ({ request }) => {
+  test("supports the create -> read -> update -> list -> delete lifecycle", { tag: '@tesbo.testId("TES-TC-170")' }, async ({ request }) => {
     const name = `E2E Cycle ${Date.now()}`;
     const created = await (
       await request.post(`/api/projects/${ctx.projectId}/cycles`, {
@@ -45,7 +45,7 @@ test.describe("test cycle / run CRUD", () => {
     expect(getAfterDeleteRes.status()).toBe(404);
   });
 
-  test("updateCycle's planId/clearPlan semantics: an omitted planId keeps it, clearPlan:true nulls it", async ({
+  test("updateCycle's planId/clearPlan semantics: an omitted planId keeps it, clearPlan:true nulls it", { tag: '@tesbo.testId("TES-TC-171")' }, async ({
     request,
   }) => {
     const plan = await (
@@ -77,7 +77,7 @@ test.describe("test cycle / run CRUD", () => {
     }
   });
 
-  test("supports adding and removing test cases, auto-creating one execution per added case", async ({
+  test("supports adding and removing test cases, auto-creating one execution per added case", { tag: '@tesbo.testId("TES-TC-172")' }, async ({
     request,
   }) => {
     const cycle = await (
@@ -123,7 +123,7 @@ test.describe("test cycle / run CRUD", () => {
     }
   });
 
-  test("from-plan and from-cases creation are aliases for plain create — neither seeds cycle_items", async ({
+  test("from-plan and from-cases creation are aliases for plain create — neither seeds cycle_items", { tag: '@tesbo.testId("TES-TC-173")' }, async ({
     request,
   }) => {
     // KNOWN GAP (documented, not test.fail() — a functional no-op, not a security issue):
@@ -181,7 +181,7 @@ test.describe("linking test cases to a run at scale", () => {
   // failing at.
   const CASE_COUNT = 300;
 
-  test("adds 300 cases in one request, reports them consistently, and bulk-removes them", async ({ request }) => {
+  test("adds 300 cases in one request, reports them consistently, and bulk-removes them", { tag: '@tesbo.testId("TES-TC-905")' }, async ({ request }) => {
     // Comfortably above what the batched path needs (~7s end to end locally) while still
     // failing rather than hanging if the per-row behaviour ever comes back.
     test.setTimeout(180_000);
@@ -307,7 +307,7 @@ test.describe("adding test cases to a run", () => {
       status: string;
     }[];
 
-  test("adds the whole selection in one call, once each, in the order it was sent", async ({ request }) => {
+  test("adds the whole selection in one call, once each, in the order it was sent", { tag: '@tesbo.testId("TES-TC-906")' }, async ({ request }) => {
     // Five cases, created serially — enough to catch a shuffled or reversed result, cheap enough not
     // to depend on how loaded the shared project is. The same ordering is asserted over 250 cases in
     // execution-ops.spec.ts EXO-E-01, where the fixtures cost nothing.
@@ -328,7 +328,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("re-sending the same selection is idempotent — the retry after a timeout must not duplicate", async ({
+  test("re-sending the same selection is idempotent — the retry after a timeout must not duplicate", { tag: '@tesbo.testId("TES-TC-907")' }, async ({
     request,
   }) => {
     const { cycleId, testcaseIds, cleanup } = await seed(request, 5, "Retry");
@@ -347,7 +347,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("the same id repeated inside one request is added once", async ({ request }) => {
+  test("the same id repeated inside one request is added once", { tag: '@tesbo.testId("TES-TC-908")' }, async ({ request }) => {
     const { cycleId, testcaseIds, cleanup } = await seed(request, 2, "DupIds");
     try {
       const res = await request.post(`/api/cycles/${cycleId}/testcases`, {
@@ -360,7 +360,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("a case removed from a run can be added back", async ({ request }) => {
+  test("a case removed from a run can be added back", { tag: '@tesbo.testId("TES-TC-909")' }, async ({ request }) => {
     const { cycleId, testcaseIds, cleanup } = await seed(request, 1, "ReAdd");
     try {
       await request.post(`/api/cycles/${cycleId}/testcases`, { data: { testcaseIds } });
@@ -379,7 +379,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("adding more cases leaves the statuses already recorded in the run alone", async ({ request }) => {
+  test("adding more cases leaves the statuses already recorded in the run alone", { tag: '@tesbo.testId("TES-TC-910")' }, async ({ request }) => {
     const { cycleId, testcaseIds, cleanup } = await seed(request, 4, "Preserve");
     try {
       await request.post(`/api/cycles/${cycleId}/testcases`, { data: { testcaseIds: testcaseIds.slice(0, 2) } });
@@ -399,7 +399,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("unknown, malformed and empty selections are refused or skipped, never a 500", async ({ request }) => {
+  test("unknown, malformed and empty selections are refused or skipped, never a 500", { tag: '@tesbo.testId("TES-TC-911")' }, async ({ request }) => {
     const { cycleId, testcaseIds, cleanup } = await seed(request, 1, "BadInput");
     try {
       const cases: { label: string; data: Record<string, unknown> }[] = [
@@ -427,7 +427,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("the singular testcaseId body form still works", async ({ request }) => {
+  test("the singular testcaseId body form still works", { tag: '@tesbo.testId("TES-TC-912")' }, async ({ request }) => {
     const { cycleId, testcaseIds, cleanup } = await seed(request, 1, "Singular");
     try {
       const res = await request.post(`/api/cycles/${cycleId}/testcases`, {
@@ -440,7 +440,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("a test case from another project in the same workspace is not adopted", async ({ request }) => {
+  test("a test case from another project in the same workspace is not adopted", { tag: '@tesbo.testId("TES-TC-913")' }, async ({ request }) => {
     const other = await (
       await request.post("/api/projects", { data: { name: `E2E Other Project ${Date.now()}` } })
     ).json();
@@ -470,7 +470,7 @@ test.describe("adding test cases to a run", () => {
     }
   });
 
-  test("an anonymous caller cannot add cases to a run", async ({ playwright }) => {
+  test("an anonymous caller cannot add cases to a run", { tag: '@tesbo.testId("TES-TC-914")' }, async ({ playwright }) => {
     const anon = await playwright.request.newContext({ baseURL: env.apiBaseUrl, storageState: undefined });
     try {
       const res = await anon.post(`/api/cycles/${ctx.projectId}/testcases`, {
@@ -480,6 +480,135 @@ test.describe("adding test cases to a run", () => {
       expect([400, 401, 403, 404], `anonymous add answered ${res.status()}`).toContain(res.status());
     } finally {
       await anon.dispose();
+    }
+  });
+});
+
+/*
+ * Run start and end timestamps — Basecamp 10221952787 ("[Test Run] history not showing when test
+ * was run").
+ *
+ * `cycles.started_at` and `cycles.ended_at` existed from the first migration and were written by
+ * nothing: only read. The runs list renders a clock from formatDuration(startedAt, endedAt), so it
+ * showed "—" for every run in the product, completed ones included. The status transition stamps
+ * them now, which is what the Start and Mark Completed buttons drive.
+ */
+test.describe("run timing", () => {
+  async function createRun(request: any, name: string) {
+    return (await request.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name } })).json();
+  }
+
+  async function readRun(request: any, id: string) {
+    return (await request.get(`/api/cycles/${id}`)).json();
+  }
+
+  test("starting a run stamps startedAt, completing it stamps endedAt", { tag: '@tesbo.testId("TES-TC-1163")' }, async ({ request }) => {
+    const run = await createRun(request, `E2E Run Timing ${Date.now()}`);
+    try {
+      // A run is created in Planning and has not started.
+      expect(run.startedAt ?? null).toBeNull();
+      expect(run.endedAt ?? null).toBeNull();
+
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      const started = await readRun(request, run.id);
+      expect(started.startedAt, "a run that is In Progress has to know when it started").toBeTruthy();
+      expect(started.endedAt ?? null).toBeNull();
+
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.endedAt).toBeTruthy();
+      // The original start survives completion — otherwise the duration is always zero.
+      expect(completed.startedAt).toBe(started.startedAt);
+      expect(new Date(completed.endedAt).getTime()).toBeGreaterThanOrEqual(new Date(completed.startedAt).getTime());
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+
+  test("reopening a completed run clears its end, and an unrelated edit leaves the clock alone", { tag: '@tesbo.testId("TES-TC-1164")' }, async ({
+    request,
+  }) => {
+    const run = await createRun(request, `E2E Run Reopen ${Date.now()}`);
+    try {
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.endedAt).toBeTruthy();
+
+      // Reopened: it is running again, so it has no end.
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "In Progress" } });
+      const reopened = await readRun(request, run.id);
+      expect(reopened.endedAt ?? null).toBeNull();
+      expect(reopened.startedAt).toBe(completed.startedAt);
+
+      // Renaming a run is not a transition and must not touch either timestamp.
+      await request.patch(`/api/cycles/${run.id}`, { data: { name: `${run.name} renamed` } });
+      const renamed = await readRun(request, run.id);
+      expect(renamed.startedAt).toBe(reopened.startedAt);
+      expect(renamed.endedAt ?? null).toBeNull();
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+
+  test("a run taken straight to Completed still gets a start to measure from", { tag: '@tesbo.testId("TES-TC-1165")' }, async ({ request }) => {
+    // The transition Planning -> Completed skips In Progress entirely; without the back-fill the
+    // duration would be computed from a null start and read "—" forever.
+    const run = await createRun(request, `E2E Run Straight Complete ${Date.now()}`);
+    try {
+      await request.patch(`/api/cycles/${run.id}`, { data: { status: "Completed" } });
+      const completed = await readRun(request, run.id);
+      expect(completed.startedAt).toBeTruthy();
+      expect(completed.endedAt).toBeTruthy();
+    } finally {
+      await request.delete(`/api/cycles/${run.id}`, { failOnStatusCode: false });
+    }
+  });
+});
+
+test.describe("list-cycles bucket counts", () => {
+  // Regression for the Test Runs Pass Rate mismatch: the frontend's summary tile and the run
+  // details page each compute their own pass rate from these bucket fields, and both now assume
+  // passed + failed + blocked + skipped + untested === totalCases for every status a case can be
+  // in. If a new status is ever added to EXECUTION_STATUSES without a matching bucket, this drifts
+  // silently and the two pages diverge again exactly as they did before the fix.
+  test("passed, failed, blocked, skipped and untested buckets always sum to totalCases", { tag: '@tesbo.testId("TES-TC-1166")' }, async ({ request }) => {
+    const stamp = `${Date.now()}${Math.floor(Math.random() * 1000)}`;
+    const cycle = await (
+      await request.post(`/api/projects/${ctx.projectId}/cycles`, { data: { name: `E2E Bucket Sum ${stamp}` } })
+    ).json();
+
+    const statuses = ["Passed", "Failed", "Blocked", "Skipped", "Retest", "Untested"];
+    const created = await (
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-create`, {
+        data: { testcases: statuses.map((_, i) => ({ title: `E2E Bucket Sum Case ${stamp}-${i}`, status: "Approved" })) },
+      })
+    ).json();
+    const testcaseIds: string[] = created.created.map((c: { id: string }) => c.id);
+
+    try {
+      await request.post(`/api/cycles/${cycle.id}/testcases`, { data: { testcaseIds } });
+      const executions = await (await request.get(`/api/cycles/${cycle.id}/executions`)).json();
+      for (let i = 0; i < statuses.length; i++) {
+        if (statuses[i] === "Untested") continue;
+        await request.patch(`/api/cycles/${cycle.id}/executions/${executions[i].id}`, { data: { status: statuses[i] } });
+      }
+
+      const runs = await (await request.get(`/api/projects/${ctx.projectId}/cycles`)).json();
+      const thisRun = runs.find((r: { id: string }) => r.id === cycle.id);
+      expect(thisRun.totalCases).toBe(statuses.length);
+      // Retest has no dedicated bucket of its own and is folded into "untested" alongside the
+      // literal Untested case, so untested is 2 (Retest + Untested) here, not 1.
+      expect(thisRun.passed + thisRun.failed + thisRun.blocked + thisRun.skipped + thisRun.untested).toBe(
+        thisRun.totalCases,
+      );
+      expect(thisRun.untested).toBe(2);
+    } finally {
+      await request.delete(`/api/cycles/${cycle.id}`, { failOnStatusCode: false });
+      await request.post(`/api/projects/${ctx.projectId}/testcases/bulk-delete`, {
+        data: { testcaseIds },
+        failOnStatusCode: false,
+      });
     }
   });
 });

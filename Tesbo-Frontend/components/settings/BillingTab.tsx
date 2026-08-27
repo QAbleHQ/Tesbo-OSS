@@ -15,7 +15,7 @@ import {
   type BillingInvoice,
   type PlanUsageSummary,
 } from "@/lib/api";
-import { Button, Card } from "@/components/ui";
+import { Button, Card, PageLoader } from "@/components/ui";
 import { cx } from "@/components/ui/cx";
 import PricingModal from "@/components/PricingModal";
 
@@ -161,11 +161,7 @@ export default function BillingTab() {
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[200px] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader />;
   }
 
   const plan = billingInfo?.plan ?? "launch";
@@ -326,7 +322,7 @@ export default function BillingTab() {
                     </>
                   ) : (
                     <>
-                      <button type="button" className="font-medium underline" onClick={() => setPricingOpen(true)}>
+                      <button type="button" className="cursor-pointer font-medium underline" onClick={() => setPricingOpen(true)}>
                         Upgrade to Pro
                       </button>{" "}
                       for 5 GB, or delete files you no longer need.
@@ -340,7 +336,7 @@ export default function BillingTab() {
               return (
                 <p className="mt-4 text-[13px] text-[var(--warning-foreground)]">
                   You&apos;ve reached the Launch plan&apos;s {usage.projectLimit}-project limit.{" "}
-                  <button type="button" className="font-medium underline" onClick={() => setPricingOpen(true)}>
+                  <button type="button" className="cursor-pointer font-medium underline" onClick={() => setPricingOpen(true)}>
                     Upgrade to Pro
                   </button>{" "}
                   for unlimited projects.
@@ -361,7 +357,7 @@ export default function BillingTab() {
                 type="button"
                 onClick={handleManageBilling}
                 disabled={redirecting}
-                className="text-[13px] font-medium text-[var(--accent-light)] hover:underline disabled:opacity-60"
+                className="cursor-pointer text-[13px] font-medium text-[var(--accent-light)] hover:underline disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {redirecting ? "Opening…" : "All invoices & payment methods →"}
               </button>

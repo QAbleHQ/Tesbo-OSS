@@ -7,7 +7,7 @@ import { softDeleteExecutions } from "../utils/screens-tenant";
 const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.json"), "utf-8"));
 
 test.describe("test plan CRUD", () => {
-  test("supports the create -> read -> update -> list -> delete lifecycle", async ({ request }) => {
+  test("supports the create -> read -> update -> list -> delete lifecycle", { tag: '@tesbo.testId("TES-TC-388")' }, async ({ request }) => {
     const name = `E2E Plan ${Date.now()}`;
     const created = await (
       await request.post(`/api/projects/${ctx.projectId}/plans`, {
@@ -46,7 +46,7 @@ test.describe("test plan CRUD", () => {
     expect(getAfterDeleteRes.status()).toBe(404);
   });
 
-  test("supports adding and removing plan items (a direct test case and a whole suite)", async ({
+  test("supports adding and removing plan items (a direct test case and a whole suite)", { tag: '@tesbo.testId("TES-TC-389")' }, async ({
     request,
   }) => {
     const plan = await (
@@ -93,7 +93,7 @@ test.describe("test plan CRUD", () => {
     }
   });
 
-  test("planRuns/planProgress aggregate executions from cycles linked to the plan", async ({ request }) => {
+  test("planRuns/planProgress aggregate executions from cycles linked to the plan", { tag: '@tesbo.testId("TES-TC-390")' }, async ({ request }) => {
     const plan = await (
       await request.post(`/api/projects/${ctx.projectId}/plans`, {
         data: { name: `E2E Plan Progress ${Date.now()}` },
@@ -143,7 +143,7 @@ test.describe("test plan CRUD", () => {
    * removed for being unexplainable on that screen; the field itself is still read by the plan detail
    * header, so these tests hold the contract.
    */
-  test("the plan list summary counts plan items in caseCount, independently of runCount", async ({
+  test("the plan list summary counts plan items in caseCount, independently of runCount", { tag: '@tesbo.testId("TES-TC-944")' }, async ({
     request,
   }) => {
     const summaryFor = async (planId: string) => {
@@ -238,7 +238,7 @@ test.describe("test plan progress roll-up", () => {
     );
   }
 
-  test("PLN-A-01 the header roll-up is the sum of the runs the plan lists", async ({ request }) => {
+  test("PLN-A-01 the header roll-up is the sum of the runs the plan lists", { tag: '@tesbo.testId("TES-TC-945")' }, async ({ request }) => {
     const stamp = Date.now();
     const plan = await (
       await request.post(`/api/projects/${ctx.projectId}/plans`, {
@@ -354,7 +354,7 @@ test.describe("test plan progress roll-up", () => {
     }
   });
 
-  test("PLN-A-02 a linked run holding no cases adds nothing to the roll-up", async ({ request }) => {
+  test("PLN-A-02 a linked run holding no cases adds nothing to the roll-up", { tag: '@tesbo.testId("TES-TC-946")' }, async ({ request }) => {
     /*
      * The defect behind the report. The untested bucket counted rows, not cases, so the row a LEFT
      * JOIN produces for a cycle with no items at all — every column NULL — scored as one untested
@@ -417,7 +417,7 @@ test.describe("test plan progress roll-up", () => {
     }
   });
 
-  test("PLN-A-03 a plan whose runs are all empty reports nothing to execute", async ({ request }) => {
+  test("PLN-A-03 a plan whose runs are all empty reports nothing to execute", { tag: '@tesbo.testId("TES-TC-947")' }, async ({ request }) => {
     // The boundary of PLN-A-02: with no cases anywhere, every counter is 0 — not one untested case
     // per empty run, which is what a percentage over a zero total would have been computed from.
     const stamp = Date.now();
@@ -451,7 +451,7 @@ test.describe("test plan progress roll-up", () => {
     }
   });
 
-  test("PLN-A-04 the plan counts the same live executions the run's own screen renders", async ({
+  test("PLN-A-04 the plan counts the same live executions the run's own screen renders", { tag: '@tesbo.testId("TES-TC-948")' }, async ({
     request,
   }) => {
     test.skip(!dbControlAvailable(), "needs psql access — executions have no DELETE route");
@@ -528,7 +528,7 @@ test.describe("test plan progress roll-up", () => {
     }
   });
 
-  test("PLN-A-05 unlinking a run takes its cases back out of the roll-up", async ({ request }) => {
+  test("PLN-A-05 unlinking a run takes its cases back out of the roll-up", { tag: '@tesbo.testId("TES-TC-949")' }, async ({ request }) => {
     const stamp = Date.now();
     const plan = await (
       await request.post(`/api/projects/${ctx.projectId}/plans`, {

@@ -97,6 +97,42 @@ describe("Zyra model-response parsing", () => {
       expect(internals(svc).parseModelJson("Here is a plain answer with no JSON.")).toBeNull();
       expect(internals(svc).parseModelJson("")).toBeNull();
     });
+
+    /*
+     * Salvage recovers only the string fields it is asked for — "reply" and "reasoningSummary".
+     * `action`, `operations` and `testcases` are gone, so the caller's routing defaults to "answer"
+     * and generation never runs. Indistinguishable from a model that genuinely chose to answer,
+     * which is exactly how a create request became a confident chat reply with an empty table.
+     *
+     * The router prompt puts `reply` first in the envelope, so a response cut short at the
+     * provider's output ceiling loses the decision fields every time.
+     */
+    it("marks a salvaged envelope so the caller can tell the decision fields were lost", () => {
+      const truncated =
+        '{"reply":"## Coverage Analysis\\n\\nGenerated 15 test cases covering the full Projects, Test Suites & Test Cases module — happy path, negative';
+      const parsed = internals(svc).parseModelJson(truncated);
+      expect(parsed?.reply).toContain("Generated 15 test cases");
+      expect(parsed?.action, "salvage cannot recover the action").toBeUndefined();
+      expect(
+        (parsed as Record<string, unknown>)?.salvaged,
+        "a salvaged fragment must be distinguishable from a clean parse"
+      ).toBe(true);
+    });
+
+    it("does not mark a cleanly parsed envelope as salvaged", () => {
+      const clean = JSON.stringify({ reply: "All good.", action: "create", operations: [] });
+      const parsed = internals(svc).parseModelJson(clean);
+      expect(parsed?.action).toBe("create");
+      expect((parsed as Record<string, unknown>)?.salvaged).toBeUndefined();
+    });
+
+    it("does not mark a repaired-but-complete envelope as salvaged", () => {
+      // Unescaped quotes are repairable without losing any field, so routing is intact.
+      const repairable = '{"reply":"A "quoted" phrase","action":"create","operations":[]}';
+      const parsed = internals(svc).parseModelJson(repairable);
+      expect(parsed?.action).toBe("create");
+      expect((parsed as Record<string, unknown>)?.salvaged).toBeUndefined();
+    });
   });
 
   describe("sanitizeZyraReply", () => {
@@ -211,6 +247,82 @@ describe("Zyra model-response parsing", () => {
         { testcases: [], activity: [] }
       );
       expect(out).toBe("There are 12 login test cases.");
+    });
+
+    /*
+     * The answer path was the one branch this function did not check, and it is where every silent
+     * failure lands: a routing loss forces actionType to "answer" with no operations, so the model's
+     * prose shipped verbatim. Reported in prod (zyra_chat_messages 2026-07-28 11:45:34): action_type
+     * "answer", zero stored rows, reply "Generated 15 test cases covering the full Projects, Test
+     * Suites & Test Cases module" — and the suite still holds 0 cases today.
+     *
+     * A turn that saved nothing may still ANSWER freely; what it may not do is claim it wrote.
+     */
+    it("corrects an answer turn whose reply claims it generated cases", () => {
+      const out = internals(svc).reconcileZyraReply(
+        {
+          reply: "Generated 15 test cases covering the full Projects, Test Suites & Test Cases module.",
+          actionType: "answer",
+          operations: []
+        },
+        { testcases: [], activity: [] }
+      );
+      expect(out).toContain("Nothing was saved");
+    });
+
+    it("keeps the model's prose below the correction rather than discarding the turn", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "Created 10 test cases, saved into the matching suite.", actionType: "answer", operations: [] },
+        { testcases: [], activity: [] }
+      );
+      expect(out).toContain("Nothing was saved");
+      expect(out).toContain("Created 10 test cases, saved into the matching suite.");
+    });
+
+    it("catches a claim written without a number", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "I've added the missing test cases to the Login suite.", actionType: "answer", operations: [] },
+        { testcases: [], activity: [] }
+      );
+      expect(out).toContain("Nothing was saved");
+    });
+
+    it("does not fire on a reply that already says nothing was written", () => {
+      // Otherwise the guard stacks a warning on top of its own earlier warning, and on the
+      // capability refusals ("testcase storage is disabled") that are already honest.
+      for (const reply of [
+        "Nothing was saved — test case storage is disabled for Zyra in this project.",
+        "I could not create the test cases because generation is turned off.",
+        "No test cases were created. Enable generation in Zyra settings first."
+      ]) {
+        const out = internals(svc).reconcileZyraReply(
+          { reply, actionType: "answer", operations: [] },
+          { testcases: [], activity: [] }
+        );
+        expect(out, `must not double-warn on: ${reply}`).toBe(reply);
+      }
+    });
+
+    it("does not fire on an analysis that merely counts existing coverage", () => {
+      for (const reply of [
+        "The Login suite has 12 test cases covering the happy path.",
+        "## Coverage gaps\n\nThese 10 login scenarios appear uncovered.",
+        "Shall I go ahead and create test cases covering these gaps?"
+      ]) {
+        const out = internals(svc).reconcileZyraReply(
+          { reply, actionType: "answer", operations: [] },
+          { testcases: [], activity: [] }
+        );
+        expect(out, `must not warn on: ${reply}`).toBe(reply);
+      }
+    });
+
+    it("leaves a claim alone when the rows really are behind it", () => {
+      const out = internals(svc).reconcileZyraReply(
+        { reply: "Created 3 test cases.", actionType: "answer", operations: [] },
+        { testcases: rows(3), activity: [] }
+      );
+      expect(out).toBe("Created 3 test cases.");
     });
   });
 });

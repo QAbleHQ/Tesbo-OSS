@@ -57,7 +57,7 @@ test.afterAll(async () => {
 });
 
 test.describe("test suites", () => {
-  test("a different account can rename and delete another project's suite by ID", async ({ request }) => {
+  test("a different account can rename and delete another project's suite by ID", { tag: '@tesbo.testId("TES-TC-31")' }, async ({ request }) => {
     // KNOWN GAP: updateSuite/deleteSuite (legacy.service.ts:1357,1362) take no userId at all —
     // not even a session is required, let alone project membership.
     const created = await (
@@ -84,7 +84,7 @@ test.describe("test suites", () => {
 });
 
 test.describe("test cases", () => {
-  test("a different account can read, update, and delete another project's test case by ID", async ({
+  test("a different account can read, update, and delete another project's test case by ID", { tag: '@tesbo.testId("TES-TC-32")' }, async ({
     request,
   }) => {
     // KNOWN GAP: getTestCase has no auth at all; updateTestCase/deleteTestCase only call
@@ -120,7 +120,7 @@ test.describe("test cases", () => {
 });
 
 test.describe("test plans", () => {
-  test("a different account can read, update, and delete another project's test plan by ID", async ({
+  test("a different account can read, update, and delete another project's test plan by ID", { tag: '@tesbo.testId("TES-TC-33")' }, async ({
     request,
   }) => {
     // KNOWN GAP: getPlan/updatePlan/deletePlan (legacy.service.ts:1658-1673) take no userId
@@ -148,7 +148,7 @@ test.describe("test plans", () => {
     }
   });
 
-  test("the plan progress roll-up is refused to another tenant and to no session at all", async ({
+  test("the plan progress roll-up is refused to another tenant and to no session at all", { tag: '@tesbo.testId("TES-TC-903")' }, async ({
     request,
   }) => {
     // Not a known gap: planProgress/planRuns both go through requirePlanAccess, unlike the
@@ -175,7 +175,7 @@ test.describe("test plans", () => {
 });
 
 test.describe("test cycles / runs", () => {
-  test("a different account can read, update, and delete another project's test cycle by ID", async ({
+  test("a different account can read, update, and delete another project's test cycle by ID", { tag: '@tesbo.testId("TES-TC-41")' }, async ({
     request,
   }) => {
     // KNOWN GAP: getCycle/updateCycle/deleteCycle (legacy.service.ts:1729-1789) take no userId
@@ -203,7 +203,7 @@ test.describe("test cycles / runs", () => {
     }
   });
 
-  test("account B's own run cannot adopt a test case belonging to account A", async ({ request }) => {
+  test("account B's own run cannot adopt a test case belonging to account A", { tag: '@tesbo.testId("TES-TC-904")' }, async ({ request }) => {
     /*
      * A different shape from the rest of this file: account B is not reaching for account A's run,
      * it is naming account A's TEST CASE while adding to a run it legitimately owns.
@@ -249,7 +249,7 @@ test.describe("test cycles / runs", () => {
 });
 
 test.describe("test executions", () => {
-  test("a different account can update another project's test execution by ID", async ({ request }) => {
+  test("a different account can update another project's test execution by ID", { tag: '@tesbo.testId("TES-TC-35")' }, async ({ request }) => {
     // KNOWN GAP: updateExecution (legacy.service.ts:1822) calls requireUser (any valid
     // session) but never checks the execution's cycle/project against the caller.
     const cycle = await (
@@ -285,7 +285,7 @@ test.describe("test executions", () => {
 });
 
 test.describe("bugs", () => {
-  test("a different account can read, update, and delete another project's bug by ID", async ({ request }) => {
+  test("a different account can read, update, and delete another project's bug by ID", { tag: '@tesbo.testId("TES-TC-36")' }, async ({ request }) => {
     // KNOWN GAP: getBug/updateBug/deleteBug (legacy.service.ts:2044-2096) don't even call
     // requireUser — no session and no project-membership check.
     const created = await (
@@ -311,7 +311,7 @@ test.describe("bugs", () => {
     }
   });
 
-  test("a completely unauthenticated request (no session at all) can read another project's bug", async ({
+  test("a completely unauthenticated request (no session at all) can read another project's bug", { tag: '@tesbo.testId("TES-TC-37")' }, async ({
     request,
   }) => {
     // Worse than the cross-tenant case above: these routes don't require ANY session, so an
@@ -332,7 +332,7 @@ test.describe("bugs", () => {
 });
 
 test.describe("public share links", () => {
-  test("a different account can toggle public sharing on another project's cycle", async ({ request }) => {
+  test("a different account can toggle public sharing on another project's cycle", { tag: '@tesbo.testId("TES-TC-38")' }, async ({ request }) => {
     // KNOWN GAP: shareCycle (legacy.service.ts:1735) takes no userId at all.
     const cycle = await (
       await request.post(`/api/projects/${ctxA.projectId}/cycles`, {
@@ -351,7 +351,7 @@ test.describe("public share links", () => {
     }
   });
 
-  test("the public share executions endpoint exposes internal fields the share page never displays", async ({
+  test("the public share executions endpoint exposes internal fields the share page never displays", { tag: '@tesbo.testId("TES-TC-39")' }, async ({
     request,
   }) => {
     // KNOWN GAP: publicCycleExecutions (legacy.service.ts:1756) reuses the same internal
@@ -395,7 +395,7 @@ test.describe("public share links", () => {
 });
 
 test.describe("requirements / traceability", () => {
-  test("a different account can read another project's requirement matrix and ticket summary", async ({
+  test("a different account can read another project's requirement matrix and ticket summary", { tag: '@tesbo.testId("TES-TC-40")' }, async ({
     request,
   }) => {
     // KNOWN GAP: requirementMatrix/requirementsSummary (legacy.service.ts:2276,5054) take a
@@ -413,7 +413,7 @@ test.describe("requirements / traceability", () => {
 });
 
 test.describe("knowledge base v1 (legacy)", () => {
-  test("a different account can read, update, and delete another project's legacy knowledge base item", async ({
+  test("a different account can read, update, and delete another project's legacy knowledge base item", { tag: '@tesbo.testId("TES-TC-54")' }, async ({
     request,
   }) => {
     // KNOWN GAP: getKnowledge/updateKnowledge/deleteKnowledge (legacy.service.ts:2961-2978)
@@ -449,7 +449,7 @@ test.describe("knowledge base v1 (legacy)", () => {
 });
 
 test.describe("project members", () => {
-  test("a caller can add themselves as owner of another project with no permission check", async ({
+  test("a caller can add themselves as owner of another project with no permission check", { tag: '@tesbo.testId("TES-TC-42")' }, async ({
     request,
   }) => {
     // KNOWN GAP, worse than the rest: addProjectMember's controller method

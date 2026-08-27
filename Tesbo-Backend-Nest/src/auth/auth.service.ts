@@ -56,8 +56,14 @@ export class AuthService {
     if (!email || !password) throw new BadRequestException({ error: "email and password required" });
     const normalizedEmail = email.trim().toLowerCase();
 
-    const userId = await this.password.verifyLogin(email, password);
-    if (!userId) throw new UnauthorizedException({ error: "invalid_email_or_password" });
+    const result = await this.password.verifyLogin(email, password);
+    if (result.outcome === "not_found") {
+      throw new UnauthorizedException({ error: "No account found with that email address" });
+    }
+    if (result.outcome === "invalid_password") {
+      throw new UnauthorizedException({ error: "invalid_email_or_password" });
+    }
+    const userId = result.userId;
 
     const token = await this.otp.createSession(userId, this.ip(req), req.get("user-agent"));
     await this.audit.log(userId, "login", "auth", normalizedEmail, "{}", this.ip(req), req.get("user-agent"));
@@ -90,7 +96,8 @@ export class AuthService {
     userId: string,
     currentPassword: string | undefined,
     newPassword: string | undefined,
-    req: AuthenticatedRequest
+    req: AuthenticatedRequest,
+    res: Response
   ): Promise<void> {
     if (!newPassword) throw new BadRequestException({ error: "new password required" });
     this.password.assertValidPassword(newPassword);
@@ -109,8 +116,11 @@ export class AuthService {
 
     await this.password.setPassword(userId, newPassword);
 
-    const currentToken = req.cookies?.[this.config.sessionCookieName];
-    if (currentToken) await this.otp.invalidateOtherSessions(userId, currentToken);
+    // Every session is invalidated, including the one making this request — same reasoning as
+    // a password reset: whoever just changed the password must prove they know the new one
+    // before continuing, rather than riding out the old session that already knew the old one.
+    await this.otp.invalidateAllSessions(userId);
+    this.clearSessionCookie(req, res);
 
     const userRow = await this.db.query<{ email: string }>("SELECT email FROM users WHERE id = $1", [userId]);
     const email = userRow.rows[0]?.email;

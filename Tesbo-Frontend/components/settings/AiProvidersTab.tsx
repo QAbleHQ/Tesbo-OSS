@@ -373,7 +373,7 @@ export default function AiProvidersTab() {
                     {" "}
                     <button
                       type="button"
-                      className="underline hover:no-underline"
+                      className="cursor-pointer underline hover:no-underline"
                       onClick={() => { setManualModelEntry(false); setNewDefaultModel(""); }}
                     >
                       Choose from the list instead

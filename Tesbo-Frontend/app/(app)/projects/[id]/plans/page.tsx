@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   authMe,
   listPlans,
@@ -18,12 +18,14 @@ import {
   FieldLabel,
   Card,
   EmptyStateBlock,
+  PageLoader,
 } from "@/components/ui";
 import { PageHeader, ListWorkspaceLayout } from "@/components/workflows";
 import { PlanCard, planStatus, type PlanStatus } from "@/components/testplans/PlanCard";
 import { readStoredValue, writeStoredValue } from "@/lib/storage";
 import {
   IconArrowsSort,
+  IconChevronDown,
   IconClipboardList,
   IconFilter,
   IconLayoutGrid,
@@ -33,11 +35,67 @@ import {
 } from "@tabler/icons-react";
 
 type StatusFilter = "all" | PlanStatus;
-type SortBy = "recent" | "name" | "status";
+// Exact same option set as the Projects list's sort menu (app/(app)/projects/page.tsx).
+type SortBy = "updated" | "created" | "name_asc" | "name_desc";
 
 const VIEW_STORAGE_KEY = "tesbo_plans_view";
-const SORT_LABELS: Record<SortBy, string> = { recent: "Recent", name: "Name", status: "Status" };
-const NEXT_SORT: Record<SortBy, SortBy> = { recent: "name", name: "status", status: "recent" };
+const SORT_OPTIONS: Array<{ value: SortBy; label: string }> = [
+  { value: "updated", label: "Last updated" },
+  { value: "created", label: "Newest created" },
+  { value: "name_asc", label: "Name (A–Z)" },
+  { value: "name_desc", label: "Name (Z–A)" },
+];
+
+// Same dropdown interaction as the Projects list's sort control (click to open, pick directly)
+// instead of a single button that silently cycled through options one click at a time.
+function PlanSortMenu({ sortBy, onSortChange }: { sortBy: SortBy; onSortChange: (v: SortBy) => void }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const currentLabel = SORT_OPTIONS.find((o) => o.value === sortBy)?.label ?? "Last updated";
+
+  useEffect(() => {
+    if (!isOpen) return;
+    function handleOutsideClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setIsOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, [isOpen]);
+
+  return (
+    <div ref={menuRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setIsOpen((prev) => !prev)}
+        aria-expanded={isOpen}
+        className="flex h-8 cursor-pointer items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[13px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
+      >
+        <IconArrowsSort size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+        Sort: {currentLabel}
+        <IconChevronDown size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
+      </button>
+      {isOpen && (
+        <div className="absolute left-0 top-full z-40 mt-1 w-44 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]">
+          {SORT_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => {
+                onSortChange(option.value);
+                setIsOpen(false);
+              }}
+              className={`flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-[var(--surface-secondary)] ${
+                option.value === sortBy ? "text-[var(--brand-primary)]" : "text-[var(--foreground)]"
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function overallPassRate(plans: PlanListItem[]): number {
   const passed = plans.reduce((sum, p) => sum + p.passed, 0);
@@ -64,7 +122,7 @@ export default function PlansPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [statusFilterOpen, setStatusFilterOpen] = useState(false);
-  const [sortBy, setSortBy] = useState<SortBy>("recent");
+  const [sortBy, setSortBy] = useState<SortBy>("updated");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
 
   useEffect(() => {
@@ -147,9 +205,27 @@ export default function PlansPage() {
       return matchesSearch && matchesStatus;
     });
     const sorted = [...filtered];
-    if (sortBy === "name") sorted.sort((a, b) => a.name.localeCompare(b.name));
-    else if (sortBy === "status") sorted.sort((a, b) => planStatus(a).localeCompare(planStatus(b)));
-    else sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // Same four options, same tie-break logic as Projects' sortProjects() —
+    // lastRunAt is this list's equivalent of a project's lastActivityAt.
+    switch (sortBy) {
+      case "name_asc":
+        sorted.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case "name_desc":
+        sorted.sort((a, b) => b.name.localeCompare(a.name));
+        break;
+      case "created":
+        sorted.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        break;
+      case "updated":
+      default:
+        sorted.sort((a, b) => {
+          const aTime = new Date(a.lastRunAt ?? a.createdAt).getTime();
+          const bTime = new Date(b.lastRunAt ?? b.createdAt).getTime();
+          return bTime - aTime;
+        });
+        break;
+    }
     return sorted;
   }, [plans, searchQuery, statusFilter, sortBy]);
 
@@ -158,14 +234,7 @@ export default function PlansPage() {
   const passRate = overallPassRate(plans);
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--ink-200)] border-t-[var(--denim)]" />
-          <p className="text-[13px] text-[var(--ink-400)]">Loading plans…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading plans…" />;
   }
 
   return (
@@ -295,11 +364,21 @@ export default function PlansPage() {
                 placeholder="Search plans..."
                 className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
               />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  aria-label="Clear search"
+                  className="shrink-0 cursor-pointer rounded-full p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                >
+                  <IconX size={12} stroke={2} />
+                </button>
+              )}
             </label>
             <button
               type="button"
               onClick={() => setStatusFilterOpen((v) => !v)}
-              className="flex h-[30px] items-center gap-1.5 rounded-[6px] border px-3 text-[12px] font-medium transition-colors"
+              className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border px-3 text-[12px] font-medium transition-colors"
               style={
                 statusFilter !== "all"
                   ? { borderColor: "var(--brand-primary)", color: "var(--accent-light)", background: "var(--brand-soft)" }
@@ -312,14 +391,7 @@ export default function PlansPage() {
                 <span className="flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--brand-primary)] text-[9px] font-semibold text-white">1</span>
               )}
             </button>
-            <button
-              type="button"
-              onClick={() => setSortBy(NEXT_SORT[sortBy])}
-              className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-[var(--surface)] px-3 text-[12px] font-medium text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)]"
-            >
-              <IconArrowsSort size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
-              Sort: {SORT_LABELS[sortBy]}
-            </button>
+            <PlanSortMenu sortBy={sortBy} onSortChange={setSortBy} />
             <div className="flex-1" />
             <div className="flex items-center gap-0.5 rounded-[6px] bg-[var(--surface-secondary)] p-[3px]">
               <button
@@ -327,7 +399,7 @@ export default function PlansPage() {
                 onClick={() => handleViewModeChange("grid")}
                 aria-label="Grid view"
                 aria-pressed={viewMode === "grid"}
-                className="flex h-[26px] w-7 items-center justify-center rounded-[4px] transition-colors"
+                className="flex h-[26px] w-7 cursor-pointer items-center justify-center rounded-[4px] transition-colors"
                 style={{ background: viewMode === "grid" ? "var(--surface)" : "transparent", color: viewMode === "grid" ? "var(--brand-primary)" : "var(--muted-soft)" }}
               >
                 <IconLayoutGrid size={15} stroke={1.75} />
@@ -337,7 +409,7 @@ export default function PlansPage() {
                 onClick={() => handleViewModeChange("list")}
                 aria-label="List view"
                 aria-pressed={viewMode === "list"}
-                className="flex h-[26px] w-7 items-center justify-center rounded-[4px] transition-colors"
+                className="flex h-[26px] w-7 cursor-pointer items-center justify-center rounded-[4px] transition-colors"
                 style={{ background: viewMode === "list" ? "var(--surface)" : "transparent", color: viewMode === "list" ? "var(--brand-primary)" : "var(--muted-soft)" }}
               >
                 <IconList size={15} stroke={1.75} />
@@ -353,7 +425,7 @@ export default function PlansPage() {
                   key={option}
                   type="button"
                   onClick={() => setStatusFilter(option)}
-                  className="rounded-full border px-3 py-[3px] text-[11.5px] font-medium capitalize transition-colors"
+                  className="cursor-pointer rounded-full border px-3 py-[3px] text-[11.5px] font-medium capitalize transition-colors"
                   style={
                     statusFilter === option
                       ? { borderColor: "var(--brand-primary)", color: "var(--accent-light)", background: "var(--brand-soft)" }
@@ -374,7 +446,7 @@ export default function PlansPage() {
               <button
                 type="button"
                 onClick={() => { setSearchQuery(""); setStatusFilter("all"); }}
-                className="flex items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] hover:underline"
+                className="flex cursor-pointer items-center gap-1 text-[12px] font-medium text-[var(--accent-light)] hover:underline"
               >
                 <IconX size={12} stroke={2} />
                 Clear filters

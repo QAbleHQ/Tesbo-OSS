@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
+import { IconPencil, IconTrash } from "@tabler/icons-react";
 import {
   authMe,
   listBugs,
@@ -18,6 +19,7 @@ import {
   type BugItem,
   type BugAttachment,
   type BugSeverity,
+  type BugPriority,
 } from "@/lib/api";
 import {
   Button,
@@ -26,6 +28,7 @@ import {
   Field,
   FieldLabel,
   Modal,
+  PageLoader,
   Textarea,
   Select,
   StatusChip,
@@ -40,6 +43,24 @@ type ViewMode = "kanban" | "list";
 
 const BUG_STATUSES = ["Open", "In Progress", "Reopened", "Closed"] as const;
 const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
+/*
+ * Basecamp 10226247009 — severity says how bad the defect is, priority says how soon it is worked
+ * on. P0..P3 mirrors how test cases already express priority and stays visually distinct from
+ * severity's words, so a row reading "Critical · P3" is unambiguous. Empty means untriaged.
+ */
+const BUG_PRIORITIES: BugPriority[] = ["P0", "P1", "P2", "P3"];
+
+const PRIORITY_TONE: Record<BugPriority, "error" | "warning" | "info" | "neutral"> = {
+  P0: "error",
+  P1: "warning",
+  P2: "info",
+  P3: "neutral",
+};
+
+function BugPriorityBadge({ priority }: { priority: BugPriority | null }) {
+  if (!priority) return <span className="text-xs text-[var(--muted-soft)]">—</span>;
+  return <StatusChip tone={PRIORITY_TONE[priority]}>{priority}</StatusChip>;
+}
 const PAGE_SIZE = 15;
 
 const STATUS_TONE: Record<string, "error" | "success" | "info" | "warning"> = {
@@ -353,6 +374,15 @@ export default function BugsPage() {
   const [bugs, setBugs] = useState<BugItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState("");
+  /*
+   * Basecamp 10226242373 ("Severity filter is missing"). Severity is a first-class field — it has its
+   * own column, its own badge and its own index on the table — but the only filter was status. Like
+   * the status filter it is shown in BOTH views, since `filtered` below feeds the board's columns as
+   * well as the list rows: a filter that applies everywhere needs a control that is visible
+   * everywhere.
+   */
+  const [filterSeverity, setFilterSeverity] = useState("");
+  const [filterPriority, setFilterPriority] = useState("");
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("kanban");
   const [page, setPage] = useState(1);
@@ -370,6 +400,7 @@ export default function BugsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
   const [createDesc, setCreateDesc] = useState("");
+  const [createPriority, setCreatePriority] = useState<BugPriority | "">("");
   const [createSeverity, setCreateSeverity] = useState<BugSeverity>("Medium");
   const [createLinks, setCreateLinks] = useState<LinkRow[]>([]);
   const [createDestination, setCreateDestination] = useState<TrackingDestination>("TESBO");
@@ -384,6 +415,7 @@ export default function BugsPage() {
   const [editBug, setEditBug] = useState<BugItem | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [editDesc, setEditDesc] = useState("");
+  const [editPriority, setEditPriority] = useState<BugPriority | "">("");
   const [editSeverity, setEditSeverity] = useState<BugSeverity>("Medium");
   const [editLinks, setEditLinks] = useState<LinkRow[]>([]);
   const [editDestination, setEditDestination] = useState<TrackingDestination>("TESBO");
@@ -395,6 +427,15 @@ export default function BugsPage() {
   const [editBetterbugsUrl, setEditBetterbugsUrl] = useState("");
   const [editStatus, setEditStatus] = useState("");
   const [saving, setSaving] = useState(false);
+  /*
+   * Basecamp 10226296533: createBug/updateBug succeeded, uploadBugAttachments then threw, and the
+   * throw went nowhere — `finally` cleared the spinner but the modal stayed open unchanged with no
+   * reason shown, which is what "stuck on Saving" looked like from the outside. The server's
+   * message (unsupported type, over the size limit, storage allowance exhausted) is worth showing
+   * verbatim: it names the file.
+   */
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
 
   /* detail view modal */
   const [viewBug, setViewBug] = useState<BugItem | null>(null);
@@ -429,6 +470,8 @@ export default function BugsPage() {
     const term = search.toLowerCase();
     return bugs.filter((b) => {
       if (filterStatus && b.status !== filterStatus) return false;
+      if (filterSeverity && b.severity !== filterSeverity) return false;
+      if (filterPriority && b.priority !== filterPriority) return false;
       if (
         term &&
         !b.title.toLowerCase().includes(term) &&
@@ -441,12 +484,12 @@ export default function BugsPage() {
         return false;
       return true;
     });
-  }, [bugs, filterStatus, search]);
+  }, [bugs, filterStatus, filterSeverity, filterPriority, search]);
 
   /* reset page when filters change */
   useEffect(() => {
     setPage(1);
-  }, [filterStatus, search, viewMode]);
+  }, [filterStatus, filterSeverity, search, viewMode]);
 
   /* paginated list for list view */
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -472,9 +515,11 @@ export default function BugsPage() {
   /* reset create modal state */
   function resetCreate() {
     setShowCreate(false);
+    setCreateError(null);
     setCreateTitle("");
     setCreateDesc("");
     setCreateSeverity("Medium");
+    setCreatePriority("");
     setCreateLinks([]);
     setCreateDestination("TESBO");
     setCreateSelfSystem(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "OTHER");
@@ -489,11 +534,13 @@ export default function BugsPage() {
     if (!createTitle.trim() || (hasTestRuns && !createLinks.length)) return;
     const selfLogged = (jiraConnected || linearConnected) && createDestination === "SELF";
     setCreating(true);
+    setCreateError(null);
     try {
       const bug = await createBug(projectId, {
         title: createTitle.trim(),
         description: createDesc.trim(),
         severity: createSeverity,
+        priority: createPriority || null,
         externalUrl: selfLogged ? createUrl.trim() : undefined,
         integrationProvider: selfLogged && createSelfSystem !== "OTHER" ? createSelfSystem : null,
         integrationIssueKey: null,
@@ -509,6 +556,11 @@ export default function BugsPage() {
       }
       resetCreate();
       load();
+    } catch (err) {
+      // The bug itself may already have been created — the evidence upload is the step that fails.
+      // Reloading keeps the list truthful about that, so the person doesn't report it twice.
+      load();
+      setCreateError(err instanceof Error ? err.message : "Something went wrong while reporting this bug.");
     } finally {
       setCreating(false);
     }
@@ -520,6 +572,7 @@ export default function BugsPage() {
     setEditTitle(bug.title);
     setEditDesc(bug.description);
     setEditSeverity(bug.severity);
+    setEditPriority(bug.priority ?? "");
     setEditLinks(
       bug.links.map((link) => ({
         cycleId: link.cycleId || "",
@@ -550,12 +603,14 @@ export default function BugsPage() {
     if (!editBug || !editTitle.trim() || (hasTestRuns && !editLinks.length)) return;
     const selfLogged = (jiraConnected || linearConnected) && editDestination === "SELF";
     setSaving(true);
+    setEditError(null);
     try {
       await updateBug(editBug.id, {
         title: editTitle.trim(),
         description: editDesc.trim(),
         status: editStatus,
         severity: editSeverity,
+        priority: editPriority || null,
         externalUrl: selfLogged ? editUrl.trim() : undefined,
         integrationProvider: selfLogged && editSelfSystem !== "OTHER" ? editSelfSystem : null,
         integrationIssueKey: null,
@@ -571,6 +626,9 @@ export default function BugsPage() {
       }
       setEditBug(null);
       load();
+    } catch (err) {
+      load();
+      setEditError(err instanceof Error ? err.message : "Something went wrong while saving this bug.");
     } finally {
       setSaving(false);
     }
@@ -588,11 +646,7 @@ export default function BugsPage() {
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   return (
@@ -646,18 +700,47 @@ export default function BugsPage() {
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-64"
               />
-              {viewMode === "list" && (
-                <Select
-                  value={filterStatus}
-                  onChange={(e) => setFilterStatus(e.target.value)}
-                >
-                  <option value="">All Statuses</option>
-                  <option value="Open">Open</option>
-                  <option value="In Progress">In Progress</option>
-                  <option value="Closed">Closed</option>
-                  <option value="Reopened">Reopened</option>
-                </Select>
-              )}
+              {/*
+                * Both filters are rendered in BOTH views. `filtered` feeds the List rows and the
+                * board's kanbanColumns alike, so a filter set in List kept narrowing the board with
+                * no visible control there to see or clear it (dev commit cdcd5dd). Search was never
+                * gated on viewMode; these now match it.
+                */}
+              <Select
+                value={filterStatus}
+                onChange={(e) => setFilterStatus(e.target.value)}
+                aria-label="Filter by status"
+              >
+                <option value="">All Statuses</option>
+                <option value="Open">Open</option>
+                <option value="In Progress">In Progress</option>
+                <option value="Closed">Closed</option>
+                <option value="Reopened">Reopened</option>
+              </Select>
+              <Select
+                value={filterSeverity}
+                onChange={(e) => setFilterSeverity(e.target.value)}
+                aria-label="Filter by severity"
+              >
+                <option value="">All Severities</option>
+                {BUG_SEVERITIES.map((severity) => (
+                  <option key={severity} value={severity}>
+                    {severity}
+                  </option>
+                ))}
+              </Select>
+              <Select
+                value={filterPriority}
+                onChange={(e) => setFilterPriority(e.target.value)}
+                aria-label="Filter by priority"
+              >
+                <option value="">All Priorities</option>
+                {BUG_PRIORITIES.map((priority) => (
+                  <option key={priority} value={priority}>
+                    {priority}
+                  </option>
+                ))}
+              </Select>
               <div className="ml-auto">
                 <ViewToggle mode={viewMode} onChange={setViewMode} />
               </div>
@@ -709,6 +792,7 @@ export default function BugsPage() {
                           <th>Title</th>
                           <th>Status</th>
                           <th>Severity</th>
+                          <th>Priority</th>
                           <th>Test Case</th>
                           <th>Test Run</th>
                           <th>Reporter</th>
@@ -731,9 +815,21 @@ export default function BugsPage() {
                               }
                             }}
                           >
+                            {/*
+                              * Basecamp 10226229423 ("No tool tip pop up is available for log text").
+                              * Two halves of one problem: a long title had no clamp, so one bug could
+                              * push a row six lines tall, and the cells that DO truncate (linked
+                              * cases, run names, reporter) cut the text off with no way to read the
+                              * rest. Clamp plus a native title attribute on everything that can
+                              * overflow — native rather than a custom tooltip so it works on the
+                              * keyboard-focused and mobile-long-press paths too.
+                              */}
                             <td>
                               <div className="flex flex-col gap-0.5 max-w-sm">
-                                <span className="text-sm font-medium text-[var(--accent-light)] hover:underline break-words">
+                                <span
+                                  title={b.title}
+                                  className="line-clamp-2 text-sm font-medium text-[var(--accent-light)] hover:underline break-words"
+                                >
                                   {b.title}
                                 </span>
                                 {b.externalUrl && (
@@ -741,6 +837,7 @@ export default function BugsPage() {
                                     href={b.externalUrl}
                                     target="_blank"
                                     rel="noreferrer"
+                                    title={b.externalUrl}
                                     onClick={(e) => e.stopPropagation()}
                                     className="text-xs text-[var(--muted-soft)] hover:text-[var(--accent-light)] hover:underline truncate"
                                   >
@@ -755,17 +852,34 @@ export default function BugsPage() {
                             <td>
                               <BugSeverityBadge severity={b.severity} />
                             </td>
+                            {/* A field you can set and never see is not a field — 10226247009 asked
+                                for it on the form, and the list is where triage actually happens. */}
+                            <td>
+                              <BugPriorityBadge priority={b.priority} />
+                            </td>
                             <td>
                               {b.links.length ? (
                                 <div className="flex flex-col gap-0.5">
                                   {b.links.slice(0, 2).map((link) => (
-                                    <span key={link.id} className="text-xs text-[var(--muted)] truncate max-w-[180px]">
+                                    <span
+                                      key={link.id}
+                                      title={`${link.testcaseExternalId ?? ""} ${link.testcaseTitle ?? ""}`.trim()}
+                                      className="text-xs text-[var(--muted)] truncate max-w-[180px]"
+                                    >
                                       <span className="font-mono text-[var(--muted-soft)]">{link.testcaseExternalId}</span>{" "}
                                       {link.testcaseTitle}
                                     </span>
                                   ))}
                                   {b.links.length > 2 && (
-                                    <span className="text-xs text-[var(--muted-soft)]">+{b.links.length - 2} more</span>
+                                    <span
+                                      title={b.links
+                                        .slice(2)
+                                        .map((link) => `${link.testcaseExternalId ?? ""} ${link.testcaseTitle ?? ""}`.trim())
+                                        .join("\n")}
+                                      className="text-xs text-[var(--muted-soft)]"
+                                    >
+                                      +{b.links.length - 2} more
+                                    </span>
                                   )}
                                 </div>
                               ) : (
@@ -775,12 +889,18 @@ export default function BugsPage() {
                               )}
                             </td>
                             <td>
-                              <span className="text-xs text-[var(--muted)]">
+                              <span
+                                title={b.links.map((link) => link.cycleName).filter(Boolean).join(", ") || undefined}
+                                className="text-xs text-[var(--muted)]"
+                              >
                                 {b.links.map((link) => link.cycleName).filter(Boolean).join(", ") || "—"}
                               </span>
                             </td>
                             <td>
-                              <span className="text-xs text-[var(--muted)]">
+                              <span
+                                title={b.reporterName || b.reporterEmail || undefined}
+                                className="text-xs text-[var(--muted)]"
+                              >
                                 {b.reporterName || b.reporterEmail || "—"}
                               </span>
                             </td>
@@ -793,47 +913,36 @@ export default function BugsPage() {
                                 className="flex items-center gap-1"
                                 onClick={(e) => e.stopPropagation()}
                               >
+                                {/*
+                                  * Basecamp 10226234070 ("icon size is very small not visible
+                                  * properly") and 10218564160 ("Delete button is not visible") are
+                                  * the same defect from two reporters: a 16px hairline glyph inside a
+                                  * transparent secondary button, whose --ink-600 on --ink-200 border
+                                  * is barely a shade off the dark table behind it. Ghost buttons make
+                                  * the glyph the thing you see rather than the box, at 18px, with
+                                  * colour that separates the destructive action from the safe one.
+                                  * aria-labels because an icon-only control otherwise announces
+                                  * nothing.
+                                  */}
                                 <Button
-                                  variant="secondary"
+                                  variant="ghost"
                                   size="sm"
                                   onClick={() => openEdit(b)}
-                                  className="h-8 w-8 min-w-8 p-0"
-                                  title="Edit"
+                                  className="h-8 w-8 min-w-8 p-0 text-[var(--muted)] hover:bg-[var(--surface-raised)] hover:text-[var(--accent-light)]"
+                                  title="Edit bug"
+                                  aria-label="Edit bug"
                                 >
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                                    />
-                                  </svg>
+                                  <IconPencil size={18} stroke={1.75} />
                                 </Button>
                                 <Button
-                                  variant="secondary"
+                                  variant="ghost"
                                   size="sm"
                                   onClick={() => setDeletingId(b.id)}
-                                  className="h-8 w-8 min-w-8 p-0 text-[var(--error-foreground)] hover:bg-[var(--error)]/10 hover:text-[var(--error-foreground)]"
-                                  title="Delete"
+                                  className="h-8 w-8 min-w-8 p-0 text-[var(--status-fail-text)] hover:bg-[var(--error-soft)] hover:text-[var(--status-fail-text)]"
+                                  title="Delete bug"
+                                  aria-label="Delete bug"
                                 >
-                                  <svg
-                                    className="w-4 h-4"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    viewBox="0 0 24 24"
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      strokeWidth={2}
-                                      d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                                    />
-                                  </svg>
+                                  <IconTrash size={18} stroke={1.75} />
                                 </Button>
                               </div>
                             </td>
@@ -872,6 +981,7 @@ export default function BugsPage() {
                 </h3>
                 <div className="flex items-center gap-2 shrink-0">
                   <BugSeverityBadge severity={viewBug.severity} />
+                  <BugPriorityBadge priority={viewBug.priority} />
                   <BugStatusBadge status={viewBug.status} />
                 </div>
               </div>
@@ -1050,6 +1160,14 @@ export default function BugsPage() {
         title="Report a Bug"
       >
         <div className="space-y-4">
+          {createError && (
+            <p
+              data-testid="create-bug-error"
+              className="rounded-[var(--radius-control)] border border-[var(--error)] bg-[var(--error)]/10 px-3 py-2 text-[13px] text-[var(--error-foreground)]"
+            >
+              {createError}
+            </p>
+          )}
           <Field>
             <FieldLabel>
               Bug Title <span className="text-[var(--error-foreground)]">*</span>
@@ -1070,16 +1188,35 @@ export default function BugsPage() {
               placeholder="Steps to reproduce, expected vs actual behavior…"
             />
           </Field>
-          <Field>
-            <FieldLabel>Severity</FieldLabel>
-            <Select value={createSeverity} onChange={(e) => setCreateSeverity(e.target.value as BugSeverity)}>
-              {BUG_SEVERITIES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </Select>
-          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field>
+              <FieldLabel>Severity</FieldLabel>
+              <Select value={createSeverity} onChange={(e) => setCreateSeverity(e.target.value as BugSeverity)}>
+                {BUG_SEVERITIES.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field>
+              {/* Optional on purpose: "not triaged yet" is a real answer, and forcing a guess here
+                  would make the field noise rather than signal. */}
+              <FieldLabel>Priority</FieldLabel>
+              <Select
+                value={createPriority}
+                onChange={(e) => setCreatePriority(e.target.value as BugPriority | "")}
+                aria-label="Bug priority"
+              >
+                <option value="">Not set</option>
+                {BUG_PRIORITIES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
           <BugEvidenceField
             mode={createEvidenceMode}
             onModeChange={setCreateEvidenceMode}
@@ -1133,10 +1270,21 @@ export default function BugsPage() {
       {/* ───── Edit Bug Modal ───── */}
       <Modal
         open={!!editBug}
-        onClose={() => setEditBug(null)}
+        onClose={() => {
+          setEditError(null);
+          setEditBug(null);
+        }}
         title="Edit Bug"
       >
         <div className="space-y-4">
+          {editError && (
+            <p
+              data-testid="edit-bug-error"
+              className="rounded-[var(--radius-control)] border border-[var(--error)] bg-[var(--error)]/10 px-3 py-2 text-[13px] text-[var(--error-foreground)]"
+            >
+              {editError}
+            </p>
+          )}
           <Field>
             <FieldLabel>
               Bug Title <span className="text-[var(--error-foreground)]">*</span>
@@ -1207,10 +1355,25 @@ export default function BugsPage() {
           </Field>
           <Field>
             <FieldLabel>Severity</FieldLabel>
-            <Select value={editSeverity} onChange={(e) => setEditSeverity(e.target.value as BugSeverity)}>
+            <Select value={editSeverity} onChange={(e) => setEditSeverity(e.target.value as BugSeverity)} aria-label="Severity">
               {BUG_SEVERITIES.map((s) => (
                 <option key={s} value={s}>
                   {s}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field>
+            <FieldLabel>Priority</FieldLabel>
+            <Select
+              value={editPriority}
+              onChange={(e) => setEditPriority(e.target.value as BugPriority | "")}
+              aria-label="Bug priority"
+            >
+              <option value="">Not set</option>
+              {BUG_PRIORITIES.map((p) => (
+                <option key={p} value={p}>
+                  {p}
                 </option>
               ))}
             </Select>

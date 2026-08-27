@@ -10,11 +10,14 @@ import {
   IconCircleDashed,
   IconCircleMinus,
   IconCircleX,
+  IconAlertTriangle,
   IconClipboardList,
+  IconRobot,
   IconClock,
   IconDeviceDesktop,
   IconPencil,
   IconPlayerPlay,
+  IconPlayerSkipForward,
   IconPlus,
   IconTrash,
 } from "@tabler/icons-react";
@@ -40,6 +43,7 @@ import {
   Modal,
   Field,
   FieldLabel,
+  PageLoader,
   Textarea,
 } from "@/components/ui";
 import { PageHeader, ListWorkspaceLayout } from "@/components/workflows";
@@ -68,13 +72,7 @@ const STATUS_FILTERS: { value: string; label: string; dot: string }[] = [
 const STATUS_SORT_ORDER: Record<string, number> = { Planning: 0, "In Progress": 1, Completed: 2 };
 type SortOption = "newest" | "oldest" | "name" | "status";
 
-import { AVATAR_COLORS as RUN_AVATAR_COLORS } from "@/lib/avatarColors";
-
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
+import { avatarColor } from "@/lib/avatarColors";
 
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -107,23 +105,24 @@ function passRateColor(pct: number): string {
 }
 
 function RunAvatar({ name }: { name: string }) {
-  const color = RUN_AVATAR_COLORS[hashSeed(name) % RUN_AVATAR_COLORS.length];
   return (
     <div
       className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-xs font-bold tracking-wide text-white"
-      style={{ background: color }}
+      style={{ background: avatarColor(name) }}
     >
       {getInitials(name)}
     </div>
   );
 }
 
-function OwnerAvatar({ name }: { name: string }) {
-  const color = RUN_AVATAR_COLORS[hashSeed(name) % RUN_AVATAR_COLORS.length];
+// Seeded on the owner's id, not their name — matches every other person avatar (top bar, team
+// avatars, activity, admins) so the same person keeps the same colour everywhere. Part of
+// Basecamp 10198836413.
+function OwnerAvatar({ name, seed }: { name: string; seed?: string | null }) {
   return (
     <span
       className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border-2 border-[var(--surface)] text-[10px] font-semibold text-white"
-      style={{ background: color }}
+      style={{ background: avatarColor(seed || name) }}
       title={name}
     >
       {getInitials(name)}
@@ -131,13 +130,26 @@ function OwnerAvatar({ name }: { name: string }) {
   );
 }
 
-function RunProgressBar({ passed, failed, blocked, total }: { passed: number; failed: number; blocked: number; total: number }) {
+function RunProgressBar({
+  passed,
+  failed,
+  blocked,
+  skipped,
+  total,
+}: {
+  passed: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  total: number;
+}) {
   const pct = (n: number) => `${total ? (n / total) * 100 : 0}%`;
   return (
     <div className="flex h-[5px] gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
       {passed > 0 && <div className="h-full" style={{ width: pct(passed), background: "var(--status-pass-dot)" }} />}
       {failed > 0 && <div className="h-full" style={{ width: pct(failed), background: "var(--status-fail-dot)" }} />}
       {blocked > 0 && <div className="h-full" style={{ width: pct(blocked), background: "var(--status-blocked-dot)" }} />}
+      {skipped > 0 && <div className="h-full" style={{ width: pct(skipped), background: "var(--status-skipped-dot)" }} />}
     </div>
   );
 }
@@ -247,21 +259,6 @@ export default function TestRunsPage() {
     });
   }, [router, load]);
 
-  const summary = useMemo(() => {
-    const totalRuns = runs.length;
-    const inProgress = runs.filter((r) => r.status === "In Progress").length;
-    let totalExecuted = 0;
-    let totalPassed = 0;
-    let openFailures = 0;
-    for (const r of runs) {
-      totalExecuted += r.passed + r.failed + r.blocked + r.skipped;
-      totalPassed += r.passed;
-      openFailures += r.failed;
-    }
-    const passRate = totalExecuted > 0 ? Math.round((totalPassed / totalExecuted) * 100) : null;
-    return { totalRuns, inProgress, passRate, openFailures };
-  }, [runs]);
-
   const visibleRuns = useMemo(() => {
     const filtered = statusFilter === "all" ? runs : runs.filter((r) => r.status === statusFilter);
     const sorted = [...filtered];
@@ -281,6 +278,24 @@ export default function TestRunsPage() {
     }
     return sorted;
   }, [runs, statusFilter, sortBy]);
+
+  // Pass Rate = passed / totalCases (all assigned cases), the same denominator as the "X / Y cases"
+  // fraction on each run card and the Test Run Details page — so the three numbers always reconcile.
+  // Scoped to visibleRuns so the tiles match whatever status filter is applied below them.
+  const summary = useMemo(() => {
+    const totalRuns = visibleRuns.length;
+    const inProgress = visibleRuns.filter((r) => r.status === "In Progress").length;
+    let totalCases = 0;
+    let totalPassed = 0;
+    let openFailures = 0;
+    for (const r of visibleRuns) {
+      totalCases += r.totalCases;
+      totalPassed += r.passed;
+      openFailures += r.failed;
+    }
+    const passRate = totalCases > 0 ? Math.round((totalPassed / totalCases) * 100) : null;
+    return { totalRuns, inProgress, passRate, openFailures };
+  }, [visibleRuns]);
 
   /* create */
   async function handleCreate(e: React.FormEvent) {
@@ -350,14 +365,7 @@ export default function TestRunsPage() {
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--ink-200)] border-t-[var(--denim)]" />
-          <p className="text-[13px] text-[var(--ink-400)]">Loading runs…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading runs…" />;
   }
 
   const emptyIcon = <IconPlayerPlay size={48} stroke={1.25} className="text-[var(--ink-300)]" />;
@@ -479,6 +487,28 @@ export default function TestRunsPage() {
                           {r.name}
                         </Link>
                         <StatusChip tone={statusTone(r.status)}>{r.status}</StatusChip>
+                        {/*
+                          * Whether a run's results were reported by an SDK or typed in by a person
+                          * is the first thing you need to know when a pass rate looks wrong, so it
+                          * belongs next to the name rather than only on the detail page. Nothing
+                          * renders for a manual run (Basecamp 10189985971).
+                          */}
+                        {r.source === "automation" && (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--muted)]"
+                            title={
+                              r.closeStatus === "incomplete"
+                                ? "Reported by an automation SDK. The test process never reported that it finished, so some results may be missing."
+                                : "Results reported by an automation SDK"
+                            }
+                          >
+                            <IconRobot size={11} stroke={1.75} />
+                            Automated
+                            {r.closeStatus === "incomplete" && (
+                              <IconAlertTriangle size={11} stroke={1.75} style={{ color: "var(--warning)" }} />
+                            )}
+                          </span>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-[var(--muted-soft)]">
                         {planName && (
@@ -504,7 +534,7 @@ export default function TestRunsPage() {
                       </div>
                     </div>
 
-                    {ownerName && <OwnerAvatar name={ownerName} />}
+                    {ownerName && <OwnerAvatar name={ownerName} seed={r.ownerId} />}
 
                     <div className="flex shrink-0 items-center gap-1">
                       <Link
@@ -537,7 +567,7 @@ export default function TestRunsPage() {
 
                   {total > 0 && (
                     <div className="border-t border-[var(--border-subtle)] px-4 py-3">
-                      <RunProgressBar passed={r.passed} failed={r.failed} blocked={r.blocked} total={total} />
+                      <RunProgressBar passed={r.passed} failed={r.failed} blocked={r.blocked} skipped={r.skipped} total={total} />
                       <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-4">
                           <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-pass-text)]">
@@ -551,6 +581,10 @@ export default function TestRunsPage() {
                           <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-blocked-text)]">
                             <IconCircleMinus size={13} stroke={1.75} />
                             {r.blocked} blocked
+                          </span>
+                          <span className="flex items-center gap-1 text-[11.5px] font-medium text-[var(--status-skipped-text)]">
+                            <IconPlayerSkipForward size={13} stroke={1.75} />
+                            {r.skipped} skipped
                           </span>
                           <span className="flex items-center gap-1 text-[11.5px] text-[var(--muted-soft)]">
                             <IconCircleDashed size={13} stroke={1.75} />

@@ -11,7 +11,7 @@ import {
   type IntegrationConnectionStatus,
   type IntegrationProvider,
 } from "@/lib/api";
-import { Button, Card } from "@/components/ui";
+import { Button, Card, PageLoader } from "@/components/ui";
 import PricingModal from "@/components/PricingModal";
 
 const PROVIDERS: {
@@ -96,11 +96,7 @@ export default function IntegrationsTab() {
   }
 
   if (loading) {
-    return (
-      <div className="flex min-h-[200px] items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader />;
   }
 
   return (

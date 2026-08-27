@@ -5,6 +5,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { authMe, getWorkspace } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { PageLoader } from "@/components/ui";
 import GeneralTab from "@/components/settings/GeneralTab";
 import MembersTab from "@/components/settings/MembersTab";
 import IntegrationsTab from "@/components/settings/IntegrationsTab";
@@ -89,14 +90,7 @@ function WorkspaceSettingsContent() {
   }
 
   if (status !== "ready" || !activeTab) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
-          <p className="text-sm text-[var(--muted)]">Loading workspace settings…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading workspace settings…" />;
   }
 
   return (
@@ -133,7 +127,7 @@ function WorkspaceSettingsContent() {
                     key={tab.key}
                     type="button"
                     onClick={() => handleTabChange(tab.key)}
-                    className={`rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
+                    className={`cursor-pointer rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
                       activeTab === tab.key
                         ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
                         : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
@@ -153,7 +147,7 @@ function WorkspaceSettingsContent() {
                   <button
                     type="button"
                     onClick={() => handleTabChange("admins")}
-                    className={`rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
+                    className={`cursor-pointer rounded-[6px] px-2.5 py-2 text-left text-[13px] transition-colors ${
                       activeTab === "admins"
                         ? "bg-[var(--brand-soft)] font-medium text-[var(--accent-light)]"
                         : "text-[var(--ink-600)] hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"

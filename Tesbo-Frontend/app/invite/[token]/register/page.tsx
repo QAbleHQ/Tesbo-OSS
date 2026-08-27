@@ -40,6 +40,11 @@ export default function RegisterFromInvitePage() {
   const [code, setCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [nameError, setNameError] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [confirmPasswordError, setConfirmPasswordError] = useState("");
+  const [formError, setFormError] = useState("");
+  const [otpNameError, setOtpNameError] = useState("");
 
   useEffect(() => {
     getInvitationByToken(token)
@@ -63,22 +68,42 @@ export default function RegisterFromInvitePage() {
     setMode(next);
     setStep("form");
     setError("");
+    setNameError("");
+    setPasswordError("");
+    setConfirmPasswordError("");
+    setFormError("");
+    setOtpNameError("");
   }
 
   async function handlePasswordFormSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
-    const nameError = validateName(name, "Name");
-    if (nameError) { setError(nameError); return; }
-    const passwordError = validatePasswordValue(password);
-    if (passwordError) { setError(passwordError); return; }
-    if (password !== confirmPassword) { setError("Passwords do not match"); return; }
+    setNameError("");
+    setPasswordError("");
+    setConfirmPasswordError("");
+    setFormError("");
+
+    let valid = true;
+    const nameMsg = validateName(name, "Name");
+    if (nameMsg) { setNameError(nameMsg); valid = false; }
+    const passwordMsg = validatePasswordValue(password);
+    if (passwordMsg) {
+      setPasswordError(passwordMsg);
+      valid = false;
+    } else if (!confirmPassword) {
+      setConfirmPasswordError("Confirm your password");
+      valid = false;
+    } else if (password !== confirmPassword) {
+      setConfirmPasswordError("Passwords do not match");
+      valid = false;
+    }
+    if (!valid) return;
+
     setSubmitting(true);
     try {
       await startInviteRegistration(token, { name: name.trim(), password });
       setStep("code");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start signup");
+      setFormError(err instanceof Error ? err.message : "Failed to start signup");
     } finally {
       setSubmitting(false);
     }
@@ -102,9 +127,10 @@ export default function RegisterFromInvitePage() {
 
   async function handleOtpFormSubmit(e: React.FormEvent) {
     e.preventDefault();
+    setOtpNameError("");
     setError("");
-    const nameError = validateName(name, "Name");
-    if (nameError) { setError(nameError); return; }
+    const nameMsg = validateName(name, "Name");
+    if (nameMsg) { setOtpNameError(nameMsg); return; }
     setSubmitting(true);
     try {
       await startInviteOtpRegistration(token, { name: name.trim() });
@@ -213,12 +239,17 @@ export default function RegisterFromInvitePage() {
                   id="reg-name"
                   type="text"
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (nameError) setNameError("");
+                  }}
                   placeholder="Your name"
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
                   autoFocus
+                  aria-invalid={Boolean(nameError)}
                 />
+                {nameError && <FieldError>{nameError}</FieldError>}
               </Field>
 
               <Field>
@@ -239,11 +270,16 @@ export default function RegisterFromInvitePage() {
                   id="reg-password"
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (passwordError) setPasswordError("");
+                  }}
                   placeholder="At least 8 characters"
                   disabled={submitting}
                   maxLength={PASSWORD_MAX_LENGTH}
+                  aria-invalid={Boolean(passwordError)}
                 />
+                {passwordError && <FieldError>{passwordError}</FieldError>}
                 <FieldHint>{PASSWORD_RULES_HINT}</FieldHint>
               </Field>
 
@@ -253,13 +289,18 @@ export default function RegisterFromInvitePage() {
                   id="reg-confirm"
                   type="password"
                   value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  onChange={(e) => {
+                    setConfirmPassword(e.target.value);
+                    if (confirmPasswordError) setConfirmPasswordError("");
+                  }}
                   placeholder="Repeat your password"
                   disabled={submitting}
+                  aria-invalid={Boolean(confirmPasswordError)}
                 />
+                {confirmPasswordError && <FieldError>{confirmPasswordError}</FieldError>}
               </Field>
 
-              {error && <FieldError>{error}</FieldError>}
+              {formError && <FieldError>{formError}</FieldError>}
 
               <Button type="submit" disabled={submitting} className="w-full">
                 {submitting ? "Sending code…" : "Send verification code"}
@@ -308,12 +349,17 @@ export default function RegisterFromInvitePage() {
                   id="reg-otp-name"
                   type="text"
                   value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  onChange={(e) => {
+                    setName(e.target.value);
+                    if (otpNameError) setOtpNameError("");
+                  }}
                   placeholder="Your name"
                   disabled={submitting}
                   maxLength={NAME_MAX_LENGTH}
                   autoFocus
+                  aria-invalid={Boolean(otpNameError)}
                 />
+                {otpNameError && <FieldError>{otpNameError}</FieldError>}
               </Field>
 
               <Field>

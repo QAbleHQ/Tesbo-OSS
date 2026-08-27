@@ -20,8 +20,9 @@ import {
   type ZyraChatSession,
   type ZyraChatTestcaseRow,
 } from "@/lib/api";
-import { Button, StatusChip, Textarea } from "@/components/ui";
+import { Button, CopyButton, PageLoader, StatusChip, Textarea } from "@/components/ui";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { toTsv } from "@/lib/tsv";
 
 // ─── Zyra icon badge — gradient sparkle mark used in the header and per-message ──
 function ZyraMark({ size = 24 }: { size?: number }) {
@@ -159,8 +160,27 @@ function summarizeTestcaseActions(rows: ZyraChatTestcaseRow[]): string | null {
 // ─── TestcaseTable ────────────────────────────────────────────────────────────
 function TestcaseTable({ rows }: { rows: ZyraChatTestcaseRow[] }) {
   if (!rows.length) return null;
+  const tsv = toTsv(
+    ["ID", "Title", "Priority", "Status", "First step", "Source"],
+    rows.map((row) => [
+      row.externalId || row.id || "",
+      row.title,
+      row.priority || "P2",
+      row.status || "Draft",
+      firstStepPreview(row.stepsJson),
+      row.action || "suggested",
+    ])
+  );
   return (
     <div className="mt-3 overflow-hidden rounded-lg border border-[var(--border)]">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--background)] px-3 py-1.5">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+          {rows.length} test case{rows.length === 1 ? "" : "s"}
+        </span>
+        <span title="Copy these test cases as tab-separated values, ready to paste into Excel.">
+          <CopyButton value={tsv} label="Copy" copiedLabel="Copied" size="sm" />
+        </span>
+      </div>
       <div className="overflow-x-auto">
         <table className="min-w-full divide-y divide-[var(--border)] text-sm">
           <thead className="bg-[var(--background)]">
@@ -523,10 +543,24 @@ export default function ZyraChatPage() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [stoppingPlan, setStoppingPlan] = useState(false);
+  const [creatingSession, setCreatingSession] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Guards the mount effect against firing loadData twice for the same mount (React 18 dev
+  // double-invoke, or the effect re-running before the first pass resolves) — without it, two
+  // concurrent runs can each see zero sessions and each create an empty one. Does not protect
+  // against two genuinely separate mounts (e.g. two tabs) racing each other; the sidebar filter
+  // below is what keeps any such leftover empty session out of view either way.
+  const loadStartedRef = useRef(false);
+  const creatingSessionRef = useRef(false);
   const messages = useMemo(() => activeSession?.messages || [], [activeSession]);
+  // The sidebar is a history of conversations that actually happened — a session nobody ever sent
+  // a message in (including one still being created) has nothing to show and shouldn't clutter or
+  // duplicate in the list. `hasMessages` only comes back on list responses (see api.ts), so a
+  // session missing the field reads as empty and is filtered out until refreshSessions() sees it
+  // with its first message.
+  const visibleSessions = useMemo(() => sessions.filter((session) => session.hasMessages), [sessions]);
 
   const refreshSessions = useCallback(async () => {
     const data = await listZyraChatSessions(projectId);
@@ -540,10 +574,20 @@ export default function ZyraChatPage() {
   }, [projectId]);
 
   const createSession = useCallback(async () => {
-    const session = await createZyraChatSession(projectId);
-    setSessions((prev) => [session, ...prev]);
-    setActiveSession(session);
-    setTimeout(() => textareaRef.current?.focus(), 100);
+    // A double-click on "New", or a second caller landing here while the first request is still
+    // in flight, would otherwise fire two POSTs and hand back two distinct empty sessions.
+    if (creatingSessionRef.current) return;
+    creatingSessionRef.current = true;
+    setCreatingSession(true);
+    try {
+      const session = await createZyraChatSession(projectId);
+      setSessions((prev) => [session, ...prev.filter((s) => s.id !== session.id)]);
+      setActiveSession(session);
+      setTimeout(() => textareaRef.current?.focus(), 100);
+    } finally {
+      creatingSessionRef.current = false;
+      setCreatingSession(false);
+    }
   }, [projectId]);
 
   const loadData = useCallback(async () => {
@@ -566,6 +610,8 @@ export default function ZyraChatPage() {
   }, [createSession, openSession, projectId, refreshSessions]);
 
   useEffect(() => {
+    if (loadStartedRef.current) return;
+    loadStartedRef.current = true;
     authMe().then((me) => {
       if (!me) router.replace("/login");
       else void loadData();
@@ -738,12 +784,11 @@ export default function ZyraChatPage() {
         )}
 
         {loading ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
-            <div className="text-center space-y-2">
-              <div className="h-8 w-8 rounded-full border-2 border-[var(--brand-primary)] border-t-transparent animate-spin mx-auto" />
-              <p className="text-sm text-[var(--muted)]">Loading Zyra...</p>
-            </div>
-          </div>
+          <PageLoader
+            variant="inline"
+            label="Loading Zyra…"
+            className="min-h-0 flex-1 rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]"
+          />
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
 
@@ -754,10 +799,10 @@ export default function ZyraChatPage() {
                 <div>
                   <p className="text-sm font-semibold text-[var(--foreground)]">Conversations</p>
                   <p className="text-[11px] text-[var(--muted)]">
-                    {sessions.length} {sessions.length === 1 ? "session" : "sessions"}
+                    {visibleSessions.length} {visibleSessions.length === 1 ? "session" : "sessions"}
                   </p>
                 </div>
-                <Button size="sm" variant="secondary" onClick={() => void createSession()}>
+                <Button size="sm" variant="secondary" disabled={creatingSession} onClick={() => void createSession()}>
                   <IconPlus size={13} stroke={2} />
                   New
                 </Button>
@@ -765,10 +810,10 @@ export default function ZyraChatPage() {
 
               {/* Session list — scrollable */}
               <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
-                {sessions.length === 0 && (
+                {visibleSessions.length === 0 && (
                   <p className="px-3 py-8 text-center text-xs text-[var(--muted)]">No conversations yet</p>
                 )}
-                {sessions.map((session) => {
+                {visibleSessions.map((session) => {
                   const isActive = activeSession?.id === session.id;
                   return (
                     <button

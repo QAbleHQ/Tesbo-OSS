@@ -56,6 +56,68 @@ The seeded user and its "E2E Smoke Project" persist across runs (the docker volu
 wiped), so re-runs reuse the same account/project rather than accumulating new ones. Test
 cases created by tests delete themselves at the end of the test.
 
+## Running against the stage environment
+
+Stage is https://app-stage.tesbo.io with its API at https://api-app-stage.tesbo.io. The specs
+themselves need no changes — the suite already targets whatever `API_BASE_URL` / `WEB_BASE_URL`
+point at. Three things are different about a remote target, and `scripts/e2e-stage.sh` exists to
+handle all three:
+
+1. **Tenants must already exist.** `global-setup.ts` fails the whole run if it cannot log in as
+   account A or account B. On a local stack it creates them by scraping the signup OTP out of
+   `docker compose logs`; there is no container log to read on stage, so both accounts have to be
+   signed up by hand first and their credentials put in `e2e/stage.env`.
+2. **The SQL-fixture specs skip by default.** `utils/psql.ts` refuses to guess a database, so
+   `dbControlAvailable()` is false and every suite that arranges state through SQL skips itself
+   (~29 spec files). Setting `E2E_DATABASE_URL` to stage's own connection string unlocks them —
+   the local postgres container is only transport for the `psql` binary, so a hosted URL is
+   reachable — at the cost of real writes to the stage database. The runner requires
+   `E2E_STAGE_DB_WRITES_ACK=yes` on top of it for that reason.
+3. **Stage is shared.** Stripe write tests are refused outright, the local stack's `DATABASE_URL`
+   and `STRIPE_*` are scrubbed from the environment so they cannot leak into a remote run, and the
+   runner refuses any host that does not look like a stage host.
+
+```bash
+cp e2e/stage.env.example e2e/stage.env    # then fill in the stage accounts
+scripts/e2e-stage.sh api/health.spec.ts api/testcases.spec.ts
+```
+
+It announces the selection and the suite total, refuses a 0-test selection, refuses to start while
+another run holds `e2e/.auth/state.json`, and opens a Terminal window at `--workers=10` teeing to
+`e2e/.run-logs/stage-<stamp>.log` — the same protocol as `scripts/e2e-run.sh`.
+
+Note that `e2e/.auth/` is shared with local runs. Each run's global setup rewrites it, so they
+self-heal in sequence, but never run a local suite and a stage suite at the same time.
+
+## Reporting results into Tesbo
+
+`playwright.config.ts` registers `@tesbox/playwright-reporter`, so a run posts its results back into
+the Tesbo project this suite tests (`Tesbo TTM - Web Official`) as one Test Run per
+`playwright test` invocation. The API host and project id are committed there — neither is a secret.
+The token is not: export `TESBO_API_TOKEN` (a `read`+`write` project token from
+**Project -> Settings -> API & MCP**) for the run, or inject it as a credential in CI.
+
+**With no token the reporter is switched off** and the suite behaves exactly as it did before, except
+in CI, where a missing token fails the run rather than reporting nothing quietly. See the comment on
+`reporter` in `playwright.config.ts` for why that asymmetry exists.
+
+Each test is linked to the case it validates by a tag:
+
+```ts
+test("ACT-A-01 an action in a project appears in that project's feed", { tag: '@tesbo.testId("TES-TC-886")' }, async () => {
+```
+
+- The leading `@` is required — Playwright rejects any tag without it at collection time.
+- **One id per test.** Two is an error, not a coin flip.
+- An untagged test is reported as `not linked to Tesbo` and does not fail anything. Tests generated
+  in a loop from a single `test()` call are untagged for that reason: one call site cannot carry one
+  id per generated test.
+- A tag pointing at a case that does not exist in the project fails the run at collection time.
+  Automation never creates cases — a QA engineer owns the repository.
+
+When adding a spec, look up the case in Tesbo and add its id. When there is no case yet, leave the
+test untagged rather than pointing it at an approximate one.
+
 ## Config
 
 Copy `.env.example` to `.env` and adjust if needed — every value has a working default for

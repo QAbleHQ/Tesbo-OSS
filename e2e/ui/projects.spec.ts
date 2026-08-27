@@ -9,7 +9,7 @@ function apiContext() {
 }
 
 test.describe("project settings", () => {
-  test("a user can rename a project and update its description from settings", async ({ page }) => {
+  test("a user can rename a project and update its description from settings", { tag: '@tesbo.testId("TES-TC-805")' }, async ({ page }) => {
     const api = await apiContext();
     let projectId: string | undefined;
 
@@ -42,7 +42,7 @@ test.describe("project settings", () => {
     }
   });
 
-  test("the delete confirmation blocks a mismatched name and only deletes on an exact match", async ({
+  test("the delete confirmation blocks a mismatched name and only deletes on an exact match", { tag: '@tesbo.testId("TES-TC-806")' }, async ({
     page,
   }) => {
     const api = await apiContext();

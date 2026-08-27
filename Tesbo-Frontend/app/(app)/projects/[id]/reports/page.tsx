@@ -1,9 +1,9 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { IconChevronRight, IconDownload } from "@tabler/icons-react";
+import { IconChevronDown, IconChevronRight, IconDownload } from "@tabler/icons-react";
 import {
   authMe,
   getProject,
@@ -13,6 +13,7 @@ import {
   getReportsOverview,
   getReportsInsights,
   getReportsTrends,
+  getReportsExportUrl,
   listPlans,
   listTestRuns,
   listSuites,
@@ -27,6 +28,7 @@ import {
   type SuiteNode,
 } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { PageLoader } from "@/components/ui";
 import { ReportsNav, type ReportView } from "@/components/reports/ReportsNav";
 import { OverviewTab } from "@/components/reports/OverviewTab";
 import { ExecutionReportTab } from "@/components/reports/ExecutionReportTab";
@@ -34,6 +36,19 @@ import { TraceabilityTab } from "@/components/reports/TraceabilityTab";
 import { RepositoryTab } from "@/components/reports/RepositoryTab";
 import { AIInsightsTab } from "@/components/reports/AIInsightsTab";
 import { TrendsTab } from "@/components/reports/TrendsTab";
+
+/*
+ * Named per view because the export is per view — the file says which report it is, and the menu
+ * says which one it is about to hand over. Same six ids as ReportsNav.
+ */
+const REPORT_VIEW_LABELS: Record<ReportView, string> = {
+  overview: "Overview",
+  execution: "Execution Report",
+  matrix: "Traceability Matrix",
+  repository: "Repository",
+  insights: "AI Insights",
+  trends: "Trends",
+};
 
 export default function ReportsPage() {
   const params = useParams();
@@ -178,12 +193,32 @@ export default function ReportsPage() {
     return { passRate, coverage };
   }, [overview, insights]);
 
+  /*
+   * Export menu state. Declared here, above the `if (!auth)` return below — a hook underneath an
+   * early return changes React's hook count between renders and takes the whole page down with
+   * "Application error: a client-side exception has occurred" (Basecamp 10217475765, which was
+   * exactly that mistake on the plan detail screen).
+   */
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    function onClickOutside(e: MouseEvent) {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(e.target as Node)) setExportMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [exportMenuOpen]);
+
+  // The Execution Report is the one view with a filter, so it is the one view whose export carries
+  // filter params; everywhere else they would be ignored by the endpoint anyway.
+  const exportParams =
+    activeView === "execution" && execFilterBy !== "overall" && execFilterValue
+      ? { filterBy: execFilterBy, filterValue: execFilterValue }
+      : undefined;
+
   if (!auth) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   return (
@@ -206,14 +241,53 @@ export default function ReportsPage() {
           )}
         {topBarEndEl &&
           createPortal(
-            <button
-              type="button"
-              title="Coming soon"
-              className="flex h-[30px] cursor-not-allowed items-center gap-1.5 rounded-[6px] border-0 bg-[var(--surface-tertiary)] px-3.5 text-[12px] font-medium text-[var(--muted-soft)]"
-            >
-              <IconDownload size={13} stroke={1.75} />
-              Export
-            </button>,
+            <div ref={exportMenuRef} className="relative">
+              <button
+                type="button"
+                data-testid="reports-export"
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+                onClick={() => setExportMenuOpen((v) => !v)}
+                className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--border)] bg-transparent px-3.5 text-[12px] font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--surface-secondary)]"
+              >
+                <IconDownload size={13} stroke={1.75} />
+                Export
+                <IconChevronDown size={12} stroke={1.75} className="text-[var(--muted-soft)]" />
+              </button>
+              {exportMenuOpen && (
+                <div
+                  role="menu"
+                  data-testid="reports-export-menu"
+                  className="absolute right-0 top-full z-30 mt-1 w-64 rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]"
+                >
+                  <p className="px-4 pb-1 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-[var(--muted-soft)]">
+                    {REPORT_VIEW_LABELS[activeView]}
+                  </p>
+                  <a
+                    href={getReportsExportUrl(projectId, activeView, "csv", exportParams)}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-testid="reports-export-csv"
+                    onClick={() => setExportMenuOpen(false)}
+                    className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
+                  >
+                    <IconDownload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+                    Export as CSV
+                  </a>
+                  <a
+                    href={getReportsExportUrl(projectId, activeView, "xlsx", exportParams)}
+                    target="_blank"
+                    rel="noreferrer"
+                    data-testid="reports-export-xlsx"
+                    onClick={() => setExportMenuOpen(false)}
+                    className="flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm text-[var(--foreground)] hover:bg-[var(--surface-secondary)]"
+                  >
+                    <IconDownload size={14} stroke={1.75} className="text-[var(--muted-soft)]" />
+                    Export as Excel
+                  </a>
+                </div>
+              )}
+            </div>,
             topBarEndEl
           )}
 
@@ -252,7 +326,13 @@ export default function ReportsPage() {
         </div>
 
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-r-xl border border-l-0 border-[var(--border)] bg-[var(--surface)]">
-          <ReportsNav activeView={activeView} onViewChange={setActiveView} flakyCount={insights?.flakyTests.length ?? 0} />
+          <ReportsNav
+            activeView={activeView}
+            onViewChange={setActiveView}
+            flakyCount={insights?.flakyTests.length ?? 0}
+            csvHref={getReportsExportUrl(projectId, activeView, "csv", exportParams)}
+            xlsxHref={getReportsExportUrl(projectId, activeView, "xlsx", exportParams)}
+          />
 
           <div className="min-w-0 flex-1 overflow-y-auto p-5">
             {activeView === "overview" && <OverviewTab overview={overview} loading={overviewLoading} />}

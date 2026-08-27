@@ -29,6 +29,10 @@ type ImportPreviewResult = {
   totalRows: number;
 };
 
+const SUPPORTED_FILE_EXTENSIONS = [".csv", ".xlsx", ".xls"];
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const MAX_FILE_SIZE_LABEL = "20MB";
+
 const IMPORTABLE_FIELDS: { key: string; label: string; required?: boolean }[] = [
   { key: "title", label: "Title", required: true },
   { key: "description", label: "Description" },
@@ -61,6 +65,7 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [rejectedFileName, setRejectedFileName] = useState<string | null>(null);
   const [preview, setPreview] = useState<ImportPreviewResult | null>(null);
   const [selectedSheetName, setSelectedSheetName] = useState("");
   const [mapping, setMapping] = useState<Record<string, number>>({});
@@ -77,6 +82,7 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
     setFile(null);
     setUploading(false);
     setUploadError(null);
+    setRejectedFileName(null);
     setPreview(null);
     setSelectedSheetName("");
     setMapping({});
@@ -249,8 +255,38 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
     return sheets.filter((sheet) => sheet.headers.length > 0);
   }, [normalizeHeader]);
 
+  // The <input accept> hint only filters the OS file picker — and not even reliably there (an
+  // "All Files" option, a file manager that ignores it) — and drag-and-drop bypasses it entirely.
+  // This is the only real gate against a PDF, image, or other unsupported file reaching the
+  // XLSX parser, which otherwise fails deep in handleUpload with a confusing "Failed to parse
+  // file" rather than telling the user their format isn't supported at all.
+  const getFileExtension = (name: string) => {
+    const idx = name.lastIndexOf(".");
+    return idx >= 0 ? name.slice(idx).toLowerCase() : "";
+  };
+
   const handleFileSelect = (f: File) => {
+    const ext = getFileExtension(f.name);
+    if (!SUPPORTED_FILE_EXTENSIONS.includes(ext)) {
+      setFile(null);
+      setRejectedFileName(f.name);
+      setUploadError(
+        ext
+          ? `Unsupported file format "${ext}". Please upload a .csv, .xlsx, or .xls file.`
+          : "This file type isn't supported. Please upload a .csv, .xlsx, or .xls file.",
+      );
+      return;
+    }
+    if (f.size > MAX_FILE_SIZE_BYTES) {
+      setFile(null);
+      setRejectedFileName(f.name);
+      setUploadError(
+        `File is too large (${(f.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed size is ${MAX_FILE_SIZE_LABEL}.`,
+      );
+      return;
+    }
     setFile(f);
+    setRejectedFileName(null);
     setUploadError(null);
   };
 
@@ -477,23 +513,35 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
             <div>
               <div
                 className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-10 transition-colors ${
-                  dragActive
-                    ? "border-[var(--confidence-high)] bg-[color-mix(in_oklab,var(--confidence-high-soft)_60%,transparent)]"
-                    : "border-[var(--border-strong)] hover:border-[var(--confidence-high-border)]"
+                  uploadError
+                    ? "border-[var(--error-border)] bg-[var(--error-soft)]"
+                    : dragActive
+                      ? "border-[var(--confidence-high)] bg-[color-mix(in_oklab,var(--confidence-high-soft)_60%,transparent)]"
+                      : "border-[var(--border-strong)] hover:border-[var(--confidence-high-border)]"
                 }`}
                 onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
                 onDragLeave={() => setDragActive(false)}
                 onDrop={handleDrop}
               >
-                <svg className="mb-3 h-10 w-10 text-[var(--muted-soft)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <svg
+                  className={`mb-3 h-10 w-10 ${uploadError ? "text-[var(--error-foreground)]" : "text-[var(--muted-soft)]"}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
-                <p className="mb-1 text-sm font-medium text-[var(--foreground)]">
-                  {file ? file.name : "Drop your CSV or Excel file here"}
+                <p
+                  className={`mb-1 text-sm font-medium ${uploadError ? "text-[var(--error-foreground)]" : "text-[var(--foreground)]"}`}
+                >
+                  {file ? file.name : rejectedFileName || "Drop your CSV or Excel file here"}
                 </p>
-                <p className="mb-3 text-xs text-[var(--muted)]">
-                  {file ? `${(file.size / 1024).toFixed(1)} KB` : "Supports .csv, .xlsx, and .xls files"}
+                <p className={`text-xs text-[var(--muted)] ${uploadError ? "mb-1" : "mb-3"}`}>
+                  {file ? `${(file.size / 1024).toFixed(1)} KB` : `Supports .csv, .xlsx, and .xls files (up to ${MAX_FILE_SIZE_LABEL})`}
                 </p>
+                {uploadError && (
+                  <p className="mb-3 text-xs font-medium text-[var(--error-foreground)]">{uploadError}</p>
+                )}
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
@@ -509,15 +557,12 @@ export default function ImportTestCasesModal({ projectId, open, onClose, onImpor
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     if (f) handleFileSelect(f);
+                    // Clears the picker's own value so re-selecting the same (still-invalid)
+                    // file after an error fires this handler again instead of being a no-op.
+                    e.target.value = "";
                   }}
                 />
               </div>
-
-              {uploadError && (
-                <div className="mt-3 rounded-lg border border-[var(--error-border)] bg-[var(--error-soft)] px-4 py-2 text-sm text-[var(--error-foreground)]">
-                  {uploadError}
-                </div>
-              )}
 
               <div className="mt-4 flex items-center gap-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--surface-secondary)] px-4 py-3">
                 <svg className="h-5 w-5 shrink-0 text-[var(--muted-soft)]" fill="none" stroke="currentColor" viewBox="0 0 24 24">

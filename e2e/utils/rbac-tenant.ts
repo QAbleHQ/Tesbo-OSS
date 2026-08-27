@@ -48,6 +48,9 @@ export type RbacTenantKind =
   | "kb-comments"
   | "kb-files"
   | "kb-ui"
+  // Embeddings allocation + semantic retrieval. Its own tenant because it attaches and detaches
+  // workspace AI keys, and the "zyra" / "ai-keys" tenants assert on their own key sets.
+  | "kb-embeddings"
   // Wave 7 — execution bulk ops, schedules, share links
   | "exec-ops"
   // Wave 8 — integrations (Jira / Linear), authorization and validation layer

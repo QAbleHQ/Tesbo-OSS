@@ -14,7 +14,7 @@ import {
   type WorkspaceActivityLogItem,
   type ProjectSummary,
 } from "@/lib/api";
-import { Button, EmptyStateBlock, Select } from "@/components/ui";
+import { Button, EmptyStateBlock, PageLoader, Select } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 import {
   ActivityRow,
@@ -146,11 +146,7 @@ export default function WorkspaceActivityPage() {
   );
 
   if (checkingAccess) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   if (!allowed) {

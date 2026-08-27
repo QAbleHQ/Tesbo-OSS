@@ -162,7 +162,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Creation ──────────────────────────────────────────────────────────────
 
-  test("creates a field of every supported type, normalising each type's config", async () => {
+  test("creates a field of every supported type, normalising each type's config", { tag: '@tesbo.testId("TES-TC-126")' }, async () => {
     const specs: { fieldType: string; config?: Record<string, unknown>; expected?: Record<string, unknown> }[] = [
       { fieldType: "text", config: { maxLength: 40, placeholder: "e.g. high" } },
       { fieldType: "long_text", config: { maxLength: 4000 } },
@@ -208,7 +208,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("the generated key is a slug of the name and does not move when the field is renamed", async () => {
+  test("the generated key is a slug of the name and does not move when the field is renamed", { tag: '@tesbo.testId("TES-TC-127")' }, async () => {
     const definition = await createField({ name: "E2E Risk Level!", fieldType: "text" });
     expect(definition.key).toMatch(/^e2e-risk-level-[0-9a-f]{4}$/);
 
@@ -216,18 +216,18 @@ test.describe("custom field definitions", () => {
     expect((await renamed.json()).key).toBe(definition.key);
   });
 
-  test("a field created with active:false lands inactive", async () => {
+  test("a field created with active:false lands inactive", { tag: '@tesbo.testId("TES-TC-128")' }, async () => {
     const definition = await createField({ name: fieldName("Dormant"), fieldType: "text", active: false });
     expect(definition.status).toBe("inactive");
     expect(storedStatus(definition.id)).toBe("inactive");
   });
 
-  test("a field can be created as required", async () => {
+  test("a field can be created as required", { tag: '@tesbo.testId("TES-TC-129")' }, async () => {
     const definition = await createField({ name: fieldName("Mandatory"), fieldType: "text", required: true });
     expect(definition.required).toBe(true);
   });
 
-  test("a name is required, and whitespace does not count as one", async () => {
+  test("a name is required, and whitespace does not count as one", { tag: '@tesbo.testId("TES-TC-130")' }, async () => {
     for (const name of [undefined, "", "   ", "\t\n"]) {
       const res = await post(asOwner, { name, fieldType: "text" });
       expect(res.status(), `name ${JSON.stringify(name)}`).toBe(400);
@@ -235,7 +235,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("names collide case-insensitively, but an archived field frees its name again", async () => {
+  test("names collide case-insensitively, but an archived field frees its name again", { tag: '@tesbo.testId("TES-TC-131")' }, async () => {
     const name = fieldName("Duplicate");
     const first = await createField({ name, fieldType: "text" });
 
@@ -248,7 +248,7 @@ test.describe("custom field definitions", () => {
     expect(reused.id).not.toBe(first.id);
   });
 
-  test("fieldType must be one of the seven supported types", async () => {
+  test("fieldType must be one of the seven supported types", { tag: '@tesbo.testId("TES-TC-132")' }, async () => {
     for (const fieldType of [undefined, "", "string", "TEXT", "dropdown", 7]) {
       const res = await post(asOwner, { name: fieldName("Bad type"), fieldType });
       expect(res.status(), `fieldType ${JSON.stringify(fieldType)}`).toBe(400);
@@ -256,7 +256,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("a select field needs at least one usable option", async () => {
+  test("a select field needs at least one usable option", { tag: '@tesbo.testId("TES-TC-133")' }, async () => {
     const cases: { label: string; options: unknown }[] = [
       { label: "no options key", options: undefined },
       { label: "empty list", options: [] },
@@ -271,7 +271,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("option labels within a field must be unique, case-insensitively", async () => {
+  test("option labels within a field must be unique, case-insensitively", { tag: '@tesbo.testId("TES-TC-134")' }, async () => {
     const res = await post(asOwner, {
       name: fieldName("Dup options"),
       fieldType: "single_select",
@@ -281,7 +281,7 @@ test.describe("custom field definitions", () => {
     expect((await res.json()).message).toContain("Duplicate option label");
   });
 
-  test("maxLength is bounded by the per-type ceiling", async () => {
+  test("maxLength is bounded by the per-type ceiling", { tag: '@tesbo.testId("TES-TC-135")' }, async () => {
     for (const [fieldType, ceiling] of Object.entries(MAX_LENGTH_CEILING)) {
       const atCeiling = await createField({ name: fieldName(`${fieldType} max`), fieldType, config: { maxLength: ceiling } });
       expect(atCeiling.config.maxLength).toBe(ceiling);
@@ -294,7 +294,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("a default value has to fit the field it belongs to", async () => {
+  test("a default value has to fit the field it belongs to", { tag: '@tesbo.testId("TES-TC-136")' }, async () => {
     const cases: { label: string; body: Record<string, unknown> }[] = [
       { label: "number default on a text field", body: { fieldType: "text", config: { defaultValue: 12 } } },
       {
@@ -324,7 +324,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("number config rejects an inverted range and an oversized unit", async () => {
+  test("number config rejects an inverted range and an oversized unit", { tag: '@tesbo.testId("TES-TC-137")' }, async () => {
     const inverted = await post(asOwner, { name: fieldName("Inverted"), fieldType: "number", config: { min: 10, max: 1 } });
     expect(inverted.status()).toBe(400);
     expect((await inverted.json()).message).toContain("min cannot exceed max");
@@ -338,7 +338,7 @@ test.describe("custom field definitions", () => {
     expect((await unit.json()).field).toBe("unit");
   });
 
-  test("multi-select selection bounds have to be satisfiable", async () => {
+  test("multi-select selection bounds have to be satisfiable", { tag: '@tesbo.testId("TES-TC-138")' }, async () => {
     const options = [{ label: "One" }, { label: "Two" }];
     const tooMany = await post(asOwner, {
       name: fieldName("Too many"),
@@ -364,7 +364,7 @@ test.describe("custom field definitions", () => {
     expect(negative.status()).toBe(400);
   });
 
-  test("a default selection must point at an option that is actually selectable", async () => {
+  test("a default selection must point at an option that is actually selectable", { tag: '@tesbo.testId("TES-TC-139")' }, async () => {
     const single = await post(asOwner, {
       name: fieldName("Ghost default"),
       fieldType: "single_select",
@@ -388,7 +388,7 @@ test.describe("custom field definitions", () => {
     expect((await multi.json()).field).toBe("defaultOptionIds");
   });
 
-  test("a name is accepted up to the column limit and refused beyond it", async () => {
+  test("a name is accepted up to the column limit and refused beyond it", { tag: '@tesbo.testId("TES-TC-140")' }, async () => {
     const atLimit = await createField({ name: "E".repeat(NAME_COLUMN_LIMIT), fieldType: "text" });
     expect(atLimit.name).toHaveLength(NAME_COLUMN_LIMIT);
 
@@ -399,7 +399,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Reading ───────────────────────────────────────────────────────────────
 
-  test("the list can be narrowed by status, and archived fields are excluded unless asked for", async () => {
+  test("the list can be narrowed by status, and archived fields are excluded unless asked for", { tag: '@tesbo.testId("TES-TC-141")' }, async () => {
     const active = await textField();
     const inactive = await textField({ active: false });
     const archived = await textField();
@@ -418,7 +418,7 @@ test.describe("custom field definitions", () => {
     expect(onlyArchived.map((d) => d.id)).toEqual([archived.id]);
   });
 
-  test("a single definition can be read back, and an unreachable id is a 404 rather than a 500", async () => {
+  test("a single definition can be read back, and an unreachable id is a 404 rather than a 500", { tag: '@tesbo.testId("TES-TC-142")' }, async () => {
     const definition = await textField();
     const res = await asOwner.get(definitionUrl(definition.id));
     expect(res.ok()).toBeTruthy();
@@ -430,7 +430,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("an id Postgres cannot even parse is answered like any other unknown field", async () => {
+  test("an id Postgres cannot even parse is answered like any other unknown field", { tag: '@tesbo.testId("TES-TC-143")' }, async () => {
     // Every one of these compares `id = $1` against a uuid column: unguarded, a typo in the URL
     // raises 22P02 and surfaces as a 500 rather than a 404.
     const routes: [string, () => Promise<APIResponse>][] = [
@@ -460,7 +460,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("isUsed reports whether any test case has recorded a value for the field", async () => {
+  test("isUsed reports whether any test case has recorded a value for the field", { tag: '@tesbo.testId("TES-TC-144")' }, async () => {
     const definition = await textField();
     expect((await asOwner.get(definitionUrl(definition.id)).then((r) => r.json())).isUsed).toBe(false);
 
@@ -471,7 +471,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Update ────────────────────────────────────────────────────────────────
 
-  test("name, description and required can be edited after creation", async () => {
+  test("name, description and required can be edited after creation", { tag: '@tesbo.testId("TES-TC-145")' }, async () => {
     const definition = await createField({
       name: fieldName("Editable"),
       fieldType: "text",
@@ -492,7 +492,7 @@ test.describe("custom field definitions", () => {
     expect(persisted).toMatchObject({ name: nextName, description: "after", required: true });
   });
 
-  test("a partial config patch merges into the stored config instead of replacing it", async () => {
+  test("a partial config patch merges into the stored config instead of replacing it", { tag: '@tesbo.testId("TES-TC-146")' }, async () => {
     const definition = await textField({ config: { maxLength: 20, placeholder: "keep me" } });
 
     const updated = await asOwner
@@ -503,7 +503,7 @@ test.describe("custom field definitions", () => {
     expect(updated.config.placeholder).toBe("keep me");
   });
 
-  test("the field type is fixed at creation", async () => {
+  test("the field type is fixed at creation", { tag: '@tesbo.testId("TES-TC-147")' }, async () => {
     const definition = await textField();
     const res = await asOwner.patch(definitionUrl(definition.id), {
       data: { fieldType: "number" },
@@ -514,7 +514,7 @@ test.describe("custom field definitions", () => {
     expect((await asOwner.get(definitionUrl(definition.id)).then((r) => r.json())).fieldType).toBe("text");
   });
 
-  test("a rename cannot take a live field's name, but may re-case its own", async () => {
+  test("a rename cannot take a live field's name, but may re-case its own", { tag: '@tesbo.testId("TES-TC-148")' }, async () => {
     const other = await textField();
     const definition = await createField({ name: fieldName("Own name"), fieldType: "text" });
 
@@ -530,7 +530,7 @@ test.describe("custom field definitions", () => {
     expect((await recased.json()).name).toBe(definition.name.toUpperCase());
   });
 
-  test("an update needs a non-empty name and an existing definition", async () => {
+  test("an update needs a non-empty name and an existing definition", { tag: '@tesbo.testId("TES-TC-149")' }, async () => {
     const definition = await textField();
     const blank = await asOwner.patch(definitionUrl(definition.id), { data: { name: "   " }, failOnStatusCode: false });
     expect(blank.status()).toBe(400);
@@ -542,7 +542,7 @@ test.describe("custom field definitions", () => {
     expect(missing.status()).toBe(404);
   });
 
-  test("an archived field is read-only", async () => {
+  test("an archived field is read-only", { tag: '@tesbo.testId("TES-TC-150")' }, async () => {
     const definition = await selectField();
     await asOwner.patch(`${definitionUrl(definition.id)}/status`, { data: { status: "archived" } });
 
@@ -570,7 +570,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Status lifecycle ──────────────────────────────────────────────────────
 
-  test("a field can be deactivated and brought back, and archiving is one-way", async () => {
+  test("a field can be deactivated and brought back, and archiving is one-way", { tag: '@tesbo.testId("TES-TC-151")' }, async () => {
     const definition = await textField();
 
     const deactivated = await asOwner.patch(`${definitionUrl(definition.id)}/status`, { data: { status: "inactive" } });
@@ -585,7 +585,7 @@ test.describe("custom field definitions", () => {
     expect(storedStatus(definition.id)).toBe("archived");
   });
 
-  test("an unknown status value is refused", async () => {
+  test("an unknown status value is refused", { tag: '@tesbo.testId("TES-TC-152")' }, async () => {
     const definition = await textField();
     for (const status of [undefined, "", "deleted", "ACTIVE", 1]) {
       const res = await asOwner.patch(`${definitionUrl(definition.id)}/status`, {
@@ -599,7 +599,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Options ───────────────────────────────────────────────────────────────
 
-  test("an option can be appended to a select field", async () => {
+  test("an option can be appended to a select field", { tag: '@tesbo.testId("TES-TC-153")' }, async () => {
     const definition = await selectField();
     const res = await asOwner.post(`${definitionUrl(definition.id)}/options`, { data: { label: " Gamma " } });
     expect(res.ok(), await res.text()).toBeTruthy();
@@ -610,7 +610,7 @@ test.describe("custom field definitions", () => {
     expect(options[2].id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
-  test("appending an option refuses a duplicate label, a blank one, and a non-select field", async () => {
+  test("appending an option refuses a duplicate label, a blank one, and a non-select field", { tag: '@tesbo.testId("TES-TC-154")' }, async () => {
     const definition = await selectField();
 
     const duplicate = await asOwner.post(`${definitionUrl(definition.id)}/options`, {
@@ -643,7 +643,7 @@ test.describe("custom field definitions", () => {
     expect(missing.status()).toBe(404);
   });
 
-  test("an option can be deactivated and reactivated without losing its id", async () => {
+  test("an option can be deactivated and reactivated without losing its id", { tag: '@tesbo.testId("TES-TC-155")' }, async () => {
     const definition = await selectField();
     const optionId = definition.config.options[0].id;
 
@@ -655,7 +655,7 @@ test.describe("custom field definitions", () => {
     expect((await on.json()).config.options.find((o: any) => o.id === optionId).active).toBe(true);
   });
 
-  test("toggling an option that does not belong to the field is a 404", async () => {
+  test("toggling an option that does not belong to the field is a 404", { tag: '@tesbo.testId("TES-TC-156")' }, async () => {
     const definition = await selectField();
     const res = await asOwner.patch(`${definitionUrl(definition.id)}/options/00000000-0000-4000-8000-000000000000`, {
       data: { active: false },
@@ -667,7 +667,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Ordering ──────────────────────────────────────────────────────────────
 
-  test("reordering rewrites display order and the order the list comes back in", async () => {
+  test("reordering rewrites display order and the order the list comes back in", { tag: '@tesbo.testId("TES-TC-157")' }, async () => {
     const first = await textField();
     const second = await textField();
     const third = await textField();
@@ -681,7 +681,7 @@ test.describe("custom field definitions", () => {
     expect((await listFields()).map((d) => d.id)).toEqual([third.id, first.id, second.id]);
   });
 
-  test("a reorder has to name exactly the project's live fields", async () => {
+  test("a reorder has to name exactly the project's live fields", { tag: '@tesbo.testId("TES-TC-158")' }, async () => {
     const first = await textField();
     const second = await textField();
     const archived = await textField();
@@ -716,7 +716,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Deletion ──────────────────────────────────────────────────────────────
 
-  test("an unused field can be deleted outright", async () => {
+  test("an unused field can be deleted outright", { tag: '@tesbo.testId("TES-TC-159")' }, async () => {
     const definition = await textField();
     const res = await asOwner.delete(definitionUrl(definition.id));
     expect(res.ok(), await res.text()).toBeTruthy();
@@ -725,7 +725,7 @@ test.describe("custom field definitions", () => {
     expect(await listFields()).toHaveLength(0);
   });
 
-  test("a field holding recorded values must be archived instead of deleted", async () => {
+  test("a field holding recorded values must be archived instead of deleted", { tag: '@tesbo.testId("TES-TC-160")' }, async () => {
     const definition = await textField();
     recordValue(definition.id, "in use");
 
@@ -742,7 +742,7 @@ test.describe("custom field definitions", () => {
     ).toBe("1");
   });
 
-  test("deleting a definition that isn't reachable from this project is a 404", async () => {
+  test("deleting a definition that isn't reachable from this project is a 404", { tag: '@tesbo.testId("TES-TC-161")' }, async () => {
     const elsewhere = await createField({ name: fieldName("Other project"), fieldType: "text" }, asOwner);
     // Move it to the tenant's second project: same workspace, different project, so only the
     // project scoping in the query can tell them apart.
@@ -758,7 +758,7 @@ test.describe("custom field definitions", () => {
     expect(definitionExists(elsewhere.id)).toBe(true);
   });
 
-  test("a definition belonging to another project cannot be read or edited through this one", async () => {
+  test("a definition belonging to another project cannot be read or edited through this one", { tag: '@tesbo.testId("TES-TC-162")' }, async () => {
     const elsewhere = await createField({ name: fieldName("Foreign"), fieldType: "text" });
     exec(
       `UPDATE custom_field_definitions SET project_id = ${literal(tenant!.secondProjectId)} ` +
@@ -784,7 +784,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Authorization ─────────────────────────────────────────────────────────
 
-  test("every definition route refuses a caller with no session", async () => {
+  test("every definition route refuses a caller with no session", { tag: '@tesbo.testId("TES-TC-163")' }, async () => {
     const definition = await selectField();
     const optionId = definition.config.options[0].id;
 
@@ -827,7 +827,7 @@ test.describe("custom field definitions", () => {
     expect((await listFields()).map((d) => d.id)).toEqual([definition.id]);
   });
 
-  test("a workspace member with no access to the project cannot see or change its fields", async () => {
+  test("a workspace member with no access to the project cannot see or change its fields", { tag: '@tesbo.testId("TES-TC-164")' }, async () => {
     const definition = await textField();
 
     const list = await asGuest.get(definitionsUrl(), { failOnStatusCode: false });
@@ -844,7 +844,7 @@ test.describe("custom field definitions", () => {
     expect(definitionExists(definition.id)).toBe(true);
   });
 
-  test("a QA engineer may read the project's fields but not configure them", async () => {
+  test("a QA engineer may read the project's fields but not configure them", { tag: '@tesbo.testId("TES-TC-165")' }, async () => {
     const definition = await selectField();
     const optionId = definition.config.options[0].id;
 
@@ -888,7 +888,7 @@ test.describe("custom field definitions", () => {
     expect(storedStatus(definition.id)).toBe("active");
   });
 
-  test("a manager can configure fields", async () => {
+  test("a manager can configure fields", { tag: '@tesbo.testId("TES-TC-166")' }, async () => {
     const definition = await createField({ name: fieldName("Manager"), fieldType: "text" }, asManager);
     const renamed = await asManager.patch(definitionUrl(definition.id), { data: { required: true } });
     expect(renamed.ok(), await renamed.text()).toBeTruthy();
@@ -900,7 +900,7 @@ test.describe("custom field definitions", () => {
 
   // ─── Plan gating ───────────────────────────────────────────────────────────
 
-  test("on the Launch plan the existing fields stay readable but nothing can be configured", async () => {
+  test("on the Launch plan the existing fields stay readable but nothing can be configured", { tag: '@tesbo.testId("TES-TC-167")' }, async () => {
     const definition = await selectField();
     const optionId = definition.config.options[0].id;
 
@@ -959,7 +959,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("a workspace inside its downgrade grace window keeps configuring fields", async () => {
+  test("a workspace inside its downgrade grace window keeps configuring fields", { tag: '@tesbo.testId("TES-TC-168")' }, async () => {
     resetToLaunch(tenant!.organizationId);
     setGraceWindow(tenant!.organizationId, 5);
     try {
@@ -971,7 +971,7 @@ test.describe("custom field definitions", () => {
     }
   });
 
-  test("once the grace window has closed the Pro gate closes with it", async () => {
+  test("once the grace window has closed the Pro gate closes with it", { tag: '@tesbo.testId("TES-TC-169")' }, async () => {
     const definition = await textField();
     setGraceWindow(tenant!.organizationId, -1);
     try {

@@ -31,6 +31,14 @@ import { filesForm, pngFile, sizedFile, textFile, type UploadFile } from "../uti
 
 const LAUNCH_LIMIT_BYTES = 500 * 1024 * 1024;
 
+/*
+ * LegacyService.EVIDENCE_MAX_FILE_SIZE — the per-file ceiling for bug and execution evidence,
+ * separate from (and well under) the 100MB MAX_UPLOAD_SIZE the knowledge base uses. Hardcoded here
+ * the way LAUNCH_LIMIT_BYTES is: if MAX_EVIDENCE_FILE_SIZE is ever set to something else in the
+ * environment under test, these two boundary cases are the ones that should fail and say so.
+ */
+const EVIDENCE_MAX_BYTES = 25 * 1024 * 1024;
+
 test.describe("attachments", () => {
   let tenant: RbacTenant | null = null;
   let asOwner: APIRequestContext;
@@ -152,7 +160,7 @@ test.describe("attachments", () => {
 
   // ─── The round trip ────────────────────────────────────────────────────────
 
-  test("an execution attachment uploads and appears in its list", async () => {
+  test("an execution attachment uploads and appears in its list", { tag: '@tesbo.testId("TES-TC-17")' }, async () => {
     const file = pngFile(`evidence-${Date.now()}.png`);
     const res = await upload(asQa, executionUploadUrl(), [file]);
     expect(res.ok(), `upload failed: ${res.status()} ${await res.text()}`).toBeTruthy();
@@ -168,7 +176,7 @@ test.describe("attachments", () => {
     expect(attachment.entityId).toBe(executionId);
   });
 
-  test("a bug attachment uploads, downloads byte-for-byte, and deletes", async () => {
+  test("a bug attachment uploads, downloads byte-for-byte, and deletes", { tag: '@tesbo.testId("TES-TC-4")' }, async () => {
     const file = textFile(`report-${Date.now()}.txt`, "the exact bytes that must come back");
     const res = await upload(asQa, bugUploadUrl(), [file]);
     expect(res.ok(), `upload failed: ${res.status()} ${await res.text()}`).toBeTruthy();
@@ -200,7 +208,7 @@ test.describe("attachments", () => {
     expect(gone.status()).toBe(404);
   });
 
-  test("several files upload in one request", async () => {
+  test("several files upload in one request", { tag: '@tesbo.testId("TES-TC-1")' }, async () => {
     const suffix = Date.now();
     const files = [pngFile(`a-${suffix}.png`), textFile(`b-${suffix}.txt`), pngFile(`c-${suffix}.png`)];
     const res = await upload(asQa, executionUploadUrl(), files);
@@ -211,7 +219,7 @@ test.describe("attachments", () => {
     expect(listed.list.map((a: any) => a.fileName).sort()).toEqual(files.map((f) => f.name).sort());
   });
 
-  test("the ten-file cap is enforced, and ten exactly is allowed", async () => {
+  test("the ten-file cap is enforced, and ten exactly is allowed", { tag: '@tesbo.testId("TES-TC-16")' }, async () => {
     const suffix = Date.now();
     const ten = Array.from({ length: 10 }, (_, i) => textFile(`ten-${suffix}-${i}.txt`));
     const atCap = await upload(asQa, executionUploadUrl(), ten);
@@ -228,7 +236,7 @@ test.describe("attachments", () => {
     expect(attachmentRows(tenant!)).toHaveLength(0);
   });
 
-  test("a request with no files is refused", async () => {
+  test("a request with no files is refused", { tag: '@tesbo.testId("TES-TC-56")' }, async () => {
     for (const api of [asQa, asOwner]) {
       const res = await api.post(executionUploadUrl(), {
         multipart: filesForm([]),
@@ -240,33 +248,24 @@ test.describe("attachments", () => {
     expect(attachmentRows(tenant!)).toHaveLength(0);
   });
 
-  test("a zero-byte file is stored honestly rather than silently dropped", async () => {
-    // Either outcome is defensible — refuse it, or keep it and report 0 bytes. What must not happen
-    // is a 200 that reports a size the stored object doesn't have.
-    const file = sizedFile(`empty-${Date.now()}.bin`, 0);
-    const res = await upload(asQa, bugUploadUrl(), [file]);
-
-    if (res.ok()) {
-      const rows = attachmentRows(tenant!);
-      expect(rows).toHaveLength(1);
-      expect(rows[0].fileSize).toBe(0);
-      const download = await asOwner.get(
-        `/api/projects/${tenant!.mainProjectId}/bugs/attachments/${rows[0].id}/download`,
-        { failOnStatusCode: false },
-      );
-      // A row that claims to exist has to be fetchable; a 500 here is the real failure.
-      expect(download.status()).toBeLessThan(500);
-    } else {
-      expect(res.status()).toBe(400);
-      expect(attachmentRows(tenant!)).toHaveLength(0);
-    }
+  /*
+   * This used to accept either outcome — refuse it, or store it and report 0 bytes. The product has
+   * chosen: assertValidEvidenceFiles refuses it (Basecamp 10226296533). A zero-byte upload is a
+   * failed drag-and-drop or a file still being written, and storing it costs an attachment row and a
+   * storage key for nothing.
+   */
+  test("a zero-byte file is refused, with nothing stored", { tag: '@tesbo.testId("TES-TC-1109")' }, async () => {
+    const res = await upload(asQa, bugUploadUrl(), [sizedFile(`empty-${Date.now()}.png`, 0, "image/png")]);
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toMatch(/empty/i);
+    expect(attachmentRows(tenant!)).toHaveLength(0);
   });
 
-  test("a megabyte file round-trips with its size recorded exactly", async () => {
-    // The configured ceiling is MAX_UPLOAD_SIZE (100MB by default), which isn't practical to push
-    // through HTTP in a test run — so this covers a realistically large screenshot instead, and the
-    // 100MB boundary is deliberately left uncovered rather than faked.
-    const file = sizedFile(`large-${Date.now()}.bin`, 1024 * 1024);
+  test("a megabyte file round-trips with its size recorded exactly", { tag: '@tesbo.testId("TES-TC-2")' }, async () => {
+    // A realistically large screenshot, well inside EVIDENCE_MAX_FILE_SIZE (the boundary itself is
+    // covered below). The extension has to be one the evidence allowlist accepts — .bin no longer
+    // is — and the bytes are still arbitrary, since nothing decodes bug evidence on upload.
+    const file = sizedFile(`large-${Date.now()}.png`, 1024 * 1024, "image/png");
     const res = await upload(asQa, bugUploadUrl(), [file]);
     expect(res.ok(), `upload failed: ${res.status()} ${await res.text()}`).toBeTruthy();
 
@@ -280,12 +279,15 @@ test.describe("attachments", () => {
 
   // ─── Filenames and content types ───────────────────────────────────────────
 
-  test("a filename that tries to escape the upload directory cannot", async () => {
+  test("a filename that tries to escape the upload directory cannot", { tag: '@tesbo.testId("TES-TC-3")' }, async () => {
     // The stored key is built from the project and execution ids plus a fresh uuid, with only the
     // EXTENSION taken from the client — so a traversal attempt must end up inside the tree. A
     // storage path containing ".." would mean an upload could overwrite anything the process can.
+    // ".png" is appended so the file survives the evidence type check and actually reaches the
+    // storage-key builder — the traversal risk lives in that builder, which takes the extension from
+    // the client, so a name refused up front would leave this test asserting nothing.
     const res = await upload(asQa, bugUploadUrl(), [
-      { name: "../../../../etc/passwd", mimeType: "text/plain", body: Buffer.from("nope") },
+      { name: "../../../../etc/passwd.png", mimeType: "text/plain", body: Buffer.from("nope") },
     ]);
     expect(res.status(), "a traversal filename should not cause a 500").toBeLessThan(500);
 
@@ -296,7 +298,7 @@ test.describe("attachments", () => {
     }
   });
 
-  test("unicode and very long filenames survive the round trip", async () => {
+  test("unicode and very long filenames survive the round trip", { tag: '@tesbo.testId("TES-TC-6")' }, async () => {
     const suffix = Date.now();
     const unicode = `スクリーンショット-${suffix}-café-🧪.png`;
     // 255 is the usual filesystem ceiling; the extension is kept inside the budget.
@@ -319,23 +321,25 @@ test.describe("attachments", () => {
     }
   });
 
-  test("an extensionless file is accepted and still downloadable", async () => {
+  /*
+   * Deliberate reversal (Basecamp 10226296533). This file previously asserted that an extensionless
+   * upload was accepted and downloadable, which was true and is no longer intended: the extension is
+   * the only thing that tells the server, the browser and the person downloading it what the file
+   * is, and evidence with no determinable type is exactly what the card asked to be rejected.
+   */
+  test("an extensionless file is refused, naming what is supported", { tag: '@tesbo.testId("TES-TC-1110")' }, async () => {
     const res = await upload(asQa, bugUploadUrl(), [
       { name: `noextension-${Date.now()}`, mimeType: "application/octet-stream", body: Buffer.from("x") },
     ]);
-    expect(res.status()).toBeLessThan(500);
-    if (!res.ok()) return;
-
-    const [row] = attachmentRows(tenant!);
-    expect(row.storagePath.endsWith("/")).toBeFalsy();
-    const download = await asOwner.get(
-      `/api/projects/${tenant!.mainProjectId}/bugs/attachments/${row.id}/download`,
-      { failOnStatusCode: false },
-    );
-    expect(download.ok()).toBeTruthy();
+    expect(res.status()).toBe(400);
+    const { error } = await res.json();
+    expect(error).toMatch(/extension/i);
+    // The message has to be actionable — a bare "invalid file" leaves the reporter guessing.
+    expect(error).toMatch(/png/);
+    expect(attachmentRows(tenant!)).toHaveLength(0);
   });
 
-  test("an html attachment is served as a download, never rendered", async () => {
+  test("an html attachment is served as a download, never rendered", { tag: '@tesbo.testId("TES-TC-8")' }, async () => {
     // The XSS case: bug evidence is attacker-supplied content served from the app's own origin. If
     // the download responded with text/html and no attachment disposition, opening it would run
     // that script as the app.
@@ -358,7 +362,7 @@ test.describe("attachments", () => {
     expect(download.headers()["content-disposition"]).toContain("attachment");
   });
 
-  test("a content type that contradicts the extension is recorded as sent, not guessed", async () => {
+  test("a content type that contradicts the extension is recorded as sent, not guessed", { tag: '@tesbo.testId("TES-TC-9")' }, async () => {
     const res = await upload(asQa, bugUploadUrl(), [
       { name: `mismatch-${Date.now()}.png`, mimeType: "text/plain", body: Buffer.from("not a png") },
     ]);
@@ -373,9 +377,138 @@ test.describe("attachments", () => {
     expect(download.headers()["content-type"]).toContain("text/plain");
   });
 
+  // ─── Type and size validation ──────────────────────────────────────────────
+
+  /*
+   * Basecamp 10226296533 — "[Bug Attachments] Missing File Type and Size Validations Cause Upload to
+   * Get Stuck on Saving".
+   *
+   * Nothing validated type or size before this: every extension was accepted, and the only ceiling
+   * was the interceptor's 100MB, enforced by multer mid-stream with no field-level reason — so the
+   * reporting modal sat on "Saving…" with nothing to show. Both uploads validate the whole batch up
+   * front now, and both are covered here because uploadExecutionAttachments had the identical hole.
+   */
+  test("an unsupported file type is refused, naming the file and what is supported", { tag: '@tesbo.testId("TES-TC-1111")' }, async () => {
+    const name = `malware-${Date.now()}.exe`;
+    const res = await upload(asQa, bugUploadUrl(), [{ name, mimeType: "application/octet-stream", body: Buffer.from("MZ") }]);
+
+    expect(res.status()).toBe(400);
+    const { error } = await res.json();
+    // The reporter has to be able to tell WHICH of several picked files was the problem.
+    expect(error).toContain(name);
+    expect(error).toMatch(/\.exe/);
+    expect(error).toMatch(/png/);
+    expect(attachmentRows(tenant!)).toHaveLength(0);
+  });
+
+  test("a zip is refused even though it is an ordinary document bundle", { tag: '@tesbo.testId("TES-TC-1112")' }, async () => {
+    // Deliberate, and inherited from the knowledge base's list: an extension check cannot see what
+    // is inside an archive, so accepting .zip would accept everything the allowlist just refused.
+    const res = await upload(asQa, bugUploadUrl(), [
+      { name: `evidence-${Date.now()}.zip`, mimeType: "application/zip", body: Buffer.from("PK\u0003\u0004") },
+    ]);
+    expect(res.status()).toBe(400);
+    expect(attachmentRows(tenant!)).toHaveLength(0);
+  });
+
+  test("a spread of the allowed evidence types is accepted", { tag: '@tesbo.testId("TES-TC-1113")' }, async () => {
+    const suffix = Date.now();
+    const res = await upload(asQa, bugUploadUrl(), [
+      pngFile(`shot-${suffix}.png`),
+      { name: `steps-${suffix}.pdf`, mimeType: "application/pdf", body: Buffer.from("%PDF-1.4") },
+      { name: `rows-${suffix}.csv`, mimeType: "text/csv", body: Buffer.from("a,b\n1,2") },
+      { name: `clip-${suffix}.mp4`, mimeType: "video/mp4", body: Buffer.from("\u0000\u0000\u0000 ftypmp42") },
+    ]);
+    expect(res.ok(), `upload failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+    expect(attachmentRows(tenant!)).toHaveLength(4);
+  });
+
+  test("a file over the evidence limit is refused, with the limit in the message", { tag: '@tesbo.testId("TES-TC-1114")' }, async () => {
+    const name = `huge-${Date.now()}.png`;
+    const res = await upload(asQa, bugUploadUrl(), [sizedFile(name, EVIDENCE_MAX_BYTES + 1024, "image/png")]);
+
+    expect(res.status()).toBe(400);
+    const { error } = await res.json();
+    expect(error).toContain(name);
+    expect(error).toMatch(/25\.0MB/);
+    expect(attachmentRows(tenant!)).toHaveLength(0);
+  });
+
+  test("a file exactly at the evidence limit is accepted", { tag: '@tesbo.testId("TES-TC-1115")' }, async () => {
+    // The boundary in the allowed direction: a cap that also rejects the value it names is a
+    // different cap. The 25MB body is the reason this is one test and not a loop.
+    const file = sizedFile(`at-limit-${Date.now()}.png`, EVIDENCE_MAX_BYTES, "image/png");
+    const res = await upload(asQa, bugUploadUrl(), [file]);
+
+    expect(res.ok(), `upload failed: ${res.status()} ${await res.text()}`).toBeTruthy();
+    const rows = attachmentRows(tenant!);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].fileSize).toBe(EVIDENCE_MAX_BYTES);
+  });
+
+  test("one bad file in a batch refuses the whole batch, storing none of it", { tag: '@tesbo.testId("TES-TC-1116")' }, async () => {
+    // The upload loops storage.put per file, so validating per file as it goes would leave the
+    // accepted ones written and billed while the request answers 400. All-or-nothing is the contract.
+    const suffix = Date.now();
+    const res = await upload(asQa, bugUploadUrl(), [
+      pngFile(`good-a-${suffix}.png`),
+      { name: `bad-${suffix}.exe`, mimeType: "application/octet-stream", body: Buffer.from("MZ") },
+      pngFile(`good-b-${suffix}.png`),
+    ]);
+
+    expect(res.status()).toBe(400);
+    expect(attachmentRows(tenant!), "a rejected batch must not leave partial evidence behind").toHaveLength(0);
+  });
+
+  test("execution evidence is held to the same rules as bug evidence", { tag: '@tesbo.testId("TES-TC-1117")' }, async () => {
+    const suffix = Date.now();
+    const unsupported = await upload(asQa, executionUploadUrl(), [
+      { name: `run-log-${suffix}.exe`, mimeType: "application/octet-stream", body: Buffer.from("MZ") },
+    ]);
+    expect(unsupported.status()).toBe(400);
+
+    const oversize = await upload(asQa, executionUploadUrl(), [
+      sizedFile(`run-shot-${suffix}.png`, EVIDENCE_MAX_BYTES + 1024, "image/png"),
+    ]);
+    expect(oversize.status()).toBe(400);
+    expect(attachmentRows(tenant!)).toHaveLength(0);
+
+    const accepted = await upload(asQa, executionUploadUrl(), [pngFile(`run-shot-ok-${suffix}.png`)]);
+    expect(accepted.ok(), `upload failed: ${accepted.status()} ${await accepted.text()}`).toBeTruthy();
+  });
+
+  test("authorization is still decided before the file is judged", { tag: '@tesbo.testId("TES-TC-1118")' }, async () => {
+    // Order matters: if validation ran first, an anonymous caller would learn which extensions a
+    // workspace accepts, and a member with no project access would get a 400 that reads like their
+    // file was the problem rather than their access.
+    const bad: UploadFile = { name: `nope-${Date.now()}.exe`, mimeType: "application/octet-stream", body: Buffer.from("MZ") };
+
+    /*
+     * Asserted on WHAT the refusal is about, not on its status code.
+     *
+     * This path answers an unauthenticated caller with 400 {"error":"Authentication required"} —
+     * verified by probing it with a perfectly valid .png, which gets the identical response, so the
+     * file genuinely is not being judged first. 401 would be the correct code and this endpoint is
+     * not the place to change it (the suite's other auth cases already encode the 400), so the test
+     * proves the ordering instead of pinning a number: the answer must be about the caller, never
+     * about their file.
+     */
+    const anonRes = await upload(anon, bugUploadUrl(), [bad]);
+    expect([400, 401, 403]).toContain(anonRes.status());
+    const anonBody = await anonRes.text();
+    expect(anonBody).toMatch(/auth|session|sign in/i);
+    expect(anonBody, "an anonymous caller must not learn which file types are accepted").not.toMatch(/\.exe|supported types/i);
+
+    const guestRes = await upload(asGuest, bugUploadUrl(), [bad]);
+    // 403 or 404 — the same pair the access test above accepts, since hiding the resource entirely
+    // is also a defensible answer for a non-member. What matters is that it is not 400.
+    expect([403, 404], "a caller with no project access should be refused on access").toContain(guestRes.status());
+    expect(attachmentRows(tenant!)).toHaveLength(0);
+  });
+
   // ─── Authorization ─────────────────────────────────────────────────────────
 
-  test("uploading needs a session", async () => {
+  test("uploading needs a session", { tag: '@tesbo.testId("TES-TC-10")' }, async () => {
     for (const url of [executionUploadUrl(), bugUploadUrl()]) {
       const res = await upload(anon, url, [pngFile()]);
       expect([400, 401], `${url} should refuse an anonymous upload`).toContain(res.status());
@@ -383,7 +516,7 @@ test.describe("attachments", () => {
     expect(attachmentRows(tenant!)).toHaveLength(0);
   });
 
-  test("a workspace member with no project access cannot upload evidence", async () => {
+  test("a workspace member with no project access cannot upload evidence", { tag: '@tesbo.testId("TES-TC-11")' }, async () => {
     for (const url of [executionUploadUrl(), bugUploadUrl()]) {
       const res = await upload(asGuest, url, [pngFile()]);
       expect([403, 404], `${url} should refuse a non-member of the project`).toContain(res.status());
@@ -391,7 +524,7 @@ test.describe("attachments", () => {
     expect(attachmentRows(tenant!)).toHaveLength(0);
   });
 
-  test("listing execution attachments is refused without access to the run", async () => {
+  test("listing execution attachments is refused without access to the run", { tag: '@tesbo.testId("TES-TC-12")' }, async () => {
     // listExecutionAttachments takes only the execution id — its controller method never receives
     // the caller, and the query joins nothing — so today the list (including internal storage paths)
     // is readable by anyone who can name an execution id.
@@ -408,7 +541,7 @@ test.describe("attachments", () => {
     );
   });
 
-  test("an attachment cannot be downloaded by someone with no access to it", async () => {
+  test("an attachment cannot be downloaded by someone with no access to it", { tag: '@tesbo.testId("TES-TC-13")' }, async () => {
     // downloadBugAttachment resolves the file by id alone — no session, no project join. The upload
     // path is properly scoped, so the file is only reachable by id; that id appearing in a link,
     // a log or a report shouldn't be enough to hand the file to the world.
@@ -425,7 +558,7 @@ test.describe("attachments", () => {
     );
   });
 
-  test("an attachment cannot be deleted by someone with no access to it", async () => {
+  test("an attachment cannot be deleted by someone with no access to it", { tag: '@tesbo.testId("TES-TC-14")' }, async () => {
     // deleteBugAttachment also takes only an id, and it deletes the stored object as well as the
     // row — so an unauthorized caller doesn't just read someone's evidence, they destroy it.
     await upload(asQa, bugUploadUrl(), [textFile(`deletable-${Date.now()}.txt`)]);
@@ -444,7 +577,7 @@ test.describe("attachments", () => {
 
   // ─── Missing and malformed targets ─────────────────────────────────────────
 
-  test("uploading to something that doesn't exist is a clean 404", async () => {
+  test("uploading to something that doesn't exist is a clean 404", { tag: '@tesbo.testId("TES-TC-15")' }, async () => {
     const missing = "00000000-0000-0000-0000-000000000000";
     const cases = [
       `/api/cycles/${cycleId}/executions/${missing}/attachments`,
@@ -457,7 +590,7 @@ test.describe("attachments", () => {
     }
   });
 
-  test("a malformed id fails cleanly, never with a 500", async () => {
+  test("a malformed id fails cleanly, never with a 500", { tag: '@tesbo.testId("TES-TC-26")' }, async () => {
     const cases = [
       `/api/cycles/${cycleId}/executions/not-a-uuid/attachments`,
       `/api/projects/${tenant!.mainProjectId}/bugs/not-a-uuid/attachments`,
@@ -481,9 +614,9 @@ test.describe("attachments", () => {
 
   // ─── Storage accounting and the plan ceiling ───────────────────────────────
 
-  test("uploaded bytes are reported as storage used, and freed again on delete", async () => {
+  test("uploaded bytes are reported as storage used, and freed again on delete", { tag: '@tesbo.testId("TES-TC-18")' }, async () => {
     const before = await reportedStorageBytes();
-    const file = sizedFile(`accounted-${Date.now()}.bin`, 64 * 1024);
+    const file = sizedFile(`accounted-${Date.now()}.png`, 64 * 1024, "image/png");
 
     expect((await upload(asQa, bugUploadUrl(), [file])).ok()).toBeTruthy();
     expect(await reportedStorageBytes()).toBe(before + file.body.length);
@@ -496,13 +629,13 @@ test.describe("attachments", () => {
     ).toBe(before);
   });
 
-  test("an upload that would exceed the Launch ceiling is refused with a route out", async () => {
+  test("an upload that would exceed the Launch ceiling is refused with a route out", { tag: '@tesbo.testId("TES-TC-19")' }, async () => {
     try {
       resetToLaunch(tenant!.organizationId);
       // One byte short of the ceiling, so any real upload has to be refused.
       claimStorage(tenant!, LAUNCH_LIMIT_BYTES - 1);
 
-      const res = await upload(asQa, bugUploadUrl(), [sizedFile(`over-${Date.now()}.bin`, 4096)]);
+      const res = await upload(asQa, bugUploadUrl(), [sizedFile(`over-${Date.now()}.png`, 4096, "image/png")]);
       expect(res.status()).toBe(403);
       const { error } = await res.json();
       expect(error).toContain("storage limit");
@@ -513,12 +646,12 @@ test.describe("attachments", () => {
     }
   });
 
-  test("a Pro workspace at its ceiling is pointed at support, not at an upgrade", async () => {
+  test("a Pro workspace at its ceiling is pointed at support, not at an upgrade", { tag: '@tesbo.testId("TES-TC-20")' }, async () => {
     try {
       setProPlan(tenant!.organizationId);
       claimStorage(tenant!, 5 * 1024 * 1024 * 1024 - 1);
 
-      const res = await upload(asQa, bugUploadUrl(), [sizedFile(`over-pro-${Date.now()}.bin`, 4096)]);
+      const res = await upload(asQa, bugUploadUrl(), [sizedFile(`over-pro-${Date.now()}.png`, 4096, "image/png")]);
       expect(res.status()).toBe(403);
       const { error } = await res.json();
       expect(error).toContain("storage limit");
@@ -529,12 +662,12 @@ test.describe("attachments", () => {
     }
   });
 
-  test("freeing space makes a refused upload possible again", async () => {
+  test("freeing space makes a refused upload possible again", { tag: '@tesbo.testId("TES-TC-21")' }, async () => {
     try {
       resetToLaunch(tenant!.organizationId);
       claimStorage(tenant!, LAUNCH_LIMIT_BYTES - 1);
 
-      const file = sizedFile(`retry-${Date.now()}.bin`, 4096);
+      const file = sizedFile(`retry-${Date.now()}.png`, 4096, "image/png");
       expect((await upload(asQa, bugUploadUrl(), [file])).status()).toBe(403);
 
       // Release the claimed space the way a user would: delete the thing taking it up.
@@ -551,7 +684,7 @@ test.describe("attachments", () => {
 
   // ─── What happens to evidence when its parent goes ─────────────────────────
 
-  test("deleting a bug does not leave its evidence billing the workspace", async () => {
+  test("deleting a bug does not leave its evidence billing the workspace", { tag: '@tesbo.testId("TES-TC-22")' }, async () => {
     // Whichever way the product goes — cascade the rows or keep them — the workspace must not be
     // charged for storage it can no longer see or delete through the UI.
     const suffix = Date.now();
@@ -561,7 +694,7 @@ test.describe("attachments", () => {
       })
     ).json();
 
-    const file = sizedFile(`orphan-${suffix}.bin`, 32 * 1024);
+    const file = sizedFile(`orphan-${suffix}.png`, 32 * 1024, "image/png");
     const uploaded = await upload(asQa, `/api/projects/${tenant!.mainProjectId}/bugs/${throwaway.id}/attachments`, [
       file,
     ]);
@@ -589,7 +722,7 @@ test.describe("attachments", () => {
     }
   });
 
-  test("an outsider with no workspace at all is refused everywhere", async () => {
+  test("an outsider with no workspace at all is refused everywhere", { tag: '@tesbo.testId("TES-TC-23")' }, async () => {
     const email = testAddress("attach-outsider");
     const outsider = seedFixtureUser(email, "E2E Attachment Outsider");
     const asOutsider = await loginAs(outsider);

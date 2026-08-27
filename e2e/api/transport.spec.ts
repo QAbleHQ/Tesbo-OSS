@@ -50,7 +50,7 @@ async function deleteCase(request: APIRequestContext, id: string) {
 }
 
 test.describe("response compression", () => {
-  test("a JSON list over the threshold is gzipped and decodes to the payload it would have sent raw", async ({
+  test("a JSON list over the threshold is gzipped and decodes to the payload it would have sent raw", { tag: '@tesbo.testId("TES-TC-962")' }, async ({
     request,
   }) => {
     // Seeded rather than borrowed from whatever the project already holds: the assertion is about a
@@ -87,7 +87,7 @@ test.describe("response compression", () => {
     }
   });
 
-  test("a client that asks for no encoding still gets a correct, readable body", async ({ request }) => {
+  test("a client that asks for no encoding still gets a correct, readable body", { tag: '@tesbo.testId("TES-TC-963")' }, async ({ request }) => {
     // Some proxies and older clients send `identity`. compression must honour that rather than
     // gzipping anyway — a body that ignores the negotiated encoding is unreadable at the other end.
     const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
@@ -101,13 +101,13 @@ test.describe("response compression", () => {
     expect(() => JSON.parse(raw.toString("utf-8"))).not.toThrow();
   });
 
-  test("a response below the threshold is left alone and still parses", async ({ request }) => {
+  test("a response below the threshold is left alone and still parses", { tag: '@tesbo.testId("TES-TC-964")' }, async ({ request }) => {
     const res = await request.get("/api/health");
     expect(res.ok()).toBeTruthy();
     expect(await res.json()).toMatchObject({ status: "ok" });
   });
 
-  test("error bodies survive compression on every status the UI reads", async ({ request }) => {
+  test("error bodies survive compression on every status the UI reads", { tag: '@tesbo.testId("TES-TC-965")' }, async ({ request }) => {
     // The frontend renders `error` out of these. A body mangled by the encoder turns every failure
     // in the product into a blank message, which is worse than the failure itself.
     const notFound = await request.get(`/api/projects/${ctx.projectId}/testcases/${crypto.randomUUID()}`, {
@@ -129,7 +129,7 @@ test.describe("response compression", () => {
     expect(await badRequest.json()).toHaveProperty("error");
   });
 
-  test("an unauthenticated caller still gets a readable error body rather than an undecodable one", async () => {
+  test("an unauthenticated caller still gets a readable error body rather than an undecodable one", { tag: '@tesbo.testId("TES-TC-966")' }, async () => {
     // anonymousContext(), not playwright.request.newContext(): a bare newContext inherits `use` from
     // playwright.config.ts, storageState included, so it arrives holding account A's session cookie
     // and is not anonymous at all. The helper passes an empty state explicitly.
@@ -151,7 +151,7 @@ test.describe("response compression", () => {
     }
   });
 
-  test("an empty result set round-trips as an empty collection, not as an empty body", async ({ request }) => {
+  test("an empty result set round-trips as an empty collection, not as an empty body", { tag: '@tesbo.testId("TES-TC-967")' }, async ({ request }) => {
     const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, {
       params: { search: `no-such-case-${Date.now()}` },
     });
@@ -161,7 +161,7 @@ test.describe("response compression", () => {
     expect(rows).toEqual([]);
   });
 
-  test("a delete still completes and returns no misencoded body", async ({ request }) => {
+  test("a delete still completes and returns no misencoded body", { tag: '@tesbo.testId("TES-TC-968")' }, async ({ request }) => {
     const testcase = await createCase(request, `E2E transport delete ${Date.now()}`);
     const res = await request.delete(`/api/projects/${ctx.projectId}/testcases/${testcase.id}`);
     expect(res.ok()).toBeTruthy();
@@ -178,7 +178,7 @@ test.describe("response compression", () => {
 });
 
 test.describe("binary downloads survive the encoder", () => {
-  test("the CSV export still parses as CSV", async ({ request }) => {
+  test("the CSV export still parses as CSV", { tag: '@tesbo.testId("TES-TC-969")' }, async ({ request }) => {
     const marker = `E2E transport csv ${Date.now()}`;
     const testcase = await createCase(request, marker);
     try {
@@ -193,7 +193,7 @@ test.describe("binary downloads survive the encoder", () => {
     }
   });
 
-  test("the XLSX export still opens as a workbook", async ({ request }) => {
+  test("the XLSX export still opens as a workbook", { tag: '@tesbo.testId("TES-TC-970")' }, async ({ request }) => {
     // The real regression this guards: xlsx is a zip container, so a byte mangled in transit does not
     // produce a wrong cell — it produces a file Excel refuses to open. Parsing it here is the only
     // assertion that can tell the difference.
@@ -212,7 +212,7 @@ test.describe("binary downloads survive the encoder", () => {
     }
   });
 
-  test("an uploaded attachment downloads back byte-for-byte", async ({ request }) => {
+  test("an uploaded attachment downloads back byte-for-byte", { tag: '@tesbo.testId("TES-TC-971")' }, async ({ request }) => {
     // A PNG is the strictest check available here: it carries a CRC per chunk, so a single altered
     // byte is detectable, and image/* is a content type the filter must decline to compress.
     const file = pngFile(`transport-${Date.now()}.png`);
@@ -242,7 +242,7 @@ test.describe("binary downloads survive the encoder", () => {
     }
   });
 
-  test("the knowledge-base folder export still unzips", async ({ request }) => {
+  test("the knowledge-base folder export still unzips", { tag: '@tesbo.testId("TES-TC-972")' }, async ({ request }) => {
     const folderRes = await request.post(`/api/projects/${ctx.projectId}/knowledge-base/folders`, {
       data: { name: `E2E transport folder ${Date.now()}` },
     });
@@ -276,7 +276,7 @@ test.describe("binary downloads survive the encoder", () => {
 });
 
 test.describe("connection pool under load", () => {
-  test("more concurrent requests than the pool holds all complete", async ({ request }) => {
+  test("more concurrent requests than the pool holds all complete", { tag: '@tesbo.testId("TES-TC-973")' }, async ({ request }) => {
     // 40 against a pool of 20: the excess must queue and drain rather than error on
     // connectionTimeoutMillis. This is the case that would have failed under the old `max: 10` with
     // no connection timeout at all — it would not error, it would simply never settle.
@@ -286,7 +286,7 @@ test.describe("connection pool under load", () => {
     for (const res of responses) expect(res.status()).toBe(200);
   });
 
-  test("a rejected request returns its connection instead of leaking it", async ({ request }) => {
+  test("a rejected request returns its connection instead of leaking it", { tag: '@tesbo.testId("TES-TC-974")' }, async ({ request }) => {
     // The leak this catches: a failing path that takes a client from the pool and never releases it
     // drains the pool one bad request at a time, and the symptom arrives much later as a hang. 25
     // rejections exceed the pool of 20, so a leak of even one connection per failure exhausts it.
@@ -306,7 +306,7 @@ test.describe("connection pool under load", () => {
     expect(after.status()).toBe(200);
   });
 
-  test("concurrent creates in one project all succeed instead of colliding on the generated id", async ({
+  test("concurrent creates in one project all succeed instead of colliding on the generated id", { tag: '@tesbo.testId("TES-TC-975")' }, async ({
     request,
   }) => {
     // Regression for a 500 this file surfaced: nextExternalId reads MAX(n)+1 in a statement separate
@@ -346,7 +346,7 @@ test.describe("connection pool under load", () => {
     }
   });
 
-  test("a transactional write still commits and is readable afterwards", async ({ request }) => {
+  test("a transactional write still commits and is readable afterwards", { tag: '@tesbo.testId("TES-TC-976")' }, async ({ request }) => {
     // createTestCase runs inside db.transaction(); the pool changes touch how that client is acquired
     // and released, so the commit path needs a witness.
     const title = `E2E transport txn ${Date.now()}`;
@@ -380,7 +380,7 @@ test.describe("connection keep-alive", () => {
   /** The longest idle any upstream keep-alive client here holds a pooled socket. */
   const UPSTREAM_IDLE_SECONDS = 60;
 
-  test("the server advertises a keep-alive window longer than its clients hold sockets for", async ({
+  test("the server advertises a keep-alive window longer than its clients hold sockets for", { tag: '@tesbo.testId("TES-TC-1212")' }, async ({
     request,
   }) => {
     const res = await request.get(`/api/projects/${ctx.projectId}/testcases`, { params: { limit: 1 } });
@@ -393,7 +393,7 @@ test.describe("connection keep-alive", () => {
     );
   });
 
-  test("an idle connection is still usable after longer than the old 5s default", async () => {
+  test("an idle connection is still usable after longer than the old 5s default", { tag: '@tesbo.testId("TES-TC-1213")' }, async () => {
     const net = await import("node:net");
     const url = new URL(env.apiBaseUrl);
     const socket = net.createConnection({

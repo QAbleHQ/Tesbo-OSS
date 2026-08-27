@@ -179,7 +179,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Project bootstrap: the knowledge base has to exist before anything else ──
 
-  test("KB-A-00 a workspace's first project, created through onboarding, has a usable knowledge base", async () => {
+  test("KB-A-00 a workspace's first project, created through onboarding, has a usable knowledge base", { tag: '@tesbo.testId("TES-TC-332")' }, async () => {
     // Regression test. createOrgAndProject inserted its project without calling
     // seedKnowledgeBaseDefaults, which createProject does — so the FIRST project of every workspace
     // (the one a new signup lands in) had no knowledge_folders root. The folder tree 404'd there and
@@ -246,7 +246,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Folders: the primary create → read → rename → move → delete flow ──────
 
-  test("KB-A-01 a folder is created under the root, appears in the tree, and reads back with a breadcrumb", async () => {
+  test("KB-A-01 a folder is created under the root, appears in the tree, and reads back with a breadcrumb", { tag: '@tesbo.testId("TES-TC-333")' }, async () => {
     const name = stamp("Folder");
     const folder = await createFolder({ name, description: "created by the e2e suite" });
     expect(folder.name).toBe(name);
@@ -267,7 +267,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(body.breadcrumb.map((b: any) => b.id)).toEqual([rootFolderId, folder.id]);
   });
 
-  test("KB-A-02 a nested folder tree nests in the response, not just in the rows", async () => {
+  test("KB-A-02 a nested folder tree nests in the response, not just in the rows", { tag: '@tesbo.testId("TES-TC-334")' }, async () => {
     const parent = await createFolder({ name: stamp("Parent") });
     const child = await createFolder({ name: stamp("Child"), parentFolderId: parent.id });
     const grandchild = await createFolder({ name: stamp("Grandchild"), parentFolderId: child.id });
@@ -283,7 +283,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(crumbs.map((b: any) => b.id)).toEqual([rootFolderId, parent.id, child.id, grandchild.id]);
   });
 
-  test("KB-A-03 a folder is renamed and its description updated", async () => {
+  test("KB-A-03 a folder is renamed and its description updated", { tag: '@tesbo.testId("TES-TC-335")' }, async () => {
     const folder = await createFolder({ name: stamp("Before"), description: "first" });
     const renamed = stamp("After");
     const res = await asOwner.patch(kbUrl(`/folders/${folder.id}`), {
@@ -297,7 +297,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(scalar(`SELECT name FROM knowledge_folders WHERE id = ${literal(folder.id)};`)).toBe(renamed);
   });
 
-  test("KB-A-04 a folder moves to a new parent, and cannot be moved into its own subtree", async () => {
+  test("KB-A-04 a folder moves to a new parent, and cannot be moved into its own subtree", { tag: '@tesbo.testId("TES-TC-336")' }, async () => {
     const a = await createFolder({ name: stamp("A") });
     const b = await createFolder({ name: stamp("B") });
     const childOfA = await createFolder({ name: stamp("A-child"), parentFolderId: a.id });
@@ -330,7 +330,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     );
   });
 
-  test("KB-A-05 deleting a folder soft-deletes its whole subtree, documents included", async () => {
+  test("KB-A-05 deleting a folder soft-deletes its whole subtree, documents included", { tag: '@tesbo.testId("TES-TC-337")' }, async () => {
     const parent = await createFolder({ name: stamp("Doomed") });
     const child = await createFolder({ name: stamp("Doomed-child"), parentFolderId: parent.id });
     const doc = await createDocument({ title: stamp("Doomed doc"), folderId: child.id });
@@ -352,7 +352,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(docs.list.map((d: any) => d.id)).not.toContain(doc.id);
   });
 
-  test("KB-A-06 the root folder can be neither moved nor deleted", async () => {
+  test("KB-A-06 the root folder can be neither moved nor deleted", { tag: '@tesbo.testId("TES-TC-338")' }, async () => {
     const target = await createFolder({ name: stamp("Elsewhere") });
 
     const moved = await asOwner.patch(kbUrl(`/folders/${rootFolderId}/move`), {
@@ -371,7 +371,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect((await (await asOwner.get(kbUrl("/folders/tree"))).json()).id).toBe(rootFolderId);
   });
 
-  test("KB-A-07 a deleted folder is restored by an owner", async () => {
+  test("KB-A-07 a deleted folder is restored by an owner", { tag: '@tesbo.testId("TES-TC-339")' }, async () => {
     const folder = await createFolder({ name: stamp("Restorable") });
     await asOwner.delete(kbUrl(`/folders/${folder.id}`), { failOnStatusCode: false });
     expect(isDeleted("knowledge_folders", folder.id)).toBe(true);
@@ -385,7 +385,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Folders: validation and boundaries ────────────────────────────────────
 
-  test("KB-A-08 a folder name that is empty, whitespace-only, or missing is refused with a message", async () => {
+  test("KB-A-08 a folder name that is empty, whitespace-only, or missing is refused with a message", { tag: '@tesbo.testId("TES-TC-340")' }, async () => {
     for (const body of [{}, { name: "" }, { name: "   " }, { name: "\t\n" }]) {
       const res = await asOwner.post(kbUrl("/folders"), { data: body, failOnStatusCode: false });
       expect(res.status(), `${JSON.stringify(body)} was accepted`).toBe(400);
@@ -400,7 +400,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     ).toBe("0");
   });
 
-  test("KB-A-09 two folders cannot share a name under the same parent, but can under different ones", async () => {
+  test("KB-A-09 two folders cannot share a name under the same parent, but can under different ones", { tag: '@tesbo.testId("TES-TC-341")' }, async () => {
     const name = stamp("Twin");
     const first = await createFolder({ name });
 
@@ -423,7 +423,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(JSON.stringify(await collide.json())).toContain("already exists");
   });
 
-  test("KB-A-10 move requires a parentFolderId, and refuses one that does not exist", async () => {
+  test("KB-A-10 move requires a parentFolderId, and refuses one that does not exist", { tag: '@tesbo.testId("TES-TC-342")' }, async () => {
     const folder = await createFolder({ name: stamp("Mover") });
 
     const missing = await asOwner.patch(kbUrl(`/folders/${folder.id}/move`), {
@@ -440,7 +440,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(unknown.status()).toBe(404);
   });
 
-  test("KB-A-11 a folder from another project cannot be read, renamed, moved or deleted through this one", async () => {
+  test("KB-A-11 a folder from another project cannot be read, renamed, moved or deleted through this one", { tag: '@tesbo.testId("TES-TC-343")' }, async () => {
     // Created in the SECOND project, then reached for through the first one's URL.
     const res = await asOwner.post(kbUrl("/folders", tenant!.secondProjectId), {
       data: { name: stamp("Other project") },
@@ -466,7 +466,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(scalar(`SELECT is_deleted FROM knowledge_folders WHERE id = ${literal(foreign.id)};`)).toBe("f");
   });
 
-  test("KB-A-12 a malformed folder id is a 404, not a 500", async () => {
+  test("KB-A-12 a malformed folder id is a 404, not a 500", { tag: '@tesbo.testId("TES-TC-344")' }, async () => {
     for (const bad of ["not-a-uuid", "12345", "%20"]) {
       for (const attempt of [
         asOwner.get(kbUrl(`/folders/${bad}`), { failOnStatusCode: false }),
@@ -485,7 +485,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Folder items listing ─────────────────────────────────────────────────
 
-  test("KB-A-13 a folder's items list carries its subfolders, documents and their type tags", async () => {
+  test("KB-A-13 a folder's items list carries its subfolders, documents and their type tags", { tag: '@tesbo.testId("TES-TC-345")' }, async () => {
     const folder = await createFolder({ name: stamp("Listing") });
     const sub = await createFolder({ name: stamp("Listing-sub"), parentFolderId: folder.id });
     const doc = await createDocument({ title: stamp("Listing doc"), folderId: folder.id });
@@ -504,14 +504,14 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(byId.get(doc.id)).not.toHaveProperty("searchVector");
   });
 
-  test("KB-A-14 an empty folder lists as empty rather than erroring", async () => {
+  test("KB-A-14 an empty folder lists as empty rather than erroring", { tag: '@tesbo.testId("TES-TC-346")' }, async () => {
     const folder = await createFolder({ name: stamp("Empty") });
     const body = await (await asOwner.get(kbUrl(`/folders/${folder.id}/items`))).json();
     expect(body.items).toEqual([]);
     expect(body.total).toBe(0);
   });
 
-  test("KB-A-15 the items list filters by search across both folder names and document titles", async () => {
+  test("KB-A-15 the items list filters by search across both folder names and document titles", { tag: '@tesbo.testId("TES-TC-347")' }, async () => {
     const folder = await createFolder({ name: stamp("Filterable") });
     const marker = `zqx${Date.now()}`;
     const matchingSub = await createFolder({ name: `Sub ${marker}`, parentFolderId: folder.id });
@@ -529,7 +529,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Documents ────────────────────────────────────────────────────────────
 
-  test("KB-A-16 a document is created, read back with its folder breadcrumb, and listed", async () => {
+  test("KB-A-16 a document is created, read back with its folder breadcrumb, and listed", { tag: '@tesbo.testId("TES-TC-348")' }, async () => {
     const folder = await createFolder({ name: stamp("Docs") });
     const title = stamp("Document");
     const doc = await createDocument({
@@ -554,7 +554,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(list.list.map((d: any) => d.id)).toContain(doc.id);
   });
 
-  test("KB-A-17 a document requires a title and an existing folder", async () => {
+  test("KB-A-17 a document requires a title and an existing folder", { tag: '@tesbo.testId("TES-TC-349")' }, async () => {
     for (const body of [
       { folderId: rootFolderId },
       { title: "", folderId: rootFolderId },
@@ -579,7 +579,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(unknownFolder.status()).toBe(404);
   });
 
-  test("KB-A-18 the documents list filters by documentType and excludes deleted documents", async () => {
+  test("KB-A-18 the documents list filters by documentType and excludes deleted documents", { tag: '@tesbo.testId("TES-TC-350")' }, async () => {
     const general = await createDocument({ title: stamp("General doc") });
     const memory = await createDocument({ title: stamp("Memory doc"), documentType: "ai_memory" });
     const doomed = await createDocument({ title: stamp("Deleted doc") });
@@ -599,7 +599,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(unknown.total).toBe(0);
   });
 
-  test("KB-A-19 a document is moved between folders", async () => {
+  test("KB-A-19 a document is moved between folders", { tag: '@tesbo.testId("TES-TC-351")' }, async () => {
     const from = await createFolder({ name: stamp("From") });
     const to = await createFolder({ name: stamp("To") });
     const doc = await createDocument({ title: stamp("Travelling"), folderId: from.id });
@@ -624,7 +624,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(JSON.stringify(await missing.json())).toContain("folderId is required");
   });
 
-  test("KB-A-20 a duplicate lands beside the original as an independent draft named (copy)", async () => {
+  test("KB-A-20 a duplicate lands beside the original as an independent draft named (copy)", { tag: '@tesbo.testId("TES-TC-352")' }, async () => {
     const folder = await createFolder({ name: stamp("Dupes") });
     const original = await createDocument({
       title: stamp("Original"),
@@ -651,7 +651,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(reread.contentHtml).toBe("<p>body</p>");
   });
 
-  test("KB-A-21 a deleted document is soft-deleted and restored by an owner", async () => {
+  test("KB-A-21 a deleted document is soft-deleted and restored by an owner", { tag: '@tesbo.testId("TES-TC-353")' }, async () => {
     const doc = await createDocument({ title: stamp("Recoverable") });
 
     const deleted = await asOwner.delete(kbUrl(`/documents/${doc.id}`), { failOnStatusCode: false });
@@ -665,7 +665,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect((await asOwner.get(kbUrl(`/documents/${doc.id}`))).status()).toBe(200);
   });
 
-  test("KB-A-22 a document from another project is not reachable through this project's URL", async () => {
+  test("KB-A-22 a document from another project is not reachable through this project's URL", { tag: '@tesbo.testId("TES-TC-354")' }, async () => {
     const created = await asOwner.post(kbUrl("/documents", tenant!.secondProjectId), {
       data: {
         title: stamp("Foreign doc"),
@@ -693,7 +693,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(scalar(`SELECT is_deleted FROM knowledge_documents WHERE id = ${literal(foreign.id)};`)).toBe("f");
   });
 
-  test("KB-A-23 a malformed document id is a 404, not a 500", async () => {
+  test("KB-A-23 a malformed document id is a 404, not a 500", { tag: '@tesbo.testId("TES-TC-355")' }, async () => {
     for (const bad of ["not-a-uuid", "0"]) {
       for (const attempt of [
         asOwner.get(kbUrl(`/documents/${bad}`), { failOnStatusCode: false }),
@@ -713,7 +713,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Versions ─────────────────────────────────────────────────────────────
 
-  test("KB-A-24 editing a document snapshots the version it replaced, and the snapshot restores", async () => {
+  test("KB-A-24 editing a document snapshots the version it replaced, and the snapshot restores", { tag: '@tesbo.testId("TES-TC-356")' }, async () => {
     const doc = await createDocument({
       title: stamp("Versioned"),
       contentHtml: "<p>v1</p>",
@@ -750,7 +750,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(after.list[0].versionNumber).toBe(2);
   });
 
-  test("KB-A-25 a second edit inside the snapshot window does not take a second snapshot", async () => {
+  test("KB-A-25 a second edit inside the snapshot window does not take a second snapshot", { tag: '@tesbo.testId("TES-TC-357")' }, async () => {
     const doc = await createDocument({ title: stamp("Coalescing"), contentText: "a" });
     await asOwner.patch(kbUrl(`/documents/${doc.id}`), { data: { contentText: "b" }, failOnStatusCode: false });
     await asOwner.patch(kbUrl(`/documents/${doc.id}`), { data: { contentText: "c" }, failOnStatusCode: false });
@@ -761,7 +761,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(versions.total).toBe(1);
   });
 
-  test("KB-A-26 an edit that changes nothing takes no snapshot at all", async () => {
+  test("KB-A-26 an edit that changes nothing takes no snapshot at all", { tag: '@tesbo.testId("TES-TC-358")' }, async () => {
     const doc = await createDocument({ title: stamp("Unchanged"), contentText: "same", contentHtml: "<p>same</p>" });
     const res = await asOwner.patch(kbUrl(`/documents/${doc.id}`), {
       data: { title: doc.title, contentText: "same", contentHtml: "<p>same</p>" },
@@ -772,7 +772,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(versions.total).toBe(0);
   });
 
-  test("KB-A-27 restore-version refuses a version id that belongs to another document", async () => {
+  test("KB-A-27 restore-version refuses a version id that belongs to another document", { tag: '@tesbo.testId("TES-TC-359")' }, async () => {
     const a = await createDocument({ title: stamp("Doc A"), contentText: "a1" });
     const b = await createDocument({ title: stamp("Doc B"), contentText: "b1" });
     await asOwner.patch(kbUrl(`/documents/${a.id}`), { data: { contentText: "a2" }, failOnStatusCode: false });
@@ -796,7 +796,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── AI memory approval ───────────────────────────────────────────────────
 
-  test("KB-A-28 an ai_memory document is approved, and re-editing it drops back to draft for review", async () => {
+  test("KB-A-28 an ai_memory document is approved, and re-editing it drops back to draft for review", { tag: '@tesbo.testId("TES-TC-360")' }, async () => {
     const doc = await createDocument({
       title: stamp("AI memory"),
       documentType: "ai_memory",
@@ -825,7 +825,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(after.reviewedAt).toBeNull();
   });
 
-  test("KB-A-29 an ai_memory document is rejected, and the status endpoints refuse a general document", async () => {
+  test("KB-A-29 an ai_memory document is rejected, and the status endpoints refuse a general document", { tag: '@tesbo.testId("TES-TC-361")' }, async () => {
     const memory = await createDocument({ title: stamp("Rejectable"), documentType: "ai_memory" });
     const rejected = await asOwner.patch(kbUrl(`/documents/${memory.id}/reject-ai-memory`), {
       failOnStatusCode: false,
@@ -843,7 +843,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect((await (await asOwner.get(kbUrl(`/documents/${general.id}`))).json()).status).toBe("draft");
   });
 
-  test("KB-A-30 an ai_memory document's status cannot be set through a plain update", async () => {
+  test("KB-A-30 an ai_memory document's status cannot be set through a plain update", { tag: '@tesbo.testId("TES-TC-362")' }, async () => {
     const memory = await createDocument({ title: stamp("Status guard"), documentType: "ai_memory" });
     const res = await asOwner.patch(kbUrl(`/documents/${memory.id}`), {
       data: { status: "approved" },
@@ -856,7 +856,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(scalar(`SELECT status FROM knowledge_documents WHERE id = ${literal(memory.id)};`)).toBe("draft");
   });
 
-  test("KB-A-31 a general document's status is set through a plain update", async () => {
+  test("KB-A-31 a general document's status is set through a plain update", { tag: '@tesbo.testId("TES-TC-363")' }, async () => {
     const doc = await createDocument({ title: stamp("Publishable") });
     const res = await asOwner.patch(kbUrl(`/documents/${doc.id}`), {
       data: { status: "published" },
@@ -868,7 +868,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Search and summary ───────────────────────────────────────────────────
 
-  test("KB-A-32 search finds folders and documents by name, and scopes to the requested type", async () => {
+  test("KB-A-32 search finds folders and documents by name, and scopes to the requested type", { tag: '@tesbo.testId("TES-TC-364")' }, async () => {
     const marker = `kbs${Date.now()}`;
     const folder = await createFolder({ name: `Folder ${marker}` });
     const doc = await createDocument({
@@ -893,7 +893,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(docsOnly.list[0]).not.toHaveProperty("searchVector");
   });
 
-  test("KB-A-33 search matches document body text, not only the title", async () => {
+  test("KB-A-33 search matches document body text, not only the title", { tag: '@tesbo.testId("TES-TC-365")' }, async () => {
     const marker = `bodyword${Date.now()}`;
     const doc = await createDocument({
       title: stamp("Prose"),
@@ -908,7 +908,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     ).toContain(doc.id);
   });
 
-  test("KB-A-34 an empty search term returns nothing rather than everything", async () => {
+  test("KB-A-34 an empty search term returns nothing rather than everything", { tag: '@tesbo.testId("TES-TC-366")' }, async () => {
     await createDocument({ title: stamp("Present") });
     for (const q of ["", "   "]) {
       const res = await asOwner.get(kbUrl(`/search?q=${encodeURIComponent(q)}`));
@@ -922,7 +922,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(none.total).toBe(0);
   });
 
-  test("KB-A-35 search excludes deleted items and does not cross into another project", async () => {
+  test("KB-A-35 search excludes deleted items and does not cross into another project", { tag: '@tesbo.testId("TES-TC-367")' }, async () => {
     const marker = `del${Date.now()}`;
     const doc = await createDocument({ title: `Doomed ${marker}` });
     await asOwner.delete(kbUrl(`/documents/${doc.id}`), { failOnStatusCode: false });
@@ -941,7 +941,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(here.total).toBe(0);
   });
 
-  test("KB-A-36 the summary counts folders, documents and files, excluding the root and deleted rows", async () => {
+  test("KB-A-36 the summary counts folders, documents and files, excluding the root and deleted rows", { tag: '@tesbo.testId("TES-TC-368")' }, async () => {
     const empty = await (await asOwner.get(kbUrl("/summary"))).json();
     // The root folder is a container, not a listable item, so it is not counted.
     expect(empty).toEqual({ folders: 0, documents: 0, files: 0, total: 0 });
@@ -966,7 +966,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Export ───────────────────────────────────────────────────────────────
 
-  test("KB-A-37 a folder exports as a zip whose entries mirror the folder structure", async () => {
+  test("KB-A-37 a folder exports as a zip whose entries mirror the folder structure", { tag: '@tesbo.testId("TES-TC-369")' }, async () => {
     const folder = await createFolder({ name: stamp("Exported") });
     const sub = await createFolder({ name: "Nested", parentFolderId: folder.id });
     await createDocument({
@@ -993,7 +993,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(html).toContain("<title>Nested doc</title>");
   });
 
-  test("KB-A-38 exporting the root folder is allowed and names the archive for the knowledge base", async () => {
+  test("KB-A-38 exporting the root folder is allowed and names the archive for the knowledge base", { tag: '@tesbo.testId("TES-TC-370")' }, async () => {
     await createDocument({ title: "Root level doc", contentHtml: "<p>x</p>" });
     const res = await asOwner.get(kbUrl(`/folders/${rootFolderId}/export`), { failOnStatusCode: false });
     expect(res.status()).toBe(200);
@@ -1001,7 +1001,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(zipEntryNames(await res.body())).toContain("Root level doc.html");
   });
 
-  test("KB-A-39 exporting an empty folder produces a valid, empty archive rather than an error", async () => {
+  test("KB-A-39 exporting an empty folder produces a valid, empty archive rather than an error", { tag: '@tesbo.testId("TES-TC-371")' }, async () => {
     const folder = await createFolder({ name: stamp("Nothing here") });
     const res = await asOwner.get(kbUrl(`/folders/${folder.id}/export`), { failOnStatusCode: false });
     expect(res.status()).toBe(200);
@@ -1012,7 +1012,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(zipEntryNames(zip)).toEqual([]);
   });
 
-  test("KB-A-40 export refuses an unknown folder and a folder in another project", async () => {
+  test("KB-A-40 export refuses an unknown folder and a folder in another project", { tag: '@tesbo.testId("TES-TC-372")' }, async () => {
     const unknown = await asOwner.get(kbUrl("/folders/11111111-1111-4111-8111-111111111111/export"), {
       failOnStatusCode: false,
     });
@@ -1025,7 +1025,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Authorization: no session ────────────────────────────────────────────
 
-  test("KB-A-41 no knowledge-base v2 route answers a caller with no session", async () => {
+  test("KB-A-41 no knowledge-base v2 route answers a caller with no session", { tag: '@tesbo.testId("TES-TC-373")' }, async () => {
     const folder = await createFolder({ name: stamp("Guarded") });
     const doc = await createDocument({ title: stamp("Guarded doc"), folderId: folder.id });
 
@@ -1117,7 +1117,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Authorization: the wrong tenant, and the wrong project ───────────────
 
-  test("KB-A-42 a workspace member with no project access is refused every knowledge-base route", async () => {
+  test("KB-A-42 a workspace member with no project access is refused every knowledge-base route", { tag: '@tesbo.testId("TES-TC-374")' }, async () => {
     const folder = await createFolder({ name: stamp("Members only") });
     const doc = await createDocument({ title: stamp("Members only doc"), folderId: folder.id });
 
@@ -1156,7 +1156,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── The role matrix inside the project ───────────────────────────────────
 
-  test("KB-A-43 a qa_engineer reads the knowledge base and creates in it", async () => {
+  test("KB-A-43 a qa_engineer reads the knowledge base and creates in it", { tag: '@tesbo.testId("TES-TC-375")' }, async () => {
     const tree = await asQa.get(kbUrl("/folders/tree"), { failOnStatusCode: false });
     expect(tree.status()).toBe(200);
     expect((await asQa.get(kbUrl("/summary"), { failOnStatusCode: false })).status()).toBe(200);
@@ -1168,7 +1168,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(doc.createdBy).toBe(tenant!.qa.userId);
   });
 
-  test("KB-A-44 a qa_engineer may edit and delete what they created, but not what someone else did", async () => {
+  test("KB-A-44 a qa_engineer may edit and delete what they created, but not what someone else did", { tag: '@tesbo.testId("TES-TC-376")' }, async () => {
     const mine = await createFolder({ name: stamp("QA owns") }, asQa);
     const theirs = await createFolder({ name: stamp("Owner owns") });
     const myDoc = await createDocument({ title: stamp("QA doc"), folderId: mine.id }, asQa);
@@ -1211,7 +1211,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect((await asQa.delete(kbUrl(`/documents/${myDoc.id}`), { failOnStatusCode: false })).status()).toBe(200);
   });
 
-  test("KB-A-45 a manager edits and deletes anyone's items", async () => {
+  test("KB-A-45 a manager edits and deletes anyone's items", { tag: '@tesbo.testId("TES-TC-377")' }, async () => {
     const theirs = await createFolder({ name: stamp("Owner's") });
     const theirDoc = await createDocument({ title: stamp("Owner's doc"), folderId: theirs.id });
 
@@ -1227,7 +1227,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(isDeleted("knowledge_folders", theirs.id)).toBe(true);
   });
 
-  test("KB-A-46 restore-from-trash and AI-memory review are owner-or-manager only", async () => {
+  test("KB-A-46 restore-from-trash and AI-memory review are owner-or-manager only", { tag: '@tesbo.testId("TES-TC-378")' }, async () => {
     const folder = await createFolder({ name: stamp("QA's own") }, asQa);
     const doc = await createDocument({ title: stamp("QA's own doc"), folderId: folder.id }, asQa);
     // Deliberately in the root, not in `folder`: the folder is deleted below, and a delete cascades
@@ -1264,7 +1264,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect((await asManager.patch(kbUrl(`/documents/${doc.id}/restore`), { failOnStatusCode: false })).status()).toBe(200);
   });
 
-  test("KB-A-46b restoring a folder does not bring its contents back — each item is restored on its own", async () => {
+  test("KB-A-46b restoring a folder does not bring its contents back — each item is restored on its own", { tag: '@tesbo.testId("TES-TC-930")' }, async () => {
     const folder = await createFolder({ name: stamp("Trashed together") });
     const doc = await createDocument({ title: stamp("Went with it"), folderId: folder.id });
 
@@ -1289,7 +1289,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(afterItemRestore.items.map((i: any) => i.id)).toEqual([doc.id]);
   });
 
-  test("KB-A-47 a project role of manager is what grants the wider access, not the workspace role", async () => {
+  test("KB-A-47 a project role of manager is what grants the wider access, not the workspace role", { tag: '@tesbo.testId("TES-TC-380")' }, async () => {
     // The qa_engineer is promoted inside the PROJECT only; their workspace role stays qa_engineer.
     // kbProjectRole reads project_members, so this must be enough to widen what they may edit.
     const theirs = await createFolder({ name: stamp("Owner's again") });
@@ -1307,7 +1307,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Read-only provider mirrors ───────────────────────────────────────────
 
-  test("KB-A-48 a document synced from a provider refuses body edits and says why", async () => {
+  test("KB-A-48 a document synced from a provider refuses body edits and says why", { tag: '@tesbo.testId("TES-TC-381")' }, async () => {
     const doc = await createDocument({ title: stamp("Jira mirror"), contentText: "mirrored" });
     // Arranged in Postgres: is_read_only is set by the integration sync, which needs a live Jira.
     exec(
@@ -1340,7 +1340,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
 
   // ─── Knowledge Base v1 (the superseded flat notes surface) ────────────────
 
-  test("KB-A-49 the v1 notes surface stores and reads a note", async () => {
+  test("KB-A-49 the v1 notes surface stores and reads a note", { tag: '@tesbo.testId("TES-TC-382")' }, async () => {
     const title = stamp("v1 note");
     const created = await asOwner.post(kbUrl(""), {
       data: { title, content: "v1 body" },
@@ -1371,7 +1371,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     expect(scalar(`SELECT COUNT(*) FROM knowledge_base_items WHERE id = ${literal(note.id)};`)).toBe("0");
   });
 
-  test("KB-A-50 the v1 notes list filters by type and search", async () => {
+  test("KB-A-50 the v1 notes list filters by type and search", { tag: '@tesbo.testId("TES-TC-383")' }, async () => {
     const marker = `v1s${Date.now()}`;
     const match = await asOwner.post(kbUrl(""), {
       data: { title: `Note ${marker}`, content: "body" },
@@ -1394,7 +1394,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     }
   });
 
-  test("KB-A-51 the v1 notes surface does not answer a caller with no session", async () => {
+  test("KB-A-51 the v1 notes surface does not answer a caller with no session", { tag: '@tesbo.testId("TES-TC-384")' }, async () => {
     const created = await asOwner.post(kbUrl(""), {
       data: { title: stamp("v1 guarded"), content: "secret" },
       failOnStatusCode: false,
@@ -1423,7 +1423,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     }
   });
 
-  test("KB-A-52 the v1 notes surface does not answer a member of another project", async () => {
+  test("KB-A-52 the v1 notes surface does not answer a member of another project", { tag: '@tesbo.testId("TES-TC-385")' }, async () => {
     const created = await asOwner.post(kbUrl(""), {
       data: { title: stamp("v1 scoped"), content: "secret" },
       failOnStatusCode: false,
@@ -1449,7 +1449,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     }
   });
 
-  test("KB-A-53 the v1 upload endpoint reports that it is not implemented rather than pretending to work", async () => {
+  test("KB-A-53 the v1 upload endpoint reports that it is not implemented rather than pretending to work", { tag: '@tesbo.testId("TES-TC-386")' }, async () => {
     const res = await asOwner.post(kbUrl("/upload"), { data: {}, failOnStatusCode: false });
     // Whatever it answers, it must not claim success — an upload UI wired to a stub that returns 2xx
     // with no row is worse than one that reports the truth.
@@ -1466,7 +1466,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     ).toBe("0");
   });
 
-  test("KB-A-54 the v1 per-item file route does not leak another project's item", async () => {
+  test("KB-A-54 the v1 per-item file route does not leak another project's item", { tag: '@tesbo.testId("TES-TC-387")' }, async () => {
     const created = await asOwner.post(kbUrl(""), {
       data: { title: stamp("v1 file item"), content: "x" },
       failOnStatusCode: false,
@@ -1494,7 +1494,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
    */
   const ZYRA_MEMORY_TITLE = "Zyra AI Memory";
 
-  test("KB-A-55 the Zyra memory document cannot be deleted or renamed", async () => {
+  test("KB-A-55 the Zyra memory document cannot be deleted or renamed", { tag: '@tesbo.testId("TES-TC-931")' }, async () => {
     // Created with the real title, which is the only thing the guard keys on.
     const memory = await createDocument({ title: ZYRA_MEMORY_TITLE });
     try {
@@ -1523,7 +1523,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     }
   });
 
-  test("KB-A-56 its body is still editable, and ordinary documents are still deletable", async () => {
+  test("KB-A-56 its body is still editable, and ordinary documents are still deletable", { tag: '@tesbo.testId("TES-TC-932")' }, async () => {
     // The protection is deliberately narrow: the document is readable and writable content-wise
     // (rememberZyraMemory prepends to whatever is there), and nothing else changed about the KB.
     const memory = await createDocument({ title: ZYRA_MEMORY_TITLE });
@@ -1543,7 +1543,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     }
   });
 
-  test("KB-A-57 deleting the folder it sits in does not take the memory document with it", async () => {
+  test("KB-A-57 deleting the folder it sits in does not take the memory document with it", { tag: '@tesbo.testId("TES-TC-933")' }, async () => {
     /*
      * The folder cascade soft-deletes every document under the folder in one statement, which was a
      * way around the per-document guard: delete the AI memory folder, lose the memory. It is now
@@ -1583,7 +1583,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
   });
   // ─── Folder name length, and what a folder reports as its size ────────────
 
-  test("KB-A-58 an over-long folder name is refused with a 400, never a 500", async () => {
+  test("KB-A-58 an over-long folder name is refused with a 400, never a 500", { tag: '@tesbo.testId("TES-TC-934")' }, async () => {
     /*
      * Basecamp 10199204536 — "[Knowledge Base → Folders] Internal Server Error occurs when renaming a
      * folder with a long name". `knowledge_folders.name` is VARCHAR(255) and neither create nor rename
@@ -1645,7 +1645,7 @@ test.describe("knowledge base v2 — folders and documents", () => {
     }
   });
 
-  test("KB-A-59 a folder reports the size and document count of everything beneath it", async () => {
+  test("KB-A-59 a folder reports the size and document count of everything beneath it", { tag: '@tesbo.testId("TES-TC-935")' }, async () => {
     /*
      * Basecamp 10199231000 — "Folder size is not displayed in Knowledge Base even when documents are
      * present". The folders branch of listKnowledgeFolderItems was a bare `SELECT kf.*`, so a folder row

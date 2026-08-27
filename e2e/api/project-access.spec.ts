@@ -49,7 +49,7 @@ test.describe("project access", () => {
 
   // ─── The access matrix ─────────────────────────────────────────────────────
 
-  test("the access matrix reports which projects each member can actually reach", async () => {
+  test("the access matrix reports which projects each member can actually reach", { tag: '@tesbo.testId("TES-TC-391")' }, async () => {
     // The screen exists to answer "who has access to what", and it's the only place an owner can
     // see that. Today the endpoint hands back `projectRoles: {}` for every member — a hard-coded
     // empty object, so the matrix renders as "nobody has access to anything" while the manager and
@@ -73,7 +73,7 @@ test.describe("project access", () => {
     expect(guest.projectRoles[tenant!.mainProjectId]).toBeUndefined();
   });
 
-  test("the access matrix is owner-and-manager territory, not a QA engineer's", async () => {
+  test("the access matrix is owner-and-manager territory, not a QA engineer's", { tag: '@tesbo.testId("TES-TC-392")' }, async () => {
     // By consistency: the roster it exposes is the same one /workspace/members administration is
     // gated on, and a QA engineer is refused every other membership view of the workspace.
     const res = await asQa.get("/api/workspace/project-access", { failOnStatusCode: false });
@@ -82,7 +82,7 @@ test.describe("project access", () => {
 
   // ─── Granting ──────────────────────────────────────────────────────────────
 
-  test("granting access makes a previously invisible project reachable", async () => {
+  test("granting access makes a previously invisible project reachable", { tag: '@tesbo.testId("TES-TC-393")' }, async () => {
     try {
       const before = await asGuest.get(`/api/projects/${tenant!.secondProjectId}`, {
         failOnStatusCode: false,
@@ -113,7 +113,7 @@ test.describe("project access", () => {
     }
   });
 
-  test("revoking access takes the project away again", async () => {
+  test("revoking access takes the project away again", { tag: '@tesbo.testId("TES-TC-394")' }, async () => {
     try {
       await asOwner.put("/api/workspace/project-access", {
         data: { projectId: tenant!.secondProjectId, userId: tenant!.guest.userId, role: "qa_engineer" },
@@ -138,7 +138,7 @@ test.describe("project access", () => {
     }
   });
 
-  test("re-granting access changes the role instead of adding a second row", async () => {
+  test("re-granting access changes the role instead of adding a second row", { tag: '@tesbo.testId("TES-TC-395")' }, async () => {
     try {
       await asOwner.put("/api/workspace/project-access", {
         data: { projectId: tenant!.secondProjectId, userId: tenant!.guest.userId, role: "qa_engineer" },
@@ -154,7 +154,7 @@ test.describe("project access", () => {
     }
   });
 
-  test("access cannot be granted to someone outside the workspace", async () => {
+  test("access cannot be granted to someone outside the workspace", { tag: '@tesbo.testId("TES-TC-396")' }, async () => {
     // addProjectMember resolves the target with `SELECT ... FROM users WHERE u.id = $1` — no
     // workspace scoping at all — so any user id in the system can be dropped into this project.
     // Workspace membership has to be a precondition of project access, or an owner can hand a
@@ -174,7 +174,7 @@ test.describe("project access", () => {
     }
   });
 
-  test("a QA engineer cannot grant or revoke project access", async () => {
+  test("a QA engineer cannot grant or revoke project access", { tag: '@tesbo.testId("TES-TC-397")' }, async () => {
     try {
       const grant = await asQa.put("/api/workspace/project-access", {
         data: { projectId: tenant!.mainProjectId, userId: tenant!.guest.userId, role: "qa_engineer" },
@@ -194,7 +194,7 @@ test.describe("project access", () => {
     }
   });
 
-  test("a manager cannot grant more than a QA engineer's access", async () => {
+  test("a manager cannot grant more than a QA engineer's access", { tag: '@tesbo.testId("TES-TC-398")' }, async () => {
     // Explicit: addProjectMember restricts a manager to granting qa_engineer, and refuses the
     // owner role to everyone.
     try {
@@ -211,7 +211,7 @@ test.describe("project access", () => {
     }
   });
 
-  test("the last project owner cannot be removed", async () => {
+  test("the last project owner cannot be removed", { tag: '@tesbo.testId("TES-TC-399")' }, async () => {
     // Explicit: removeProjectMember protects the final owner. Without it a project can be left
     // with nobody who can administer its members.
     const res = await asOwner.delete("/api/workspace/project-access", {
@@ -224,7 +224,7 @@ test.describe("project access", () => {
 
   // ─── Malformed and cross-tenant input ──────────────────────────────────────
 
-  test("a missing or malformed target fails cleanly, never with a 500", async () => {
+  test("a missing or malformed target fails cleanly, never with a 500", { tag: '@tesbo.testId("TES-TC-400")' }, async () => {
     const payloads: Record<string, unknown>[] = [
       {},
       { userId: tenant!.guest.userId },
@@ -245,7 +245,23 @@ test.describe("project access", () => {
     }
   });
 
-  test("a project in another workspace cannot be granted away", async () => {
+  test("an unrecognised role is refused rather than silently becoming QA Engineer", { tag: '@tesbo.testId("TES-TC-1184")' }, async () => {
+    // Mirrors api/rbac.spec.ts's workspace-level version of this test. addProjectMember's
+    // parseRole refuses unknown strings outright, but that guarantee was never exercised through
+    // this endpoint — only assumed from the workspace-member path, which is a different call site.
+    try {
+      const res = await asOwner.put("/api/workspace/project-access", {
+        data: { projectId: tenant!.mainProjectId, userId: tenant!.guest.userId, role: "supervisor" },
+        failOnStatusCode: false,
+      });
+      expect(res.status()).toBe(400);
+      expect(storedProjectRole(tenant!.mainProjectId, tenant!.guest.userId)).toBe("");
+    } finally {
+      resetRbacMembership(tenant!);
+    }
+  });
+
+  test("a project in another workspace cannot be granted away", { tag: '@tesbo.testId("TES-TC-401")' }, async () => {
     const foreign = "00000000-0000-0000-0000-000000000000";
     const res = await asOwner.put("/api/workspace/project-access", {
       data: { projectId: foreign, userId: tenant!.guest.userId, role: "qa_engineer" },

@@ -1,7 +1,14 @@
 import { expect, test, type APIRequestContext } from "@playwright/test";
 import { emailDomain } from "../utils/env";
-import { clearOtpIpRateLimit, clearOtpRateLimit, seedOtpCode } from "../utils/otp";
-import { dbControlAvailable, exec, execAllowingAuditImmutability, literal, scalar } from "../utils/psql";
+import { clearOtpIpRateLimit, seedOtpCode } from "../utils/otp";
+import {
+  dbControlAvailable,
+  exec,
+  execAllowingAuditImmutability,
+  execMany,
+  literal,
+  scalar,
+} from "../utils/psql";
 import { anonymousContext } from "../utils/rbac-tenant";
 
 /*
@@ -66,17 +73,31 @@ test.describe("self-serve signup", () => {
     return email;
   }
 
-  /** Removes the user and any pending signup, so a re-run starts from the same place. */
+  /**
+   * Removes the user and any pending signup, so a re-run starts from the same place.
+   *
+   * Batched into two round trips rather than five, because this runs once per account created by the
+   * file and the connection is what costs on a hosted database — ~3.4s to connect against ~0.3s for
+   * another statement on a connection already open. As five separate calls this spent ~12.5s per
+   * account, and with the ~15 accounts this file creates the afterAll hook needed ~187s against a
+   * 120s budget: SGN-A-17 failed on the teardown, not on its assertion. Two calls bring it to ~5s.
+   *
+   * The users DELETE stays on its own call deliberately. It is the one statement here whose failure
+   * is expected and tolerated — any account that has been audited cannot be hard-deleted, because
+   * audit_logs is append-only and its foreign key is ON DELETE SET NULL. Batching it would let that
+   * tolerated failure abandon the rest of the batch. See execMany's caveat in utils/psql.ts.
+   */
   function purgeAccount(email: string): void {
-    exec(`DELETE FROM pending_signups WHERE email = ${literal(email.toLowerCase())};`);
-    exec(
-      `DELETE FROM organization_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(email.toLowerCase())});`,
-    );
-    exec(
-      `DELETE FROM project_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(email.toLowerCase())});`,
-    );
-    execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(email.toLowerCase())};`);
-    clearOtpRateLimit(email.toLowerCase());
+    const normalized = email.toLowerCase();
+    execMany([
+      `DELETE FROM pending_signups WHERE email = ${literal(normalized)}`,
+      `DELETE FROM organization_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(normalized)})`,
+      `DELETE FROM project_members WHERE user_id IN (SELECT id FROM users WHERE email = ${literal(normalized)})`,
+      // Inlined rather than calling clearOtpRateLimit(), purely so it shares this connection. Kept
+      // identical to utils/otp.ts's statement, including the three key shapes it clears.
+      `DELETE FROM otp_rate_limit WHERE email IN (${literal(`send:${normalized}`)}, ${literal(`verify:${normalized}`)}, ${literal(normalized)})`,
+    ]);
+    execAllowingAuditImmutability(`DELETE FROM users WHERE email = ${literal(normalized)};`);
   }
 
   function pendingCount(email: string): number {
@@ -115,7 +136,7 @@ test.describe("self-serve signup", () => {
 
   // ─── Validation: refused before the rate limit, so these are free ─────────
 
-  test("SGN-A-01 signup/start refuses a missing or malformed email and writes nothing", async () => {
+  test("SGN-A-01 signup/start refuses a missing or malformed email and writes nothing", { tag: '@tesbo.testId("TES-TC-516")' }, async () => {
     for (const email of [undefined, "", "   ", "not-an-email", "missing@tld", "@nodomain.com", "spaces in@x.com"]) {
       const res = await start({ name: "EndToEnd Signup", email, password: "E2E-Signup-Pass-9f3!" });
       expect(res.status(), `email ${JSON.stringify(email)} was accepted: ${await res.text()}`).toBe(400);
@@ -128,7 +149,7 @@ test.describe("self-serve signup", () => {
     ).toBe(0);
   });
 
-  test("SGN-A-02 signup/start requires a name", async () => {
+  test("SGN-A-02 signup/start requires a name", { tag: '@tesbo.testId("TES-TC-517")' }, async () => {
     const email = signupEmail("noname");
     for (const name of [undefined, "", "   ", "\t\n"]) {
       const res = await start({ name, email, password: "E2E-Signup-Pass-9f3!" });
@@ -138,7 +159,7 @@ test.describe("self-serve signup", () => {
     expect(pendingCount(email)).toBe(0);
   });
 
-  test("SGN-A-03 signup/start enforces an 8-character password floor", async () => {
+  test("SGN-A-03 signup/start enforces an 8-character password floor", { tag: '@tesbo.testId("TES-TC-518")' }, async () => {
     const email = signupEmail("weakpass");
     // 7 characters is refused, and the message says what the rule is — a password rule the user has to
     // guess at is a rule they will fight.
@@ -150,7 +171,7 @@ test.describe("self-serve signup", () => {
     expect(pendingCount(email)).toBe(0);
   });
 
-  test("SGN-A-04 signup/start refuses an email that already has an account, and says to sign in", async () => {
+  test("SGN-A-04 signup/start refuses an email that already has an account, and says to sign in", { tag: '@tesbo.testId("TES-TC-519")' }, async () => {
     // The smoke tenant's own address, which global-setup has already registered.
     const existing = scalar("SELECT email FROM users WHERE email LIKE 'e2e-%' ORDER BY created_at LIMIT 1;");
     expect(existing, "no seeded account to test against").toBeTruthy();
@@ -173,7 +194,7 @@ test.describe("self-serve signup", () => {
     expect(userCount(existing)).toBe(1);
   });
 
-  test("SGN-A-05 the email is normalised, so case and padding cannot create a second account", async () => {
+  test("SGN-A-05 the email is normalised, so case and padding cannot create a second account", { tag: '@tesbo.testId("TES-TC-520")' }, async () => {
     const existing = scalar("SELECT email FROM users WHERE email LIKE 'e2e-%' ORDER BY created_at LIMIT 1;");
     for (const variant of [existing.toUpperCase(), `  ${existing}  `]) {
       const res = await start({ name: "EndToEnd Duplicate", email: variant, password: "E2E-Signup-Pass-9f3!" });
@@ -186,7 +207,7 @@ test.describe("self-serve signup", () => {
 
   // ─── Verify: also refused before any rate-limited work ────────────────────
 
-  test("SGN-A-06 signup/verify requires an email and a code", async () => {
+  test("SGN-A-06 signup/verify requires an email and a code", { tag: '@tesbo.testId("TES-TC-521")' }, async () => {
     const email = signupEmail("noverify");
     for (const data of [{}, { email }, { email, code: "" }, { email, code: "   " }, { code: "123456" }]) {
       const res = await verify(data);
@@ -195,7 +216,7 @@ test.describe("self-serve signup", () => {
     expect(userCount(email)).toBe(0);
   });
 
-  test("SGN-A-07 signup/verify refuses a wrong code before it looks for a pending signup", async () => {
+  test("SGN-A-07 signup/verify refuses a wrong code before it looks for a pending signup", { tag: '@tesbo.testId("TES-TC-522")' }, async () => {
     const email = signupEmail("wrongcode");
     seedOtpCode(email, "111111");
 
@@ -206,7 +227,7 @@ test.describe("self-serve signup", () => {
     expect(userCount(email), "a wrong code created an account").toBe(0);
   });
 
-  test("SGN-A-08 a correct code with no pending signup behind it does not create an account", async () => {
+  test("SGN-A-08 a correct code with no pending signup behind it does not create an account", { tag: '@tesbo.testId("TES-TC-523")' }, async () => {
     const email = signupEmail("nopending");
     // The code is valid but nothing was ever started — the ordering matters, because creating a user
     // from a verified code alone would let anyone with a code skip the password step entirely.
@@ -219,7 +240,7 @@ test.describe("self-serve signup", () => {
     expect(userCount(email)).toBe(0);
   });
 
-  test("SGN-A-09 an expired code is refused", async () => {
+  test("SGN-A-09 an expired code is refused", { tag: '@tesbo.testId("TES-TC-524")' }, async () => {
     const email = signupEmail("expired");
     // Negative expiry: the same state a code left sitting for eleven minutes reaches.
     seedOtpCode(email, "333333", -1);
@@ -232,7 +253,7 @@ test.describe("self-serve signup", () => {
 
   // ─── The happy path: the only rate-limited attempts in this file ───────────
 
-  test("SGN-A-10 a signup completes end to end and signs the new user in", async () => {
+  test("SGN-A-10 a signup completes end to end and signs the new user in", { tag: '@tesbo.testId("TES-TC-525")' }, async () => {
     const email = signupEmail("happy");
     const password = "E2E-Signup-Pass-9f3!";
 
@@ -293,7 +314,7 @@ test.describe("self-serve signup", () => {
     expect(login.status(), `the new account cannot sign in — ${await login.text()}`).toBeLessThan(400);
   });
 
-  test("SGN-A-11 starting twice for the same address leaves one usable pending signup", async () => {
+  test("SGN-A-11 starting twice for the same address leaves one usable pending signup", { tag: '@tesbo.testId("TES-TC-526")' }, async () => {
     const email = signupEmail("restart");
     const first = await start({ name: "EndToEnd Restart", email, password: "E2E-Signup-Pass-9f3!" });
     expect(first.status()).toBe(204);
@@ -322,7 +343,7 @@ test.describe("self-serve signup", () => {
   // Every case below is refused BEFORE sendOtp, so like SGN-A-01..03 these cost nothing from the IP
   // rate-limit allowance this file is careful with.
 
-  test("SGN-A-12 a name containing digits or special characters is refused", async () => {
+  test("SGN-A-12 a name containing digits or special characters is refused", { tag: '@tesbo.testId("TES-TC-952")' }, async () => {
     const email = signupEmail("badnamechars");
     // The reporter typed exactly these kinds of values into First/Last name and the form took them.
     const rejected = [
@@ -343,7 +364,7 @@ test.describe("self-serve signup", () => {
     expect(pendingCount(email)).toBe(0);
   });
 
-  test("SGN-A-13 the punctuation real names use is still accepted", async () => {
+  test("SGN-A-13 the punctuation real names use is still accepted", { tag: '@tesbo.testId("TES-TC-953")' }, async () => {
     // The rule has to reject digits without rejecting people, so one accepted name carries every
     // allowed class at once: an accented letter, a space, a hyphen, an apostrophe and a period.
     //
@@ -364,7 +385,7 @@ test.describe("self-serve signup", () => {
     ).toBe(name);
   });
 
-  test("SGN-A-14 a name longer than 100 characters is refused", async () => {
+  test("SGN-A-14 a name longer than 100 characters is refused", { tag: '@tesbo.testId("TES-TC-954")' }, async () => {
     const email = signupEmail("longname");
     const res = await start({ name: "A".repeat(101), email, password: "E2E-Signup-Pass-9f3!" });
     expect(res.status(), `a 101-character name — ${await res.text()}`).toBe(400);
@@ -374,7 +395,7 @@ test.describe("self-serve signup", () => {
     // rate-limited attempt (see SGN-A-13). SGN-A-10 already proves a legal name signs up.
   });
 
-  test("SGN-A-15 a password over 128 characters is refused rather than silently truncated", async () => {
+  test("SGN-A-15 a password over 128 characters is refused rather than silently truncated", { tag: '@tesbo.testId("TES-TC-955")' }, async () => {
     const email = signupEmail("longpass");
     // Silent truncation would be the dangerous outcome: the user would set a 200-character password
     // and later be unable to sign in with it.
@@ -384,7 +405,7 @@ test.describe("self-serve signup", () => {
     expect(pendingCount(email)).toBe(0);
   });
 
-  test("SGN-A-16 a password must mix upper case, lower case and a digit", async () => {
+  test("SGN-A-16 a password must mix upper case, lower case and a digit", { tag: '@tesbo.testId("TES-TC-956")' }, async () => {
     const email = signupEmail("passclasses");
     const cases: Array<[string, string]> = [
       ["alllowercase1", "uppercase"],
@@ -400,7 +421,7 @@ test.describe("self-serve signup", () => {
     expect(pendingCount(email)).toBe(0);
   });
 
-  test("SGN-A-17 an email longer than 255 characters is refused", async () => {
+  test("SGN-A-17 an email longer than 255 characters is refused", { tag: '@tesbo.testId("TES-TC-957")' }, async () => {
     // users.email is VARCHAR(255); without the check the insert would fail as a 500 rather than a 400.
     const local = "a".repeat(250);
     const res = await start({ name: "EndToEnd Signup", email: `${local}@${emailDomain}`, password: "E2E-Signup-Pass-9f3!" });

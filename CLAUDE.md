@@ -36,6 +36,32 @@ authentication bug and is not one.
 
 ---
 
+## MANDATORY: bug-fix work follows the Basecamp flow
+
+Any work that starts from a Basecamp card follows [docs/basecamp-bugfix-flow.md](docs/basecamp-bugfix-flow.md).
+Read it before picking a card. The essentials, because skipping them has cost real time:
+
+- **Claim first.** Cards in To Do default to Nikunj. Assign to **Viral** (`44943233`) *before* reading or
+  investigating, then move to **In progress**, so two people never work the same card.
+- **A card is a claim, not a specification.** Read the BetterBugs report — `getBugDetails`,
+  `getBugLogs`, `getScreenshot` — never the card title alone. Titles drift from the defect: one card
+  blamed a `TEXT` description when the screenshot showed the overflow was in a `VARCHAR(512)` title.
+- **Categorise before coding.** Every card is exactly one of: bug · already fixed · duplicate ·
+  not a bug · unbuilt feature · suggestion. Roughly a third are not the fix they ask for — features
+  misread as bugs (a password change deliberately keeps the current session) and unbuilt UI read as
+  broken (a "Coming soon" button with no `onClick`) are the two that recur.
+- **Reproduce before naming a mechanism**, and say so explicitly when you cannot.
+- **Get approval before fixing.** State the intended change and wait. The right scope is often wider
+  than the card (14 unvalidated columns, not one), narrower (the feature does not exist), a removal, or
+  a behaviour decision that is not yours to make.
+- **Then the e2e mandate below applies**, and the card moves to **Writing Tests** with a comment giving
+  the root cause, what changed, what proves it, and what is still unverified.
+
+Board ids, the six verdicts, and the traps that have actually bitten (stale images, the `:1011` vs
+`:1021` port confusion, `audit_logs` being append-only, hooks below an early return) are all in the doc.
+
+---
+
 ## MANDATORY: every feature or file change ships with end-to-end coverage
 
 A change to product behaviour is **not done** until it is proven by automated end-to-end tests in
@@ -145,8 +171,16 @@ is a failed selection, not a pass.**
 
 #### 3c — Run exactly that selection
 
-**Three conditions gate every run. All three, every time — no exceptions for a quick re-check.**
+**Four conditions gate every run. All four, every time — no exceptions for a quick re-check.**
 
+0. **Deploy first — test what you actually changed.** New code is not in the running containers
+   until the images are rebuilt, so a run against yesterday's images tests yesterday's product.
+   `scripts/e2e-run.sh` now refuses to start when any file under `Tesbo-Backend-Nest/src`,
+   `Tesbo-Backend-Nest/migrations`, `Tesbo-Frontend/app`, `Tesbo-Frontend/components` or
+   `Tesbo-Frontend/lib` is newer than the image built from it, and names the deploy command instead.
+   **If you changed product code, the run command is `scripts/deploy-and-test.sh`, not
+   `scripts/e2e-run.sh`** — it rebuilds, waits for health, applies migrations, and then hands the run
+   to `e2e-run.sh` so the three conditions below still hold.
 1. **Ask first, and wait.** State the selection and the exact command, then stop and wait for the
    user's go-ahead. A run saturates the machine for minutes and writes to shared infrastructure;
    the user decides when that starts, not you. Never launch one as a side effect of another task.
@@ -158,10 +192,22 @@ is a failed selection, not a pass.**
    buried in an agent's tool call is not a visible run.
 
 ```bash
-# from the repo root — announces the selection, refuses a 0-test selection, refuses to start while
-# another run holds e2e/.auth/state.json, then opens the window at --workers=10
+# Changed product code? This is the command. Rebuilds backend/frontend/migrator from the working
+# tree, waits for both to report healthy, then execs e2e-run.sh with the same arguments.
+scripts/deploy-and-test.sh api/testcases.spec.ts ui/testcases.spec.ts
+
+# Only when the images already contain the code under test (e2e-run.sh verifies this and exits 6
+# if not). Announces the selection, refuses a 0-test selection, refuses to start while another run
+# holds e2e/.auth/state.json, then opens the window at --workers=10.
 scripts/e2e-run.sh api/testcases.spec.ts ui/testcases.spec.ts
 ```
+
+> Why condition 0 exists: on 2026-08-24 a 258-test run came back 194/64, and **every one of the 64
+> failures was code missing from images built seven hours earlier** — an export route that did not
+> exist yet, a renamed dashboard tile, a validation rule. A red run against stale images reads
+> exactly like a broken product, and costs an afternoon before anyone checks `docker compose images`.
+> A rebuild also deploys whatever else is in the shared worktree, including another session's
+> in-flight work and its migrations — check `git status` before deploying, and say what is going out.
 
 The machine is an Apple M1 Max — 10 logical cores, 32 GB. API specs are network-bound on Neon and
 leave the CPU idle, so 10 workers costs nothing there. UI specs each carry a Chromium, and the
@@ -187,9 +233,10 @@ global — [e2e/global-setup.ts](e2e/global-setup.ts), [e2e/utils/](e2e/utils/),
 [playwright.config.ts](e2e/playwright.config.ts), auth/session middleware, or a migration that moves
 data other modules read. Say that you're doing it and why, and announce the count the same way.
 
-- If the stack isn't up, [scripts/deploy-and-test.sh](scripts/deploy-and-test.sh) rebuilds the
-  images, waits for health, and **forwards its arguments to Playwright** — so hand it the impacted
-  specs too: `scripts/deploy-and-test.sh api/testcases.spec.ts`.
+- [scripts/deploy-and-test.sh](scripts/deploy-and-test.sh) is also what to use when the stack isn't
+  up at all. It forwards its arguments through to the run, so hand it the impacted specs either way:
+  `scripts/deploy-and-test.sh api/testcases.spec.ts`. With no specs named it deploys and stops,
+  rather than quietly running everything.
 - **If the tests cannot be run at all** (stack down, Docker unavailable, target unreachable):
   **stop and report.** State which phase you reached and what is blocking it, and ask the user to
   bring the stack up. Do not rebuild or restart their stack unprompted, do not substitute unit

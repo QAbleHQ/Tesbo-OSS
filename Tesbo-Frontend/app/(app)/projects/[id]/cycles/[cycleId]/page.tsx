@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import {
@@ -60,12 +60,16 @@ import {
   type TestCaseListItem,
   type SuiteNode,
   type BugItem,
+  type BugSeverity,
+  type BugPriority,
   type IssueSearchResult,
   type TestRunListItem,
 } from "@/lib/api";
-import { Button, StatusChip, Input, Select, Textarea, Drawer } from "@/components/ui";
+import { Button, StatusChip, Input, PageLoader, Select, Textarea, Drawer } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
 import IssuePickerModal from "@/components/IssuePickerModal";
+import ExecutionEvidencePanel from "@/components/ExecutionEvidencePanel";
+import { AutomationResultMeta, AutomationRunProvenance } from "@/components/AutomationResultMeta";
 import TrackingDestinationField, { type TrackingDestination } from "@/components/TrackingDestinationField";
 import SelfLoggedTrackerField, { type SelfLoggedSystem } from "@/components/SelfLoggedTrackerField";
 import BugEvidenceField, { type EvidenceMode } from "@/components/BugEvidenceField";
@@ -77,18 +81,27 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:7000";
 /* ───── Constants ───── */
 const EXEC_STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"] as const;
 const RUN_TABS = ["All", "Passed", "Failed", "Blocked", "Skipped", "Pending"] as const;
+/*
+ * Basecamp 10226268634 ("The Log Bug UI should be consistent across both Test Run → Log Bug and Bug
+ * Page → Log Bug"). This modal collected only a title, a description and evidence, so every bug
+ * filed from a run landed on the severity column's 'Medium' default with no way to say otherwise —
+ * while the same action from the Bugs page asked for severity (and now priority). Same fields, same
+ * order, same wording as projects/[id]/bugs/page.tsx.
+ */
+const BUG_SEVERITIES: BugSeverity[] = ["Critical", "High", "Medium", "Low"];
+const BUG_PRIORITIES: BugPriority[] = ["P0", "P1", "P2", "P3"];
 type RunTab = (typeof RUN_TABS)[number];
 const PAGE_SIZE = 10;
-import { AVATAR_COLORS } from "@/lib/avatarColors";
+import { avatarColor } from "@/lib/avatarColors";
 const PANEL_STORAGE_KEY = "tesbo_run_switcher_panel";
 
 /* ───── Status tone helpers ───── */
 function statusToTone(status: string) {
-  const map: Record<string, "success" | "error" | "warning" | "info" | "neutral"> = {
+  const map: Record<string, "success" | "error" | "blocked" | "skipped" | "info" | "neutral"> = {
     Passed: "success",
     Failed: "error",
-    Skipped: "warning",
-    Blocked: "warning",
+    Skipped: "skipped",
+    Blocked: "blocked",
     Retest: "info",
     Untested: "neutral",
   };
@@ -141,8 +154,8 @@ function normalizeSteps(value: unknown): Array<{ action: string; expected: strin
 const PANEL_STATUS_COLORS: Record<string, { active: string; idle: string }> = {
   Passed: { active: "bg-[var(--success)] text-white border-[var(--success)]", idle: "border-[var(--success)]/30 text-[var(--success-foreground)] hover:bg-[var(--success-soft)]" },
   Failed: { active: "bg-[var(--error)] text-white border-[var(--error)]", idle: "border-[var(--error)]/30 text-[var(--error-foreground)] hover:bg-[var(--error-soft)]" },
-  Skipped: { active: "bg-[var(--warning)] text-white border-[var(--warning)]", idle: "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]" },
-  Blocked: { active: "bg-[var(--warning)] text-white border-[var(--warning)]", idle: "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]" },
+  Skipped: { active: "bg-[var(--status-skipped-dot)] text-white border-[var(--status-skipped-dot)]", idle: "border-[var(--status-skipped-dot)]/30 text-[var(--status-skipped-text)] hover:bg-[var(--status-skipped-fill)]" },
+  Blocked: { active: "bg-[var(--status-blocked-dot)] text-white border-[var(--status-blocked-dot)]", idle: "border-[var(--status-blocked-dot)]/30 text-[var(--status-blocked-text)] hover:bg-[var(--status-blocked-fill)]" },
   Retest: { active: "bg-[var(--info)] text-white border-[var(--info)]", idle: "border-[var(--info)]/30 text-[var(--info-foreground)] hover:bg-[var(--info-soft)]" },
   Untested: { active: "bg-[var(--muted)] text-white border-[var(--muted)]", idle: "border-[var(--border)] text-[var(--muted)] hover:bg-[var(--surface-secondary)]" },
 };
@@ -212,12 +225,6 @@ function ExistingBugPickerModal({
 }
 
 /* ───── Avatar helpers ───── */
-function hashSeed(seed: string): number {
-  let h = 0;
-  for (let i = 0; i < seed.length; i++) h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-  return Math.abs(h);
-}
-
 function getInitials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "U";
@@ -226,23 +233,24 @@ function getInitials(name: string): string {
 }
 
 function RunAvatar({ name, size = 40 }: { name: string; size?: number }) {
-  const color = AVATAR_COLORS[hashSeed(name) % AVATAR_COLORS.length];
   return (
     <div
       className="flex shrink-0 items-center justify-center rounded-lg text-[13px] font-bold tracking-wide text-white"
-      style={{ background: color, width: size, height: size }}
+      style={{ background: avatarColor(name), width: size, height: size }}
     >
       {getInitials(name)}
     </div>
   );
 }
 
-function MemberAvatar({ name, size = 22 }: { name: string; size?: number }) {
-  const color = AVATAR_COLORS[hashSeed(name) % AVATAR_COLORS.length];
+// Seeded on the member's id, not their name — matches every other person avatar (top bar, team
+// avatars, activity, admins) so the same person keeps the same colour everywhere. Part of
+// Basecamp 10198836413.
+function MemberAvatar({ name, seed, size = 22 }: { name: string; seed?: string | null; size?: number }) {
   return (
     <span
       className="inline-flex shrink-0 items-center justify-center rounded-full border-2 border-[var(--surface)] font-semibold text-white"
-      style={{ background: color, width: size, height: size, fontSize: size * 0.42 }}
+      style={{ background: avatarColor(seed || name), width: size, height: size, fontSize: size * 0.42 }}
       title={name}
     >
       {getInitials(name)}
@@ -276,17 +284,32 @@ function priorityColor(priority: string): string {
   return "var(--muted-soft)";
 }
 
+/* The neutral ("Untested") palette — also the fallback in execSelectStyle for any status the
+ * map below doesn't name. Pulled out so the dropdown's option list (EXEC_OPTION_STYLE) can pin
+ * every option to this one theme instead of inheriting whichever status color the closed
+ * <select> currently has: a native <option> with no style of its own inherits its parent
+ * <select>'s color/background, so without this the whole popup re-themed to match the row's
+ * current status (e.g. all-red when Failed was selected) instead of staying consistent. */
+const EXEC_STATUS_NEUTRAL = { border: "var(--border)", bg: "var(--surface-secondary)", color: "var(--muted)" };
+
 function execSelectStyle(status: string): React.CSSProperties {
   const map: Record<string, { border: string; bg: string; color: string }> = {
     Passed: { border: "var(--success-border)", bg: "var(--success-soft)", color: "var(--success-foreground)" },
     Failed: { border: "var(--error-border)", bg: "var(--error-soft)", color: "var(--error-foreground)" },
-    Skipped: { border: "var(--warning-border)", bg: "var(--warning-soft)", color: "var(--warning-foreground)" },
-    Blocked: { border: "var(--warning-border)", bg: "var(--warning-soft)", color: "var(--warning-foreground)" },
+    Skipped: { border: "var(--status-skipped-dot)", bg: "var(--status-skipped-fill)", color: "var(--status-skipped-text)" },
+    Blocked: { border: "var(--status-blocked-dot)", bg: "var(--status-blocked-fill)", color: "var(--status-blocked-text)" },
     Retest: { border: "var(--info-border)", bg: "var(--info-soft)", color: "var(--info-foreground)" },
   };
-  const s = map[status] || { border: "var(--border)", bg: "var(--surface-secondary)", color: "var(--muted)" };
+  const s = map[status] || EXEC_STATUS_NEUTRAL;
   return { borderColor: s.border, background: s.bg, color: s.color };
 }
+
+/* Fixed style for every <option> in the execution status dropdown, so the open popup always
+ * reads the same regardless of which status is currently selected. */
+const EXEC_OPTION_STYLE: React.CSSProperties = {
+  backgroundColor: EXEC_STATUS_NEUTRAL.bg,
+  color: EXEC_STATUS_NEUTRAL.color,
+};
 
 function tabBadgeStyle(tab: RunTab): { bg: string; color: string } {
   const map: Partial<Record<RunTab, { bg: string; color: string }>> = {
@@ -300,13 +323,53 @@ function tabBadgeStyle(tab: RunTab): { bg: string; color: string } {
 }
 
 /* ───── Segmented progress bar ───── */
-function RunProgressBar({ passed, failed, other, total }: { passed: number; failed: number; other: number; total: number }) {
+/*
+ * Basecamp 10221778177 ("Progress not showing correct colours or progress").
+ *
+ * Blocked, skipped and pending used to be summed into one `other` segment painted --warning, which
+ * is the BLOCKED colour. On a run of 109 cases with 100 still pending, the bar was ~92% amber and
+ * read as "everything is blocked" — and because the segments filled the whole track regardless, the
+ * fill length said nothing about progress either.
+ *
+ * Each status is now its own segment in the colour the rest of the app uses for it, including
+ * --status-notrun-dot for untested. This is the same fix 7f9b59a applied to the plan detail screen
+ * for Basecamp 10213200614; the run screen had the identical defect and was missed.
+ *
+ * Consequence, accepted deliberately and shared with that screen: the bar always totals 100%, so
+ * the percentage beside it — not the fill length — is the progress reading.
+ *
+ * dev's 48363ea fixed the same defect independently; the token set kept here is the one the StatPill
+ * row and the per-execution badges already use, so a Blocked segment reads as the same colour as
+ * "Blocked" everywhere else on the screen.
+ */
+function RunProgressBar({
+  passed,
+  failed,
+  blocked,
+  skipped,
+  pending,
+  total,
+}: {
+  passed: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  pending: number;
+  total: number;
+}) {
   const pct = (n: number) => (total ? `${(n / total) * 100}%` : "0%");
+  const segments: [number, string][] = [
+    [passed, "var(--status-pass-dot)"],
+    [failed, "var(--status-fail-dot)"],
+    [blocked, "var(--status-blocked-dot)"],
+    [skipped, "var(--status-skipped-dot)"],
+    [pending, "var(--status-notrun-dot)"],
+  ];
   return (
     <div className="flex h-2 gap-0.5 overflow-hidden rounded-full bg-[var(--surface-secondary)]">
-      {passed > 0 && <div style={{ width: pct(passed), background: "var(--success)" }} />}
-      {failed > 0 && <div style={{ width: pct(failed), background: "var(--error)" }} />}
-      {other > 0 && <div style={{ width: pct(other), background: "var(--warning)" }} />}
+      {segments.map(([value, color], index) =>
+        value > 0 ? <div key={index} style={{ width: pct(value), background: color }} /> : null
+      )}
     </div>
   );
 }
@@ -321,23 +384,27 @@ function StatPill({
   icon: React.ReactNode;
   label: string;
   value: number;
-  tone?: "success" | "error" | "warning";
+  tone?: "success" | "error" | "blocked" | "skipped";
 }) {
   const toneClasses =
     tone === "success"
       ? "border-[var(--success-border)] bg-[var(--success-soft)]"
       : tone === "error"
       ? "border-[var(--error-border)] bg-[var(--error-soft)]"
-      : tone === "warning"
-      ? "border-[var(--warning-border)] bg-[var(--warning-soft)]"
+      : tone === "blocked"
+      ? "border-[var(--status-blocked-dot)]/30 bg-[var(--status-blocked-fill)]"
+      : tone === "skipped"
+      ? "border-[var(--status-skipped-dot)]/30 bg-[var(--status-skipped-fill)]"
       : "border-[var(--border)] bg-[var(--surface-secondary)]";
   const textColor =
     tone === "success"
       ? "var(--success-foreground)"
       : tone === "error"
       ? "var(--error-foreground)"
-      : tone === "warning"
-      ? "var(--warning-foreground)"
+      : tone === "blocked"
+      ? "var(--status-blocked-text)"
+      : tone === "skipped"
+      ? "var(--status-skipped-text)"
       : "var(--muted)";
   return (
     <div className={`flex h-7 items-center gap-1.5 rounded-full border px-3 text-[12px] font-medium ${toneClasses}`} style={{ color: textColor }}>
@@ -393,6 +460,11 @@ export default function TestRunDetailPage() {
   const [filterSuiteId, setFilterSuiteId] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+  /* synchronous double-submit guard: `adding` state only takes effect after a render, so two
+     click events dispatched in the same tick (fast double-click, or a stuck key) would both
+     read adding === false and both fire the request. */
+  const addInFlightRef = useRef(false);
 
   /* inline status editing */
   const [statusSaving, setStatusSaving] = useState<string | null>(null);
@@ -421,6 +493,8 @@ export default function TestRunDetailPage() {
   const [showBugDialog, setShowBugDialog] = useState(false);
   const [bugExecution, setBugExecution] = useState<ExecutionItem | null>(null);
   const [bugTitle, setBugTitle] = useState("");
+  const [bugSeverity, setBugSeverity] = useState<BugSeverity>("Medium");
+  const [bugPriority, setBugPriority] = useState<BugPriority | "">("");
   const [bugDesc, setBugDesc] = useState("");
   const [bugAlreadyLogged, setBugAlreadyLogged] = useState(false);
   const [bugExistingChoice, setBugExistingChoice] = useState<"JIRA" | "LINEAR" | "TESBO">("TESBO");
@@ -513,6 +587,8 @@ export default function TestRunDetailPage() {
     setShowPicker(true);
     setCasesLoading(true);
     setSelectedCases(new Set());
+    setAddError(null);
+    addInFlightRef.current = false;
     try {
       const [casesResult, suitesResult] = await Promise.all([
         listTestCases(projectId, { limit: 1000 }),
@@ -552,8 +628,22 @@ export default function TestRunDetailPage() {
     [filteredCases]
   );
 
+  /*
+   * Selections are cumulative across filter changes (a case picked under one Module filter stays
+   * picked after switching to another), which the per-row checkbox already reflects correctly via
+   * `selectedCases.has(tc.id)`. But the header "select all" checkbox and the summary line need a
+   * count scoped to what the *current* filter shows — comparing the raw `selectedCases.size`
+   * (cumulative, can include hidden rows) against `selectableCases.length` (filtered) produced
+   * nonsense like "37 of 3 selectable selected" once a Module filter hid most of a prior selection.
+   */
+  const selectedInView = useMemo(
+    () => selectableCases.filter((tc) => selectedCases.has(tc.id)).length,
+    [selectableCases, selectedCases]
+  );
+
   /* toggle selection (only Approved) */
   function toggleCase(id: string) {
+    if (adding) return;
     const tc = filteredCases.find((c) => c.id === id);
     if (tc && tc.status !== "Approved") return;
     setSelectedCases((prev) => {
@@ -565,21 +655,47 @@ export default function TestRunDetailPage() {
   }
 
   function toggleAll() {
-    if (selectedCases.size === selectableCases.length && selectableCases.length > 0) {
-      setSelectedCases(new Set());
-    } else {
-      setSelectedCases(new Set(selectableCases.map((c) => c.id)));
-    }
+    if (adding || selectableCases.length === 0) return;
+    setSelectedCases((prev) => {
+      // Recompute from `prev`, not the outer `selectedInView`, so two toggle-all clicks fired
+      // before React re-renders still see each other's effect instead of racing on stale state.
+      const allVisibleSelected = selectableCases.every((tc) => prev.has(tc.id));
+      const next = new Set(prev);
+      for (const tc of selectableCases) {
+        if (allVisibleSelected) next.delete(tc.id);
+        else next.add(tc.id);
+      }
+      return next;
+    });
   }
 
   async function handleAddCases() {
+    if (addInFlightRef.current) return;
     if (selectedCases.size === 0) return;
+    addInFlightRef.current = true;
     setAdding(true);
+    setAddError(null);
     try {
-      await addTestCasesToRun(cycleId, Array.from(selectedCases));
-      setShowPicker(false);
+      const idsToAdd = Array.from(selectedCases);
+      const result = await addTestCasesToRun(cycleId, idsToAdd);
+      if (!result || result.added >= result.requested) {
+        setShowPicker(false);
+        load();
+        return;
+      }
+      // Some selected cases were skipped server-side (e.g. another session added one of them to
+      // this run first, or a case was un-approved between selection and submit). Not a failure,
+      // but the modal must not report success while some selections silently didn't land — keep
+      // it open with the discrepancy explained, and refresh so the ones that did land drop out of
+      // the "not yet added" list instead of staying selectable for a re-submit.
+      setAddError(
+        `${result.added} of ${result.requested} case${result.requested !== 1 ? "s" : ""} added — ${result.skipped} already existed in this run or are no longer eligible.`
+      );
       load();
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : "Failed to add test cases to this run. Please try again.");
     } finally {
+      addInFlightRef.current = false;
       setAdding(false);
     }
   }
@@ -589,6 +705,8 @@ export default function TestRunDetailPage() {
     setBugExecution(exec);
     setBugTitle(`${titlePrefix}: ${exec.title || exec.snapshotTitle || "Untitled test case"}`);
     setBugDesc("");
+    setBugSeverity("Medium");
+    setBugPriority("");
     setBugAlreadyLogged(false);
     setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
     setBugDestination("TESBO");
@@ -670,6 +788,8 @@ export default function TestRunDetailPage() {
     setShowBugDialog(false);
     setBugExecution(null);
     setBugTitle("");
+    setBugSeverity("Medium");
+    setBugPriority("");
     setBugDesc("");
     setBugAlreadyLogged(false);
     setBugExistingChoice(jiraConnected ? "JIRA" : linearConnected ? "LINEAR" : "TESBO");
@@ -685,13 +805,15 @@ export default function TestRunDetailPage() {
 
   /* ───── Submit bug from dialog (new bug, optionally noting where it's tracked elsewhere) ───── */
   async function handleBugSubmit() {
-    if (!bugExecution || !bugTitle.trim()) return;
+    if (!bugExecution || !bugTitle.trim() || !bugSeverity) return;
     const selfLogged = (jiraConnected || linearConnected) && bugDestination === "SELF";
     setBugSaving(true);
     try {
       const bug = await createBug(projectId, {
         title: bugTitle.trim(),
         description: bugDesc.trim(),
+        severity: bugSeverity,
+        priority: bugPriority || null,
         externalUrl: selfLogged ? bugUrl.trim() : undefined,
         integrationProvider: selfLogged && bugSelfSystem !== "OTHER" ? bugSelfSystem : null,
         integrationIssueKey: null,
@@ -774,12 +896,19 @@ export default function TestRunDetailPage() {
     });
   }
 
-  // Covers every case the current filter matches, not just the visible page — the run keeps all
-  // executions in memory, so there is nothing to fetch.
+  // Only the rows on the current page — selecting "all" must not reach into other pages, and
+  // toggling it off must not drop selections made on a page the user has since left.
   function toggleSelectAllRunCases() {
-    setSelectedRunCaseIds((prev) =>
-      prev.size === filteredExecutions.length ? new Set() : new Set(filteredExecutions.map((e) => e.testcaseId))
-    );
+    setSelectedRunCaseIds((prev) => {
+      const pageIds = pagedExecutions.map((e) => e.testcaseId);
+      const allPageSelected = pageIds.length > 0 && pageIds.every((id) => prev.has(id));
+      const next = new Set(prev);
+      for (const id of pageIds) {
+        if (allPageSelected) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
   }
 
   /* ───── Change run status ───── */
@@ -846,7 +975,9 @@ export default function TestRunDetailPage() {
     return { total, passed, failed, skipped, blocked, pending };
   }, [executions]);
 
-  const passRate = stats.total ? Math.round((stats.passed / stats.total) * 100) : 0;
+  // null (rendered as "—") for a run with zero cases, so an empty run is never shown as a
+  // misleading "0% pass rate" — mirrors the Test Runs list summary tile's zero-case handling.
+  const passRate = stats.total ? Math.round((stats.passed / stats.total) * 100) : null;
 
   /* ───── Test cases table: tab counts, filter, search, pagination ───── */
   const tabCounts = useMemo(() => {
@@ -882,11 +1013,7 @@ export default function TestRunDetailPage() {
 
 
   if (loading || !run) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   const isInProgress = run.status === "In Progress";
@@ -981,9 +1108,18 @@ export default function TestRunDetailPage() {
             <RunAvatar name={run.name} size={28} />
             <h1 className="text-[20px] font-semibold leading-tight tracking-[-0.02em] text-[var(--foreground)]">{run.name}</h1>
             <StatusChip tone={runStatusToTone(run.status)}>{run.status}</StatusChip>
-            {ownerName && <MemberAvatar name={ownerName} size={24} />}
+            {ownerName && <MemberAvatar name={ownerName} seed={run.ownerId} size={24} />}
           </div>
           {run.description && <p className="mt-1 text-[13px] text-[var(--muted-soft)]">{run.description}</p>}
+          {/*
+            * "Automated · github-actions · main · a1b2c3d · Build ↗" — renders nothing on a manual
+            * run, so the header is unchanged for every run a person created (Basecamp 10189985971 §4).
+            */}
+          {run.source === "automation" && (
+            <div className="mt-2">
+              <AutomationRunProvenance run={run} />
+            </div>
+          )}
           <div className="mt-2.5 flex flex-wrap items-center gap-4">
             {planName && (
               <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
@@ -1102,18 +1238,25 @@ export default function TestRunDetailPage() {
                 <StatPill icon={<IconClipboardCheck size={13} />} label="Total" value={stats.total} />
                 <StatPill icon={<IconCircleCheck size={13} />} label="Passed" value={stats.passed} tone="success" />
                 <StatPill icon={<IconCircleX size={13} />} label="Failed" value={stats.failed} tone="error" />
-                <StatPill icon={<IconCircleMinus size={13} />} label="Blocked" value={stats.blocked} tone="warning" />
-                <StatPill icon={<IconCircleDashed size={13} />} label="Skipped" value={stats.skipped} />
+                <StatPill icon={<IconCircleMinus size={13} />} label="Blocked" value={stats.blocked} tone="blocked" />
+                <StatPill icon={<IconCircleDashed size={13} />} label="Skipped" value={stats.skipped} tone="skipped" />
                 <StatPill icon={<IconClock size={13} />} label="Pending" value={stats.pending} />
 
                 <div className="min-w-[160px] flex-1">
                   <div className="mb-1.5 flex items-center justify-between">
                     <span className="text-[12px] text-[var(--muted-soft)]">Progress</span>
                     <span className="text-[12px] font-semibold" style={{ color: "var(--success-foreground)" }}>
-                      {passRate}% pass rate
+                      {passRate !== null ? `${passRate}% pass rate` : "No cases executed yet"}
                     </span>
                   </div>
-                  <RunProgressBar passed={stats.passed} failed={stats.failed} other={stats.blocked + stats.skipped + stats.pending} total={stats.total} />
+                  <RunProgressBar
+                    passed={stats.passed}
+                    failed={stats.failed}
+                    blocked={stats.blocked}
+                    skipped={stats.skipped}
+                    pending={stats.pending}
+                    total={stats.total}
+                  />
                 </div>
               </div>
             </section>
@@ -1207,10 +1350,11 @@ export default function TestRunDetailPage() {
                       <th className="w-9 px-3 py-2.5">
                         <input
                           type="checkbox"
-                          aria-label="Select all matching test cases in this run"
+                          aria-label="Select all test cases on this page"
                           data-testid="run-select-all"
                           checked={
-                            filteredExecutions.length > 0 && selectedRunCaseIds.size === filteredExecutions.length
+                            pagedExecutions.length > 0 &&
+                            pagedExecutions.every((e) => selectedRunCaseIds.has(e.testcaseId))
                           }
                           onChange={toggleSelectAllRunCases}
                           className="h-3.5 w-3.5 cursor-pointer accent-[var(--brand-primary)]"
@@ -1263,7 +1407,7 @@ export default function TestRunDetailPage() {
                         <td className="px-5 py-3">
                           {assigneeName ? (
                             <span className="flex items-center gap-1.5">
-                              <MemberAvatar name={assigneeName} size={20} />
+                              <MemberAvatar name={assigneeName} seed={e.assigneeId} size={20} />
                               <span className="text-[12.5px] text-[var(--muted)]">{assigneeName}</span>
                             </span>
                           ) : (
@@ -1308,7 +1452,7 @@ export default function TestRunDetailPage() {
                                 style={execSelectStyle(e.status)}
                               >
                                 {EXEC_STATUSES.map((s) => (
-                                  <option key={s} value={s}>
+                                  <option key={s} value={s} style={EXEC_OPTION_STYLE}>
                                     {s}
                                   </option>
                                 ))}
@@ -1390,7 +1534,14 @@ export default function TestRunDetailPage() {
 
       <Modal
         open={showPicker}
-        onClose={() => setShowPicker(false)}
+        onClose={() => {
+          // Escape/backdrop bypasses the Cancel button's `disabled={adding}` guard — block it too,
+          // otherwise closing (and later reopening) mid-submit lets the in-flight request's result
+          // land on a picker session the user never asked it to affect (stale success/error banner,
+          // or an unexpected re-close of the freshly reopened modal).
+          if (adding) return;
+          setShowPicker(false);
+        }}
         title="Add Test Cases to Run"
         className="!max-w-4xl"
       >
@@ -1459,6 +1610,20 @@ export default function TestRunDetailPage() {
           </p>
         </div>
 
+        {addError && (
+          <div className="flex items-center justify-between gap-2 mb-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
+            <p className="text-xs text-amber-800">{addError}</p>
+            <button
+              type="button"
+              onClick={() => setAddError(null)}
+              className="text-amber-500 hover:text-amber-700 shrink-0"
+              aria-label="Dismiss"
+            >
+              <IconX size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Case list */}
         {casesLoading ? (
           <div className="text-center py-8 text-[var(--muted-soft)] text-sm">Loading test cases…</div>
@@ -1477,10 +1642,10 @@ export default function TestRunDetailPage() {
                     <th className="px-3 py-2 w-8">
                       <input
                         type="checkbox"
-                        checked={selectedCases.size === selectableCases.length && selectableCases.length > 0}
+                        checked={selectedInView === selectableCases.length && selectableCases.length > 0}
                         onChange={toggleAll}
                         className="rounded"
-                        disabled={selectableCases.length === 0}
+                        disabled={selectableCases.length === 0 || adding}
                       />
                     </th>
                     <th className="px-3 py-2 font-medium">ID</th>
@@ -1513,7 +1678,7 @@ export default function TestRunDetailPage() {
                             onChange={() => toggleCase(tc.id)}
                             className={`rounded ${!isApproved ? "cursor-not-allowed" : ""}`}
                             onClick={(e) => e.stopPropagation()}
-                            disabled={!isApproved}
+                            disabled={!isApproved || adding}
                             title={!isApproved ? `Only Approved test cases can be added. This case is "${tc.status}".` : undefined}
                           />
                         </td>
@@ -1542,15 +1707,20 @@ export default function TestRunDetailPage() {
             </div>
             <div className="flex items-center justify-between mt-4">
               <p className="text-sm text-[var(--muted)]">
-                {selectedCases.size} of {selectableCases.length} selectable selected
+                {selectedInView} of {selectableCases.length} selectable selected
                 {selectableCases.length < filteredCases.length && (
                   <span className="text-[var(--muted-soft)] ml-1">
                     ({filteredCases.length - selectableCases.length} non-approved)
                   </span>
                 )}
+                {selectedCases.size > selectedInView && (
+                  <span className="text-[var(--muted-soft)] ml-1">
+                    ({selectedCases.size - selectedInView} more selected outside this filter)
+                  </span>
+                )}
               </p>
               <div className="flex gap-2">
-                <Button variant="secondary" onClick={() => setShowPicker(false)}>
+                <Button variant="secondary" onClick={() => setShowPicker(false)} disabled={adding}>
                   Cancel
                 </Button>
                 <Button
@@ -1572,13 +1742,16 @@ export default function TestRunDetailPage() {
         title="Report a Bug"
       >
         <div className="space-y-4">
-          <div className="flex items-start gap-2 rounded-lg bg-red-50 border border-red-200 p-3">
-            <svg className="w-5 h-5 text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          {/* Themed rather than the literal red-50/red-200 these carried: in dark mode that pale
+              block stayed light while its text followed the theme, which is the same mismatch the
+              danger Button variant was fixed for. */}
+          <div className="flex items-start gap-2 rounded-lg border border-[var(--error-border)] bg-[var(--error-soft)] p-3">
+            <svg className="w-5 h-5 text-[var(--status-fail-text)] mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
             </svg>
             <div>
-              <p className="text-sm font-medium text-red-800">Test case marked as Failed</p>
-              <p className="text-xs text-red-600 mt-0.5">
+              <p className="text-sm font-medium text-[var(--status-fail-text)]">Test case marked as Failed</p>
+              <p className="text-xs text-[var(--status-fail-text)] opacity-80 mt-0.5">
                 {bugExecution?.externalId && <span className="font-mono mr-1">{bugExecution.externalId}</span>}
                 {bugExecution?.title || bugExecution?.snapshotTitle || "Untitled test case"}
               </p>
@@ -1681,6 +1854,46 @@ export default function TestRunDetailPage() {
                   placeholder="Steps to reproduce, expected vs actual behavior…"
                 />
               </div>
+              {/*
+                * Severity carries dev's required marker (48363ea/10226268634 — the run's modal used
+                * to collect no severity at all, so every bug filed from a run took the column
+                * default), paired with Priority from 10226247009. Evidence keeps its own full-width
+                * row below rather than sharing the grid with Severity: three controls do not fit two
+                * columns, and the file list needs the width.
+                */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-[var(--muted)] mb-1">
+                    Severity <span className="text-[var(--error-foreground)]">*</span>
+                  </label>
+                  <Select
+                    value={bugSeverity}
+                    onChange={(e) => setBugSeverity(e.target.value as BugSeverity)}
+                    aria-label="Severity"
+                  >
+                    {BUG_SEVERITIES.map((severity) => (
+                      <option key={severity} value={severity}>
+                        {severity}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-[var(--muted)] mb-1">Priority</label>
+                  <Select
+                    value={bugPriority}
+                    onChange={(e) => setBugPriority(e.target.value as BugPriority | "")}
+                    aria-label="Bug priority"
+                  >
+                    <option value="">Not set</option>
+                    {BUG_PRIORITIES.map((priority) => (
+                      <option key={priority} value={priority}>
+                        {priority}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+              </div>
               <BugEvidenceField
                 mode={bugEvidenceMode}
                 onModeChange={setBugEvidenceMode}
@@ -1746,7 +1959,7 @@ export default function TestRunDetailPage() {
               <Button
                 variant="destructive"
                 onClick={handleBugSubmit}
-                disabled={bugSaving || !bugTitle.trim()}
+                disabled={bugSaving || !bugTitle.trim() || !bugSeverity}
               >
                 {bugSaving ? (
                   "Filing…"
@@ -1914,7 +2127,7 @@ export default function TestRunDetailPage() {
                 <span className="text-[var(--muted)]">{panelExecution.type || "—"}</span>
                 {panelExecution.assigneeId && memberNames[panelExecution.assigneeId] && (
                   <span className="flex items-center gap-1.5 text-[var(--muted)]">
-                    <MemberAvatar name={memberNames[panelExecution.assigneeId]} size={18} />
+                    <MemberAvatar name={memberNames[panelExecution.assigneeId]} seed={panelExecution.assigneeId} size={18} />
                     {memberNames[panelExecution.assigneeId]}
                   </span>
                 )}
@@ -1962,6 +2175,13 @@ export default function TestRunDetailPage() {
 
               <div className="h-px bg-[var(--border)]" />
 
+              {/*
+                * Automation facts for this result — duration, retries and the framework's own
+                * failure text. Renders nothing at all for a human-recorded result, so a manually
+                * executed run's drawer is unchanged (Basecamp 10189985971).
+                */}
+              <AutomationResultMeta execution={panelExecution} />
+
               {/* Status picker */}
               <div>
                 <label className="mb-2 block text-[12.5px] font-medium text-[var(--muted)]">Status</label>
@@ -1994,8 +2214,10 @@ export default function TestRunDetailPage() {
                 />
               </div>
 
-              {/* Defect key/url */}
-              <div className="space-y-3">
+              {/* Defect key/url — Failed only (Basecamp 10221790207). Same rule as the full-page
+                  execute screen: a defect reference on a passing case ends up in the export and the
+                  traceability matrix, so the backend clears it when a non-Failed status is saved. */}
+              <div className="space-y-3" hidden={panelStatus !== "Failed"}>
                 <div>
                   <label className="mb-1 block text-[12.5px] font-medium text-[var(--muted)]">Defect Key</label>
                   <Input type="text" value={panelDefectKey} onChange={(e) => setPanelDefectKey(e.target.value)} placeholder="e.g. PROJ-123" />
@@ -2005,6 +2227,23 @@ export default function TestRunDetailPage() {
                   <Input type="url" value={panelDefectUrl} onChange={(e) => setPanelDefectUrl(e.target.value)} placeholder="https://…" />
                 </div>
               </div>
+
+              <div className="h-px bg-[var(--border)]" />
+
+              {/*
+                * Evidence. Keyed on the execution id so switching rows in the drawer remounts the
+                * panel and refetches, rather than showing the previous result's files.
+                */}
+              <ExecutionEvidencePanel
+                key={panelExecution.id}
+                cycleId={cycleId}
+                executionId={panelExecution.id}
+                onCountChange={(count) =>
+                  setExecutions((prev) =>
+                    prev.map((e) => (e.id === panelExecution.id ? { ...e, evidenceCount: count } : e))
+                  )
+                }
+              />
             </div>
 
             {/* Footer actions */}

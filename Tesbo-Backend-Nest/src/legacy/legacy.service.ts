@@ -12,6 +12,7 @@ import { EmailService } from "../auth/email.service";
 import { PasswordService } from "../auth/password.service";
 import { AppConfigService } from "../config/app-config.service";
 import { DatabaseService } from "../database/database.service";
+import { endZyraTurn, recordExistingCoverage, recordGeneration, recordJiraContext, recordKnowledgeContext, startZyraTurn } from "../observability/ai-trace";
 import { StorageService } from "../storage/storage.service";
 import { encryptSecret, decryptSecret } from "../common/crypto.util";
 import { escapeHtml, jiraDescriptionToText } from "../common/integration-text.util";
@@ -28,6 +29,16 @@ type Body = Record<string, any>;
 
 /** The four buckets V67's bugs_severity_check allows, and the four the dashboard reports. */
 const BUG_SEVERITIES = ["Critical", "High", "Medium", "Low"] as const;
+/*
+ * Bug priority — Basecamp 10226247009. Severity is how bad it is, priority is how soon it gets
+ * worked on; a cosmetic defect on the signup page is Low severity and P0 priority. P0..P3 is the
+ * scale `testcases.priority` already uses, and keeping it distinct from severity's words is what
+ * stops rows reading "Critical / Critical" where nobody can tell the two fields apart.
+ *
+ * Nullable end to end: no priority means nobody has triaged it yet, which is a different fact from
+ * "someone decided it is P2".
+ */
+const BUG_PRIORITIES = ["P0", "P1", "P2", "P3"] as const;
 
 /** Sentinel `suiteId` query value meaning "test cases with no suite assigned" (suite_id IS NULL). */
 export const UNASSIGNED_SUITE_ID = "none";
@@ -307,21 +318,42 @@ export function isUuid(value: unknown): boolean {
   return UUID_RE.test(String(value ?? ""));
 }
 
-/** projects.key is varchar(32); derived keys use 16 and leave the rest for a uniqueness suffix. */
-const PROJECT_KEY_MAX_LENGTH = 32;
+// Product-chosen cap (matches PROJECT_NAME_MAX_LENGTH), well under the projects.key VARCHAR(32)
+// column. Derived keys use a shorter 16 and leave the rest of that budget for a uniqueness suffix.
+const PROJECT_KEY_MAX_LENGTH = 30;
 
+function sanitizeKey(value: string): string {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "");
+}
+
+// Only for a key derived from the project name (body.key omitted) — auto-derived keys are kept
+// short for readability, unlike a key the user typed on purpose (see validateProjectKey).
 function projectKey(value: string): string {
-  return value
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]+/g, "")
-    .slice(0, 16) || "TESBO";
+  return sanitizeKey(value).slice(0, 16) || "TESBO";
+}
+
+/**
+ * An explicitly supplied key used to be silently uppercased, stripped of non-alphanumerics, and
+ * cut to 16 characters via projectKey() — so typing a 40-character key succeeded but stored only
+ * the first 16 sanitized characters with no indication anything was dropped. A key the caller
+ * chose on purpose is validated against the real column width instead of silently truncated;
+ * only the name-derived fallback keeps the shorter 16-character UX budget.
+ */
+function validateProjectKey(rawKey: string | undefined): void {
+  if (rawKey === undefined || rawKey === null) return;
+  const trimmed = String(rawKey).trim();
+  if (!trimmed) return; // blank/omitted key falls back to deriving one from the name
+  const sanitized = sanitizeKey(trimmed);
+  if (!sanitized) throw new BadRequestException({ error: "Project key must contain at least one letter or number" });
+  if (sanitized.length > PROJECT_KEY_MAX_LENGTH) {
+    throw new BadRequestException({ error: `Project key must be at most ${PROJECT_KEY_MAX_LENGTH} characters` });
+  }
 }
 
 const PROJECT_NAME_MIN_LENGTH = 3;
-// Matches the projects.name VARCHAR(255) column — going over that isn't just a policy
-// choice, the insert/update would otherwise fail outright.
-const PROJECT_NAME_MAX_LENGTH = 255;
+// Product-chosen cap, well under the projects.name VARCHAR(255) column — this is a UX/display
+// limit, not the column limit.
+const PROJECT_NAME_MAX_LENGTH = 30;
 const PROJECT_DESCRIPTION_MAX_LENGTH = 500;
 
 /** Shared by createProject/updateProject. `name`/`description` undefined means "not being changed". */
@@ -357,6 +389,47 @@ function validateWorkspaceName(name: string, field: "orgName" | "name"): string 
     throw new BadRequestException({ error: `Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters` });
   }
   return trimmed;
+}
+
+/*
+ * The bounded VARCHAR columns behind suites, runs, plans and bugs.
+ *
+ * Nothing validated these, and the consequence was not a policy gap but a 500: Postgres raises
+ * 22001 `value too long for type character varying(N)`, nothing here catches it, and the caller gets
+ * an unhandled server error on what is plainly a bad request. That is what Basecamp 10217475765
+ * ("Geeting error page while creating test suit") actually was — the card carried no repro, and a
+ * 900-character suite name reproduces it every time. The same hole was open on runs, plans and bugs,
+ * which is the shape docs/basecamp-bugfix-flow.md warns about: one reported column, several
+ * unreported ones beside it.
+ *
+ * Each limit is the column's own width, so these refuse exactly what the INSERT would refuse.
+ * Bounds live next to PROJECT_NAME_MAX_LENGTH and WORKSPACE_NAME_MAX_LENGTH, which solved this for
+ * projects and workspaces first; this is that pattern finished off.
+ */
+const SUITE_NAME_MAX_LENGTH = 255;           // suites.name
+const CYCLE_NAME_MAX_LENGTH = 255;           // cycles.name
+const CYCLE_LABEL_MAX_LENGTH = 128;          // cycles.environment / build_version / release_name
+const PLAN_NAME_MAX_LENGTH = 255;            // plans.name
+const PLAN_TARGET_RELEASE_MAX_LENGTH = 128;  // plans.target_release
+const BUG_TITLE_MAX_LENGTH = 512;            // bugs.title
+const BUG_EXTERNAL_URL_MAX_LENGTH = 1024;    // bugs.external_url
+
+/**
+ * Refuses a value that would not fit the column it is bound for.
+ *
+ * `undefined` and `null` mean "not being changed" on the update paths, and every caller here treats
+ * an absent field that way (COALESCE), so both pass through untouched. Measured on the trimmed value
+ * because that is what the writes store.
+ *
+ * Note `description` is deliberately absent from every call site below: those columns are TEXT and
+ * cannot overflow. Bounding them would be inventing a product rule, and the flow doc records a card
+ * that blamed a TEXT description when the real overflow was in a VARCHAR title.
+ */
+function validateBoundedField(value: unknown, label: string, max: number): void {
+  if (value === undefined || value === null) return;
+  if (String(value).trim().length > max) {
+    throw new BadRequestException({ error: `${label} must be at most ${max} characters` });
+  }
 }
 
 function maskSecret(value: string): string {
@@ -2049,6 +2122,7 @@ export class LegacyService implements OnModuleInit {
     const uid = this.requireUser(userId);
     const name = String(body.name || "").trim();
     validateProjectFields(name, body.description != null ? String(body.description) : undefined);
+    validateProjectKey(body.key != null ? String(body.key) : undefined);
     const workspace = await this.workspace(uid);
     // Creating a project is an administrative act, not part of authoring or executing tests. The
     // projects list hides the button from a QA Engineer, but that is presentation — the rule has to
@@ -2075,8 +2149,14 @@ export class LegacyService implements OnModuleInit {
    * than fail the second caller, re-derive and try again.
    */
   private async insertProjectWithUniqueKey(organizationId: string, uid: string, name: string, body: Body) {
+    // An explicit key was already validated (validateProjectKey) against the real 32-character
+    // column width — sanitize it the same way but do NOT also run it through projectKey()'s
+    // 16-character UX slice, or a caller-chosen key gets silently shortened just like the bug
+    // this validation exists to catch. Only the name-derived fallback keeps that shorter budget.
+    const explicitKey = body.key != null ? sanitizeKey(String(body.key)) : "";
+    const requestedBase = explicitKey || projectKey(name);
     for (let attempt = 1; ; attempt++) {
-      const key = await this.nextFreeProjectKey(organizationId, String(body.key || name));
+      const key = await this.nextFreeProjectKey(organizationId, requestedBase);
       try {
         return await this.db.transaction(async (client) => {
           const project = await client.query(
@@ -2100,8 +2180,7 @@ export class LegacyService implements OnModuleInit {
     }
   }
 
-  private async nextFreeProjectKey(organizationId: string, requested: string): Promise<string> {
-    const base = projectKey(requested);
+  private async nextFreeProjectKey(organizationId: string, base: string): Promise<string> {
     const res = await this.db.query<{ key: string }>("SELECT key FROM projects WHERE organization_id = $1", [
       organizationId
     ]);
@@ -2332,6 +2411,7 @@ export class LegacyService implements OnModuleInit {
   async createSuite(projectId: string, body: Body) {
     const name = String(body.name || "").trim();
     if (!name) throw new BadRequestException({ error: "name is required" });
+    validateBoundedField(name, "Suite name", SUITE_NAME_MAX_LENGTH);
     const res = await this.db.query(
       "INSERT INTO suites (project_id, parent_id, name, position) VALUES ($1, $2, $3, $4) RETURNING id, parent_id, name, position, created_at",
       [projectId, body.parentId || null, name, Number(body.position || 0)]
@@ -2341,6 +2421,7 @@ export class LegacyService implements OnModuleInit {
 
   async updateSuite(userId: string | null | undefined, suiteId: string, body: Body) {
     await this.requireSuiteAccess(userId, suiteId);
+    validateBoundedField(body.name, "Suite name", SUITE_NAME_MAX_LENGTH);
     await this.db.query(
       "UPDATE suites SET name = COALESCE($2, name), parent_id = $3, position = COALESCE($4, position), updated_at = now() WHERE id = $1",
       [suiteId, body.name ?? null, body.parentId ?? null, body.position ?? null]
@@ -2629,8 +2710,112 @@ export class LegacyService implements OnModuleInit {
    * Kept unguarded for the callers that have already decided access: the MCP tool (token bound to one
    * project), the Zyra chat flow, and CSV import. Route traffic goes through createTestCaseForUser.
    */
+  /*
+   * Every length-bounded column on `testcases`, with the width its migration actually declares.
+   *
+   * Basecamp 10226376787 came in as "Internal Server Error When Adding a Long Description to Test Case
+   * Details". The description is TEXT and cannot overflow — the screenshot shows the long text was in
+   * the TITLE, which is VARCHAR(512). Nothing bounded it, so Postgres raised 22001
+   * (string_data_right_truncation) and, with no handler for that code, the create answered 500.
+   *
+   * Title was simply the field the reporter happened to use. All fourteen of these are reachable
+   * through the API with no validation between the caller and the column, so each one was its own
+   * latent 500 — the same defect class as the Knowledge Base folder rename (Basecamp 10199204536).
+   *
+   * Kept as data next to the widths rather than as scattered `if` blocks so a future ALTER that widens
+   * or adds a column has exactly one place to stay in step with.
+   */
+  private static readonly TESTCASE_FIELD_LIMITS: ReadonlyArray<{ field: string; label: string; max: number }> = [
+    { field: "automationRepo", label: "Automation repo", max: 1024 },
+    { field: "title", label: "Title", max: 512 },
+    { field: "automationPath", label: "Automation path", max: 512 },
+    { field: "automationTestName", label: "Automation test name", max: 512 },
+    { field: "automationTags", label: "Automation tags", max: 512 },
+    { field: "component", label: "Component", max: 255 },
+    { field: "automationFramework", label: "Automation framework", max: 64 },
+    { field: "estimatedDuration", label: "Estimated duration", max: 64 },
+    { field: "severity", label: "Severity", max: 32 },
+    { field: "type", label: "Type", max: 32 },
+    { field: "status", label: "Status", max: 32 },
+    { field: "automationStatus", label: "Automation type", max: 32 },
+    { field: "externalId", label: "Test case ID", max: 32 },
+    { field: "priority", label: "Priority", max: 8 }
+  ];
+
+  /*
+   * Estimated duration: plain minutes ("90") or an hours/minutes form ("2h", "45m", "2h 30m").
+   *
+   * Basecamp 10226363759 reported that this field "accepts invalid text and special characters". It was
+   * worse than that: the frontend has always sent `estimatedDuration` on create and update, and the
+   * backend had NO reference to it anywhere, so the V7 `estimated_duration VARCHAR(64)` column was dead
+   * and every value typed was silently discarded. It accepted anything because it stored nothing.
+   *
+   * Now persisted and bounded to a shape a report could add up. An empty value is allowed and clears
+   * the field, because "no estimate yet" is a legitimate answer.
+   */
+  private static readonly DURATION_MINUTES = "m|min|mins|minute|minutes";
+  private static readonly DURATION_HOURS = "h|hr|hrs|hour|hours";
+  /*
+   * Deliberately accepts the spellings the form itself suggests. The input's placeholder is "e.g. 10 min",
+   * so a pattern that took only "10m" would have made the product's own guidance invalid — the field
+   * would reject exactly what it told the user to type.
+   */
+  private static readonly ESTIMATED_DURATION_RE = new RegExp(
+    `^(?:\\d{1,4}` +
+      `|\\d{1,4}\\s*(?:${LegacyService.DURATION_HOURS})(?:\\s*\\d{1,2}\\s*(?:${LegacyService.DURATION_MINUTES}))?` +
+      `|\\d{1,4}\\s*(?:${LegacyService.DURATION_MINUTES}))$`,
+    "i"
+  );
+
+  private normalizeEstimatedDuration(raw: unknown): string | null {
+    if (raw === undefined || raw === null) return null;
+    const value = String(raw).trim();
+    if (!value) return "";
+    if (!LegacyService.ESTIMATED_DURATION_RE.test(value)) {
+      throw new BadRequestException({
+        error: 'Estimated duration must be minutes ("90") or hours and minutes ("2h", "2h 30m")'
+      });
+    }
+    return value;
+  }
+
+  /**
+   * Refuses an over-long value before it can reach a bounded column.
+   *
+   * Only fields actually present in the body are checked, so a PATCH that omits a field is untouched.
+   * The message names the field and the limit — a bare "Internal server error" told the reporter
+   * nothing about which of fourteen inputs to shorten.
+   */
+  private assertTestcaseFieldLengths(body: Body): void {
+    for (const { field, label, max } of LegacyService.TESTCASE_FIELD_LIMITS) {
+      const raw = body[field];
+      if (raw === undefined || raw === null) continue;
+      const value = String(raw);
+      if (value.length > max) {
+        throw new BadRequestException({ error: `${label} must be at most ${max} characters` });
+      }
+    }
+  }
+
+  /**
+   * Converts a truncation error into a field-level 400 instead of a 500.
+   *
+   * A backstop, not the primary guard: assertTestcaseFieldLengths above is what callers should hit.
+   * This exists because the same tables are written by import, Zyra and the MCP tool, and any path
+   * that grows a new column tomorrow would otherwise reintroduce the 500 this card was raised for.
+   */
+  private rethrowTruncationAs400(error: unknown): never {
+    if ((error as { code?: string })?.code === "22001") {
+      throw new BadRequestException({
+        error: "One of the fields is too long for the field it is stored in. Shorten it and try again."
+      });
+    }
+    throw error as Error;
+  }
+
   async createTestCase(projectId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
+    this.assertTestcaseFieldLengths(body);
     // nextExternalId reads MAX(trailing number) + 1 in a separate statement from the INSERT below,
     // so two creates racing in the same project both read the same MAX and both try to write
     // "<KEY>-TC-<n>". idx_testcases_project_external then rejects the loser, and the caller got a
@@ -2648,6 +2833,8 @@ export class LegacyService implements OnModuleInit {
           !body.externalId &&
           (error as { code?: string })?.code === "23505" &&
           String((error as { constraint?: string })?.constraint || "") === "idx_testcases_project_external";
+        // A value too long for its column is the caller's to fix, not something to retry.
+        if ((error as { code?: string })?.code === "22001") this.rethrowTruncationAs400(error);
         if (!collided || attempt >= 5) throw error;
       }
     }
@@ -2672,8 +2859,8 @@ export class LegacyService implements OnModuleInit {
          (project_id, suite_id, external_id, title, description, preconditions, postconditions, steps, test_data,
           priority, severity, type, automation_status, automation_repo, automation_path, automation_test_name,
           automation_framework, automation_tags, owner_id, component, status, jira_issue_key, jira_url,
-          linear_issue_key, linear_url, attachments, created_by, updated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27)
+          linear_issue_key, linear_url, attachments, created_by, updated_by, estimated_duration)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$27,$28)
          RETURNING *`,
         [
           projectId,
@@ -2702,7 +2889,8 @@ export class LegacyService implements OnModuleInit {
           body.linearIssueKey || null,
           body.linearUrl || null,
           body.attachments || null,
-          uid
+          uid,
+          this.normalizeEstimatedDuration(body.estimatedDuration)
         ]
       );
       const row = res.rows[0];
@@ -2731,6 +2919,24 @@ export class LegacyService implements OnModuleInit {
       throw new BadRequestException({
         error: `A batch is limited to ${LegacyService.MAX_BULK_TESTCASES} test cases — send larger imports as several batches.`
       });
+    }
+
+    /*
+     * Every row is bounded before the batch runs, and the row number is named.
+     *
+     * The INSERT ... SELECT below casts each text column to its varchar width, so one over-long value
+     * anywhere in the batch raises 22001 and — as the comment on that statement already noted — fails
+     * exactly like the single insert did, i.e. as a 500. Worse here: the whole transaction rolls back,
+     * so an import of 500 rows dies on row 400 with nothing written and no indication which row or
+     * which field was at fault. Checked up front, and the message names both.
+     */
+    for (const [index, row] of incoming.entries()) {
+      try {
+        this.assertTestcaseFieldLengths(row);
+      } catch (error) {
+        const detail = (error as { response?: { error?: string } })?.response?.error ?? "a field is too long";
+        throw new BadRequestException({ error: `Row ${index + 1}: ${detail}` });
+      }
     }
 
     const created = await this.db.transaction(async (client) => {
@@ -3297,6 +3503,8 @@ export class LegacyService implements OnModuleInit {
 
   async updateTestCase(id: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
+    // Same guard as create: an over-long value here hit the bounded column and answered 500.
+    this.assertTestcaseFieldLengths(body);
     const before = await this.db.query("SELECT * FROM testcases WHERE id = $1 AND deleted_at IS NULL", [id]);
     if (!before.rows[0]) throw new NotFoundException({ error: "Test case not found" });
     const projectId = before.rows[0].project_id;
@@ -3312,7 +3520,8 @@ export class LegacyService implements OnModuleInit {
          automation_tags=COALESCE($17,automation_tags), owner_id=$18, component=COALESCE($19,component),
          status=COALESCE($20,status), jira_issue_key=COALESCE($21,jira_issue_key), jira_url=COALESCE($22,jira_url),
          linear_issue_key=COALESCE($23,linear_issue_key), linear_url=COALESCE($24,linear_url),
-         attachments=COALESCE($25,attachments), updated_by=$26, updated_at=now()
+         attachments=COALESCE($25,attachments), updated_by=$26,
+         estimated_duration=COALESCE($27,estimated_duration), updated_at=now()
          WHERE id=$1 AND deleted_at IS NULL
          RETURNING *`,
         [
@@ -3341,7 +3550,8 @@ export class LegacyService implements OnModuleInit {
           body.linearIssueKey ?? null,
           body.linearUrl ?? null,
           body.attachments ?? null,
-          uid
+          uid,
+          this.normalizeEstimatedDuration(body.estimatedDuration)
         ]
       );
       const row = res.rows[0];
@@ -3435,6 +3645,9 @@ export class LegacyService implements OnModuleInit {
     await this.requireProjectAccess(uid, projectId);
     const ids = Array.isArray(body.testcaseIds) ? body.testcaseIds : [];
     if (!ids.length) return;
+    // Bulk writes priority/status/automationStatus into the same bounded columns as a single update,
+    // so it needs the same guard — otherwise the 500 is simply reachable a different way.
+    this.assertTestcaseFieldLengths(body);
     /*
      * `suiteId: "none"` clears the suite; an absent suiteId leaves it alone.
      *
@@ -3603,6 +3816,8 @@ export class LegacyService implements OnModuleInit {
 
   async createPlan(userId: string | null | undefined, projectId: string, body: Body) {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
+    validateBoundedField(body.name, "Plan name", PLAN_NAME_MAX_LENGTH);
+    validateBoundedField(body.targetRelease, "Target release", PLAN_TARGET_RELEASE_MAX_LENGTH);
     const res = await this.db.query(
       "INSERT INTO plans (project_id, name, description, target_release, owner_id) VALUES ($1,$2,$3,$4,$5) RETURNING *",
       [projectId, body.name || "Untitled plan", body.description || "", body.targetRelease || null, body.ownerId || null]
@@ -3619,6 +3834,8 @@ export class LegacyService implements OnModuleInit {
 
   async updatePlan(userId: string | null | undefined, planId: string, body: Body) {
     await this.requirePlanAccess(userId, planId);
+    validateBoundedField(body.name, "Plan name", PLAN_NAME_MAX_LENGTH);
+    validateBoundedField(body.targetRelease, "Target release", PLAN_TARGET_RELEASE_MAX_LENGTH);
     await this.db.query(
       "UPDATE plans SET name=COALESCE($2,name), description=COALESCE($3,description), target_release=COALESCE($4,target_release), updated_at=now() WHERE id=$1",
       [planId, body.name || null, body.description || null, body.targetRelease || null]
@@ -3785,6 +4002,10 @@ export class LegacyService implements OnModuleInit {
    * goes through createCycleForUser.
    */
   async createCycle(projectId: string, body: Body) {
+    validateBoundedField(body.name, "Test run name", CYCLE_NAME_MAX_LENGTH);
+    validateBoundedField(body.environment, "Environment", CYCLE_LABEL_MAX_LENGTH);
+    validateBoundedField(body.buildVersion, "Build version", CYCLE_LABEL_MAX_LENGTH);
+    validateBoundedField(body.releaseName, "Release name", CYCLE_LABEL_MAX_LENGTH);
     const res = await this.db.query(
       `INSERT INTO cycles (project_id, plan_id, name, description, environment, build_version, release_name, owner_id)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
@@ -3884,12 +4105,35 @@ export class LegacyService implements OnModuleInit {
 
   async updateCycle(cycleId: string, userId: string | null | undefined, body: Body) {
     await this.requireCycleAccess(userId, cycleId);
+    validateBoundedField(body.name, "Test run name", CYCLE_NAME_MAX_LENGTH);
+    validateBoundedField(body.environment, "Environment", CYCLE_LABEL_MAX_LENGTH);
+    validateBoundedField(body.buildVersion, "Build version", CYCLE_LABEL_MAX_LENGTH);
+    validateBoundedField(body.releaseName, "Release name", CYCLE_LABEL_MAX_LENGTH);
+    /*
+     * Basecamp 10221952787 ("[Test Run] history not showing when test was run").
+     *
+     * `cycles.started_at` and `cycles.ended_at` have existed since the first migration and were
+     * never written by ANY code path — only read. The runs list renders a clock reading
+     * formatDuration(startedAt, endedAt), so every run in the product showed "—", including
+     * completed ones with results on screen. Nothing was broken in the UI; there was simply no data
+     * that could ever arrive.
+     *
+     * They are stamped from the status transition, which is what the Start and Mark Completed
+     * buttons drive:
+     *   → In Progress  starts the clock (first time only) and reopens a run that had finished
+     *   → Completed    stops it, and back-fills a start for a run taken straight to Completed,
+     *                  so a duration is never computed from a null start
+     *   → Planning     leaves the original start alone but clears the end: it is not finished
+     */
+    const status = typeof body.status === "string" ? body.status : null;
     await this.db.query(
       `UPDATE cycles SET name=COALESCE($2,name), description=COALESCE($3,description),
        environment=COALESCE($4,environment), build_version=COALESCE($5,build_version),
        release_name=COALESCE($6,release_name),
        plan_id=CASE WHEN $7::boolean THEN NULL WHEN $8::uuid IS NOT NULL THEN $8::uuid ELSE plan_id END,
        status=COALESCE($9,status),
+       started_at=CASE WHEN $9 IN ('In Progress', 'Completed') THEN COALESCE(started_at, now()) ELSE started_at END,
+       ended_at=CASE WHEN $9 = 'Completed' THEN now() WHEN $9 IN ('In Progress', 'Planning') THEN NULL ELSE ended_at END,
        updated_at=now() WHERE id=$1`,
       [
         cycleId,
@@ -3900,7 +4144,7 @@ export class LegacyService implements OnModuleInit {
         body.releaseName || null,
         body.clearPlan === true,
         body.planId || null,
-        body.status || null
+        status
       ]
     );
   }
@@ -4005,14 +4249,34 @@ export class LegacyService implements OnModuleInit {
    * is deliberately public).
    */
   async executions(cycleId: string) {
+    /*
+     * The five e.* columns after defect_url and the evidence_count are what the automation ingest
+     * writes (Basecamp 10189985971, V84). They are on the authenticated projection only —
+     * publicCycleExecutions above has its own deliberately narrow column list, and an automated
+     * run's error stack and CI provenance are not things a share link should publish.
+     *
+     * evidence_count is a count, not the file list: the run table renders a paperclip badge per
+     * row, and fetching every attachment's metadata for a 500-case run to decide whether to draw
+     * an icon would be 500 rows of payload for one integer. The list is fetched per execution when
+     * the detail panel opens (listExecutionEvidence).
+     *
+     * The CSV export (exportCycleExecutions -> this method) is unaffected: it names its nine
+     * headers explicitly rather than iterating the row's keys.
+     */
     const res = await this.db.query(
       `SELECT e.id, e.status, e.assignee_id, e.actual_result, e.executed_at, e.defect_key, e.defect_url,
+              e.duration_ms, e.retry_count, e.error_message, e.error_stack, e.reported_by,
               ci.id AS cycle_item_id, ci.testcase_id, ci.snapshot_title,
               COALESCE(NULLIF(ci.snapshot_title, ''), NULLIF(t.title, ''), 'Untitled test case') AS title,
               t.external_id, t.priority, t.type, t.suite_id, t.description, t.preconditions, t.postconditions,
-              t.steps, t.test_data, t.automation_status, t.automation_tags
+              t.steps, t.test_data, t.automation_status, t.automation_tags,
+              COALESCE(ev.count, 0)::int AS evidence_count
        FROM cycle_items ci JOIN executions e ON e.cycle_item_id = ci.id
        LEFT JOIN testcases t ON t.id = ci.testcase_id AND t.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT COUNT(*) AS count FROM attachments a
+          WHERE a.entity_type = 'execution' AND a.entity_id = e.id
+       ) ev ON true
        WHERE ci.cycle_id = $1 AND e.deleted_at IS NULL ORDER BY ci.position, ci.created_at`,
       [cycleId]
     );
@@ -4118,6 +4382,32 @@ export class LegacyService implements OnModuleInit {
 
   async updateExecution(executionId: string, actorId: string | null | undefined, body: Body) {
     const uid = this.requireUser(actorId);
+    /*
+     * Basecamp 10189985971 (automation ingest scoping) surfaced this as a pre-existing defect.
+     *
+     * EXECUTION_STATUSES was checked in bulkUpdateExecutionStatus and NOT here — yet this is the
+     * single-result path, taken by PATCH /api/cycles/:cycleId/executions/:executionId, by the MCP
+     * `record_execution_result` tool, and (now) by the automation ingest. `status` is
+     * VARCHAR(32), so before this check:
+     *
+     *   - {"status": "pass"} stored the literal string `pass`. Every aggregate in the product
+     *     counts by exact match ('Passed', 'Failed', ...), so the case showed as neither passed
+     *     nor executed while displaying a status. Silent corruption, no error, and the card's own
+     *     draft contract in §6 specifies exactly that lowercase vocabulary.
+     *   - a 33-character status reached Postgres and failed the length constraint, turning user
+     *     input into an unhandled 500.
+     *
+     * The empty string is left alone: `body.status || null` below treats it as "not supplied",
+     * which is how a PATCH that only changes the assignee arrives.
+     */
+    if (body.status !== undefined && body.status !== null && body.status !== "") {
+      const status = String(body.status);
+      if (!LegacyService.EXECUTION_STATUSES.includes(status)) {
+        throw new BadRequestException({
+          error: `status must be one of: ${LegacyService.EXECUTION_STATUSES.join(", ")}`
+        });
+      }
+    }
     const before = await this.db.query(
       `SELECT e.*, c.project_id, COALESCE(NULLIF(ci.snapshot_title, ''), NULLIF(t.title, ''), 'Untitled test case') AS testcase_title
        FROM executions e
@@ -4131,13 +4421,36 @@ export class LegacyService implements OnModuleInit {
     // The execution was resolved but its project never was: a signed-in caller from any workspace
     // could rewrite another team's result by execution id.
     await this.requireProjectAccess(uid, before.rows[0].project_id);
+    /*
+     * Basecamp 10221790207 ("[Test Run] Only failed test case should show defect key and Defect
+     * URL"). The two fields were offered on every status, so a passing test could carry a defect
+     * reference — which then travels into the CSV export and the traceability matrix, where it reads
+     * as "this passing case has a bug against it".
+     *
+     * The screens now only show the inputs on Failed. This clears the stored values when a status
+     * other than Failed is recorded, because hiding them alone would leave the stale reference in
+     * the database and in every export that reads it. A defect on a case that is no longer failing
+     * is not data worth keeping — the bug itself, and its link, are what survive.
+     */
+    const clearsDefect = typeof body.status === "string" && body.status !== "" && body.status !== "Failed";
     const res = await this.db.query(
       `UPDATE executions SET status=COALESCE($2,status), assignee_id=$3, actual_result=COALESCE($4,actual_result),
-       executed_at=CASE WHEN $2 IS NULL THEN executed_at ELSE now() END, defect_key=COALESCE($5,defect_key),
-       defect_url=COALESCE($6,defect_url), executed_by=$7, updated_at=now()
+       executed_at=CASE WHEN $2 IS NULL THEN executed_at ELSE now() END,
+       defect_key=CASE WHEN $8::boolean THEN NULL ELSE COALESCE($5,defect_key) END,
+       defect_url=CASE WHEN $8::boolean THEN NULL ELSE COALESCE($6,defect_url) END,
+       executed_by=$7, updated_at=now()
        WHERE id=$1 AND deleted_at IS NULL
        RETURNING *`,
-      [executionId, body.status || null, body.assigneeId ?? null, body.actualResult || null, body.defectKey || null, body.defectUrl || null, uid]
+      [
+        executionId,
+        body.status || null,
+        body.assigneeId ?? null,
+        body.actualResult || null,
+        body.defectKey || null,
+        body.defectUrl || null,
+        uid,
+        clearsDefect
+      ]
     );
     await this.logProjectActivity(
       before.rows[0].project_id,
@@ -4225,6 +4538,100 @@ export class LegacyService implements OnModuleInit {
     }));
   }
 
+  /*
+   * Linking a bug to a test case in a run marks that execution Failed.
+   *
+   * Basecamp 10226284379 and 10221755377 (the same request from two reporters): a bug was filed
+   * against a case in a run and the case sat there Untested, so the run's own numbers said nothing
+   * had gone wrong. The run screen already prompts for a bug when you mark something Failed; this is
+   * the reverse path — reporting from the Bugs page, or adding a link later — which never touched
+   * the execution at all.
+   *
+   * Decided behaviour: it ALWAYS sets Failed, including over a result someone already recorded. A
+   * bug against a case that is currently Passed is precisely the case worth flipping, and a rule
+   * with an exception in it ("unless someone passed it") is the kind that quietly does nothing on
+   * the day it matters. The previous status is written into the activity payload so the override is
+   * visible afterwards rather than silent, and an execution that is already Failed is left alone so
+   * re-linking doesn't churn executed_at or spam the activity stream.
+   *
+   * Scoped by project: a link row can name any execution id, and without the join a caller could
+   * flip a result in a workspace they cannot see.
+   */
+  private async failLinkedExecutions(projectId: string, actorId: string | null | undefined, links: Body[]) {
+    const executionIds = [...new Set(links.map((link) => link.executionId).filter((id): id is string => isUuid(String(id ?? ""))))];
+    if (executionIds.length === 0) return;
+
+    const affected = await this.db.query(
+      `SELECT e.id, e.status, COALESCE(NULLIF(ci.snapshot_title, ''), NULLIF(t.title, ''), 'Untitled test case') AS testcase_title
+         FROM executions e
+         JOIN cycle_items ci ON ci.id = e.cycle_item_id
+         JOIN cycles c ON c.id = ci.cycle_id
+         LEFT JOIN testcases t ON t.id = ci.testcase_id
+        WHERE e.id = ANY($1::uuid[]) AND e.deleted_at IS NULL AND c.project_id = $2`,
+      [executionIds, projectId]
+    );
+
+    for (const row of affected.rows) {
+      if (row.status === "Failed") continue;
+      await this.db.query(
+        `UPDATE executions SET status = 'Failed', executed_at = now(), executed_by = $2, updated_at = now()
+          WHERE id = $1 AND deleted_at IS NULL`,
+        [row.id, actorId || null]
+      );
+      await this.logProjectActivity(projectId, actorId ?? null, "execution_updated", "execution", String(row.id), row.testcase_title, {
+        reason: "bug_linked",
+        before: { status: row.status },
+        after: { status: "Failed" }
+      });
+    }
+  }
+
+  /*
+   * Link targets have to exist in THIS project before they reach an insert.
+   *
+   * `bugs.execution_id`, `testcase_id` and `cycle_id` are all foreign keys, and the ids arrive in a
+   * request body — so a caller naming an execution that does not exist (a stale tab, a copied id, a
+   * CI script with the wrong run) produced a 23503 foreign-key violation, which surfaces as a 500.
+   * Found by the regression test written for the auto-fail change: "a bogus execution id in the
+   * links is ignored rather than 500ing" was asserting the behaviour this now has.
+   *
+   * Unresolvable ids are dropped rather than rejected: a bug report is worth keeping even when one
+   * of its links is stale, and the link rows are a convenience, not the record. A link with nothing
+   * left to point at is dropped entirely.
+   */
+  private async sanitizeBugLinks(projectId: string, links: Body[]): Promise<Body[]> {
+    if (!links.length) return links;
+    const ids = (key: string) => [...new Set(links.map((l) => String(l?.[key] ?? "")).filter((v) => isUuid(v)))];
+    const [testcaseIds, cycleIds, executionIds] = [ids("testcaseId"), ids("cycleId"), ids("executionId")];
+
+    const resolved = async (sql: string, candidates: string[]): Promise<Set<string>> => {
+      if (!candidates.length) return new Set();
+      const res = await this.db.query<{ id: string }>(sql, [candidates, projectId]);
+      return new Set(res.rows.map((row) => String(row.id)));
+    };
+    const [validTestcases, validCycles, validExecutions] = await Promise.all([
+      resolved("SELECT id FROM testcases WHERE id = ANY($1::uuid[]) AND project_id = $2 AND deleted_at IS NULL", testcaseIds),
+      resolved("SELECT id FROM cycles WHERE id = ANY($1::uuid[]) AND project_id = $2", cycleIds),
+      resolved(
+        `SELECT e.id FROM executions e
+           JOIN cycle_items ci ON ci.id = e.cycle_item_id
+           JOIN cycles c ON c.id = ci.cycle_id
+          WHERE e.id = ANY($1::uuid[]) AND c.project_id = $2 AND e.deleted_at IS NULL`,
+        executionIds
+      )
+    ]);
+
+    const keep = (value: unknown, valid: Set<string>) => (valid.has(String(value ?? "")) ? String(value) : null);
+    return links
+      .map((link) => ({
+        ...link,
+        testcaseId: keep(link?.testcaseId, validTestcases),
+        cycleId: keep(link?.cycleId, validCycles),
+        executionId: keep(link?.executionId, validExecutions)
+      }))
+      .filter((link) => link.testcaseId || link.cycleId || link.executionId);
+  }
+
   private async replaceBugLinks(client: PoolClient, bugId: string, links: Body[]) {
     await client.query("DELETE FROM bug_links WHERE bug_id = $1", [bugId]);
     for (const link of links) {
@@ -4244,6 +4651,19 @@ export class LegacyService implements OnModuleInit {
    * project dashboard's bySeverity reports, so a fifth would also be counted by the bugs list and
    * dropped by the dashboard.
    */
+  private parseBugPriority(priority: unknown): "P0" | "P1" | "P2" | "P3" | null {
+    // Absent, null and "" all mean "untriaged" rather than an error — the field is optional on both
+    // create and edit, and the UI's empty option submits "".
+    if (priority === undefined || priority === null || priority === "") return null;
+    const match = BUG_PRIORITIES.find((p) => p.toLowerCase() === String(priority).trim().toLowerCase());
+    if (!match)
+      throw new BadRequestException({
+        error: `priority must be one of ${BUG_PRIORITIES.join(", ")}`,
+        field: "priority"
+      });
+    return match;
+  }
+
   private parseBugSeverity(severity: unknown): "Critical" | "High" | "Medium" | "Low" {
     if (severity === undefined || severity === null || severity === "") return "Medium";
     const match = BUG_SEVERITIES.find((s) => s.toLowerCase() === String(severity).trim().toLowerCase());
@@ -4259,13 +4679,16 @@ export class LegacyService implements OnModuleInit {
     // A link is required whenever the project actually has test cases/runs to link to — enforced
     // client-side (the UI only lets the field be empty when there's nothing to pick). An empty
     // array is accepted here so reporting a bug is never blocked in a project with no test runs yet.
-    const links = normalizeJsonArray(body.links);
+    validateBoundedField(body.title, "Bug title", BUG_TITLE_MAX_LENGTH);
+    validateBoundedField(body.externalUrl, "External URL", BUG_EXTERNAL_URL_MAX_LENGTH);
+    const links = await this.sanitizeBugLinks(projectId, normalizeJsonArray(body.links));
     const severity = this.parseBugSeverity(body.severity);
+    const priority = this.parseBugPriority(body.priority);
 
     const bugId = await this.db.transaction(async (client) => {
       const res = await client.query(
-        `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, severity, reported_by, integration_provider, integration_issue_key, betterbugs_url)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`,
+        `INSERT INTO bugs (project_id, execution_id, testcase_id, cycle_id, title, description, external_url, status, severity, priority, reported_by, integration_provider, integration_issue_key, betterbugs_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
         [
           projectId,
           links[0]?.executionId || null,
@@ -4276,6 +4699,7 @@ export class LegacyService implements OnModuleInit {
           body.externalUrl || null,
           body.status || "Open",
           severity,
+          priority,
           userId || null,
           body.integrationProvider || null,
           body.integrationIssueKey || null,
@@ -4286,6 +4710,9 @@ export class LegacyService implements OnModuleInit {
       await this.replaceBugLinks(client, id, links);
       return id;
     });
+    // After the commit, not inside it: the bug is the record that must exist, and a failure while
+    // flipping an execution should not roll back the bug report someone just wrote.
+    await this.failLinkedExecutions(projectId, userId, links);
     return this.getBug(bugId);
   }
 
@@ -4313,9 +4740,19 @@ export class LegacyService implements OnModuleInit {
     // Same refusal as createBug — an unknown severity on edit hit the same constraint and the same
     // opaque 500. Absent/empty leaves the stored value alone via COALESCE, so it isn't parsed.
     if (body.severity) this.parseBugSeverity(body.severity);
+    validateBoundedField(body.title, "Bug title", BUG_TITLE_MAX_LENGTH);
+    validateBoundedField(body.externalUrl, "External URL", BUG_EXTERNAL_URL_MAX_LENGTH);
+    /*
+     * Priority is the one field here that can be cleared. COALESCE means "absent leaves it alone",
+     * which is right for every other column, but an explicitly sent null has to be able to take a
+     * bug back to untriaged — so it gets its own flag rather than another COALESCE.
+     */
+    const clearsPriority = body.priority === null || body.priority === "";
+    const priority = this.parseBugPriority(body.priority);
     await this.db.query(
       `UPDATE bugs SET title=COALESCE($2,title), description=COALESCE($3,description), external_url=COALESCE($4,external_url),
-       status=COALESCE($5,status), severity=COALESCE($6,severity), integration_provider=COALESCE($7,integration_provider), integration_issue_key=COALESCE($8,integration_issue_key),
+       status=COALESCE($5,status), severity=COALESCE($6,severity), priority=CASE WHEN $10::boolean THEN NULL ELSE COALESCE($11,priority) END,
+       integration_provider=COALESCE($7,integration_provider), integration_issue_key=COALESCE($8,integration_issue_key),
        betterbugs_url=COALESCE($9,betterbugs_url), updated_at=now() WHERE id=$1`,
       [
         bugId,
@@ -4326,11 +4763,15 @@ export class LegacyService implements OnModuleInit {
         body.severity || null,
         body.integrationProvider || null,
         body.integrationIssueKey || null,
-        body.betterbugsUrl || null
+        body.betterbugsUrl || null,
+        clearsPriority,
+        priority
       ]
     );
     if (Array.isArray(body.links)) {
-      await this.db.transaction((client) => this.replaceBugLinks(client, bugId, normalizeJsonArray(body.links)));
+      const owner = await this.db.query<{ project_id: string }>("SELECT project_id FROM bugs WHERE id = $1", [bugId]);
+      const sanitized = await this.sanitizeBugLinks(String(owner.rows[0]?.project_id ?? ""), normalizeJsonArray(body.links));
+      await this.db.transaction((client) => this.replaceBugLinks(client, bugId, sanitized));
     }
     return this.getBug(bugId);
   }
@@ -4343,6 +4784,11 @@ export class LegacyService implements OnModuleInit {
        ON CONFLICT (bug_id, testcase_id, cycle_id) DO NOTHING`,
       [bugId, body.testcaseId || null, body.cycleId || null, body.executionId || null]
     );
+    // requireBugAccess already resolved this bug's project; re-read it rather than trusting the
+    // caller's body, which never carries a project id.
+    const owner = await this.db.query<{ project_id: string }>("SELECT project_id FROM bugs WHERE id = $1", [bugId]);
+    const projectId = owner.rows[0]?.project_id;
+    if (projectId) await this.failLinkedExecutions(String(projectId), userId, [body]);
     return this.getBug(bugId);
   }
 
@@ -4364,7 +4810,10 @@ export class LegacyService implements OnModuleInit {
   // into a Content-Disposition header, and the result is cut to fit file_name's varchar(255).
   // Without that last step a long-but-legitimate name (240 chars is well inside the filesystem's
   // own ceiling) makes Postgres reject the insert and the whole upload answers with a 500.
-  private static displayFileName(originalName: string, max = 255): string {
+  // Public rather than private only so the automation ingest can sanitise the file names a CI
+  // process supplies with the same rules the human upload paths use; duplicating it would let the
+  // two drift.
+  static displayFileName(originalName: string, max = 255): string {
     const base = path
       .basename(String(originalName ?? "").replace(/\\/g, "/"))
       // eslint-disable-next-line no-control-regex
@@ -4376,6 +4825,63 @@ export class LegacyService implements OnModuleInit {
     // person downloading it what the file actually is.
     const ext = path.extname(base);
     return ext.length > 0 && ext.length < max ? `${base.slice(0, max - ext.length)}${ext}` : base.slice(0, max);
+  }
+
+  /*
+   * Evidence uploads — bug attachments and execution attachments — validate what they accept.
+   *
+   * Basecamp 10226296533 ("[Bug Attachments] Missing File Type and Size Validations Cause Upload to
+   * Get Stuck on Saving"): nothing here checked type or size. Every extension was accepted, and the
+   * only ceiling was the interceptor's MAX_UPLOAD_SIZE — the 100MB the knowledge base uses — which
+   * multer enforces mid-stream, so the caller got a failure with no field-level reason and the modal
+   * simply sat there. Both gaps are one function now, and both evidence routes call it, because
+   * uploadExecutionAttachments had exactly the same hole.
+   *
+   * The allowlist is deliberately the knowledge base's: it already excludes zip and exe on purpose
+   * (a zip hides anything past an extension check) and evidence has no reason to accept more than a
+   * knowledge base document does.
+   *
+   * The size cap is its own, lower value. Evidence is screenshots, logs and short clips; a
+   * full-length recording belongs in the BetterBugs session a bug can already link to, not in a
+   * 100MB upload billed against the workspace's storage allowance. MAX_EVIDENCE_FILE_SIZE overrides
+   * it without a code change.
+   */
+  static readonly EVIDENCE_MAX_FILE_SIZE = Number(process.env.MAX_EVIDENCE_FILE_SIZE) || 25 * 1024 * 1024;
+
+  private static formatFileSize(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  }
+
+  /*
+   * Validates the whole batch before a single byte is stored: the upload loops over the files
+   * calling storage.put per file, so rejecting halfway would leave the accepted ones written and
+   * billed while the request answers 400. All-or-nothing is the only defensible outcome.
+   */
+  private static assertValidEvidenceFiles(files: Array<{ originalname: string; size: number }>) {
+    const supported = [...LegacyService.KB_ALLOWED_EXTENSIONS].sort().join(", ");
+    for (const file of files) {
+      const name = LegacyService.displayFileName(file.originalname);
+      const ext = path.extname(file.originalname).replace(/^\./, "").toLowerCase();
+      if (!ext) {
+        throw new BadRequestException({
+          error: `${name} has no file extension, so its type can't be determined. Supported types: ${supported}.`
+        });
+      }
+      if (!LegacyService.KB_ALLOWED_EXTENSIONS.has(ext)) {
+        throw new BadRequestException({ error: `${name}: .${ext} files aren't supported. Supported types: ${supported}.` });
+      }
+      // A zero-byte file is almost always a failed drag-and-drop or a still-being-written file, and
+      // it stores nothing useful while still consuming an attachment row and a storage key.
+      if (file.size <= 0) throw new BadRequestException({ error: `${name} is empty (0 bytes).` });
+      if (file.size > LegacyService.EVIDENCE_MAX_FILE_SIZE) {
+        throw new BadRequestException({
+          error:
+            `${name} is ${LegacyService.formatFileSize(file.size)}, which is over the ` +
+            `${LegacyService.formatFileSize(LegacyService.EVIDENCE_MAX_FILE_SIZE)} limit for evidence files.`
+        });
+      }
+    }
   }
 
   // Bug evidence uploads — reuses the generic `attachments` table (entity_type='bug') rather
@@ -4396,6 +4902,7 @@ export class LegacyService implements OnModuleInit {
     if (!isUuid(bugId)) throw new NotFoundException({ error: "Bug not found" });
     const bug = await this.db.query("SELECT b.id FROM bugs b WHERE b.id = $1 AND b.project_id = $2", [bugId, projectId]);
     if (!bug.rows[0]) throw new NotFoundException({ error: "Bug not found" });
+    LegacyService.assertValidEvidenceFiles(files);
     await this.planLimits.assertStorageAvailable(
       project.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
@@ -4490,6 +4997,7 @@ export class LegacyService implements OnModuleInit {
     // Being signed in to the workspace isn't enough: attaching evidence to a run means writing
     // into that project, so the caller has to be a member of it.
     await this.requireProjectAccess(uid, projectId);
+    LegacyService.assertValidEvidenceFiles(files);
     await this.planLimits.assertStorageAvailable(
       execution.organization_id,
       files.reduce((sum, file) => sum + file.size, 0)
@@ -4513,6 +5021,58 @@ export class LegacyService implements OnModuleInit {
     return { list: created, total: created.length };
   }
 
+  /**
+   * Serves one execution evidence file.
+   *
+   * This route did not exist. `uploadExecutionAttachments` and `listExecutionAttachments` have both
+   * been in the product since the bug-evidence work, so evidence could be stored (and billed
+   * against the workspace's storage allowance) and its metadata listed -- with no way to fetch a
+   * single byte of it back. Nothing in the frontend called either endpoint, so nothing surfaced
+   * the gap; the automation ingest (Basecamp 10189985971 §5) is what makes it load-bearing, since
+   * a screenshot or trace nobody can open is not evidence.
+   *
+   * Mirrors getBugAttachmentAccess, and for the same reason: an attachment id turning up in a log
+   * line or an exported report must not be enough to hand the file to whoever holds it, so the
+   * caller is authorized against the project that owns the run -- and `scopeExecutionId` keeps a
+   * lookup by attachment id from crossing to another execution's evidence even within it.
+   */
+  async getExecutionAttachmentAccess(
+    cycleId: string,
+    userId: string | null | undefined,
+    executionId: string,
+    attachmentId: string,
+    inline: boolean
+  ) {
+    const uid = this.requireUser(userId);
+    const execution = await this.executionOwner(cycleId, executionId);
+    await this.requireProjectAccess(uid, String(execution.project_id));
+    if (!isUuid(attachmentId)) throw new NotFoundException({ error: "Attachment not found" });
+    const res = await this.db.query(
+      `SELECT * FROM attachments
+        WHERE id = $1 AND entity_type = 'execution' AND entity_id = $2 AND project_id = $3`,
+      [attachmentId, executionId, execution.project_id]
+    );
+    const file = res.rows[0];
+    if (!file) throw new NotFoundException({ error: "Attachment not found" });
+    if (!file.storage_path || !(await this.storage.exists(file.storage_path))) {
+      throw new NotFoundException({ error: "File content is not available" });
+    }
+    const mimeType = file.content_type || "application/octet-stream";
+    /*
+     * A Playwright trace is a .zip that the ingest accepts as an exception to the evidence
+     * allowlist (see automation.types.ts). It is never served inline: `inline` is forced off for
+     * anything that is not an image or a video, so a stored archive or log cannot be rendered by a
+     * browser in Tesbo's own origin.
+     */
+    const safeInline = inline && /^(image|video)\//.test(mimeType);
+    const access = await this.storage.getAccessUrl(file.storage_path, {
+      filename: file.file_name,
+      inline: safeInline,
+      contentType: mimeType
+    });
+    return { ...access, mimeType, originalFileName: file.file_name, inline: safeInline };
+  }
+
   async listExecutionAttachments(cycleId: string, userId: string | null | undefined, executionId: string) {
     const uid = this.requireUser(userId);
     const execution = await this.executionOwner(cycleId, executionId);
@@ -4520,7 +5080,8 @@ export class LegacyService implements OnModuleInit {
     // Columns are listed rather than SELECT *: storage_path is an internal storage key that no
     // client needs and that shouldn't travel out of the backend.
     const res = await this.db.query(
-      `SELECT id, project_id, entity_type, entity_id, file_name, content_type, file_size, uploaded_by, created_at
+      `SELECT id, project_id, entity_type, entity_id, file_name, content_type, file_size, uploaded_by,
+              evidence_kind, created_at
        FROM attachments WHERE entity_type = 'execution' AND entity_id = $1 ORDER BY created_at`,
       [executionId]
     );
@@ -8115,11 +8676,16 @@ export class LegacyService implements OnModuleInit {
 
   async zyraChatSessions(projectId: string, userId: string | null | undefined) {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
+    // has_messages is additive, not a filter: every session this project ever created is still
+    // returned (callers and existing tests rely on a just-created session showing up immediately).
+    // It exists so the sidebar can hide sessions nobody ever used without the API silently dropping
+    // rows out of its own list.
     const res = await this.db.query(
-      `SELECT id, project_id, user_id, title, created_at, updated_at, active_plan
-       FROM zyra_chat_sessions
-       WHERE project_id = $1
-       ORDER BY updated_at DESC
+      `SELECT s.id, s.project_id, s.user_id, s.title, s.created_at, s.updated_at, s.active_plan,
+              EXISTS (SELECT 1 FROM zyra_chat_messages m WHERE m.session_id = s.id) AS has_messages
+       FROM zyra_chat_sessions s
+       WHERE s.project_id = $1
+       ORDER BY s.updated_at DESC
        LIMIT 50`,
       [projectId]
     );
@@ -8316,8 +8882,9 @@ export class LegacyService implements OnModuleInit {
   // system does with the answer is validated, capability-gated, and reconciled against reality
   // (applyZyraChatOperations, reconcileZyraReply). The model decides; it never writes.
   private async buildZyraChatDecision(projectId: string, userId: string, sessionId: string, message: string): Promise<ZyraChatDecision> {
-    const mentionedJiraKeys = this.extractJiraIssueKeys(message);
-    const [history, knowledgeFallback, ragKnowledge, folderKnowledge, existingTestcases, allocation, projectSnapshot, mentionedJira, lastCompletedPlanRes] = await Promise.all([
+    const jiraKeyResolution = await this.resolveJiraIssueKeysDetailed(projectId, message);
+    const mentionedJiraKeys = jiraKeyResolution.keys;
+    const [history, knowledgeFallback, ragDiagnostics, folderKnowledge, existingTestcases, allocation, projectSnapshot, mentionedJira, lastCompletedPlanRes] = await Promise.all([
       this.db.query(
         `SELECT role, content, reasoning_summary, action_type, testcases
          FROM zyra_chat_messages
@@ -8331,7 +8898,10 @@ export class LegacyService implements OnModuleInit {
       // fallback above so a project with nothing embedded yet (or an Anthropic-only key)
       // pays no extra latency — retrieveKnowledgeContext never throws, resolves to [] on
       // any failure.
-      this.ragRetrieval.retrieveKnowledgeContext(projectId, message),
+      // retrieveWithDiagnostics rather than retrieveKnowledgeContext: the plain call returns [] for
+      // every failure mode, so "no embeddings key" and "nothing relevant" are indistinguishable —
+      // which is how the vector half of this search stayed off in production unnoticed.
+      this.ragRetrieval.retrieveWithDiagnostics(projectId, message),
       // Direct folder-name lookup — recency/embeddings never match on a folder's name alone
       // (e.g. "knowledge base 'EAD-11215' folder"), only on document content.
       this.knowledgeFolderSnapshot(projectId, message, mentionedJiraKeys),
@@ -8343,7 +8913,37 @@ export class LegacyService implements OnModuleInit {
       this.relevantJiraSnapshot(projectId, message, mentionedJiraKeys),
       this.db.query("SELECT last_completed_plan FROM zyra_chat_sessions WHERE id = $1", [sessionId]).catch(() => ({ rows: [] as Body[] }))
     ]);
+    const ragKnowledge = ragDiagnostics.items;
+    const usedRecencyFallback = !ragKnowledge.length;
     const knowledge = [...folderKnowledge, ...(ragKnowledge.length ? ragKnowledge : knowledgeFallback)];
+
+    // Opened once the gathered context exists, so the trace carries what Zyra actually read rather
+    // than only what it later claims to have read.
+    const trace = await startZyraTurn({ messageId: `${sessionId}:${message}`, sessionId, projectId, userId, message });
+    recordJiraContext(trace, {
+      extracted: jiraKeyResolution.extracted,
+      validated: jiraKeyResolution.keys,
+      configuredProjectKeys: jiraKeyResolution.configuredProjectKeys,
+      resolved: mentionedJira.map((ticket) => ({ key: ticket.key, source: "cache" as const, summary: ticket.summary })),
+      relevanceMatched: mentionedJira.map((ticket) => ticket.key).filter((key) => !jiraKeyResolution.keys.includes(key))
+    });
+    recordKnowledgeContext(trace, {
+      query: message,
+      semanticSearchRan: ragDiagnostics.semanticSearchRan,
+      reason: ragDiagnostics.reason,
+      retrieved: (ragKnowledge.length ? ragKnowledge : knowledgeFallback).map((item) => ({
+        title: String((item as Body).title || ""),
+        sourceType: String(((item as Body).citation as Body)?.sourceType || ""),
+        sourceId: String(((item as Body).citation as Body)?.sourceId || ""),
+        score: typeof (item as Body).score === "number" ? Number((item as Body).score) : undefined
+      })),
+      folderMatched: folderKnowledge.map((item) => ({ title: String((item as Body).title || "") })),
+      fallbackUsed: usedRecencyFallback
+    });
+    recordExistingCoverage(trace, {
+      searchTerms: this.zyraSearchTerms(message),
+      testcases: existingTestcases.map((tc) => ({ externalId: String((tc as Body).externalId || ""), title: String((tc as Body).title || "") }))
+    });
     const lastCompletedPlanCount = normalizeJsonArray((lastCompletedPlanRes.rows[0]?.last_completed_plan as Body | undefined)?.testcaseIds).length;
     // Oldest-first: the transcript handed to the model must read in conversation order.
     const chronologicalHistory = [...history.rows].reverse();
@@ -8374,7 +8974,9 @@ export class LegacyService implements OnModuleInit {
       "- archive: archive an existing testcase when the user asks to remove/delete/archive testcase coverage. IMPORTANT: before archiving, always describe which testcases will be archived and explicitly ask the user to confirm (e.g. 'I found TC-5 Login Test. Should I archive it? Reply yes to confirm.'). Only include archive operations if the user's current message is a clear confirmation (yes, confirm, go ahead, proceed) after you already proposed what would be archived in the prior assistant turn.",
       "- create_suite: create a new test suite (a folder/group for testcases) when the user asks to create/add a suite, folder, or group. Put the suite name in operation.suiteName.",
       "- move_to_suite: move/assign EXISTING testcases into a suite when the user asks to move/assign/organize/group/put existing testcases into a suite. The target suite goes in operation.suiteName (it is created automatically if it does not already exist, so you do not need a separate create_suite op for the same suite). List the testcases to move in operation.externalIds (use the external IDs shown under 'Existing suites' / 'Existing testcases'), set operation.allExisting=true when the user means every existing testcase, or set operation.fromLastPlan=true when the user refers to 'all'/'the N cases' from a recent generation batch (see 'Most recently generated batch' below) — fromLastPlan is exact and does not depend on you correctly recalling every external ID from earlier in the conversation, so prefer it over externalIds whenever the user is clearly referring to a just-generated batch rather than naming specific unrelated testcases.",
-      "CRITICAL: there is no draft buffer in this system. Choosing 'create' writes the testcases to the repository immediately; choosing 'answer' stores NOTHING, however many testcases your reply text lists. So never present testcases as 'ready to save' or 'pending', and never ask 'would you like me to save these?' — if the user wants testcases, choose 'create' now and say they are saved, otherwise do not enumerate them at all.",
+      "CRITICAL: there is no draft buffer in this system. Choosing 'create' writes the testcases to the repository immediately as real, openable rows; choosing 'answer' stores NOTHING, however many testcases your reply text lists. So never present testcases as 'ready to save' or 'pending', and never ask 'would you like me to save these?' — if the user wants testcases, choose 'create' now, otherwise do not enumerate them at all.",
+      `What you create is written with status Draft. If the request names a suite it lands there; if it names none it is staged in the "${LegacyService.ZYRA_DRAFT_SUITE_NAME}" suite. So describe what you created as DRAFTED and say where it is staged — do not say "saved" or "filed" for something sitting in the staging suite, and never imply a person has reviewed it.`,
+      `"Save them" / "save them to <suite>" AFTER you have already drafted testcases is a move, not a create: emit move_to_suite with fromLastPlan=true and the target suiteName. Re-creating them would duplicate every case. Use the transcript annotations to tell the two apart — if the previous turn saved rows, they exist and must be moved; if it saved nothing, they do not exist yet and 'save them' means create.`,
       "A short confirmation of an offer you made in your previous turn ('yes', 'yes please', 'go ahead', 'do it', 'please start generating', 'save it', 'save them into <suite>') is a create request: choose 'create', and set suiteName/suiteId on the create operation when a suite is named.",
       "Only use move_to_suite for testcases that appear under 'Existing suites'/'Existing testcases' below, or in the most recently generated batch. If the user asks you to save or file testcases that so far only appeared as text in this chat, those testcases DO NOT EXIST yet — choose 'create' with the suite named on the create operation, never move_to_suite.",
       "CRITICAL: moving or assigning existing testcases into a suite is NEVER a create action. Do not generate, draft, or duplicate testcases for a move/assign/organize request — only emit move_to_suite operations that reference the existing testcases. Use create only when the user explicitly asks to author brand-new testcases.",
@@ -8399,7 +9001,7 @@ export class LegacyService implements OnModuleInit {
       "  - Be direct — skip filler openers like 'Certainly!', 'Sure!', or 'Here is your answer:'.",
       "  - For analytical responses (coverage gaps, test strategy, explanations) use structured headings and bullets so the answer is easy to scan.",
       "",
-      "Existing suites (use these names/ids for move_to_suite; reuse an existing suite instead of duplicating it):",
+      `Existing suites (use these names/ids for move_to_suite; reuse an existing suite instead of duplicating it). "${LegacyService.ZYRA_DRAFT_SUITE_NAME}" is where your own unfiled drafts are staged — its count is how many test cases you have generated that nobody has filed yet, so use it when asked how many you have created:`,
       projectSnapshot.suites.length ? projectSnapshot.suites.map((s) => `${s.name} (id: ${s.id}, ${s.testCaseCount} testcase(s))`).join("\n") : "No suites yet.",
       "",
       "Most recently generated batch (already saved to the repository; use move_to_suite with fromLastPlan=true to reference all of these together):",
@@ -8430,6 +9032,22 @@ export class LegacyService implements OnModuleInit {
         ? await this.zyraChatWithAnthropic(key, model, context, message)
         : await this.zyraChatWithOpenAi(key, model, context, message);
       const modelIntent = this.intentFromZyraModelAction(raw.action, raw.actionType);
+      // The router call itself: the prompt the model saw and the structured decision it returned.
+      // Recorded before dispatch so a decision that is later overridden by a capability gate is
+      // still visible as what the model actually chose.
+      recordGeneration(trace, {
+        name: "router",
+        provider,
+        model,
+        input: { message, context },
+        output: raw,
+        usage: { input: estimateTokens(context) + estimateTokens(message), output: estimateTokens(JSON.stringify(raw ?? "")) }
+      });
+      endZyraTurn(trace, {
+        reply: String(raw.reply || ""),
+        actionType: modelIntent,
+        operationsRequested: normalizeJsonArray(raw.operations).length
+      });
       if (modelIntent === "jira_pending_testcases") {
         const toolDecision = await this.analyzeZyraJiraTestcaseCoverage(projectId);
         return this.finalizeZyraToolDecisionWithAi({
@@ -8477,21 +9095,101 @@ export class LegacyService implements OnModuleInit {
           return this.applyStorageGateToGenerated(decision, capabilities);
         } catch (err) {
           // Generation is a second call and can fail on its own (truncated JSON, no usable drafts)
-          // after the router already succeeded. The router's reply is in hand, so degrade to that
-          // answer instead of discarding a good turn — but never claim testcases were produced.
+          // after the router already succeeded.
           const detail = this.extractAiErrorMessage(err);
           await this.logProjectActivity(projectId, userId, "zyra_chat_ai_failed", "zyra_chat", sessionId, "Zyra chat", { message: detail, stage: "generation" });
-          const answer = this.normalizeZyraChatDecision(raw, message, existingTestcases, "answer");
-          return {
-            ...answer,
-            reply: `⚠️ I couldn't produce the test cases this time (${detail}) — nothing was saved. Try again, or narrow the request to fewer cases.\n\n${answer.reply}`,
-            reasoningSummary: `Generation failed after routing (${detail}). ${answer.reasoningSummary}`
-          };
+
+          const routedSuiteForTurn = this.routedZyraSuite(raw, projectSnapshot.suites);
+          const attempt = LegacyService.zyraAttemptSummary({
+            requestedCount: Number(raw.requestedCount) || null,
+            knowledgeCount: knowledgeForChat.length,
+            jiraCount: mentionedJira.length,
+            suiteName: routedSuiteForTurn?.name ?? null
+          });
+
+          /*
+           * One retry, with a deliberately different approach rather than the same call again.
+           *
+           * The failure this path sees most is a response that arrived truncated — which is a
+           * function of how much was asked for, so repeating the identical request is the one thing
+           * guaranteed not to help. The retry asks for a small batch instead, and the reply says the
+           * first attempt failed and that this is a narrowed second attempt: a user who asked for 20
+           * and receives 5 is owed the reason, and finding out from the count alone is not that.
+           */
+          try {
+            const retried = await this.generateZyraChatCreateDecision({
+              projectId,
+              userId,
+              sessionId,
+              provider,
+              model,
+              key,
+              message,
+              knowledge: knowledgeForChat,
+              existingTestcases,
+              jiraIssueKeys: mentionedJiraKeys,
+              projectTestcaseRange,
+              suites: projectSnapshot.suites,
+              conversation: this.zyraTranscript(chronologicalHistory),
+              routedSuite: routedSuiteForTurn,
+              routedCount: { requestedCount: LegacyService.ZYRA_RETRY_BATCH, exhaustive: false },
+              jira: mentionedJira
+            });
+            const gated = this.applyStorageGateToGenerated(retried, capabilities);
+            const { cause } = LegacyService.zyraFailureCause(detail);
+            await this.logProjectActivity(projectId, userId, "zyra_chat_ai_retried", "zyra_chat", sessionId, "Zyra chat", {
+              message: detail,
+              stage: "generation_retry",
+              batch: LegacyService.ZYRA_RETRY_BATCH
+            });
+            return {
+              ...gated,
+              reply: [
+                `⚠️ My first attempt to ${attempt} didn't work — ${cause}.`,
+                `I changed approach and tried again with a smaller batch of ${LegacyService.ZYRA_RETRY_BATCH}. That went through:`,
+                "",
+                gated.reply,
+                "",
+                "Ask me to continue and I'll add the rest in batches this size."
+              ].join("\n"),
+              reasoningSummary: `First generation attempt failed (${detail}); retried with a ${LegacyService.ZYRA_RETRY_BATCH}-case batch. ${gated.reasoningSummary}`
+            };
+          } catch (retryErr) {
+            const retryDetail = this.extractAiErrorMessage(retryErr);
+            await this.logProjectActivity(projectId, userId, "zyra_chat_ai_failed", "zyra_chat", sessionId, "Zyra chat", {
+              message: retryDetail,
+              stage: "generation_retry"
+            });
+            const answer = this.normalizeZyraChatDecision(raw, message, existingTestcases, "answer");
+          /*
+           * The router's own reply is NOT reused here any more.
+           *
+           * Basecamp 10231923903: this used to read `⚠️ I couldn't produce the test cases … nothing
+           * was saved.\n\n${answer.reply}`. On a create turn the router has already written its reply
+           * as though generation would follow — "Created 7 test cases covering passwordless biometric
+           * login…" — so the user was shown a failure and a success, in that order, about the same
+           * request. The 2026-07-31 "degrade to the router's answer" behaviour was right for a
+           * ROUTING failure, where the answer is all there is; after a create routing the answer is
+           * prose about work that did not happen.
+           *
+           * Basecamp 10231965612: the wording is the user's now, not the parser's. `detail` ("AI
+           * testcase generation returned invalid JSON") stays in reasoningSummary and the activity
+           * log, where whoever is debugging it will look — it is not something to put in front of
+           * someone who asked for test cases.
+           */
+            return {
+              ...answer,
+              reply: LegacyService.zyraFailureReply(attempt, retryDetail || detail, true),
+              reasoningSummary: `Generation failed after routing (${detail}); the narrowed retry also failed (${retryDetail}). ${answer.reasoningSummary}`
+            };
+          }
         }
       }
       return this.normalizeZyraChatDecision(raw, message, existingTestcases, modelIntent);
     } catch (err) {
       const errorDetail = this.extractAiErrorMessage(err);
+      recordGeneration(trace, { name: "router", provider, model, input: { message }, errorMessage: errorDetail });
+      endZyraTurn(trace, { reply: errorDetail, actionType: "error" });
       await this.logProjectActivity(projectId, userId, "zyra_chat_ai_failed", "zyra_chat", sessionId, "Zyra chat", { message: errorDetail, stage: "routing" });
       return this.zyraDegradedDecision(message, existingTestcases, errorDetail);
     }
@@ -8537,8 +9235,13 @@ export class LegacyService implements OnModuleInit {
         if (op.suiteId) {
           const suite = await this.getProjectSuite(projectId, op.suiteId);
           suiteId = suite ? suite.id : null;
-        } else if (op.suiteName) {
-          const suite = await this.resolveOrCreateSuiteByName(projectId, op.suiteName);
+        }
+        // No suite named — or one named that no longer resolves — stages in Zyra's own suite rather
+        // than landing unassigned. The case is a real, openable, runnable row either way; what
+        // changes is that it is now identifiable as an unfiled agent draft.
+        const suiteName = op.suiteName || (suiteId ? null : LegacyService.ZYRA_DRAFT_SUITE_NAME);
+        if (!suiteId && suiteName) {
+          const suite = await this.resolveOrCreateSuiteByName(projectId, suiteName);
           suiteId = suite.id;
           if (suite.created) {
             activity.push({ actor: "agent", title: "Created suite", detail: suite.name, createdAt: new Date().toISOString() });
@@ -8758,19 +9461,23 @@ export class LegacyService implements OnModuleInit {
         `Sources considered: ${params.knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${params.existingTestcases.length} existing testcase(s).`
       ].filter(Boolean).join(" ")
     });
-    return {
-      // Report sources honestly: Jira tickets are mirrored into the knowledge base, so a bare
-      // "0 Jira ticket(s)" alongside 20 knowledge items reads as "Jira isn't connected" when in fact
-      // most of those items were Jira tickets.
-      reply: [
-        `I generated ${aiResult.drafts.length} test case(s) after reading`,
+    // Nothing in the knowledge base and no Jira ticket matched: these drafts are the model's general
+    // knowledge, not this team's requirements, and the reply has to lead with that.
+    const ungrounded = params.knowledge.length === 0 && jira.length === 0;
+    const stagedSuiteName = matchedSuite?.name ?? LegacyService.ZYRA_DRAFT_SUITE_NAME;
+    const groundedReply = [
+        `I drafted ${aiResult.drafts.length} test case(s) after reading`,
         [
           `${params.knowledge.length} knowledge-base item(s)${jiraFromKnowledge ? ` (${jiraFromKnowledge} mirrored from Jira)` : ""}`,
           `${jira.length} Jira ticket(s) read directly`,
           `${params.existingTestcases.length} existing test case(s) to avoid duplicating coverage`
         ].join(", "),
-        `.${matchedSuite ? ` Placing them in the "${matchedSuite.name}" suite.` : ""}`
-      ].join(" ").replace(" .", "."),
+        "."
+    ].join(" ").replace(" .", ".") + `\n\n${LegacyService.zyraDraftFilingHint(stagedSuiteName)}`;
+    return {
+      reply: ungrounded
+        ? [LegacyService.zyraUngroundedNote(aiResult.drafts.length), LegacyService.zyraDraftFilingHint(stagedSuiteName)].join("\n\n")
+        : groundedReply,
       reasoningSummary: `AI generation used ${params.provider}/${params.model}. It considered Jira keys ${params.jiraIssueKeys.length ? params.jiraIssueKeys.join(", ") : "none explicitly mentioned"}, knowledge-base context, existing coverage for duplicate avoidance, and Zyra memory. Tokens: input ${aiResult.usage.input}, output ${aiResult.usage.output}.`,
       actionType: "create",
       operations: aiResult.drafts.map((draft) => ({
@@ -9191,32 +9898,73 @@ export class LegacyService implements OnModuleInit {
     };
   }
 
-  private async processZyraTask(projectId: string, taskId: string, options: { userId: string; knowledgeItemIds?: string[] }) {
-    const taskRes = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
-    const task = taskRes.rows[0];
-    if (!task) return;
-    const allocation = await this.db.query(
-      `SELECT k.provider, k.default_model, k.api_key, k.base_url, k.auth_header_name, k.auth_scheme
-       FROM project_ai_key_allocations a
-       JOIN workspace_ai_keys k ON k.id = a.workspace_ai_key_id
-       WHERE a.project_id = $1 AND k.is_active = true`,
-      [projectId]
+  // Records a terminal failure, but only if the row is still where processZyraTask left it
+  // ('todo' if it never even got to the start UPDATE below, 'in_progress' otherwise). If the
+  // user already closed/saved/resubmitted the task in the meantime, that action already moved
+  // task_status past this point and must win — we only append a note to the activity log so the
+  // failure isn't lost, without resurrecting or overwriting whatever the user set.
+  private async markZyraTaskFailed(projectId: string, taskId: string, detail: string) {
+    const failedAt = new Date().toISOString();
+    const activity = [{ actor: "agent", stage: "failed", title: "Generation failed", detail, createdAt: failedAt }];
+    const res = await this.db.query(
+      `UPDATE ai_generation_requests SET task_status = 'failed', activity_log = activity_log || $3::jsonb, updated_at = now()
+       WHERE id = $1 AND project_id = $2 AND task_status IN ('todo', 'in_progress') RETURNING id`,
+      [taskId, projectId, JSON.stringify(activity)]
     );
-    if (!allocation.rows[0]) return;
-    const now = new Date().toISOString();
-    const startedActivity = [{
-      actor: "agent",
-      stage: "in_progress",
-      title: "Picked up task",
-      detail: "Zyra moved this task from Todo to In Progress.",
-      createdAt: now
-    }];
-    await this.db.query(
-      "UPDATE ai_generation_requests SET task_status = 'in_progress', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
-      [taskId, projectId, JSON.stringify(startedActivity)]
-    );
+    if (res.rowCount === 0) {
+      const note = [{
+        actor: "agent",
+        stage: "failed",
+        title: "Generation failed after task was already updated",
+        detail: `${detail} (the task had already moved on by the time this was recorded, so its status was left as-is)`,
+        createdAt: failedAt
+      }];
+      await this.db.query(
+        "UPDATE ai_generation_requests SET activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
+        [taskId, projectId, JSON.stringify(note)]
+      );
+    }
+  }
 
+  private async processZyraTask(projectId: string, taskId: string, options: { userId: string; knowledgeItemIds?: string[] }) {
     try {
+      const taskRes = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
+      const task = taskRes.rows[0];
+      if (!task) return;
+      const allocation = await this.db.query(
+        `SELECT k.provider, k.default_model, k.api_key, k.base_url, k.auth_header_name, k.auth_scheme
+         FROM project_ai_key_allocations a
+         JOIN workspace_ai_keys k ON k.id = a.workspace_ai_key_id
+         WHERE a.project_id = $1 AND k.is_active = true`,
+        [projectId]
+      );
+      if (!allocation.rows[0]) {
+        // aiGenerate already checks this before inserting the row, so this only fires if the
+        // allocation was revoked in the window between that check and this fire-and-forget job
+        // running. It used to just `return` here, leaving the task stuck at 'todo' forever with
+        // no error and no trace — indistinguishable from a task that was never picked up.
+        await this.markZyraTaskFailed(projectId, taskId, "No active AI provider key is allocated to this project.");
+        return;
+      }
+      const now = new Date().toISOString();
+      const startedActivity = [{
+        actor: "agent",
+        stage: "in_progress",
+        title: "Picked up task",
+        detail: "Zyra moved this task from Todo to In Progress.",
+        createdAt: now
+      }];
+      const startRes = await this.db.query(
+        `UPDATE ai_generation_requests SET task_status = 'in_progress', activity_log = activity_log || $3::jsonb, updated_at = now()
+         WHERE id = $1 AND project_id = $2 AND task_status = 'todo' RETURNING id`,
+        [taskId, projectId, JSON.stringify(startedActivity)]
+      );
+      if (startRes.rowCount === 0) {
+        // The task was already closed/updated by the user before Zyra could pick it up — don't
+        // spend a provider call generating drafts nobody will see.
+        return;
+      }
+
       const story = String(task.user_story || "");
       const context = String(task.context || task.custom_prompt || "");
       const acceptanceCriteria = String(task.acceptance_criteria || "");
@@ -9269,15 +10017,34 @@ export class LegacyService implements OnModuleInit {
         { actor: "agent", stage: "in_progress", title: "Generation plan", detail: this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length }), createdAt: finishedAt },
         { actor: "agent", stage: "in_review", title: "Generated testcase drafts", detail: `Generated ${drafts.length} testcase draft(s) with ${provider}${aiResult.requestId ? ` request ${aiResult.requestId}` : ""}. Cached input tokens: ${aiResult.usage.cached}.`, createdAt: finishedAt }
       ];
-      await this.db.query(
+      const successRes = await this.db.query(
         `UPDATE ai_generation_requests
          SET generated_count = $3, generated_payload = $4::jsonb,
              token_input = $5, token_output = $6, token_total = $7,
              source_summary = $8::jsonb, activity_log = activity_log || $9::jsonb,
              task_status = 'in_review', updated_at = now()
-         WHERE id = $1 AND project_id = $2`,
+         WHERE id = $1 AND project_id = $2 AND task_status = 'in_progress' RETURNING id`,
         [taskId, projectId, drafts.length, JSON.stringify(drafts), tokenInput, tokenOutput, tokenInput + tokenOutput, JSON.stringify(sourceSummary), JSON.stringify(activity)]
       );
+      if (successRes.rowCount === 0) {
+        // The user closed/saved/resubmitted the task while generation was still running. Their
+        // action already reflects the current truth, so don't resurrect it into 'in_review' or
+        // silently replace generated_payload out from under whatever they already accepted —
+        // just leave a trace that the drafts were produced but dropped.
+        const droppedAt = new Date().toISOString();
+        const note = [{
+          actor: "agent",
+          stage: "in_review",
+          title: "Generated drafts discarded",
+          detail: `Zyra finished generating ${drafts.length} testcase draft(s), but the task had already been updated in the meantime, so these drafts were not applied.`,
+          createdAt: droppedAt
+        }];
+        await this.db.query(
+          "UPDATE ai_generation_requests SET activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
+          [taskId, projectId, JSON.stringify(note)]
+        );
+        return;
+      }
       await this.rememberZyraTurn({
         projectId,
         userId: options.userId,
@@ -9288,7 +10055,6 @@ export class LegacyService implements OnModuleInit {
         outcome: `Generated ${drafts.length} testcase draft(s) using ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), and ${linear.length} Linear ticket(s). Coverage plan: ${this.zyraThinking({ story, context, acceptanceCriteria, feedback, knowledgeCount: knowledge.length, jiraCount: jira.length, linearCount: linear.length })}`
       });
     } catch (error) {
-      const failedAt = new Date().toISOString();
       // Nest builds HttpExceptions from an object payload, so `error.message` is the generic
       // status text ("Bad Request Exception") and the real cause — provider status, invalid
       // JSON, revoked key — is only in getResponse(). Reading `.message` here made every
@@ -9304,13 +10070,13 @@ export class LegacyService implements OnModuleInit {
         ? String((payload as Record<string, unknown>).detail || "")
         : "";
       const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
-      // Nothing logged this before, so a failed task left no server-side trace at all.
       this.logger.error(`Zyra task ${taskId} (project ${projectId}) failed: ${detail}`, error instanceof Error ? error.stack : undefined);
-      const activity = [{ actor: "agent", stage: "todo", title: "Generation failed", detail, createdAt: failedAt }];
-      await this.db.query(
-        "UPDATE ai_generation_requests SET task_status = 'todo', activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
-        [taskId, projectId, JSON.stringify(activity)]
-      );
+      // task_status used to revert to 'todo' here — identical to a task that was never started,
+      // so a failed generation was indistinguishable from a queued one anywhere the Kanban board
+      // reads task_status. 'failed' is a dedicated terminal state the UI can badge distinctly.
+      // markZyraTaskFailed only applies it if the row is still where this job left it (see the
+      // comment on that method) — a user action that already moved the task on wins instead.
+      await this.markZyraTaskFailed(projectId, taskId, detail);
     }
   }
 
@@ -9352,6 +10118,15 @@ export class LegacyService implements OnModuleInit {
     if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
+    const statusBeforeFeedback = String(existing.rows[0].task_status || "");
+    // Feedback only makes sense once there is something to review, or to retry after a failure.
+    // Without this guard, feedback could be sent while processZyraTask was still mid-flight for
+    // the same row — both would then race to write task_status/generated_payload for the same
+    // task, and the "todo" this endpoint sets below could stomp the running job's own 'in_progress'
+    // write (or vice versa) with neither side aware of the other.
+    if (!["in_review", "failed"].includes(statusBeforeFeedback)) {
+      throw new ConflictException({ error: `This task is currently "${statusBeforeFeedback}" and can't accept feedback right now. Wait for generation to finish first.` });
+    }
     const feedbackText = String(body.feedback || "").trim();
     const referenceNote = String(body.referenceNote || "").trim();
     const additionalJiraIssueKeys = normalizeJsonArray(body.jiraIssueKeys).map(String).filter(Boolean);
@@ -9381,10 +10156,17 @@ export class LegacyService implements OnModuleInit {
       ].filter(Boolean).join("\n"),
       createdAt: new Date().toISOString()
     }];
-    await this.db.query(
-      "UPDATE ai_generation_requests SET task_status = 'todo', feedback = $3, activity_log = activity_log || $4::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2",
-      [taskId, projectId, feedback, JSON.stringify(feedbackActivity)]
+    const claimRes = await this.db.query(
+      `UPDATE ai_generation_requests SET task_status = 'todo', feedback = $3, activity_log = activity_log || $4::jsonb, updated_at = now()
+       WHERE id = $1 AND project_id = $2 AND task_status = $5 RETURNING id`,
+      [taskId, projectId, feedback, JSON.stringify(feedbackActivity), statusBeforeFeedback]
     );
+    if (claimRes.rowCount === 0) {
+      // Lost the race: something else (another feedback submission, a close, a save) changed the
+      // task's status between the read above and this write. Reject rather than blindly proceeding
+      // against a row that has already moved on.
+      throw new ConflictException({ error: "This task was just updated by another action. Reload and try again." });
+    }
     const story = existing.rows[0].user_story;
     const context = existing.rows[0].context || existing.rows[0].custom_prompt || "";
     const acceptanceCriteria = existing.rows[0].acceptance_criteria || "";
@@ -9399,79 +10181,122 @@ export class LegacyService implements OnModuleInit {
     const requestedCount = Number(existing.rows[0].requested_count) || this.testcaseRangeConfig(testcaseRange).requestedCount;
     const provider = String(existing.rows[0].provider || allocation.rows[0].provider || "openai").toLowerCase();
     const model = normalizeProviderModel(provider, existing.rows[0].model || allocation.rows[0].default_model);
-    const knowledge = await this.knowledgeSnapshot(projectId);
-    const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
-    const linear = await this.linearSnapshot(projectId, linearIssueKeys);
-    const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
-    const aiResult = await this.generateZyraWithProvider({
-      provider,
-      model,
-      apiKey: allocation.rows[0].api_key,
-      baseUrl: allocation.rows[0].base_url,
-      authHeaderName: allocation.rows[0].auth_header_name,
-      authScheme: allocation.rows[0].auth_scheme,
-      projectId,
-      input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
-    });
-    const now = new Date().toISOString();
-    const activity = [
-      { actor: "agent", stage: "in_progress", title: "Moved task back to Todo", detail: "Zyra queued the task again after reviewer feedback.", createdAt: now },
-      { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
-      { actor: "agent", stage: "in_review", title: "Regenerated testcase drafts", detail: `Updated this task with ${aiResult.drafts.length} regenerated draft(s). Cached input tokens: ${aiResult.usage.cached}.`, createdAt: now }
-    ];
-    const previousSources = normalizeJsonArray(existing.rows[0].source_summary);
-    const nextSources = [
-      ...previousSources,
-      ...(referenceNote ? [{ type: "feedback_reference", title: "Reviewer reference", detail: referenceNote.slice(0, 320) }] : []),
-      ...additionalJiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Referenced by reviewer feedback." })),
-      ...additionalLinearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Referenced by reviewer feedback." })),
-      ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
-    ];
-    const res = await this.db.query(
-      `UPDATE ai_generation_requests
-       SET generated_count = $3, generated_payload = $4::jsonb, feedback = $5,
-           token_input = token_input + $6, token_output = token_output + $7, token_total = token_total + $8,
-           activity_log = activity_log || $9::jsonb, source_summary = $10::jsonb, jira_issue_keys = $11::jsonb,
-           linear_issue_keys = $12::jsonb, task_status = 'in_review', updated_at = now()
-       WHERE id = $1 AND project_id = $2
-       RETURNING *`,
-      [
-        taskId,
+    try {
+      const knowledge = await this.knowledgeSnapshot(projectId);
+      const jira = await this.jiraSnapshot(projectId, jiraIssueKeys);
+      const linear = await this.linearSnapshot(projectId, linearIssueKeys);
+      const existingTestcases = await this.existingTestcaseSnapshot(projectId, story, context);
+      const aiResult = await this.generateZyraWithProvider({
+        provider,
+        model,
+        apiKey: allocation.rows[0].api_key,
+        baseUrl: allocation.rows[0].base_url,
+        authHeaderName: allocation.rows[0].auth_header_name,
+        authScheme: allocation.rows[0].auth_scheme,
         projectId,
-        aiResult.drafts.length,
-        JSON.stringify(aiResult.drafts),
-        feedback,
-        aiResult.usage.input,
-        aiResult.usage.output,
-        aiResult.usage.total,
-        JSON.stringify(activity),
-        JSON.stringify(nextSources),
-        JSON.stringify(jiraIssueKeys),
-        JSON.stringify(linearIssueKeys)
-      ]
-    );
-    await this.rememberZyraTurn({
-      projectId,
-      userId: uid,
-      provider,
-      model,
-      key: allocation.rows[0],
-      userMessage: `${story}\nReviewer feedback: ${feedbackText}`,
-      outcome: [
-        `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
-        referenceNote ? `Reviewer references: ${referenceNote}` : "",
-        additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
-        additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
-      ].filter(Boolean).join(" ")
-    });
-    return {
-      generationRequestId: taskId,
-      task: this.formatAiTask(res.rows[0]),
-      provider,
-      drafts: aiResult.drafts,
-      generatedCount: aiResult.drafts.length,
-      tokenUsage: aiResult.usage
-    };
+        input: { story, context, acceptanceCriteria, feedback, knowledge, jira, linear, existingTestcases, requestedCount, testcaseRange }
+      });
+      const now = new Date().toISOString();
+      const activity = [
+        { actor: "agent", stage: "in_progress", title: "Moved task back to Todo", detail: "Zyra queued the task again after reviewer feedback.", createdAt: now },
+        { actor: "agent", stage: "in_progress", title: "Re-read sources with feedback", detail: `Reused the same task and applied feedback against ${knowledge.length} knowledge-base item(s), ${jira.length} Jira ticket(s), ${linear.length} Linear ticket(s), ${existingTestcases.length} existing testcase(s), Zyra memory, and ${referenceNote ? "the referenced docs/tickets" : "the existing context"}.`, createdAt: now },
+        { actor: "agent", stage: "in_review", title: "Regenerated testcase drafts", detail: `Updated this task with ${aiResult.drafts.length} regenerated draft(s). Cached input tokens: ${aiResult.usage.cached}.`, createdAt: now }
+      ];
+      const previousSources = normalizeJsonArray(existing.rows[0].source_summary);
+      const nextSources = [
+        ...previousSources,
+        ...(referenceNote ? [{ type: "feedback_reference", title: "Reviewer reference", detail: referenceNote.slice(0, 320) }] : []),
+        ...additionalJiraIssueKeys.map((key) => ({ type: "jira", title: key, detail: "Referenced by reviewer feedback." })),
+        ...additionalLinearIssueKeys.map((key) => ({ type: "linear", title: key, detail: "Referenced by reviewer feedback." })),
+        ...existingTestcases.map((item) => ({ type: "existing_testcase", title: `${item.externalId} ${item.title}`, detail: item.description.slice(0, 320) }))
+      ];
+      const res = await this.db.query(
+        `UPDATE ai_generation_requests
+         SET generated_count = $3, generated_payload = $4::jsonb, feedback = $5,
+             token_input = token_input + $6, token_output = token_output + $7, token_total = token_total + $8,
+             activity_log = activity_log || $9::jsonb, source_summary = $10::jsonb, jira_issue_keys = $11::jsonb,
+             linear_issue_keys = $12::jsonb, task_status = 'in_review', updated_at = now()
+         WHERE id = $1 AND project_id = $2 AND task_status = 'todo'
+         RETURNING *`,
+        [
+          taskId,
+          projectId,
+          aiResult.drafts.length,
+          JSON.stringify(aiResult.drafts),
+          feedback,
+          aiResult.usage.input,
+          aiResult.usage.output,
+          aiResult.usage.total,
+          JSON.stringify(activity),
+          JSON.stringify(nextSources),
+          JSON.stringify(jiraIssueKeys),
+          JSON.stringify(linearIssueKeys)
+        ]
+      );
+      let responseRow = res.rows[0];
+      if (!responseRow) {
+        // Something else (a close/save from another tab) changed the task's status while the
+        // provider call was in flight. The caller's own request still succeeded — they should
+        // still see the drafts they asked for — but don't resurrect the row into 'in_review' out
+        // from under whatever the concurrent action already set; just record that this happened
+        // and return the task's current, true state.
+        const droppedAt = new Date().toISOString();
+        const note = [{
+          actor: "agent",
+          stage: "in_review",
+          title: "Regenerated drafts discarded",
+          detail: `Zyra regenerated ${aiResult.drafts.length} testcase draft(s) after this feedback, but the task had already been updated elsewhere in the meantime, so the regenerated drafts were not applied.`,
+          createdAt: droppedAt
+        }];
+        const fresh = await this.db.query(
+          "UPDATE ai_generation_requests SET activity_log = activity_log || $3::jsonb, updated_at = now() WHERE id = $1 AND project_id = $2 RETURNING *",
+          [taskId, projectId, JSON.stringify(note)]
+        );
+        responseRow = fresh.rows[0];
+      } else {
+        await this.rememberZyraTurn({
+          projectId,
+          userId: uid,
+          provider,
+          model,
+          key: allocation.rows[0],
+          userMessage: `${story}\nReviewer feedback: ${feedbackText}`,
+          outcome: [
+            `Regenerated ${aiResult.drafts.length} testcase draft(s) after applying reviewer feedback.`,
+            referenceNote ? `Reviewer references: ${referenceNote}` : "",
+            additionalJiraIssueKeys.length ? `Jira references: ${additionalJiraIssueKeys.join(", ")}` : "",
+            additionalLinearIssueKeys.length ? `Linear references: ${additionalLinearIssueKeys.join(", ")}` : ""
+          ].filter(Boolean).join(" ")
+        });
+      }
+      return {
+        generationRequestId: taskId,
+        task: this.formatAiTask(responseRow),
+        provider,
+        drafts: aiResult.drafts,
+        generatedCount: aiResult.drafts.length,
+        tokenUsage: aiResult.usage
+      };
+    } catch (error) {
+      // Regeneration runs synchronously in the request/response cycle, unlike the initial
+      // processZyraTask fire-and-forget — but it moved task_status to 'todo' above *before*
+      // calling the provider, with no catch here at all. A provider failure threw straight to
+      // the controller as a raw 500 and left the task stuck showing "Pending" with no record of
+      // what happened, same failure mode as the initial-generation bug this mirrors.
+      const summary = this.extractAiErrorMessage(error) || "Zyra failed to regenerate testcase drafts.";
+      const payload = typeof (error as { getResponse?: () => unknown })?.getResponse === "function"
+        ? (error as { getResponse: () => unknown }).getResponse()
+        : null;
+      const providerDetail = payload && typeof payload === "object"
+        ? String((payload as Record<string, unknown>).detail || "")
+        : "";
+      const detail = providerDetail && providerDetail !== summary ? `${summary} (${providerDetail})` : summary;
+      this.logger.error(`Zyra task ${taskId} (project ${projectId}) feedback regeneration failed: ${detail}`, error instanceof Error ? error.stack : undefined);
+      // markZyraTaskFailed only marks 'failed' if the row is still 'todo'/'in_progress' — if a
+      // concurrent close/save already moved it on, that action wins and this only leaves a note.
+      await this.markZyraTaskFailed(projectId, taskId, detail);
+      throw error;
+    }
   }
 
   async zyraDeleteDraft(projectId: string, userId: string | null | undefined, taskId: string, draftIndex: number) {
@@ -9506,8 +10331,13 @@ export class LegacyService implements OnModuleInit {
   async zyraCloseTask(projectId: string, userId: string | null | undefined, taskId: string) {
     await this.requireProjectAccess(this.requireUser(userId), projectId);
     if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
-    const existing = await this.db.query("SELECT id, task_status FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
+    const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
+    if (existing.rows[0].task_status === "done") {
+      // Already closed — a double-click or a second tab landing here after the first request
+      // already won should be a harmless no-op, not a duplicate "Closed task" activity entry.
+      return this.formatAiTask(existing.rows[0]);
+    }
     const now = new Date().toISOString();
     const activity = [{
       actor: "user",
@@ -9519,10 +10349,16 @@ export class LegacyService implements OnModuleInit {
     const res = await this.db.query(
       `UPDATE ai_generation_requests
        SET task_status = 'done', activity_log = activity_log || $3::jsonb, updated_at = now()
-       WHERE id = $1 AND project_id = $2
+       WHERE id = $1 AND project_id = $2 AND task_status <> 'done'
        RETURNING *`,
       [taskId, projectId, JSON.stringify(activity)]
     );
+    if (!res.rows[0]) {
+      // Lost a race to a concurrent close (two tabs, double-click before the button disabled) —
+      // return the current state instead of erroring on an action that already succeeded.
+      const fresh = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
+      return this.formatAiTask(fresh.rows[0]);
+    }
     return this.formatAiTask(res.rows[0]);
   }
 
@@ -9531,6 +10367,11 @@ export class LegacyService implements OnModuleInit {
     if (!isUuid(taskId)) throw new NotFoundException({ error: "Zyra task not found" });
     const existing = await this.db.query("SELECT * FROM ai_generation_requests WHERE id = $1 AND project_id = $2", [taskId, projectId]);
     if (!existing.rows[0]) throw new NotFoundException({ error: "Zyra task not found" });
+    if (existing.rows[0].task_status === "in_progress") {
+      // Nothing generated yet for this row — saving now would either save nothing or save
+      // drafts from a stale client-side cache that the still-running job is about to replace.
+      throw new ConflictException({ error: "Zyra is still generating drafts for this task. Wait for it to finish before saving." });
+    }
     let suiteId = body.suiteId || null;
     if (!suiteId && body.suiteName) {
       const suite = await this.createSuite(projectId, { name: body.suiteName });
@@ -10821,10 +11662,30 @@ export class LegacyService implements OnModuleInit {
       const rows = normalizeJsonArray(row?.testcases);
       const saved = rows.filter((item) => item && (item as Body).id);
       const externalIds = saved.map((item) => String((item as Body).externalId || "")).filter(Boolean);
+      /*
+       * The annotation says what the turn PERSISTED. Basecamp 10231190735 and 10231274688 showed
+       * what it was missing: whether the turn was still waiting on the user.
+       *
+       * A turn that proposed an archive ("Should I archive PRO-TC-124? Reply yes to confirm") saves
+       * nothing, so it was annotated "[saved nothing — any testcases named in this reply do not
+       * exist in the repository]" — and the very next instruction tells the model to trust the
+       * annotations over its own earlier wording. So when the user replied "yes", the one fact
+       * needed to resolve it had been described as something not to rely on, the turn routed to
+       * `answer`, and nothing was archived while the reply said it had been.
+       *
+       * Naming the action type the turn was routed as gives the confirmation an antecedent. It is a
+       * fact we already store (zyra_chat_messages.action_type) rather than another rule in the
+       * prompt, and it is the model — not a keyword matcher — that decides what "yes" refers to.
+       */
+      const actionType = String(row?.action_type || row?.actionType || "").trim();
+      const proposal =
+        !saved.length && (actionType === "create" || actionType === "archive" || actionType === "update")
+          ? ` [this turn was routed as '${actionType}' but wrote nothing — treat it as a PROPOSAL still awaiting the user's go-ahead; if their next message confirms it, carry it out now]`
+          : "";
       const note = saved.length
         ? `[saved ${saved.length} testcase(s) to the repository${externalIds.length ? `: ${externalIds.join(", ")}` : ""}]`
         : "[saved nothing — any testcases named in this reply do not exist in the repository]";
-      return `assistant ${note}: ${content}`;
+      return `assistant ${note}${proposal}: ${content}`;
     }).join("\n");
   }
 
@@ -10984,8 +11845,180 @@ export class LegacyService implements OnModuleInit {
    * A partial application is now reported as a partial application, with applied.activity carrying
    * the per-operation reason.
    */
+  /*
+   * Failure, in the user's terms.
+   *
+   * The provider detail ("AI testcase generation returned invalid JSON", "429 Too Many Requests") is
+   * what a developer needs and what a person asking for test cases cannot act on. It stays in
+   * reasoningSummary and the activity log; this maps it to a cause and, more usefully, to the thing
+   * the user can actually do about it.
+   */
+  /*
+   * When the knowledge base has nothing to say about what was asked for.
+   *
+   * Basecamp 10231923903 asked for "passwordless biometric login" in a project whose knowledge base
+   * has no such feature. Refusing outright is unhelpful — generic cases for a well-understood flow
+   * are a real starting point — and generating silently is worse, because the reply's "after reading
+   * N knowledge-base item(s)" line then implies the cases came from the team's own requirements when
+   * they came from the model's general knowledge.
+   *
+   * So: say it plainly, hand over the generic cases anyway, and name the one thing that would make
+   * them specific. The cases are still written to the repository, as every other create is — Zyra has
+   * no draft state, and a case the user can read but not open or run is its own bug (2026-07-31).
+   */
+  /*
+   * Drafts, not "created".
+   *
+   * Zyra's generations are written with status Draft (they always were), but the reply called them
+   * created and they landed with no suite — so "created" was doing two jobs at once: the row exists,
+   * and the work is done. Only the first was true. The wording says drafted, names where they are
+   * staged, and says how to file them, so the state on screen and the state in the sentence agree.
+   */
+  private static zyraDraftFilingHint(suiteName: string | null): string {
+    return suiteName === LegacyService.ZYRA_DRAFT_SUITE_NAME
+      ? `They're staged as drafts in **${LegacyService.ZYRA_DRAFT_SUITE_NAME}** — say "save them to <suite>" and I'll file them where they belong.`
+      : `They're drafts in **${suiteName}** — review them there, or say "save them to <suite>" to move them.`;
+  }
+
+  private static zyraUngroundedNote(count: number): string {
+    return [
+      "ℹ️ I don't have anything about this in the project's knowledge base, and no Jira ticket matched it either.",
+      "",
+      `I've still written ${count} test case(s) from general practice for this kind of feature, so you have somewhere to start — treat them as a draft to review rather than as coverage of your actual behaviour.`,
+      "",
+      "Add the requirement, spec or acceptance criteria to the knowledge base (or link the Jira ticket) and ask me again — I'll regenerate them against how your feature really works, with your own terminology and edge cases."
+    ].join("\n");
+  }
+
+  /*
+   * Where Zyra's own generations land when the request named no suite.
+   *
+   * Chat creates used to be written with suite_id NULL, so they fell into the repository's "No
+   * suite" bucket alongside anything else that had never been filed — indistinguishable from a case
+   * someone created by hand and forgot to sort. They are drafts produced by an agent, and they need
+   * somewhere identifiable to sit until a person decides where they belong.
+   *
+   * A named suite still wins: "generate 10 for Login" puts them in Login, as it always has. This is
+   * only the default for a request that named nowhere.
+   */
+  static readonly ZYRA_DRAFT_SUITE_NAME = "Zyra generated test cases";
+
+  /** The narrowed second attempt's batch size — small enough that a truncated response is unlikely. */
+  private static readonly ZYRA_RETRY_BATCH = 5;
+
+  private static zyraFailureCause(detail: string): { cause: string; advice: string } {
+    const text = String(detail || "").toLowerCase();
+    if (/json|parse|truncat|unterminated|unexpected token/.test(text)) {
+      return {
+        cause: "the AI's answer came back incomplete, so I couldn't read the test cases out of it",
+        advice: "asking for fewer cases at a time usually fixes this — try \"generate 5\" and I'll build on it"
+      };
+    }
+    if (/rate.?limit|429|quota|too many requests/.test(text)) {
+      return {
+        cause: "the AI provider is rate-limiting this workspace right now",
+        advice: "wait a minute and ask again — nothing about your request was wrong"
+      };
+    }
+    if (/api key|unauthor|401|403|invalid.*key|revoked/.test(text)) {
+      return {
+        cause: "the AI provider rejected the workspace's key",
+        advice: "an admin can check the key in Settings → AI providers; I can't generate anything until that's sorted"
+      };
+    }
+    if (/timeout|timed out|econnreset|network|fetch failed|socket/.test(text)) {
+      return {
+        cause: "the AI provider didn't answer in time",
+        advice: "try again — if it keeps timing out, a smaller request gets through more reliably"
+      };
+    }
+    if (/no provider|not configured|missing/.test(text)) {
+      return {
+        cause: "no AI provider is configured for this workspace",
+        advice: "an admin can connect one in Settings → AI providers"
+      };
+    }
+    return {
+      cause: "the AI provider returned an error",
+      advice: "try again, or narrow the request to fewer cases"
+    };
+  }
+
+  /** What the turn set out to do, so a failure can say what it was attempting rather than just that it failed. */
+  private static zyraAttemptSummary(input: {
+    requestedCount?: number | null;
+    knowledgeCount: number;
+    jiraCount: number;
+    suiteName?: string | null;
+  }): string {
+    const target = input.requestedCount && input.requestedCount > 0 ? `${input.requestedCount} test case(s)` : "test cases";
+    const sources = [
+      input.knowledgeCount ? `${input.knowledgeCount} knowledge-base item(s)` : null,
+      input.jiraCount ? `${input.jiraCount} Jira ticket(s)` : null
+    ].filter(Boolean);
+    return [
+      `generate ${target}`,
+      input.suiteName ? `for the "${input.suiteName}" suite` : null,
+      sources.length ? `from ${sources.join(" and ")}` : "from your request alone, with nothing matching in the knowledge base"
+    ].filter(Boolean).join(" ");
+  }
+
+  /*
+   * The graceful failure reply.
+   *
+   * Asked for directly: say what I tried, say what went wrong, say what you can do — instead of a
+   * bare error, and instead of prose that reads as though something was produced.
+   */
+  private static zyraFailureReply(attempt: string, detail: string, retried: boolean): string {
+    const { cause, advice } = LegacyService.zyraFailureCause(detail);
+    return [
+      "⚠️ I ran into a problem and couldn't finish this — **nothing was created or saved.**",
+      "",
+      `**What I tried:** to ${attempt}.` + (retried ? " When that failed I retried with a smaller batch, and that didn't get through either." : ""),
+      `**What went wrong:** ${cause}.`,
+      `**What you can do:** ${advice}.`
+    ].join("\n");
+  }
+
+  /*
+   * Completion language, for the answer-turn guard below. Past tense only, and only about the
+   * repository: "I'll create…" and "shall I archive…" are proposals and must survive untouched,
+   * while "Created 7 test cases", "PRO-TC-124 has been archived" and "saved them to the Login suite"
+   * are claims about work this turn did not do.
+   *
+   * This is a check on OUTPUT, not on comprehension — the router's reading of the user is the model's
+   * job and stays the model's job. This only decides whether a reply that already exists is allowed
+   * to say a mutation happened.
+   */
+  private static readonly ZYRA_COMPLETION_CLAIM =
+    /\b(created|added|generated and saved|saved|archived|updated|deleted|removed|moved)\b[^.!?\n]{0,80}\b(test\s?cases?|tc-\d|suite|repository)\b|\b(test\s?cases?|suite)\b[^.!?\n]{0,80}\b(have|has|were|was)\s+been\s+(created|added|saved|archived|updated|removed|moved)\b/i;
+
   private reconcileZyraReply(decision: ZyraChatDecision, applied: { testcases: Body[]; activity: Body[] }): string {
-    if (decision.actionType === "answer") return decision.reply;
+    /*
+     * An `answer` turn used to return its reply unchecked, on the reasoning that an answer changes
+     * nothing so there is nothing to reconcile. That is exactly backwards: an answer changes nothing,
+     * so a reply that SAYS it changed something is the one case nothing else can catch.
+     *
+     * Three cards, one shape (Basecamp 10231190735, 10231274688, 10231923903): the user replies "yes"
+     * to a proposed archive, or asks again in a session where an earlier turn really did create
+     * cases, the turn routes to `answer`, and the model's prose reports the work as done. On
+     * 10231190735 the user then asked "is it created?" and Zyra — reading the same transcript
+     * annotations — correctly answered no. It had already told them yes.
+     *
+     * The correction goes FIRST, before the model's prose, so the two are read in the right order.
+     */
+    if (decision.actionType === "answer") {
+      if (!applied.testcases.length && LegacyService.ZYRA_COMPLETION_CLAIM.test(decision.reply)) {
+        return [
+          "⚠️ **Nothing was changed in the repository by this message.** Anything described below as created, saved or archived was not carried out — I only described it.",
+          "",
+          "Ask me to go ahead and I'll make the change and show you the affected test cases.",
+          "",
+          decision.reply
+        ].join("\n");
+      }
+      return decision.reply;
+    }
     // Creating an empty suite touches no testcases and is still a complete success.
     if (decision.operations.length && decision.operations.every((op) => op.type === "create_suite")) return decision.reply;
 
@@ -11034,10 +12067,27 @@ export class LegacyService implements OnModuleInit {
 
   private extractJiraIssueKeys(message: string): string[] {
     const keys = new Set<string>();
+    // Hyphenated form stays case-insensitive: people do type "ead-11215" for EAD-11215.
     for (const match of message.match(/\b[A-Z][A-Z0-9]+-\d+\b/gi) || []) {
       keys.add(match.toUpperCase());
     }
-    const loosePattern = /\b([A-Z][A-Z0-9]{1,9})\s+(\d+)\b/gi;
+    /*
+     * Space-separated form ("EAD 11215"), for a key typed without its hyphen.
+     *
+     * Deliberately CASE-SENSITIVE. With the /i flag this matched any word followed by a number,
+     * so ordinary English turned into Jira keys: "create 10 first" produced CREATE-10, "add 2
+     * back" produced ADD-2, "give me 20 smoke tests" produced ME-20. Six of the eight real
+     * production messages that hit this pattern invented a ticket that has never existed.
+     *
+     * The consequences were not cosmetic. Each phantom key was reported to the user as a source
+     * Zyra had "read directly", and — because jiraSnapshot live-fetches any key missing from the
+     * sync cache — each one also fired a real Jira API request for a nonexistent issue on every
+     * message. A stopword list cannot fix this: the space-separated form is inherently ambiguous
+     * with "<verb> <count>", which is how users ask for test cases. Requiring the uppercase a
+     * real project key actually has is what disambiguates it, and resolveJiraIssueKeys() below
+     * then checks the prefix against the project's configured Jira projects.
+     */
+    const loosePattern = /\b([A-Z][A-Z0-9]{1,9})\s+(\d+)\b/g;
     let loose: RegExpExecArray | null;
     while ((loose = loosePattern.exec(message))) {
       const prefix = loose[1].toUpperCase();
@@ -11045,6 +12095,50 @@ export class LegacyService implements OnModuleInit {
       keys.add(`${prefix}-${loose[2]}`);
     }
     return Array.from(keys);
+  }
+
+  /**
+   * Issue keys in a message that could plausibly belong to THIS project's Jira.
+   *
+   * Pattern-matching alone cannot tell a real key from a coincidence — "TEST-1" is a valid key
+   * shape and also something a person writes by accident. The project's configured Jira projects
+   * (jira_project_mappings) are the only authority on which prefixes exist, so a key whose prefix
+   * is not configured is dropped before it can be looked up, live-fetched, or reported to the user
+   * as a source that was read.
+   *
+   * A project with no Jira mapping therefore resolves nothing, which is the correct answer: it has
+   * no Jira to have read from.
+   */
+  private async resolveJiraIssueKeys(projectId: string, message: string): Promise<string[]> {
+    return (await this.resolveJiraIssueKeysDetailed(projectId, message)).keys;
+  }
+
+  /**
+   * Same resolution, but reports what was discarded and why — the shape the trace records.
+   * `extracted` minus `keys` is exactly the phantom-key population, so a span showing
+   * extracted:[CREATE-10] / validated:[] is the bug being prevented, visible without a DB audit.
+   */
+  private async resolveJiraIssueKeysDetailed(
+    projectId: string,
+    message: string
+  ): Promise<{ keys: string[]; extracted: string[]; configuredProjectKeys: string[] }> {
+    const candidates = this.extractJiraIssueKeys(message);
+    // The overwhelmingly common case is a message with no key-shaped text at all. Returning before
+    // touching the database keeps this free for those, which matters on a per-message path.
+    if (!candidates.length) return { keys: [], extracted: [], configuredProjectKeys: [] };
+
+    const mappings = await this.db
+      .query<{ jira_project_key: string }>(
+        "SELECT jira_project_key FROM jira_project_mappings WHERE project_id = $1 AND enabled = true",
+        [projectId]
+      )
+      .catch(() => ({ rows: [] as Array<{ jira_project_key: string }> }));
+    const configuredProjectKeys = mappings.rows.map((row) => String(row.jira_project_key || "").trim().toUpperCase()).filter(Boolean);
+    const configured = new Set(configuredProjectKeys);
+    if (!configured.size) return { keys: [], extracted: candidates, configuredProjectKeys };
+
+    const keys = candidates.filter((key) => configured.has(key.slice(0, key.lastIndexOf("-")).toUpperCase()));
+    return { keys, extracted: candidates, configuredProjectKeys };
   }
 
   // Decides how many testcases Zyra chat should generate. An explicit number in the message

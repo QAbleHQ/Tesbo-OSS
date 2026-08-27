@@ -21,7 +21,7 @@ import {
 } from "../utils/screens-tenant";
 
 test.describe("project CRUD", () => {
-  test("creates a project from just a name and derives a key from it", async ({ request }) => {
+  test("creates a project from just a name and derives a key from it", { tag: '@tesbo.testId("TES-TC-405")' }, async ({ request }) => {
     // projectKey() uppercases, strips non-alphanumerics, then keeps only the first 16 chars —
     // so the name must stay short enough that the full (fast-changing) timestamp survives
     // that truncation. A longer prefix like "E2E Project" would eat the budget and leave only
@@ -40,7 +40,7 @@ test.describe("project CRUD", () => {
     await request.delete(`/api/projects/${created.id}`);
   });
 
-  test("creates a project with an explicit key, description and projectType", async ({ request }) => {
+  test("creates a project with an explicit key, description and projectType", { tag: '@tesbo.testId("TES-TC-406")' }, async ({ request }) => {
     const suffix = Date.now().toString().slice(-8);
     const name = `E2E Full Project ${suffix}`;
     const createRes = await request.post("/api/projects", {
@@ -58,13 +58,34 @@ test.describe("project CRUD", () => {
     await request.delete(`/api/projects/${created.id}`);
   });
 
-  test("rejects creating a project without a name", async ({ request }) => {
+  test("rejects creating a project without a name", { tag: '@tesbo.testId("TES-TC-407")' }, async ({ request }) => {
     const res = await request.post("/api/projects", { data: {}, failOnStatusCode: false });
     expect(res.status()).toBe(400);
     expect((await res.json()).error).toMatch(/name/i);
   });
 
-  test("rejects creating a project whose key collides with an existing one", async ({ request }) => {
+  test("rejects creating a project with a name over the 30 character max", { tag: '@tesbo.testId("TES-TC-1185")' }, async ({ request }) => {
+    const suffix = Date.now().toString().slice(-8);
+    const res = await request.post("/api/projects", {
+      data: { name: "x".repeat(31), key: `E2ELONG${suffix}` },
+      failOnStatusCode: false,
+    });
+    expect(res.status()).toBe(400);
+    expect((await res.json()).error).toMatch(/30 characters/);
+  });
+
+  test("allows creating a project with a name at exactly the 30 character max", { tag: '@tesbo.testId("TES-TC-1186")' }, async ({ request }) => {
+    const suffix = Date.now().toString().slice(-8);
+    const name = "y".repeat(30);
+    const createRes = await request.post("/api/projects", { data: { name, key: `E2EMAX${suffix}` } });
+    expect(createRes.ok()).toBeTruthy();
+    const created = await createRes.json();
+    expect(created.name).toBe(name);
+
+    await request.delete(`/api/projects/${created.id}`);
+  });
+
+  test("rejects creating a project whose key collides with an existing one", { tag: '@tesbo.testId("TES-TC-408")' }, async ({ request }) => {
     const suffix = Date.now().toString().slice(-8);
     const key = `DUPE${suffix}`;
 
@@ -85,7 +106,7 @@ test.describe("project CRUD", () => {
     await request.delete(`/api/projects/${first.id}`);
   });
 
-  test("supports the read -> update -> delete lifecycle", async ({ request }) => {
+  test("supports the read -> update -> delete lifecycle", { tag: '@tesbo.testId("TES-TC-409")' }, async ({ request }) => {
     const suffix = Date.now().toString().slice(-8);
     const name = `E2E Lifecycle Project ${suffix}`;
     // Explicit key: the name alone is too long for projectKey()'s 16-char budget to retain any
@@ -126,7 +147,7 @@ test.describe("project CRUD", () => {
     expect(listAfterDelete.some((p: { id: string }) => p.id === created.id)).toBeFalsy();
   });
 
-  test("update validates name and description instead of blanking the name", async ({ request }) => {
+  test("update validates name and description instead of blanking the name", { tag: '@tesbo.testId("TES-TC-950")' }, async ({ request }) => {
     // This used to assert the opposite: updateProject() had no "name required" check, so
     // PATCH {name: ""} blanked the name (COALESCE only skips null/undefined, and "" is neither),
     // and the spec documented that gap. validateProjectFields() is now shared by
@@ -150,7 +171,7 @@ test.describe("project CRUD", () => {
       }
 
       const tooLongName = await request.patch(`/api/projects/${created.id}`, {
-        data: { name: "x".repeat(256) },
+        data: { name: "x".repeat(31) },
         failOnStatusCode: false,
       });
       expect(tooLongName.status()).toBe(400);
@@ -161,8 +182,8 @@ test.describe("project CRUD", () => {
       });
       expect(tooLongDescription.status()).toBe(400);
 
-      // The max-length boundary itself is allowed — 255 passes, 256 (above) does not.
-      const atMaxName = `${"y".repeat(255)}`;
+      // The max-length boundary itself is allowed — 30 passes, 31 (above) does not.
+      const atMaxName = `${"y".repeat(30)}`;
       const okRes = await request.patch(`/api/projects/${created.id}`, { data: { name: atMaxName } });
       expect(okRes.ok()).toBeTruthy();
       const afterOk = await request.get(`/api/projects/${created.id}`);
@@ -172,7 +193,7 @@ test.describe("project CRUD", () => {
     }
   });
 
-  test("updating or deleting a project that doesn't exist returns 404", async ({ request }) => {
+  test("updating or deleting a project that doesn't exist returns 404", { tag: '@tesbo.testId("TES-TC-411")' }, async ({ request }) => {
     const missingId = "00000000-0000-0000-0000-000000000000";
 
     const patchRes = await request.patch(`/api/projects/${missingId}`, {
@@ -209,7 +230,7 @@ test.describe("project dashboard summary", () => {
     await api?.dispose();
   });
 
-  test("DSH-A-01/02 a brand-new project reports the full contract, zeroed, with no invented rates", async () => {
+  test("DSH-A-01/02 a brand-new project reports the full contract, zeroed, with no invented rates", { tag: '@tesbo.testId("TES-TC-412")' }, async () => {
     const project = await createProject(api);
     try {
       const summary = await getDashboard(api, project.id);
@@ -231,7 +252,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-03 testCases.total matches the list endpoint and excludes soft-deleted cases", async () => {
+  test("DSH-A-03 testCases.total matches the list endpoint and excludes soft-deleted cases", { tag: '@tesbo.testId("TES-TC-413")' }, async () => {
     const project = await createProject(api);
     try {
       const kept = await createTestCase(api, project.id);
@@ -252,7 +273,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-04 addedThisWeek counts the last 7 days only", async () => {
+  test("DSH-A-04 addedThisWeek counts the last 7 days only", { tag: '@tesbo.testId("TES-TC-414")' }, async () => {
     test.skip(!dbControlAvailable(), "needs psql access to backdate a test case past the 7-day window");
     const project = await createProject(api);
     try {
@@ -269,7 +290,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-05 passRate divides by executed cases, leaving Untested out of the denominator", async () => {
+  test("DSH-A-05 passRate divides by executed cases, leaving Untested out of the denominator", { tag: '@tesbo.testId("TES-TC-415")' }, async () => {
     const project = await createProject(api);
     try {
       // 3 passed, 1 failed, 2 untested → 3/4 executed = 75%, not 3/6 = 50%.
@@ -283,7 +304,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-06 a run with nothing executed reports no pass rate rather than 0%", async () => {
+  test("DSH-A-06 a run with nothing executed reports no pass rate rather than 0%", { tag: '@tesbo.testId("TES-TC-416")' }, async () => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Untested", "Untested", "Untested"] });
@@ -294,7 +315,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-07 deltaThisWeek stays null while either comparison window is empty", async () => {
+  test("DSH-A-07 deltaThisWeek stays null while either comparison window is empty", { tag: '@tesbo.testId("TES-TC-417")' }, async () => {
     const project = await createProject(api);
     try {
       // Everything executed just now: the recent window has data, the prior one has none.
@@ -308,7 +329,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-08 deltaThisWeek compares the last 7 days against the 7 before them", async () => {
+  test("DSH-A-08 deltaThisWeek compares the last 7 days against the 7 before them", { tag: '@tesbo.testId("TES-TC-418")' }, async () => {
     test.skip(!dbControlAvailable(), "needs psql access to place executions in the prior 7-day window");
     const project = await createProject(api);
     try {
@@ -323,7 +344,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-09 openBugs counts Open and Reopened, and nothing else", async () => {
+  test("DSH-A-09 openBugs counts Open and Reopened, and nothing else", { tag: '@tesbo.testId("TES-TC-419")' }, async () => {
     const project = await createProject(api);
     try {
       await createBug(api, project.id, { severity: "Critical" });
@@ -339,7 +360,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-10 a severity outside the four buckets is refused with a validation error, not a 500", async () => {
+  test("DSH-A-10 a severity outside the four buckets is refused with a validation error, not a 500", { tag: '@tesbo.testId("TES-TC-420")' }, async () => {
     const project = await createProject(api);
     try {
       // The dashboard's bySeverity has exactly four buckets, so a fifth severity would be counted
@@ -359,7 +380,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-11 activeRuns counts In Progress runs only", async () => {
+  test("DSH-A-11 activeRuns counts In Progress runs only", { tag: '@tesbo.testId("TES-TC-421")' }, async () => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Passed"], status: "In Progress" });
@@ -372,7 +393,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-12 coverage is null with no requirements, and a real percentage once they exist", async () => {
+  test("DSH-A-12 coverage is null with no requirements, and a real percentage once they exist", { tag: '@tesbo.testId("TES-TC-422")' }, async () => {
     test.skip(!dbControlAvailable(), "needs psql access to seed Jira requirements (no API route exists)");
     const project = await createProject(api);
     try {
@@ -392,7 +413,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-13 suites and plans match their own list endpoints", async () => {
+  test("DSH-A-13 suites and plans match their own list endpoints", { tag: '@tesbo.testId("TES-TC-423")' }, async () => {
     const project = await createProject(api);
     try {
       await createSuite(api, project.id);
@@ -411,7 +432,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-14 a caller with no session is refused and gets none of the summary", async ({ playwright }) => {
+  test("DSH-A-14 a caller with no session is refused and gets none of the summary", { tag: '@tesbo.testId("TES-TC-424")' }, async ({ playwright }) => {
     // An explicitly empty storage state, not just an omitted one: playwright.config.ts sets a
     // global `use.storageState`, and leaving it unset here yields account A's cookies rather than
     // an anonymous caller — which would quietly turn this into a second copy of DSH-A-15.
@@ -434,7 +455,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-15 another tenant cannot read this project's dashboard", async ({ request }) => {
+  test("DSH-A-15 another tenant cannot read this project's dashboard", { tag: '@tesbo.testId("TES-TC-425")' }, async ({ request }) => {
     // `request` here is account A — a real, fully authenticated caller from a different workspace.
     const res = await request.get(`/api/projects/${tenant!.projectId}/dashboard`, {
       failOnStatusCode: false,
@@ -442,7 +463,7 @@ test.describe("project dashboard summary", () => {
     expect([403, 404]).toContain(res.status());
   });
 
-  test("DSH-A-16 a missing or malformed project id fails cleanly, never with a 500", async () => {
+  test("DSH-A-16 a missing or malformed project id fails cleanly, never with a 500", { tag: '@tesbo.testId("TES-TC-426")' }, async () => {
     const missing = await api.get("/api/projects/00000000-0000-0000-0000-000000000000/dashboard", {
       failOnStatusCode: false,
     });
@@ -452,7 +473,7 @@ test.describe("project dashboard summary", () => {
     expect(malformed.status()).toBeLessThan(500);
   });
 
-  test("DSH-A-17 the dashboard disappears with the project", async () => {
+  test("DSH-A-17 the dashboard disappears with the project", { tag: '@tesbo.testId("TES-TC-427")' }, async () => {
     const project = await createProject(api);
     await getDashboard(api, project.id); // readable while it exists
     await api.delete(`/api/projects/${project.id}`);
@@ -461,7 +482,7 @@ test.describe("project dashboard summary", () => {
     expect([403, 404]).toContain(res.status());
   });
 
-  test("DSH-A-19 the per-run status counters add up to totalCases", async () => {
+  test("DSH-A-19 the per-run status counters add up to totalCases", { tag: '@tesbo.testId("TES-TC-428")' }, async () => {
     const project = await createProject(api);
     try {
       const run = await seedRun(api, project.id, {
@@ -481,7 +502,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-20 a Retest execution is treated the same way by the run list and the dashboard", async () => {
+  test("DSH-A-20 a Retest execution is treated the same way by the run list and the dashboard", { tag: '@tesbo.testId("TES-TC-429")' }, async () => {
     const project = await createProject(api);
     try {
       const run = await seedRun(api, project.id, { statuses: ["Passed", "Retest"] });
@@ -509,7 +530,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-21 a soft-deleted execution disappears from both the dashboard and the run list", async () => {
+  test("DSH-A-21 a soft-deleted execution disappears from both the dashboard and the run list", { tag: '@tesbo.testId("TES-TC-430")' }, async () => {
     test.skip(!dbControlAvailable(), "needs psql access — executions have no DELETE route");
     const project = await createProject(api);
     try {
@@ -538,7 +559,7 @@ test.describe("project dashboard summary", () => {
     }
   });
 
-  test("DSH-A-22 a run with no test cases reports nothing to execute", async () => {
+  test("DSH-A-22 a run with no test cases reports nothing to execute", { tag: '@tesbo.testId("TES-TC-431")' }, async () => {
     const project = await createProject(api);
     try {
       const run = await seedRun(api, project.id, { statuses: [] });
@@ -606,7 +627,7 @@ test.describe("projects overview", () => {
     return entry!;
   }
 
-  test("PVW-A-01 the route is not swallowed as a project id", async () => {
+  test("PVW-A-01 the route is not swallowed as a project id", { tag: '@tesbo.testId("TES-TC-1187")' }, async () => {
     // `/api/projects/:id` is declared right beside this route, and Nest matches in declaration
     // order — get that ordering wrong and "overview" is read as a project id and 404s. This is the
     // cheapest possible regression test for a mistake that is invisible in review.
@@ -615,7 +636,7 @@ test.describe("projects overview", () => {
     expect(Array.isArray(await res.json())).toBe(true);
   });
 
-  test("PVW-A-02 an anonymous caller is refused", async () => {
+  test("PVW-A-02 an anonymous caller is refused", { tag: '@tesbo.testId("TES-TC-1188")' }, async () => {
     const anon = await anonymousContext();
     try {
       const res = await anon.get("/api/projects/overview", { failOnStatusCode: false });
@@ -626,7 +647,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-03 a brand-new project needs setup and claims no run it has not had", async () => {
+  test("PVW-A-03 a brand-new project needs setup and claims no run it has not had", { tag: '@tesbo.testId("TES-TC-1189")' }, async () => {
     const project = await createProject(api);
     try {
       const entry = await overviewFor(project.id);
@@ -642,7 +663,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-04 the test case count matches the repository, and excludes archived and deleted cases", async () => {
+  test("PVW-A-04 the test case count matches the repository, and excludes archived and deleted cases", { tag: '@tesbo.testId("TES-TC-1190")' }, async () => {
     const project = await createProject(api);
     try {
       const live = await createTestCase(api, project.id, { title: `E2E Overview Live ${uniqueSuffix()}` });
@@ -665,7 +686,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-05 the suite count includes nested suites, matching the suite tree", async () => {
+  test("PVW-A-05 the suite count includes nested suites, matching the suite tree", { tag: '@tesbo.testId("TES-TC-1191")' }, async () => {
     const project = await createProject(api);
     try {
       const parent = await createSuite(api, project.id, `E2E Overview Parent ${uniqueSuffix()}`);
@@ -688,7 +709,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-06 the members match the project's own member list", async () => {
+  test("PVW-A-06 the members match the project's own member list", { tag: '@tesbo.testId("TES-TC-1192")' }, async () => {
     const project = await createProject(api);
     try {
       const members = await (await api.get(`/api/projects/${project.id}/members`)).json();
@@ -703,7 +724,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-07 the pass rate divides by executed cases, not by the run's total", async () => {
+  test("PVW-A-07 the pass rate divides by executed cases, not by the run's total", { tag: '@tesbo.testId("TES-TC-1193")' }, async () => {
     const project = await createProject(api);
     try {
       // Two passed, one failed, one never executed: 2/3 executed = 67%, not 2/4 = 50%.
@@ -722,7 +743,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-08 a newer unexecuted run does not displace the last executed one", async () => {
+  test("PVW-A-08 a newer unexecuted run does not displace the last executed one", { tag: '@tesbo.testId("TES-TC-1194")' }, async () => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Passed", "Passed"] });
@@ -739,7 +760,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-09 a project with cases but no activity is configured, and activity makes it active", async () => {
+  test("PVW-A-09 a project with cases but no activity is configured, and activity makes it active", { tag: '@tesbo.testId("TES-TC-1195")' }, async () => {
     const project = await createProject(api);
     try {
       await createTestCase(api, project.id, { title: `E2E Overview Status ${uniqueSuffix()}` });
@@ -769,7 +790,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-10 an archived project drops out of the overview, as it does from the list", async () => {
+  test("PVW-A-10 an archived project drops out of the overview, as it does from the list", { tag: '@tesbo.testId("TES-TC-1196")' }, async () => {
     const project = await createProject(api);
     let archived = false;
     try {
@@ -790,7 +811,7 @@ test.describe("projects overview", () => {
     }
   });
 
-  test("PVW-A-11 one response covers every project the caller can see", async () => {
+  test("PVW-A-11 one response covers every project the caller can see", { tag: '@tesbo.testId("TES-TC-1197")' }, async () => {
     const first = await createProject(api);
     const second = await createProject(api);
     try {

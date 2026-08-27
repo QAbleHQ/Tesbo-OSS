@@ -109,7 +109,7 @@ test.describe("projects list — creating a project", () => {
     await api?.dispose();
   });
 
-  test("PRJ-C-01 a name alone is enough, and the new project opens on its dashboard", async ({ page }) => {
+  test("PRJ-C-01 a name alone is enough, and the new project opens on its dashboard", { tag: '@tesbo.testId("TES-TC-759")' }, async ({ page }) => {
     const name = `E2E UI Create ${uniqueSuffix()}`;
     let projectId: string | undefined;
     try {
@@ -130,7 +130,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-02 an explicit key and description are persisted verbatim", async ({ page }) => {
+  test("PRJ-C-02 an explicit key and description are persisted verbatim", { tag: '@tesbo.testId("TES-TC-760")' }, async ({ page }) => {
     const name = `E2E UI Create Full ${uniqueSuffix()}`;
     const key = uniqueKey("UIC");
     const description = "Created through the projects list UI";
@@ -156,7 +156,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-03/07 a new project appears in the list needing setup, with nothing counted yet", async ({
+  test("PRJ-C-03/07 a new project appears in the list needing setup, with nothing counted yet", { tag: '@tesbo.testId("TES-TC-761")' }, async ({
     page,
   }) => {
     const project = await createProject(api);
@@ -174,12 +174,12 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-06 the ?create=1 deep link opens the modal straight away", async ({ page }) => {
+  test("PRJ-C-06 the ?create=1 deep link opens the modal straight away", { tag: '@tesbo.testId("TES-TC-762")' }, async ({ page }) => {
     await page.goto("/projects?create=1");
     await expect(createForm(page).locator("#create-name")).toBeVisible();
   });
 
-  test("PRJ-C-08/09 an empty or whitespace-only name is refused without calling the API", async ({
+  test("PRJ-C-08/09 an empty or whitespace-only name is refused without calling the API", { tag: '@tesbo.testId("TES-TC-763")' }, async ({
     page,
   }) => {
     await page.goto("/projects");
@@ -206,7 +206,7 @@ test.describe("projects list — creating a project", () => {
     await expect(form.locator("#create-name")).toBeVisible();
   });
 
-  test("PRJ-C-10 a duplicate key is reported inline and creates nothing", async ({ page }) => {
+  test("PRJ-C-10 a duplicate key is reported inline and creates nothing", { tag: '@tesbo.testId("TES-TC-764")' }, async ({ page }) => {
     const existing = await createProject(api);
     try {
       await page.goto("/projects");
@@ -224,7 +224,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-11 two projects may share a name when their keys differ", async ({ page }) => {
+  test("PRJ-C-11 two projects may share a name when their keys differ", { tag: '@tesbo.testId("TES-TC-765")' }, async ({ page }) => {
     const sharedName = `E2E UI Shared Name ${uniqueSuffix()}`;
     const first = await createProject(api, { name: sharedName, key: uniqueKey("SHA") });
     let secondId: string | undefined;
@@ -244,7 +244,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-12 the key field accepts only uppercase alphanumerics as you type", async ({ page }) => {
+  test("PRJ-C-12 the key field accepts only uppercase alphanumerics as you type", { tag: '@tesbo.testId("TES-TC-766")' }, async ({ page }) => {
     await page.goto("/projects");
     await openCreateModal(page);
     const key = createForm(page).locator("#create-key");
@@ -253,9 +253,9 @@ test.describe("projects list — creating a project", () => {
     await expect(key).toHaveValue("MYPROJECTKEY1");
   });
 
-  test("PRJ-C-13 a 255-character name is accepted and a 256-character one is refused", async ({ page }) => {
+  test("PRJ-C-13 a 30-character name is accepted and a 31-character one is refused", async ({ page }) => {
     const suffix = uniqueSuffix();
-    const atLimit = `E2E${suffix}`.padEnd(255, "x");
+    const atLimit = `E2E${suffix}`.padEnd(30, "x");
     let projectId: string | undefined;
     try {
       await page.goto("/projects");
@@ -266,10 +266,12 @@ test.describe("projects list — creating a project", () => {
       await form.getByRole("button", { name: "Create project", exact: true }).click();
       await page.waitForURL(/\/dashboard$/);
       projectId = page.url().split("/projects/")[1].split("/")[0];
-      expect((await (await api.get(`/api/projects/${projectId}`)).json()).name).toHaveLength(255);
+      expect((await (await api.get(`/api/projects/${projectId}`)).json()).name).toHaveLength(30);
 
-      // One character past the column width must be a refusal, not a silent truncation.
-      const overLimit = `E2E${uniqueSuffix()}`.padEnd(256, "y");
+      // One character past the product-chosen cap must be a refusal, not a silent truncation.
+      // Fill bypasses the input's maxLength attribute (unlike real typing), so this still reaches
+      // the server and exercises its own validation rather than only the client-side guard.
+      const overLimit = `E2E${uniqueSuffix()}`.padEnd(31, "y");
       await page.goto("/projects");
       await openCreateModal(page);
       form = createForm(page);
@@ -284,7 +286,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-14/15 a unicode name round-trips and drives the card's avatar letter", async ({ page }) => {
+  test("PRJ-C-14/15 a unicode name round-trips and drives the card's avatar letter", { tag: '@tesbo.testId("TES-TC-768")' }, async ({ page }) => {
     const name = `日本語 プロジェクト ${uniqueSuffix()}`;
     const numeric = `9 Lives ${uniqueSuffix()}`;
     const unicodeProject = await createProject(api, { name, key: uniqueKey("UNI") });
@@ -299,7 +301,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-16 cancelling discards what was typed", async ({ page }) => {
+  test("PRJ-C-16 cancelling discards what was typed", { tag: '@tesbo.testId("TES-TC-769")' }, async ({ page }) => {
     await page.goto("/projects");
     await openCreateModal(page);
     let form = createForm(page);
@@ -312,7 +314,7 @@ test.describe("projects list — creating a project", () => {
     await expect(form.locator("#create-name")).toHaveValue("");
   });
 
-  test("PRJ-C-18 double-clicking Create makes exactly one project", async ({ page }) => {
+  test("PRJ-C-18 double-clicking Create makes exactly one project", { tag: '@tesbo.testId("TES-TC-770")' }, async ({ page }) => {
     const name = `E2E UI Double ${uniqueSuffix()}`;
     let created: { id: string }[] = [];
     try {
@@ -343,7 +345,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-19 a server error keeps the modal open and creates nothing", async ({ page }) => {
+  test("PRJ-C-19 a server error keeps the modal open and creates nothing", { tag: '@tesbo.testId("TES-TC-771")' }, async ({ page }) => {
     await page.goto("/projects");
     await openCreateModal(page);
     const form = createForm(page);
@@ -362,7 +364,7 @@ test.describe("projects list — creating a project", () => {
     await expect(page).toHaveURL(/\/projects$/);
   });
 
-  test("PRJ-C-20 a dropped connection surfaces an error rather than hanging", async ({ page }) => {
+  test("PRJ-C-20 a dropped connection surfaces an error rather than hanging", { tag: '@tesbo.testId("TES-TC-772")' }, async ({ page }) => {
     await page.goto("/projects");
     await openCreateModal(page);
     const form = createForm(page);
@@ -379,7 +381,7 @@ test.describe("projects list — creating a project", () => {
     await expect(form.getByRole("button", { name: "Create project", exact: true })).toBeEnabled();
   });
 
-  test("PRJ-C-26 an unauthenticated visitor is sent to the login screen", async ({ browser }) => {
+  test("PRJ-C-26 an unauthenticated visitor is sent to the login screen", { tag: '@tesbo.testId("TES-TC-773")' }, async ({ browser }) => {
     const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     try {
       const anonymous = await context.newPage();
@@ -390,7 +392,7 @@ test.describe("projects list — creating a project", () => {
     }
   });
 
-  test("PRJ-C-27 another tenant's projects are not in this list", async ({ page }) => {
+  test("PRJ-C-27 another tenant's projects are not in this list", { tag: '@tesbo.testId("TES-TC-774")' }, async ({ page }) => {
     const otherTenantProjects = await (await api.get("/api/projects")).json();
     await page.goto("/projects");
     const rendered = await renderedProjectNames(page);
@@ -420,7 +422,7 @@ test.describe("projects list — access and the empty state", () => {
    * anything being removed.
    */
 
-  test("PRJ-C-04/05/22 a manager with no projects yet is invited to create the first one", async ({
+  test("PRJ-C-04/05/22 a manager with no projects yet is invited to create the first one", { tag: '@tesbo.testId("TES-TC-775")' }, async ({
     browser,
   }) => {
     const manager = await seedWorkspaceMember(tenant!.organizationId, "manager");
@@ -444,7 +446,7 @@ test.describe("projects list — access and the empty state", () => {
     }
   });
 
-  test("PRJ-C-21 a plain member is told to ask for access instead of being offered a button", async ({
+  test("PRJ-C-21 a plain member is told to ask for access instead of being offered a button", { tag: '@tesbo.testId("TES-TC-776")' }, async ({
     browser,
   }) => {
     const member = await seedWorkspaceMember(tenant!.organizationId, "member");
@@ -464,7 +466,7 @@ test.describe("projects list — access and the empty state", () => {
     }
   });
 
-  test("PRJ-C-23 the server refuses a member who posts around the missing button", async ({ browser }) => {
+  test("PRJ-C-23 the server refuses a member who posts around the missing button", { tag: '@tesbo.testId("TES-TC-777")' }, async ({ browser }) => {
     const member = await seedWorkspaceMember(tenant!.organizationId, "member");
     const context = await browser.newContext({ storageState: member.storageStatePath });
     try {
@@ -482,7 +484,7 @@ test.describe("projects list — access and the empty state", () => {
     }
   });
 
-  test("PRJ-D-27 a project the caller is not a member of is absent from their list", async ({ browser }) => {
+  test("PRJ-D-27 a project the caller is not a member of is absent from their list", { tag: '@tesbo.testId("TES-TC-778")' }, async ({ browser }) => {
     const admin = await seedWorkspaceMember(tenant!.organizationId, "admin");
     const context = await browser.newContext({ storageState: admin.storageStatePath });
     try {
@@ -511,7 +513,7 @@ test.describe("projects list — what the cards report", () => {
     await api?.dispose();
   });
 
-  test("PRJ-D-01/02 the test case and suite counts match the API", async ({ page }) => {
+  test("PRJ-D-01/02 the test case and suite counts match the API", { tag: '@tesbo.testId("TES-TC-779")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await createTestCase(api, project.id);
@@ -529,7 +531,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-03/04 the pass rate and its colour follow the run's result", async ({ page }) => {
+  test("PRJ-D-03/04 the pass rate and its colour follow the run's result", { tag: '@tesbo.testId("TES-TC-780")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       // 9 of 10 passed = 90%, the boundary where the colour becomes success green.
@@ -556,7 +558,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-05/06/07 the status badge tracks setup, configuration and activity", async ({ page }) => {
+  test("PRJ-D-05/06/07 the status badge tracks setup, configuration and activity", { tag: '@tesbo.testId("TES-TC-781")' }, async ({ page }) => {
     const fresh = await createProject(api);
     const configured = await createProject(api);
     try {
@@ -572,7 +574,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-09 the card's pass rate agrees with the project dashboard", async ({ page }) => {
+  test("PRJ-D-09 the card's pass rate agrees with the project dashboard", { tag: '@tesbo.testId("TES-TC-782")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       // A finished run, everything passing.
@@ -595,7 +597,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-10 the card's blocked count is the run's real blocked count", async ({ page }) => {
+  test("PRJ-D-10 the card's blocked count is the run's real blocked count", { tag: '@tesbo.testId("TES-TC-783")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const run = await seedRun(api, project.id, {
@@ -619,7 +621,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-08 the pass-rate bar segments are proportional and omit empty ones", async ({ page }) => {
+  test("PRJ-D-08 the pass-rate bar segments are proportional and omit empty ones", { tag: '@tesbo.testId("TES-TC-784")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Passed", "Passed", "Passed", "Failed"], status: "Completed" });
@@ -634,7 +636,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-12 a project with no members says so rather than showing an empty row", async ({ page }) => {
+  test("PRJ-D-12 a project with no members says so rather than showing an empty row", { tag: '@tesbo.testId("TES-TC-785")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto("/projects");
@@ -646,7 +648,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-16 a project with no description shows the guidance placeholder", async ({ page }) => {
+  test("PRJ-D-16 a project with no description shows the guidance placeholder", { tag: '@tesbo.testId("TES-TC-786")' }, async ({ page }) => {
     const without = await createProject(api);
     const withDescription = await createProject(api, { description: "A real description" });
     try {
@@ -661,7 +663,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-15 a project with no activity is labelled by when it was created", async ({ page }) => {
+  test("PRJ-D-15 a project with no activity is labelled by when it was created", { tag: '@tesbo.testId("TES-TC-787")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto("/projects");
@@ -671,7 +673,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-18 the project key is rendered in uppercase", async ({ page }) => {
+  test("PRJ-D-18 the project key is rendered in uppercase", { tag: '@tesbo.testId("TES-TC-788")' }, async ({ page }) => {
     const project = await createProject(api, { key: uniqueKey("CAS") });
     try {
       await page.goto("/projects");
@@ -681,7 +683,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-19 a project's colour is stable across reloads", async ({ page }) => {
+  test("PRJ-D-19 a project's colour is stable across reloads", { tag: '@tesbo.testId("TES-TC-789")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const avatarColour = async () =>
@@ -699,7 +701,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-20 clicking a card opens that project's dashboard", async ({ page }) => {
+  test("PRJ-D-20 clicking a card opens that project's dashboard", { tag: '@tesbo.testId("TES-TC-790")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto("/projects");
@@ -710,7 +712,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-21 a project whose runs cannot be fetched still renders", async ({ page }) => {
+  test("PRJ-D-21 a project whose runs cannot be fetched still renders", { tag: '@tesbo.testId("TES-TC-791")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.route(
@@ -728,7 +730,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-22 a failure in one project's stats does not blank the whole list", async ({ page }) => {
+  test("PRJ-D-22 a failure in one project's stats does not blank the whole list", { tag: '@tesbo.testId("TES-TC-792")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.route(
@@ -750,13 +752,13 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-23 the loading spinner is replaced by content", async ({ page }) => {
+  test("PRJ-D-23 the loading spinner is replaced by content", { tag: '@tesbo.testId("TES-TC-793")' }, async ({ page }) => {
     await page.goto("/projects");
     await expect(page.getByText("Loading projects…")).toHaveCount(0);
     await expect(page.getByText("Tesbo Test Manager Projects")).toBeVisible();
   });
 
-  test("PRJ-D-25/26 the list is newest first, and an archived project drops out of it", async ({ page }) => {
+  test("PRJ-D-25/26 the list is newest first, and an archived project drops out of it", { tag: '@tesbo.testId("TES-TC-794")' }, async ({ page }) => {
     const older = await createProject(api, { name: `E2E UI Order A ${uniqueSuffix()}` });
     const newer = await createProject(api, { name: `E2E UI Order B ${uniqueSuffix()}` });
     try {
@@ -781,7 +783,7 @@ test.describe("projects list — what the cards report", () => {
     }
   });
 
-  test("PRJ-D-28 an unexecuted run does not read as a zero-percent pass rate", async ({ page }) => {
+  test("PRJ-D-28 an unexecuted run does not read as a zero-percent pass rate", { tag: '@tesbo.testId("TES-TC-795")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Untested", "Untested", "Untested"] });
@@ -806,7 +808,7 @@ test.describe("projects list — the grid/list toggle", () => {
     await api?.dispose();
   });
 
-  test("PRJ-V-01/02 grid is the default and List switches the layout", async ({ page }) => {
+  test("PRJ-V-01/02 grid is the default and List switches the layout", { tag: '@tesbo.testId("TES-TC-796")' }, async ({ page }) => {
     await page.goto("/projects");
     await expect(page.getByRole("button", { name: "Grid view" })).toHaveAttribute("aria-pressed", "true");
     await expect(page.getByRole("button", { name: "List view" })).toHaveAttribute("aria-pressed", "false");
@@ -816,7 +818,7 @@ test.describe("projects list — the grid/list toggle", () => {
     await expect(page.getByRole("button", { name: "Grid view" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  test("PRJ-V-03 the chosen view is remembered across a reload", async ({ page }) => {
+  test("PRJ-V-03 the chosen view is remembered across a reload", { tag: '@tesbo.testId("TES-TC-797")' }, async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "List view" }).click();
     await expect
@@ -839,7 +841,7 @@ test.describe("projects list — the grid/list toggle", () => {
     });
   }
 
-  test("PRJ-V-05 list view labels every column", async ({ page }) => {
+  test("PRJ-V-05 list view labels every column", { tag: '@tesbo.testId("TES-TC-801")' }, async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "List view" }).click();
 
@@ -848,7 +850,7 @@ test.describe("projects list — the grid/list toggle", () => {
     }
   });
 
-  test("PRJ-V-06/07 both views report the same numbers for the same project", async ({ page }) => {
+  test("PRJ-V-06/07 both views report the same numbers for the same project", { tag: '@tesbo.testId("TES-TC-802")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await createTestCase(api, project.id);
@@ -874,7 +876,7 @@ test.describe("projects list — the grid/list toggle", () => {
     }
   });
 
-  test("PRJ-V-07 list view says 'No runs yet' where grid shows a dash", async ({ page }) => {
+  test("PRJ-V-07 list view says 'No runs yet' where grid shows a dash", { tag: '@tesbo.testId("TES-TC-803")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto("/projects");
@@ -888,7 +890,7 @@ test.describe("projects list — the grid/list toggle", () => {
     }
   });
 
-  test("PRJ-V-10 a list row highlights on hover and stays clickable", async ({ page }) => {
+  test("PRJ-V-10 a list row highlights on hover and stays clickable", { tag: '@tesbo.testId("TES-TC-804")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto("/projects");
@@ -982,7 +984,7 @@ test.describe("projects list — search and sort", () => {
     await expect(sortTrigger(page)).toHaveText(new RegExp(option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 
-  test("PRJ-S-01 typing a project name filters the list down to it", async ({ page }) => {
+  test("PRJ-S-01 typing a project name filters the list down to it", { tag: '@tesbo.testId("TES-TC-1056")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     await searchBox(page).fill(names.alpha);
@@ -993,7 +995,7 @@ test.describe("projects list — search and sort", () => {
     await expect(projectCard(page, names.gamma)).toHaveCount(0);
   });
 
-  test("PRJ-S-02 a shared keyword keeps every project that matches it", async ({ page }) => {
+  test("PRJ-S-02 a shared keyword keeps every project that matches it", { tag: '@tesbo.testId("TES-TC-1057")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     await searchBox(page).fill(token);
@@ -1003,7 +1005,7 @@ test.describe("projects list — search and sort", () => {
     }
   });
 
-  test("PRJ-S-03 search is case-insensitive and ignores surrounding whitespace", async ({ page }) => {
+  test("PRJ-S-03 search is case-insensitive and ignores surrounding whitespace", { tag: '@tesbo.testId("TES-TC-1058")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     await searchBox(page).fill(`   ${token.toUpperCase()}   `);
@@ -1013,7 +1015,7 @@ test.describe("projects list — search and sort", () => {
     await expect(projectCard(page, names.alpha)).toBeVisible();
   });
 
-  test("PRJ-S-04 search matches a project's key and its description, not only its name", async ({ page }) => {
+  test("PRJ-S-04 search matches a project's key and its description, not only its name", { tag: '@tesbo.testId("TES-TC-1059")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     // Description-only hit: this project's name contains no part of the token, so the only way it
@@ -1027,7 +1029,7 @@ test.describe("projects list — search and sort", () => {
     await expect(projectCard(page, names.beta)).toHaveCount(0);
   });
 
-  test("PRJ-S-05 filtering happens as you type, with no Enter and no request per keystroke", async ({ page }) => {
+  test("PRJ-S-05 filtering happens as you type, with no Enter and no request per keystroke", { tag: '@tesbo.testId("TES-TC-1060")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     let projectRequests = 0;
@@ -1043,7 +1045,7 @@ test.describe("projects list — search and sort", () => {
     expect(projectRequests, "filtering is client-side over the loaded list").toBe(0);
   });
 
-  test("PRJ-S-06 a term matching nothing says so and offers the term back", async ({ page }) => {
+  test("PRJ-S-06 a term matching nothing says so and offers the term back", { tag: '@tesbo.testId("TES-TC-1061")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     const miss = `NoSuchProject${uniqueSuffix()}`;
@@ -1054,7 +1056,7 @@ test.describe("projects list — search and sort", () => {
     await expect(projectCard(page, names.alpha)).toHaveCount(0);
   });
 
-  test("PRJ-S-07 clearing the search restores the projects it had hidden", async ({ page }) => {
+  test("PRJ-S-07 clearing the search restores the projects it had hidden", { tag: '@tesbo.testId("TES-TC-1062")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     await searchBox(page).fill(names.alpha);
@@ -1067,7 +1069,7 @@ test.describe("projects list — search and sort", () => {
     await expect(projectCard(page, names.gamma)).toBeVisible();
   });
 
-  test("PRJ-S-08 Name (A–Z) and (Z–A) are exact reverses of each other", async ({ page }) => {
+  test("PRJ-S-08 Name (A–Z) and (Z–A) are exact reverses of each other", { tag: '@tesbo.testId("TES-TC-1063")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
     // Narrowed to this test's own three projects so unrelated fixtures cannot sit between them.
     await searchBox(page).fill(token);
@@ -1082,7 +1084,7 @@ test.describe("projects list — search and sort", () => {
     expect(descending).toEqual([names.gamma, names.beta, names.alpha]);
   });
 
-  test("PRJ-S-09 Newest created puts the most recently created project first", async ({ page }) => {
+  test("PRJ-S-09 Newest created puts the most recently created project first", { tag: '@tesbo.testId("TES-TC-1064")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
     await searchBox(page).fill(token);
     await expect(projectCard(page, names.gamma)).toBeVisible();
@@ -1093,7 +1095,7 @@ test.describe("projects list — search and sort", () => {
     expect(order).toEqual([names.gamma, names.beta, names.alpha]);
   });
 
-  test("PRJ-S-10 the chosen sort still applies after the search term changes", async ({ page }) => {
+  test("PRJ-S-10 the chosen sort still applies after the search term changes", { tag: '@tesbo.testId("TES-TC-1065")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
 
     await chooseSort(page, "Name (Z–A)");
@@ -1107,7 +1109,7 @@ test.describe("projects list — search and sort", () => {
     ]);
   });
 
-  test("PRJ-S-11 sorting survives switching between grid and list view", async ({ page }) => {
+  test("PRJ-S-11 sorting survives switching between grid and list view", { tag: '@tesbo.testId("TES-TC-1066")' }, async ({ page }) => {
     await gotoProjectsAndFind(page, names.alpha);
     await searchBox(page).fill(token);
     await chooseSort(page, "Name (A–Z)");
@@ -1119,5 +1121,43 @@ test.describe("projects list — search and sort", () => {
     await page.getByRole("button", { name: "Grid view" }).click();
     const inGrid = (await renderedProjectNames(page)).filter((n) => n.includes(token));
     expect(inGrid).toEqual([names.alpha, names.beta, names.gamma]);
+  });
+});
+
+/*
+ * Basecamp 10221710841 ("[Projects] List view not showing failed pass rate").
+ *
+ * The grid card has always carried the full breakdown — a segmented bar plus "N passed · N failed".
+ * The list row drew a single green bar filled to the pass rate, so a project at 67% looked like a
+ * third of its work was missing rather than failed. Same data, same colours, counts in a tooltip
+ * because the row has no space for a legend.
+ */
+test.describe("projects list — the list view reports failures", () => {
+  test("PRJ-U-30 a project with failures shows a failed segment and count in the list row", { tag: '@tesbo.testId("TES-TC-1359")' }, async ({ page }) => {
+    const api: APIRequestContext = await screensApi();
+    const project = await createProject(api);
+    try {
+      // Two passes and one failure: a pass rate that is neither 0 nor 100, so a bar that only ever
+      // paints the passing share is visibly wrong.
+      await seedRun(api, project.id, { statuses: ["Passed", "Passed", "Failed"], status: "Completed" });
+
+      await page.goto("/projects");
+      await page.getByRole("button", { name: /list view/i }).click();
+
+      const row = page.locator("a").filter({ hasText: project.name }).first();
+      await expect(row).toBeVisible();
+      await expect(row, "the failure count has to be readable without opening the project").toContainText(
+        /1 failed/,
+      );
+
+      // And the bar itself carries a fail-coloured segment, not just green.
+      const segments = row.locator("div[title] > div");
+      const colors = await segments.evaluateAll((els) => els.map((el) => getComputedStyle(el).backgroundColor));
+      expect(colors.length, "the compact bar should paint one segment per outcome").toBeGreaterThanOrEqual(2);
+      expect(new Set(colors).size, "passed and failed must not be the same colour").toBeGreaterThan(1);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
+    }
   });
 });

@@ -16,7 +16,7 @@ const ctx = JSON.parse(fs.readFileSync(path.join(__dirname, "../.auth/context.js
 const STATE_PATH = path.join(__dirname, "../.auth/state.json");
 
 test.describe("test case import", () => {
-  test("importing a CSV shows a completion toast that survives closing the import modal", async ({ page }) => {
+  test("importing a CSV shows a completion toast that survives closing the import modal", { tag: '@tesbo.testId("TES-TC-824")' }, async ({ page }) => {
     // Regression test for: import completed successfully but no toast notification was
     // ever shown, during or after — see ImportTestCasesModal.tsx / testcases/page.tsx.
     const stamp = Date.now();
@@ -219,7 +219,7 @@ test.describe("test case import wizard", () => {
 
   /* ─────────────────────────── the wizard ─────────────────────────── */
 
-  test("auto-maps the column names other tools export, without any manual mapping", async ({ browser }) => {
+  test("auto-maps the column names other tools export, without any manual mapping", { tag: '@tesbo.testId("TES-TC-825")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Aliases");
@@ -259,7 +259,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("finds the header row below leading junk rows, and numbers errors by file line", async ({ browser }) => {
+  test("finds the header row below leading junk rows, and numbers errors by file line", { tag: '@tesbo.testId("TES-TC-826")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Header Row");
@@ -293,7 +293,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("will not import until a Title column is mapped", async ({ browser }) => {
+  test("will not import until a Title column is mapped", { tag: '@tesbo.testId("TES-TC-827")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "No Title");
@@ -316,7 +316,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("skips titles that already exist and titles repeated inside the file", async ({ browser }) => {
+  test("skips titles that already exist and titles repeated inside the file", { tag: '@tesbo.testId("TES-TC-828")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Duplicates");
@@ -354,7 +354,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("creates the suite and its component subfolder, and reuses them on a second import", async ({ browser }) => {
+  test("creates the suite and its component subfolder, and reuses them on a second import", { tag: '@tesbo.testId("TES-TC-829")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Suites");
@@ -397,7 +397,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("splits steps into actions with their expected results", async ({ browser }) => {
+  test("splits steps into actions with their expected results", { tag: '@tesbo.testId("TES-TC-830")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Steps");
@@ -423,7 +423,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("offers a worksheet picker for a workbook, defaulting to the sheet holding test cases", async ({ browser }) => {
+  test("offers a worksheet picker for a workbook, defaulting to the sheet holding test cases", { tag: '@tesbo.testId("TES-TC-831")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Workbook");
@@ -458,7 +458,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("keeps the user on the upload step when there is nothing readable in the file", async ({ browser }) => {
+  test("keeps the user on the upload step when there is nothing readable in the file", { tag: '@tesbo.testId("TES-TC-832")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Unreadable");
@@ -477,9 +477,161 @@ test.describe("test case import wizard", () => {
     }
   });
 
+  // Regression test for: the wizard let a PDF or image file through to the Map Columns step —
+  // the <input accept> attribute only hints at the OS file picker (and not reliably even there;
+  // an "All Files" filter or a file manager that ignores it slips past it), and drag-and-drop
+  // bypasses it entirely, so it was never a real gate. ImportTestCasesModal.handleFileSelect now
+  // checks the file extension itself before ever handing the file to the XLSX parser.
+  const UNSUPPORTED_FILES: [name: string, mimeType: string, ext: string][] = [
+    ["not-a-spreadsheet.pdf", "application/pdf", ".pdf"],
+    ["screenshot.png", "image/png", ".png"],
+  ];
+
+  for (const [name, mimeType, ext] of UNSUPPORTED_FILES) {
+    test(`rejects a ${ext} file and keeps the user on the upload step`, async ({ browser }) => {
+      let fixture: Fixture | undefined;
+      try {
+        fixture = await withProject(browser, `Bad Format ${ext}`);
+        const { page, projectId } = fixture;
+        await openWizard(page, projectId);
+
+        await page.locator('input[type="file"]').setInputFiles({
+          name,
+          mimeType,
+          buffer: Buffer.from("not actually a spreadsheet"),
+        });
+
+        await expect(
+          page.getByText(`Unsupported file format "${ext}". Please upload a .csv, .xlsx, or .xls file.`),
+        ).toBeVisible();
+        // Nothing to advance with — Next stays disabled and the wizard never reaches Map Columns.
+        await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+        await expect(page.getByText("Map your file columns to test case fields.")).toBeHidden();
+
+        // Recovery: picking a real file afterwards clears the error and proceeds normally.
+        const title = `E2E Bad Format Recovery ${Date.now()}`;
+        await uploadCsv(page, toCsv(["Title"], [[title]]));
+        await expect(page.getByText("Map your file columns to test case fields.")).toBeVisible();
+        expect(await listCases(projectId)).toEqual([]);
+      } finally {
+        await disposeProject(fixture);
+      }
+    });
+  }
+
+  test("rejects a file with no extension at all", async ({ browser }) => {
+    let fixture: Fixture | undefined;
+    try {
+      fixture = await withProject(browser, "No Extension");
+      const { page, projectId } = fixture;
+      await openWizard(page, projectId);
+
+      await page.locator('input[type="file"]').setInputFiles({
+        name: "README",
+        mimeType: "application/octet-stream",
+        buffer: Buffer.from("not a spreadsheet"),
+      });
+
+      await expect(
+        page.getByText("This file type isn't supported. Please upload a .csv, .xlsx, or .xls file."),
+      ).toBeVisible();
+      await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+    } finally {
+      await disposeProject(fixture);
+    }
+  });
+
+  test("accepts a spreadsheet file whose extension is uppercase", async ({ browser }) => {
+    let fixture: Fixture | undefined;
+    try {
+      fixture = await withProject(browser, "Uppercase Ext");
+      const { page, projectId } = fixture;
+      const title = `E2E Uppercase Ext ${Date.now()}`;
+      await openWizard(page, projectId);
+
+      await page.locator('input[type="file"]').setInputFiles({
+        name: "IMPORT.CSV",
+        mimeType: "text/csv",
+        buffer: Buffer.from(toCsv(["Title"], [[title]])),
+      });
+      await page.getByRole("button", { name: "Next" }).click();
+      await runImport(page, 1);
+
+      expect((await listCases(projectId)).map((c) => c.title)).toEqual([title]);
+    } finally {
+      await disposeProject(fixture);
+    }
+  });
+
+  // Regression test for: nothing capped upload size, so a huge file could hang the in-browser
+  // XLSX parse (parseWorkbook runs entirely client-side — there is no server-side preview to fall
+  // back on, see the file banner above). handleFileSelect now rejects anything over 20MB before
+  // it ever reaches the parser.
+  const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+  test("rejects a file over the 20MB upload limit", async ({ browser }) => {
+    let fixture: Fixture | undefined;
+    try {
+      fixture = await withProject(browser, "Size Limit");
+      const { page, projectId } = fixture;
+      await openWizard(page, projectId);
+
+      // One byte over the limit is enough to prove the ">" boundary — no need to actually build
+      // a huge parseable spreadsheet for the rejection path.
+      const oversized = Buffer.alloc(MAX_UPLOAD_BYTES + 1, "a".charCodeAt(0));
+      await page.locator('input[type="file"]').setInputFiles({
+        name: "oversized.csv",
+        mimeType: "text/csv",
+        buffer: oversized,
+      });
+
+      await expect(
+        page.getByText("File is too large (20.0MB). Maximum allowed size is 20MB."),
+      ).toBeVisible();
+      await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
+      await expect(page.getByText("Map your file columns to test case fields.")).toBeHidden();
+    } finally {
+      await disposeProject(fixture);
+    }
+  });
+
+  test("accepts a file at exactly the 20MB upload limit", async ({ browser }) => {
+    test.setTimeout(60_000);
+    let fixture: Fixture | undefined;
+    try {
+      fixture = await withProject(browser, "Size Boundary");
+      const { page, projectId } = fixture;
+      const title = `E2E Size Boundary ${Date.now()}`;
+
+      // Padded with blank lines (which the parser already drops via blankrows:false) rather than
+      // one huge cell, so the file is exactly MAX_UPLOAD_BYTES without stressing the CSV parser.
+      const header = "Title\n";
+      const dataLine = `${title}\n`;
+      const staticBytes = Buffer.byteLength(header) + Buffer.byteLength(dataLine);
+      const filler = "\n".repeat(MAX_UPLOAD_BYTES - staticBytes);
+      const csv = header + filler + dataLine;
+      expect(Buffer.byteLength(csv)).toBe(MAX_UPLOAD_BYTES);
+
+      await openWizard(page, projectId);
+      await page.locator('input[type="file"]').setInputFiles({
+        name: "boundary.csv",
+        mimeType: "text/csv",
+        buffer: Buffer.from(csv),
+      });
+      await page.getByRole("button", { name: "Next" }).click();
+
+      // At exactly the limit, the size check must not reject it — the wizard still reaches mapping.
+      await expect(page.getByText("Map your file columns to test case fields.")).toBeVisible({ timeout: 30_000 });
+      await runImport(page, 1);
+      expect((await listCases(projectId)).map((c) => c.title)).toEqual([title]);
+    } finally {
+      await disposeProject(fixture);
+    }
+  });
+
   /* ─────────────────────────── the export links ─────────────────────────── */
 
-  test("the export menu links to both formats and to both templates", async ({ browser }) => {
+  test("the export menu links to both formats and to both templates", { tag: '@tesbo.testId("TES-TC-833")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Export Menu");
@@ -516,7 +668,7 @@ test.describe("test case import wizard", () => {
     }
   });
 
-  test("the run detail page exports the run as CSV", async ({ browser }) => {
+  test("the run detail page exports the run as CSV", { tag: '@tesbo.testId("TES-TC-834")' }, async ({ browser }) => {
     let fixture: Fixture | undefined;
     try {
       fixture = await withProject(browser, "Run Export");

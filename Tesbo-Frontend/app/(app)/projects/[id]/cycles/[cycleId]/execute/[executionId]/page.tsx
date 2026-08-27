@@ -9,16 +9,18 @@ import {
   updateExecution,
   type ExecutionItem,
 } from "@/lib/api";
-import { Button, StatusChip, Input, Textarea } from "@/components/ui";
+import { Button, StatusChip, Input, PageLoader, Textarea } from "@/components/ui";
+import ExecutionEvidencePanel from "@/components/ExecutionEvidencePanel";
+import { AutomationResultMeta } from "@/components/AutomationResultMeta";
 
 const STATUSES = ["Untested", "Passed", "Failed", "Skipped", "Blocked", "Retest"];
 
 function statusToTone(status: string) {
-  const map: Record<string, "success" | "error" | "warning" | "info" | "neutral"> = {
+  const map: Record<string, "success" | "error" | "blocked" | "skipped" | "info" | "neutral"> = {
     Passed: "success",
     Failed: "error",
-    Skipped: "warning",
-    Blocked: "warning",
+    Skipped: "skipped",
+    Blocked: "blocked",
     Retest: "info",
     Untested: "neutral",
   };
@@ -101,11 +103,7 @@ export default function ExecutionDetailPage() {
   }
 
   if (!execution) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   const steps = normalizeSteps(execution.steps);
@@ -190,8 +188,8 @@ export default function ExecutionDetailPage() {
                 const colors: Record<string, string> = {
                   Passed: active ? "bg-[var(--success)] text-white" : "border-[var(--success)]/30 text-[var(--success-foreground)] hover:bg-[var(--success-soft)]",
                   Failed: active ? "bg-[var(--error)] text-white" : "border-[var(--error)]/30 text-[var(--error-foreground)] hover:bg-[var(--error-soft)]",
-                  Skipped: active ? "bg-[var(--warning)] text-white" : "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]",
-                  Blocked: active ? "bg-[var(--warning)] text-white" : "border-[var(--warning)]/30 text-[var(--warning-foreground)] hover:bg-[var(--warning-soft)]",
+                  Skipped: active ? "bg-[var(--status-skipped-dot)] text-white" : "border-[var(--status-skipped-dot)]/30 text-[var(--status-skipped-text)] hover:bg-[var(--status-skipped-fill)]",
+                  Blocked: active ? "bg-[var(--status-blocked-dot)] text-white" : "border-[var(--status-blocked-dot)]/30 text-[var(--status-blocked-text)] hover:bg-[var(--status-blocked-fill)]",
                   Retest: active ? "bg-[var(--info)] text-white" : "border-[var(--info)]/30 text-[var(--info)] hover:bg-[var(--info-soft)]",
                   Untested: active ? "bg-[var(--muted)] text-white" : "border-[var(--border)] text-[var(--muted)] hover:bg-[var(--surface-secondary)]",
                 };
@@ -221,7 +219,14 @@ export default function ExecutionDetailPage() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          {/*
+            * Basecamp 10221790207 — "Only failed test case should show defect key and Defect URL".
+            * A defect reference on a passing case is not just clutter: it flows into the CSV export
+            * and the traceability matrix, where it reads as a bug against a case that passed. The
+            * backend clears the stored values when a status other than Failed is saved, so hiding
+            * the inputs here does not leave data behind invisibly.
+            */}
+          <div className="grid grid-cols-2 gap-3" hidden={status !== "Failed"}>
             <div>
               <label className="block text-sm font-medium text-[var(--muted)] mb-1">
                 Defect Key
@@ -245,6 +250,17 @@ export default function ExecutionDetailPage() {
               />
             </div>
           </div>
+
+          {/*
+            * The same two panels the run drawer shows, so a result looks the same wherever it is
+            * opened. Both render nothing for a human-recorded result with no evidence, which is
+            * every result that existed before the automation ingest (Basecamp 10189985971).
+            */}
+          <AutomationResultMeta execution={execution} />
+
+          <div className="h-px bg-[var(--border)]" />
+
+          <ExecutionEvidencePanel cycleId={cycleId} executionId={execution.id} />
 
           <div className="flex gap-2 pt-2">
             <Button type="submit" disabled={saving}>

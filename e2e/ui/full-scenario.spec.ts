@@ -11,7 +11,7 @@ const STATE_PATH = path.join(__dirname, "../.auth/state.json");
 const ENV_NAME = "E2E Scenario Env";
 
 test.describe("full test-management scenario", () => {
-  test("a test case moves from creation through a run to a filed bug, and the plan reflects it", async ({
+  test("a test case moves from creation through a run to a filed bug, and the plan reflects it", { tag: '@tesbo.testId("TES-TC-669")' }, async ({
     page,
   }) => {
     test.slow(); // a long, multi-page journey — give it more room than the focused smoke tests

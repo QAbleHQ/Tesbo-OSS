@@ -65,7 +65,7 @@ test.describe("role-based permissions", () => {
 
   // ─── Workspace membership ──────────────────────────────────────────────────
 
-  test("a QA engineer cannot add members to the workspace", async () => {
+  test("a QA engineer cannot add members to the workspace", { tag: '@tesbo.testId("TES-TC-432")' }, async () => {
     // By consistency: a QA engineer cannot invite (explicit), cannot manage project members
     // (explicit) and cannot rename the workspace (explicit). Adding members outright is strictly
     // more powerful than inviting, so it cannot be the one membership action they're allowed.
@@ -82,7 +82,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a manager cannot grant workspace owner", async () => {
+  test("a manager cannot grant workspace owner", { tag: '@tesbo.testId("TES-TC-433")' }, async () => {
     // By consistency: createInvitation refuses role=owner outright ("Cannot invite owners
     // directly") and restricts a manager to inviting QA engineers. The same manager reaching the
     // same outcome through /workspace/members would make that gate decorative.
@@ -97,7 +97,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("the owner cannot promote anyone to a role the product doesn't have", async () => {
+  test("the owner cannot promote anyone to a role the product doesn't have", { tag: '@tesbo.testId("TES-TC-434")' }, async () => {
     // addWorkspaceMember stores body.role verbatim — it never passes it through normalizeRole — so
     // an unknown string lands in organization_members.role and every later check reads it through
     // normalizeRole, which collapses anything unrecognised to qa_engineer. An unknown role must be
@@ -114,7 +114,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("an owner can add a member and the roster reports the granted role", async () => {
+  test("an owner can add a member and the roster reports the granted role", { tag: '@tesbo.testId("TES-TC-435")' }, async () => {
     const email = testAddress("rbac-newhire");
     try {
       const res = await asOwner.post("/api/workspace/members", {
@@ -134,7 +134,7 @@ test.describe("role-based permissions", () => {
 
   // ─── Role changes ──────────────────────────────────────────────────────────
 
-  test("only the owner can change a member's role", async () => {
+  test("only the owner can change a member's role", { tag: '@tesbo.testId("TES-TC-436")' }, async () => {
     // Explicit: changeWorkspaceMemberRole refuses any caller whose role isn't owner.
     try {
       const res = await asManager.post("/api/workspace/members/role", {
@@ -148,7 +148,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("the owner can promote a QA engineer to manager and demote them again", async () => {
+  test("the owner can promote a QA engineer to manager and demote them again", { tag: '@tesbo.testId("TES-TC-437")' }, async () => {
     try {
       const promote = await asOwner.post("/api/workspace/members/role", {
         data: { userId: tenant!.qa.userId, role: "manager" },
@@ -168,7 +168,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("the owner cannot change their own role", async () => {
+  test("the owner cannot change their own role", { tag: '@tesbo.testId("TES-TC-438")' }, async () => {
     // Explicit: guards the workspace against being left with nobody who can administer it.
     const res = await asOwner.post("/api/workspace/members/role", {
       data: { userId: tenant!.owner.userId, role: "qa_engineer" },
@@ -178,7 +178,7 @@ test.describe("role-based permissions", () => {
     expect(storedOrgRole(tenant!, tenant!.owner.userId)).toBe("owner");
   });
 
-  test("an unrecognised role is refused rather than silently demoting the member", async () => {
+  test("an unrecognised role is refused rather than silently demoting the member", { tag: '@tesbo.testId("TES-TC-439")' }, async () => {
     // normalizeRole maps anything it doesn't recognise to qa_engineer, so today a typo'd role in a
     // promotion request quietly DEMOTES a manager instead of failing. Callers must be told.
     try {
@@ -195,7 +195,7 @@ test.describe("role-based permissions", () => {
 
   // ─── Removing members ──────────────────────────────────────────────────────
 
-  test("a manager cannot remove team members", async () => {
+  test("a manager cannot remove team members", { tag: '@tesbo.testId("TES-TC-440")' }, async () => {
     // Explicit: removeWorkspaceMember is owner-only.
     try {
       const res = await asManager.delete(`/api/workspace/members/${tenant!.qa.userId}`, {
@@ -208,7 +208,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a QA engineer cannot remove team members", async () => {
+  test("a QA engineer cannot remove team members", { tag: '@tesbo.testId("TES-TC-441")' }, async () => {
     try {
       const res = await asQa.delete(`/api/workspace/members/${tenant!.manager.userId}`, {
         failOnStatusCode: false,
@@ -220,7 +220,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("nobody can remove themselves from the workspace", async () => {
+  test("nobody can remove themselves from the workspace", { tag: '@tesbo.testId("TES-TC-442")' }, async () => {
     // Explicit: an owner removing themselves is how a workspace becomes unadministrable.
     const res = await asOwner.delete(`/api/workspace/members/${tenant!.owner.userId}`, {
       failOnStatusCode: false,
@@ -229,7 +229,7 @@ test.describe("role-based permissions", () => {
     expect(storedOrgRole(tenant!, tenant!.owner.userId)).toBe("owner");
   });
 
-  test("promotion to owner is refused, so ownership can't be escalated through a role change", async () => {
+  test("promotion to owner is refused, so ownership can't be escalated through a role change", { tag: '@tesbo.testId("TES-TC-443")' }, async () => {
     // Explicit: changeWorkspaceMemberRole refuses normalized === "owner" outright. Worth pinning,
     // because it's the gate that /api/workspace/members bypasses (see "a manager cannot grant
     // workspace owner" above) — the two endpoints have to agree or the stricter one is decoration.
@@ -245,7 +245,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a workspace can never be left without an owner", async () => {
+  test("a workspace can never be left without an owner", { tag: '@tesbo.testId("TES-TC-444")' }, async () => {
     // Two owners is not reachable through the API (promotion to owner is refused above), so the
     // second owner is written directly — otherwise the last-owner guard can't be exercised at all.
     //
@@ -280,7 +280,7 @@ test.describe("role-based permissions", () => {
 
   // ─── Workspace-level settings ──────────────────────────────────────────────
 
-  test("a QA engineer cannot rename the workspace", async () => {
+  test("a QA engineer cannot rename the workspace", { tag: '@tesbo.testId("TES-TC-445")' }, async () => {
     // Explicit: updateWorkspace refuses qa_engineer.
     const res = await asQa.patch("/api/workspace", {
       data: { name: "Renamed By A QA Engineer" },
@@ -289,7 +289,7 @@ test.describe("role-based permissions", () => {
     expect(res.status()).toBe(403);
   });
 
-  test("a manager can rename the workspace", async () => {
+  test("a manager can rename the workspace", { tag: '@tesbo.testId("TES-TC-446")' }, async () => {
     // The other half of the same gate: managers are explicitly allowed, so an over-tightened
     // implementation is a bug too.
     const original = (await (await asOwner.get("/api/workspace")).json()).name;
@@ -304,7 +304,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("AI provider keys are owner-only", async () => {
+  test("AI provider keys are owner-only", { tag: '@tesbo.testId("TES-TC-447")' }, async () => {
     // Explicit: createAiKey/deleteAiKey/allocateAiKey each refuse anyone but the owner.
     const payload = { name: `E2E Key ${Date.now()}`, provider: "openai", apiKey: "sk-e2e-not-a-real-key" };
     for (const [role, ctx] of [
@@ -316,7 +316,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("integrations are owner-only", async () => {
+  test("integrations are owner-only", { tag: '@tesbo.testId("TES-TC-448")' }, async () => {
     // Explicit: integrationAuthUrl/callback/disconnect each refuse anyone but the owner.
     for (const [role, ctx] of [
       ["manager", asManager],
@@ -327,7 +327,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("the workspace activity feed is owner-only", async () => {
+  test("the workspace activity feed is owner-only", { tag: '@tesbo.testId("TES-TC-449")' }, async () => {
     // Explicit: workspaceActivity is an owner-only rollup across every project.
     for (const [role, ctx] of [
       ["manager", asManager],
@@ -340,7 +340,7 @@ test.describe("role-based permissions", () => {
 
   // ─── Project scoping ───────────────────────────────────────────────────────
 
-  test("a workspace member with no project access cannot see the project", async () => {
+  test("a workspace member with no project access cannot see the project", { tag: '@tesbo.testId("TES-TC-450")' }, async () => {
     // Explicit: requireProjectAccess joins on project_members, so workspace membership alone is
     // not access. 404 rather than 403 is correct here — a non-member shouldn't learn it exists.
     const res = await asGuest.get(`/api/projects/${tenant!.mainProjectId}`, { failOnStatusCode: false });
@@ -351,7 +351,7 @@ test.describe("role-based permissions", () => {
     expect(projects.map((p) => p.id)).not.toContain(tenant!.mainProjectId);
   });
 
-  test("a QA engineer cannot manage project members", async () => {
+  test("a QA engineer cannot manage project members", { tag: '@tesbo.testId("TES-TC-451")' }, async () => {
     // Explicit: addProjectMember and removeProjectMember both refuse qa_engineer.
     try {
       const add = await asQa.post(`/api/projects/${tenant!.mainProjectId}/members`, {
@@ -372,7 +372,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a manager cannot hand out the project owner role", async () => {
+  test("a manager cannot hand out the project owner role", { tag: '@tesbo.testId("TES-TC-452")' }, async () => {
     // Explicit: addProjectMember refuses requestedRole=owner, and restricts a manager to granting
     // qa_engineer only.
     try {
@@ -393,7 +393,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a QA engineer cannot rename a project", async () => {
+  test("a QA engineer cannot rename a project", { tag: '@tesbo.testId("TES-TC-453")' }, async () => {
     // By consistency: updateProjectForUser gates on project membership but never on role, so today
     // the weakest role can rename any project it can see. Every neighbouring administrative action
     // — project members, KB writes, workspace rename — is owner-or-manager, and renaming a project
@@ -414,7 +414,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a QA engineer cannot archive a project", async () => {
+  test("a QA engineer cannot archive a project", { tag: '@tesbo.testId("TES-TC-454")' }, async () => {
     // By consistency, as above. This one is the more damaging half: deleteProjectForUser archives
     // the project and every child record hangs off it.
     const throwaway = await createThrowawayProject(asOwner);
@@ -430,7 +430,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a QA engineer can still do the job the role exists for", async () => {
+  test("a QA engineer can still do the job the role exists for", { tag: '@tesbo.testId("TES-TC-455")' }, async () => {
     // The counterweight to everything above: locking down administration must not lock a QA
     // engineer out of authoring and executing tests, or the role is useless.
     const suffix = Date.now();
@@ -465,7 +465,7 @@ test.describe("role-based permissions", () => {
 
   // ─── The rest of the authoring surface ─────────────────────────────────────
 
-  test("a QA engineer can author across the whole test-management surface", async () => {
+  test("a QA engineer can author across the whole test-management surface", { tag: '@tesbo.testId("TES-TC-456")' }, async () => {
     // The counterweight, extended past test cases and bugs: suites, plans, cycles and executions
     // are the daily work of the role, and no gate in the product suggests otherwise. Kept as a
     // single walkthrough so a future tightening of RBAC that over-locks any one of them fails here
@@ -528,7 +528,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("undeleting a knowledge base folder is owner-and-manager only", async () => {
+  test("undeleting a knowledge base folder is owner-and-manager only", { tag: '@tesbo.testId("TES-TC-457")' }, async () => {
     // Explicit, and narrower than it first looks: kbRequireOwnerOrManager is applied at exactly
     // three call sites — restoreKnowledgeFolder, restoreKnowledgeDocument and restoreKnowledgeFile.
     // Creating, editing, moving and deleting KB content are all open to any project member. So the
@@ -571,7 +571,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("a workspace member with no project access cannot write into the project", async () => {
+  test("a workspace member with no project access cannot write into the project", { tag: '@tesbo.testId("TES-TC-458")' }, async () => {
     // requireProjectAccess already makes the project invisible to this user on read. Writes have to
     // agree: createSuite, createPlan and createCycle take only the project id — their controller
     // methods never receive the caller — so nothing stops a workspace member from seeding a project
@@ -601,7 +601,7 @@ test.describe("role-based permissions", () => {
     }
   });
 
-  test("an anonymous caller cannot write into a project", async () => {
+  test("an anonymous caller cannot write into a project", { tag: '@tesbo.testId("TES-TC-459")' }, async () => {
     // The same three handlers, with no session at all. An endpoint that never reads the caller
     // can't tell a signed-in user from a stranger who guessed a project id.
     const suffix = Date.now();
@@ -627,7 +627,7 @@ test.describe("role-based permissions", () => {
 
   // ─── Unauthenticated callers ───────────────────────────────────────────────
 
-  test("every workspace administration endpoint refuses a caller with no session", async () => {
+  test("every workspace administration endpoint refuses a caller with no session", { tag: '@tesbo.testId("TES-TC-460")' }, async () => {
     const endpoints: { method: "get" | "post" | "patch" | "put" | "delete"; path: string }[] = [
       { method: "get", path: "/api/workspace/members" },
       { method: "post", path: "/api/workspace/members" },
@@ -681,7 +681,7 @@ test.describe("role-based permissions", () => {
     expect(res.ok(), `could not create a throwaway project: ${res.status()} ${await res.text()}`).toBeTruthy();
     return { id: (await res.json()).id, name };
   }
-  test("RBAC-A-31 the workspace dashboard counts only the projects the caller can reach", async () => {
+  test("RBAC-A-31 the workspace dashboard counts only the projects the caller can reach", { tag: '@tesbo.testId("TES-TC-951")' }, async () => {
     /*
      * Basecamp 10199551447 — "[Dashboard / Project Access] QA Engineer can view project details of all
      * owner projects", reported against /dashboard.

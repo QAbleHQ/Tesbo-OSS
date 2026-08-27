@@ -131,7 +131,7 @@ test.describe("billing settings", () => {
     await expect(page.getByRole("heading", { name: "Billing", exact: true })).toBeVisible();
   }
 
-  test("the Launch plan card explains the free plan and offers the upgrade", async () => {
+  test("the Launch plan card explains the free plan and offers the upgrade", { tag: '@tesbo.testId("TES-TC-637")' }, async () => {
     resetToLaunch(orgId);
     await openBillingTab();
 
@@ -141,7 +141,7 @@ test.describe("billing settings", () => {
     await expect(page.getByRole("button", { name: "Manage billing" })).toHaveCount(0);
   });
 
-  test("usage bars report the ceilings actually in force", async () => {
+  test("usage bars report the ceilings actually in force", { tag: '@tesbo.testId("TES-TC-638")' }, async () => {
     resetToLaunch(orgId);
     await openBillingTab();
 
@@ -160,7 +160,7 @@ test.describe("billing settings", () => {
     await expect(page.getByText("5.0 GB", { exact: false })).toBeVisible();
   });
 
-  test("hitting the Launch project limit points at the upgrade", async () => {
+  test("hitting the Launch project limit points at the upgrade", { tag: '@tesbo.testId("TES-TC-639")' }, async () => {
     setProPlan(orgId);
     const created = await api.post("/api/projects", {
       data: { name: `E2E Billing UI Limit ${Date.now()}`, key: `BILU${`${Date.now()}`.slice(-8)}` },
@@ -180,7 +180,7 @@ test.describe("billing settings", () => {
     }
   });
 
-  test("the Pro plan card shows the renewal date and the way to manage the subscription", async () => {
+  test("the Pro plan card shows the renewal date and the way to manage the subscription", { tag: '@tesbo.testId("TES-TC-640")' }, async () => {
     setProPlan(orgId, { billing_interval: "annual", current_period_end: isoDaysFromNow(200) });
     await openBillingTab();
 
@@ -191,7 +191,7 @@ test.describe("billing settings", () => {
     await expect(page.getByRole("button", { name: "Upgrade to Pro" })).toHaveCount(0);
   });
 
-  test("the renewal line reads as a sentence for both billing intervals", async () => {
+  test("the renewal line reads as a sentence for both billing intervals", { tag: '@tesbo.testId("TES-TC-641")' }, async () => {
     test.fail();
     // KNOWN GAP: BillingTab.tsx interpolates the raw billingInterval into "billed {interval}", so an
     // annual subscription reads "billed annual" instead of "billed annually". Monthly happens to
@@ -203,7 +203,7 @@ test.describe("billing settings", () => {
     await expect(page.getByText(/billed annually/)).toBeVisible();
   });
 
-  test("a scheduled cancellation is shown on the plan card without removing access", async () => {
+  test("a scheduled cancellation is shown on the plan card without removing access", { tag: '@tesbo.testId("TES-TC-642")' }, async () => {
     setProPlan(orgId, { cancel_at_period_end: true, current_period_end: isoDaysFromNow(12) });
     await openBillingTab();
 
@@ -212,7 +212,7 @@ test.describe("billing settings", () => {
     await expect(page.getByRole("button", { name: "Manage billing" })).toBeVisible();
   });
 
-  test("opening the billing portal without a billing account reports why instead of failing silently", async () => {
+  test("opening the billing portal without a billing account reports why instead of failing silently", { tag: '@tesbo.testId("TES-TC-643")' }, async () => {
     setProPlan(orgId, { stripe_customer_id: null });
     await openBillingTab();
 
@@ -222,7 +222,7 @@ test.describe("billing settings", () => {
     await expect(page.getByText(/no billing account yet/)).toBeVisible();
   });
 
-  test("a failed payment is impossible to miss and offers to fix the card", async () => {
+  test("a failed payment is impossible to miss and offers to fix the card", { tag: '@tesbo.testId("TES-TC-644")' }, async () => {
     setProPlan(orgId, { payment_failed_at: isoDaysFromNow(-2) });
     await openBillingTab();
 
@@ -233,7 +233,7 @@ test.describe("billing settings", () => {
     await expect(page.getByRole("button", { name: "Update payment method" })).toBeVisible();
   });
 
-  test("an open grace window names the deadline and offers to resubscribe", async () => {
+  test("an open grace window names the deadline and offers to resubscribe", { tag: '@tesbo.testId("TES-TC-645")' }, async () => {
     setGraceWindow(orgId, 9);
     await openBillingTab();
 
@@ -243,7 +243,7 @@ test.describe("billing settings", () => {
     await expect(page.getByRole("button", { name: "Resubscribe to Pro" })).toBeVisible();
   });
 
-  test("a closed grace window leads with the data being safe", async () => {
+  test("a closed grace window leads with the data being safe", { tag: '@tesbo.testId("TES-TC-646")' }, async () => {
     setGraceWindow(orgId, -1);
     await openBillingTab();
 
@@ -253,7 +253,7 @@ test.describe("billing settings", () => {
     await expect(page.getByRole("button", { name: "Upgrade to Pro" }).first()).toBeVisible();
   });
 
-  test("the billing activity timeline renders what happened and when", async () => {
+  test("the billing activity timeline renders what happened and when", { tag: '@tesbo.testId("TES-TC-647")' }, async () => {
     resetToLaunch(orgId);
     const marker = `Payment received — $360 (${Date.now()})`;
     insertBillingAuditEntry(orgId, "billing_payment_succeeded", marker);
@@ -263,7 +263,7 @@ test.describe("billing settings", () => {
     await expect(page.getByText(marker)).toBeVisible();
   });
 
-  test("returning from a cancelled checkout says nothing changed", async () => {
+  test("returning from a cancelled checkout says nothing changed", { tag: '@tesbo.testId("TES-TC-648")' }, async () => {
     resetToLaunch(orgId);
     await page.goto(`${BILLING_URL}&checkout=cancelled`);
 
@@ -272,7 +272,7 @@ test.describe("billing settings", () => {
     await expect(page).toHaveURL(/\/settings\?tab=billing$/);
   });
 
-  test("returning from a successful checkout reports the real outcome, not an assumed one", async () => {
+  test("returning from a successful checkout reports the real outcome, not an assumed one", { tag: '@tesbo.testId("TES-TC-649")' }, async () => {
     resetToLaunch(orgId);
     await page.goto(`${BILLING_URL}&checkout=success`);
 
@@ -285,7 +285,7 @@ test.describe("billing settings", () => {
   });
 
   test.describe("the pricing modal", () => {
-    test("quotes the plan in the currency the server resolved, for both intervals", async () => {
+    test("quotes the plan in the currency the server resolved, for both intervals", { tag: '@tesbo.testId("TES-TC-997")' }, async () => {
       resetToLaunch(orgId);
       const pricing = await (await api.get("/api/billing/pricing")).json();
       test.skip(
@@ -320,7 +320,7 @@ test.describe("billing settings", () => {
       await expect(modal.getByText("Billed monthly.")).toBeVisible();
     });
 
-    test("the India-pricing option appears only when the server allows INR", async () => {
+    test("the India-pricing option appears only when the server allows INR", { tag: '@tesbo.testId("TES-TC-651")' }, async () => {
       resetToLaunch(orgId);
       const pricing = await (await api.get("/api/billing/pricing")).json();
 
@@ -342,7 +342,7 @@ test.describe("billing settings", () => {
       }
     });
 
-    test("the current plan is marked and can't be bought again", async () => {
+    test("the current plan is marked and can't be bought again", { tag: '@tesbo.testId("TES-TC-652")' }, async () => {
       setProPlan(orgId);
       await openBillingTab();
       // On Pro the plan card offers "Manage billing"; the modal is reachable from the banners, so
@@ -359,7 +359,7 @@ test.describe("billing settings", () => {
   });
 
   test.describe("read-only projects after a downgrade", () => {
-    test("a locked project is still fully readable in the UI", async () => {
+    test("a locked project is still fully readable in the UI", { tag: '@tesbo.testId("TES-TC-653")' }, async () => {
       // Arrange three projects so the newest is beyond the Launch allowance, then close the window.
       setProPlan(orgId);
       const created: string[] = [];
@@ -389,7 +389,7 @@ test.describe("billing settings", () => {
     });
   });
   test.describe("Pro-only integrations read the same on every screen", () => {
-    test("the project settings Linear card shows the Pro lock a Launch workspace is under", async () => {
+    test("the project settings Linear card shows the Pro lock a Launch workspace is under", { tag: '@tesbo.testId("TES-TC-998")' }, async () => {
       /*
        * Basecamp 10191178824 — "Linear is restricted behind a Pro upgrade in Workspace Settings, but the
        * same integration is available in Project Settings → Integrations".

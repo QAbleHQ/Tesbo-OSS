@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { IconSparkles } from "@tabler/icons-react";
 import {
   authMe,
@@ -16,14 +16,15 @@ import {
   type ZyraAgentState,
   type ZyraTask,
 } from "@/lib/api";
-import { Button, Field, FieldLabel, Modal, Select, StatusChip, Textarea } from "@/components/ui";
+import { Button, Field, FieldLabel, Modal, PageLoader, Select, StatusChip, Textarea } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
-import TaskQuickViewPanel, { JIRA_BADGE_CLASS, normalizeTaskStatus as normalizeStatus, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
+import TaskQuickViewPanel, { JIRA_BADGE_CLASS, latestFailureDetail, normalizeTaskStatus as normalizeStatus, taskStatusLabel, taskStatusTone as tone } from "@/components/agents/TaskQuickViewPanel";
 
 const columns = [
   { key: "todo", label: "Pending", dot: "var(--muted-soft)" },
   { key: "in_progress", label: "In Progress", dot: "var(--warning)" },
   { key: "in_review", label: "In Review", dot: "var(--accent-light)" },
+  { key: "failed", label: "Failed", dot: "var(--error)" },
   { key: "done", label: "Done", dot: "var(--success)" },
 ] as const;
 
@@ -48,6 +49,9 @@ export default function ZyraTasksPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [quickViewTask, setQuickViewTask] = useState<ZyraTask | null>(null);
+  // Guards the poll loop below against piling up requests if one tick is still in flight
+  // (a slow response, or the tab waking from sleep) when the next interval fires.
+  const pollInFlightRef = useRef(false);
 
   function handleTaskUpdated(updated: ZyraTask) {
     setQuickViewTask(updated);
@@ -84,6 +88,35 @@ export default function ZyraTasksPage() {
       else void loadData();
     });
   }, [loadData, router]);
+
+  // Refreshes just the task list (cheaper than loadData, which also re-pulls Jira/knowledge-base
+  // data). Zyra picks up and finishes tasks asynchronously server-side, so without this the board
+  // only ever reflected that after a manual reload.
+  const refreshTasks = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+    pollInFlightRef.current = true;
+    try {
+      const agentState = await getZyraAgent(projectId);
+      setState((prev) => (prev ? { ...prev, tasks: agentState.tasks, testcasesCreated: agentState.testcasesCreated, tokenUsage: agentState.tokenUsage, agent: agentState.agent } : agentState));
+      setQuickViewTask((prev) => (prev ? agentState.tasks.find((t) => t.id === prev.id) || prev : prev));
+    } catch {
+      // A missed poll tick isn't worth surfacing as an error — the row itself is the source of
+      // truth, and the next tick usually succeeds.
+    } finally {
+      pollInFlightRef.current = false;
+    }
+  }, [projectId]);
+
+  const hasActiveTask = (state?.tasks || []).some((task) => ["todo", "in_progress"].includes(normalizeStatus(task.taskStatus)));
+
+  useEffect(() => {
+    if (!hasActiveTask) return;
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      void refreshTasks();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [hasActiveTask, refreshTasks]);
 
   const tasksByColumn = useMemo(() => {
     const grouped = new Map<string, ZyraTask[]>();
@@ -150,7 +183,7 @@ export default function ZyraTasksPage() {
   if (loading || !state) {
     return (
       <StandardPageLayout header={<PageHeader title="Agent tasks" />}>
-        <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">Loading tasks...</div>
+        <PageLoader label="Loading tasks…" />
       </StandardPageLayout>
     );
   }
@@ -241,9 +274,13 @@ export default function ZyraTasksPage() {
               >
                 <div className="min-w-0">
                   <h2 className="line-clamp-2 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h2>
-                  {task.context && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{task.context}</p>}
+                  {normalizeStatus(task.taskStatus) === "failed" ? (
+                    <p className="mt-1 line-clamp-2 text-xs text-[var(--error-foreground)]">{latestFailureDetail(task.activities)}</p>
+                  ) : (
+                    task.context && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{task.context}</p>
+                  )}
                 </div>
-                <div><StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip></div>
+                <div><StatusChip tone={tone(task.taskStatus)}>{taskStatusLabel(task.taskStatus)}</StatusChip></div>
                 <div className="flex flex-wrap gap-1.5">
                   {task.jiraIssueKeys.slice(0, 2).map((key) => (
                     <span key={key} className={JIRA_BADGE_CLASS}>{key}</span>
@@ -259,7 +296,7 @@ export default function ZyraTasksPage() {
           </div>
         </section>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-4">
+        <div className="grid gap-4 xl:grid-cols-5">
           {columns.map((column) => {
             const columnTasks = tasksByColumn.get(column.key) || [];
             const isDone = column.key === "done";
@@ -280,8 +317,12 @@ export default function ZyraTasksPage() {
                       onClick={() => setQuickViewTask(task)}
                       className={`block w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3 text-left transition-[opacity,border-color] hover:border-[var(--brand-primary)] ${isDone ? "opacity-75 hover:opacity-100" : ""}`}
                     >
-                      <StatusChip tone={tone(task.taskStatus)}>{normalizeStatus(task.taskStatus).replaceAll("_", " ")}</StatusChip>
+                      <StatusChip tone={tone(task.taskStatus)}>{taskStatusLabel(task.taskStatus)}</StatusChip>
                       <h3 className="mt-2 line-clamp-3 text-sm font-semibold text-[var(--foreground)]">{task.userStory}</h3>
+                      {normalizeStatus(task.taskStatus) === "failed" && (
+                        <p className="mt-1 line-clamp-2 text-xs text-[var(--error-foreground)]">{latestFailureDetail(task.activities)}</p>
+                      )}
+                      {task.context && <p className="mt-1 line-clamp-2 text-xs text-[var(--muted)]">{task.context}</p>}
                       {task.jiraIssueKeys.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1.5">
                           {task.jiraIssueKeys.slice(0, 3).map((key) => (

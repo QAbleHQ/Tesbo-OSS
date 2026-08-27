@@ -85,7 +85,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
 
   // ─── Project API keys ─────────────────────────────────────────────────────
 
-  test("TAI-A-01 an API key is created once, listed without its secret, and revoked", async () => {
+  test("TAI-A-01 an API key is created once, listed without its secret, and revoked", { tag: '@tesbo.testId("TES-TC-531")' }, async () => {
     const created = await asOwner.post(url("/apikeys"), { data: { name: stamp("CI token") }, failOnStatusCode: false });
     expect(created.status(), `creating an API key — ${await created.text()}`).toBe(201);
     const key = await created.json();
@@ -114,7 +114,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     expect(afterRevoke).not.toContain(key.id);
   });
 
-  test("TAI-A-02 an API key needs a name", async () => {
+  test("TAI-A-02 an API key needs a name", { tag: '@tesbo.testId("TES-TC-532")' }, async () => {
     for (const data of [{}, { name: "" }, { name: "   " }]) {
       const res = await asOwner.post(url("/apikeys"), { data, failOnStatusCode: false });
       // A nameless token cannot be told apart from another in the revoke list, which is the only
@@ -127,7 +127,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     ).toBe("0");
   });
 
-  test("TAI-A-03 API keys are not reachable without project access", async () => {
+  test("TAI-A-03 API keys are not reachable without project access", { tag: '@tesbo.testId("TES-TC-533")' }, async () => {
     const created = await asOwner.post(url("/apikeys"), { data: { name: stamp("guarded") }, failOnStatusCode: false });
     const key = await created.json();
 
@@ -150,7 +150,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     expect(scalar(`SELECT COUNT(*) FROM api_tokens WHERE id = ${literal(key.id)};`)).toBe("1");
   });
 
-  test("TAI-A-04 a key from another project cannot be revoked through this project's URL", async () => {
+  test("TAI-A-04 a key from another project cannot be revoked through this project's URL", { tag: '@tesbo.testId("TES-TC-534")' }, async () => {
     const created = await asOwner.post(url("/apikeys", tenant!.secondProjectId), {
       data: { name: stamp("second project key") },
       failOnStatusCode: false,
@@ -163,7 +163,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     expect(scalar(`SELECT COUNT(*) FROM api_tokens WHERE id = ${literal(foreign.id)};`)).toBe("1");
   });
 
-  test("TAI-A-05 a malformed key id is refused without a 500", async () => {
+  test("TAI-A-05 a malformed key id is refused without a 500", { tag: '@tesbo.testId("TES-TC-535")' }, async () => {
     for (const bad of ["not-a-uuid", "0"]) {
       const res = await asOwner.delete(url(`/apikeys/${bad}`), { failOnStatusCode: false });
       expect(res.status(), `key id "${bad}" answered ${res.status()}: ${await res.text()}`).toBeLessThan(500);
@@ -172,7 +172,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
 
   // ─── Activity ─────────────────────────────────────────────────────────────
 
-  test("TAI-A-06 a project's activity feed records what was done and by whom", async () => {
+  test("TAI-A-06 a project's activity feed records what was done and by whom", { tag: '@tesbo.testId("TES-TC-536")' }, async () => {
     const title = stamp("activity case");
     const created = await asOwner.post(url("/testcases"), { data: { title }, failOnStatusCode: false });
     expect(created.status()).toBe(201);
@@ -190,7 +190,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     }
   });
 
-  test("TAI-A-07 the activity feed paginates and survives a non-numeric page", async () => {
+  test("TAI-A-07 the activity feed paginates and survives a non-numeric page", { tag: '@tesbo.testId("TES-TC-537")' }, async () => {
     const first = await asOwner.get(url("/activity?limit=1"), { failOnStatusCode: false });
     expect(first.status()).toBe(200);
 
@@ -202,13 +202,13 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     }
   });
 
-  test("TAI-A-08 the project activity summary answers for a member", async () => {
+  test("TAI-A-08 the project activity summary answers for a member", { tag: '@tesbo.testId("TES-TC-538")' }, async () => {
     const res = await asOwner.get(url("/activity/summary"), { failOnStatusCode: false });
     expect(res.status(), `activity summary — ${await res.text()}`).toBe(200);
     expect(await res.json()).toBeTruthy();
   });
 
-  test("TAI-A-09 the workspace activity summary answers for a member and refuses an outsider", async () => {
+  test("TAI-A-09 the workspace activity summary answers for a member and refuses an outsider", { tag: '@tesbo.testId("TES-TC-539")' }, async () => {
     const res = await asOwner.get("/api/workspace/activity/summary", { failOnStatusCode: false });
     expect(res.status(), `workspace activity summary — ${await res.text()}`).toBe(200);
     expect(await res.json()).toBeTruthy();
@@ -219,7 +219,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     );
   });
 
-  test("TAI-A-10 activity is not readable without access to the project it belongs to", async () => {
+  test("TAI-A-10 activity is not readable without access to the project it belongs to", { tag: '@tesbo.testId("TES-TC-540")' }, async () => {
     const title = stamp("private activity");
     const created = await asOwner.post(url("/testcases"), { data: { title }, failOnStatusCode: false });
     const testcaseId = (await created.json()).id;
@@ -243,7 +243,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
 
   // ─── Notifications ────────────────────────────────────────────────────────
 
-  test("TAI-A-11 the notification list is per-user and not readable without a session", async () => {
+  test("TAI-A-11 the notification list is per-user and not readable without a session", { tag: '@tesbo.testId("TES-TC-541")' }, async () => {
     const res = await asOwner.get("/api/notifications", { failOnStatusCode: false });
     expect(res.status(), `notifications — ${await res.text()}`).toBe(200);
     const body = await res.json();
@@ -258,7 +258,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     );
   });
 
-  test("TAI-A-12 marking a notification read requires a session and a notification that exists", async () => {
+  test("TAI-A-12 marking a notification read requires a session and a notification that exists", { tag: '@tesbo.testId("TES-TC-542")' }, async () => {
     await expectRefused(
       await anon.post("/api/notifications/11111111-1111-4111-8111-111111111111/read", {
         data: {},
@@ -278,7 +278,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
 
   // ─── Branding ─────────────────────────────────────────────────────────────
 
-  test("TAI-A-13 public branding is readable without a session and carries no internal detail", async () => {
+  test("TAI-A-13 public branding is readable without a session and carries no internal detail", { tag: '@tesbo.testId("TES-TC-543")' }, async () => {
     // Deliberately public: the login screen renders it before anyone is signed in.
     const res = await anon.get("/api/branding", { failOnStatusCode: false });
     expect(res.status(), `public branding — ${await res.text()}`).toBe(200);
@@ -291,7 +291,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     }
   });
 
-  test("TAI-A-14 the admin branding routes are not reachable by an ordinary workspace owner", async () => {
+  test("TAI-A-14 the admin branding routes are not reachable by an ordinary workspace owner", { tag: '@tesbo.testId("TES-TC-544")' }, async () => {
     for (const [what, attempt] of [
       ["GET admin branding (anonymous)", () => anon.get("/api/admin/branding", { failOnStatusCode: false })],
       ["GET admin branding (owner)", () => asOwner.get("/api/admin/branding", { failOnStatusCode: false })],
@@ -316,7 +316,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
 
   // ─── Superadmin ───────────────────────────────────────────────────────────
 
-  test("TAI-A-15 the superadmin surface refuses an anonymous caller and an ordinary owner", async () => {
+  test("TAI-A-15 the superadmin surface refuses an anonymous caller and an ordinary owner", { tag: '@tesbo.testId("TES-TC-545")' }, async () => {
     for (const [what, attempt] of [
       ["customers (anonymous)", () => anon.get("/api/admin/customers", { failOnStatusCode: false })],
       ["customers (owner)", () => asOwner.get("/api/admin/customers", { failOnStatusCode: false })],
@@ -347,7 +347,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     expect(await customers.text()).not.toContain(tenant!.organizationId);
   });
 
-  test("TAI-A-16 the setup probe reports that the install already has an admin, and refuses a second", async () => {
+  test("TAI-A-16 the setup probe reports that the install already has an admin, and refuses a second", { tag: '@tesbo.testId("TES-TC-546")' }, async () => {
     const status = await anon.get("/api/setup/status", { failOnStatusCode: false });
     // Deliberately public: the first-run wizard has to be able to ask before anyone can sign in.
     expect(status.status(), `setup status — ${await status.text()}`).toBe(200);
@@ -370,7 +370,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
 
   // ─── Tesbo Reports ingest ─────────────────────────────────────────────────
 
-  test("TAI-A-17 the external report routes are not readable without access to the project", async () => {
+  test("TAI-A-17 the external report routes are not readable without access to the project", { tag: '@tesbo.testId("TES-TC-547")' }, async () => {
     /*
      * All six are controller stubs today — empty lists, zeroed analytics, and a settings payload
      * carrying an `ingestionApiKey` field — and none of them takes a caller or looks at the project
@@ -398,7 +398,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     }
   });
 
-  test("TAI-A-18 the external report routes answer a member, and never hand back an ingestion key", async () => {
+  test("TAI-A-18 the external report routes answer a member, and never hand back an ingestion key", { tag: '@tesbo.testId("TES-TC-548")' }, async () => {
     for (const path of [
       "/tesbo-reports/runs",
       "/tesbo-reports/specs",
@@ -422,7 +422,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
     }
   });
 
-  test("TAI-A-19 an external report route does not answer for a project in another workspace", async () => {
+  test("TAI-A-19 an external report route does not answer for a project in another workspace", { tag: '@tesbo.testId("TES-TC-549")' }, async () => {
     // The routes take no project into account at all today, so this is the assertion that catches it:
     // a project id the caller has no business with must not produce a 200.
     const res = await asQa.get(url("/tesbo-reports/runs", tenant!.secondProjectId), { failOnStatusCode: false });
@@ -431,7 +431,7 @@ test.describe("the tail — api keys, activity, notifications, branding, admin",
 
   // ─── Linked issue keys ────────────────────────────────────────────────────
 
-  test("TAI-A-20 the linked-issue-key aggregates answer a member and refuse everyone else", async () => {
+  test("TAI-A-20 the linked-issue-key aggregates answer a member and refuse everyone else", { tag: '@tesbo.testId("TES-TC-550")' }, async () => {
     for (const path of ["/testcases/linked-jira-keys", "/testcases/linked-linear-keys"]) {
       const res = await asOwner.get(url(path), { failOnStatusCode: false });
       expect(res.status(), `${path} — ${await res.text()}`).toBe(200);

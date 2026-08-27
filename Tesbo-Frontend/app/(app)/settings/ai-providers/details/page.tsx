@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { authMe, getWorkspace, listWorkspaceAiKeys, type WorkspaceAiKey } from "@/lib/api";
-import { Card, StatusChip } from "@/components/ui";
+import { Card, PageLoader, StatusChip } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
 export default function AiProviderDetailsPage() {
@@ -37,7 +37,7 @@ export default function AiProviderDetailsPage() {
   if (loading) {
     return (
       <StandardPageLayout header={<PageHeader title="AI provider details" />}>
-        <div className="flex min-h-[220px] items-center justify-center text-sm text-[var(--muted)]">Loading providers...</div>
+        <PageLoader label="Loading providers…" />
       </StandardPageLayout>
     );
   }

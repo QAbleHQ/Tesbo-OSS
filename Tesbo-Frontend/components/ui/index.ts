@@ -9,10 +9,13 @@ export type { StatusBadgeProps, TestStatus } from "@/components/ui/StatusBadge";
 export { default as PriorityBadge } from "@/components/ui/PriorityBadge";
 export type { PriorityBadgeProps, Priority } from "@/components/ui/PriorityBadge";
 export { default as Modal } from "@/components/ui/Modal";
+export { default as ConfirmModal } from "@/components/ui/ConfirmModal";
 export { default as CopyButton } from "@/components/ui/CopyButton";
 export type { CopyButtonProps } from "@/components/ui/CopyButton";
 export { default as Drawer } from "@/components/ui/Drawer";
 export { default as EmptyStateBlock } from "@/components/ui/EmptyStateBlock";
+export { PageLoader } from "@/components/ui/PageLoader";
+export type { PageLoaderProps } from "@/components/ui/PageLoader";
 
 export { Field, FieldLabel, FieldHint, FieldError } from "@/components/ui/Field";
 export { default as Input } from "@/components/ui/Input";

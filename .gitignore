@@ -56,3 +56,6 @@ frontend/
 test-results/
 playwright-report/
 .auth/
+
+# Personal, machine-local Claude Code overrides (never share across branches/teammates)
+CLAUDE.local.md

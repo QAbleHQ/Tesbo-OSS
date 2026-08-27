@@ -1,8 +1,10 @@
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { dbControlAvailable } from "../utils/psql";
 import {
+  createPlan,
   removeWorkspaceMember,
+  screensApi,
   screensSuiteSkipReason,
   screensTenant,
   seedWorkspaceMember,
@@ -41,18 +43,18 @@ test.describe("side navigation — workspace mode", () => {
     await page.goto("/projects");
   });
 
-  test("NAV-W-01 shows exactly the three workspace destinations", async ({ page }) => {
+  test("NAV-W-01 shows exactly the three workspace destinations", { tag: '@tesbo.testId("TES-TC-687")' }, async ({ page }) => {
     await expect(navLink(page, "Dashboard")).toBeVisible();
     await expect(navLink(page, "Projects")).toBeVisible();
     // The screens tenant's user created the workspace, so it is the owner.
     await expect(navLink(page, "Activity")).toBeVisible();
   });
 
-  test("NAV-W-03 Projects is the only item marked active on /projects", async ({ page }) => {
+  test("NAV-W-03 Projects is the only item marked active on /projects", { tag: '@tesbo.testId("TES-TC-688")' }, async ({ page }) => {
     expect(await activeNavLabels(page)).toEqual(["Projects"]);
   });
 
-  test("NAV-W-04 each workspace item navigates and takes the active state with it", async ({ page }) => {
+  test("NAV-W-04 each workspace item navigates and takes the active state with it", { tag: '@tesbo.testId("TES-TC-689")' }, async ({ page }) => {
     await navLink(page, "Dashboard").click();
     await page.waitForURL("**/dashboard");
     expect(await activeNavLabels(page)).toEqual(["Dashboard"]);
@@ -66,25 +68,25 @@ test.describe("side navigation — workspace mode", () => {
     expect(await activeNavLabels(page)).toEqual(["Projects"]);
   });
 
-  test("NAV-W-05 the footer offers workspace settings, not project settings", async ({ page }) => {
+  test("NAV-W-05 the footer offers workspace settings, not project settings", { tag: '@tesbo.testId("TES-TC-690")' }, async ({ page }) => {
     await expect(navLink(page, "Workspace settings")).toBeVisible();
     await expect(navLink(page, "Project settings")).toHaveCount(0);
   });
 
-  test("NAV-W-06 the project-only sections are absent outside a project", async ({ page }) => {
+  test("NAV-W-06 the project-only sections are absent outside a project", { tag: '@tesbo.testId("TES-TC-691")' }, async ({ page }) => {
     for (const section of ["Test management", "Execution", "Assets"]) {
       await expect(sidebar(page).getByText(section, { exact: true })).toHaveCount(0);
     }
     await expect(navLink(page, "All Projects")).toHaveCount(0);
   });
 
-  test("NAV-W-07 the brand mark returns to the projects list", async ({ page }) => {
+  test("NAV-W-07 the brand mark returns to the projects list", { tag: '@tesbo.testId("TES-TC-692")' }, async ({ page }) => {
     await page.goto("/dashboard");
     await sidebar(page).getByRole("link", { name: "Tesbo Test Manager" }).click();
     await page.waitForURL("**/projects");
   });
 
-  test("NAV-W-02 a non-owner does not get the workspace Activity link", async ({ browser }) => {
+  test("NAV-W-02 a non-owner does not get the workspace Activity link", { tag: '@tesbo.testId("TES-TC-693")' }, async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a second workspace member");
     const member = await seedWorkspaceMember(tenant!.organizationId, "member");
     const context = await browser.newContext({ storageState: member.storageStatePath });
@@ -112,13 +114,13 @@ test.describe("side navigation — project mode", () => {
     await page.goto(projectPath("/dashboard"));
   });
 
-  test("NAV-P-01 All Projects returns to the workspace list", async ({ page }) => {
+  test("NAV-P-01 All Projects returns to the workspace list", { tag: '@tesbo.testId("TES-TC-694")' }, async ({ page }) => {
     await navLink(page, "All Projects").click();
     await page.waitForURL("**/projects");
     await expect(navLink(page, "Dashboard")).toBeVisible();
   });
 
-  test("NAV-P-02 the four section headers are present", async ({ page }) => {
+  test("NAV-P-02 the four section headers are present", { tag: '@tesbo.testId("TES-TC-695")' }, async ({ page }) => {
     for (const section of ["Overview", "Test management", "Execution", "Assets"]) {
       await expect(sidebar(page).getByText(section, { exact: true })).toBeVisible();
     }
@@ -150,7 +152,7 @@ test.describe("side navigation — project mode", () => {
     });
   }
 
-  test("NAV-P-06/07 the project root redirects to the dashboard and marks Project home active", async ({
+  test("NAV-P-06/07 the project root redirects to the dashboard and marks Project home active", { tag: '@tesbo.testId("TES-TC-706")' }, async ({
     page,
   }) => {
     await page.goto(projectPath());
@@ -158,13 +160,13 @@ test.describe("side navigation — project mode", () => {
     expect(await activeNavLabels(page)).toContain("Project home");
   });
 
-  test("NAV-P-08 a deep child route keeps its parent section active", async ({ page }) => {
+  test("NAV-P-08 a deep child route keeps its parent section active", { tag: '@tesbo.testId("TES-TC-707")' }, async ({ page }) => {
     await navLink(page, "Runs").click();
     await page.waitForURL(/\/cycles$/);
     expect(await activeNavLabels(page)).toContain("Runs");
   });
 
-  test("NAV-P-09/10 the Agents sub-items appear only once Agents is the active section", async ({
+  test("NAV-P-09/10 the Agents sub-items appear only once Agents is the active section", { tag: '@tesbo.testId("TES-TC-708")' }, async ({
     page,
   }) => {
     await expect(navLink(page, "Tasks")).toHaveCount(0);
@@ -180,7 +182,7 @@ test.describe("side navigation — project mode", () => {
     expect(await activeNavLabels(page)).toContain("Agent list");
   });
 
-  test("NAV-P-12 every project link carries the project id currently being viewed", async ({ page }) => {
+  test("NAV-P-12 every project link carries the project id currently being viewed", { tag: '@tesbo.testId("TES-TC-709")' }, async ({ page }) => {
     const hrefs = await sidebar(page)
       .locator("a")
       .evaluateAll((links) => links.map((l) => l.getAttribute("href") ?? ""));
@@ -192,13 +194,13 @@ test.describe("side navigation — project mode", () => {
     }
   });
 
-  test("NAV-P-13 a project id from another workspace lands back on the projects list", async ({ page }) => {
+  test("NAV-P-13 a project id from another workspace lands back on the projects list", { tag: '@tesbo.testId("TES-TC-710")' }, async ({ page }) => {
     // A syntactically valid id this workspace has no access to — the app must not half-render.
     await page.goto("/projects/00000000-0000-0000-0000-000000000000/dashboard");
     await page.waitForURL("**/projects", { timeout: 15_000 });
   });
 
-  test("NAV-P-14 the footer offers project settings and marks it active there", async ({ page }) => {
+  test("NAV-P-14 the footer offers project settings and marks it active there", { tag: '@tesbo.testId("TES-TC-711")' }, async ({ page }) => {
     await expect(navLink(page, "Project settings")).toBeVisible();
     await expect(navLink(page, "Workspace settings")).toHaveCount(0);
 
@@ -207,7 +209,7 @@ test.describe("side navigation — project mode", () => {
     expect(await activeNavLabels(page)).toContain("Project settings");
   });
 
-  test("NAV-P-15 workspace settings collapses the rail to just the way back", async ({ page }) => {
+  test("NAV-P-15 workspace settings collapses the rail to just the way back", { tag: '@tesbo.testId("TES-TC-712")' }, async ({ page }) => {
     await page.goto("/settings");
 
     await expect(navLink(page, "All Projects")).toBeVisible();
@@ -216,7 +218,7 @@ test.describe("side navigation — project mode", () => {
     }
   });
 
-  test("NAV-P-17 members and suites are reachable by URL but absent from the nav", async ({ page }) => {
+  test("NAV-P-17 members and suites are reachable by URL but absent from the nav", { tag: '@tesbo.testId("TES-TC-713")' }, async ({ page }) => {
     await expect(navLink(page, "Members")).toHaveCount(0);
     await expect(navLink(page, "Suites")).toHaveCount(0);
 
@@ -230,7 +232,7 @@ test.describe("side navigation — project mode", () => {
 test.describe("side navigation — behaviour", () => {
   test.skip(!!skipReason, skipReason ?? "");
 
-  test("NAV-B-01/02 collapsing hides the labels and expanding brings them back", async ({ page }) => {
+  test("NAV-B-01/02 collapsing hides the labels and expanding brings them back", { tag: '@tesbo.testId("TES-TC-714")' }, async ({ page }) => {
     await page.goto("/projects");
     const rail = sidebar(page);
     await expect(rail).toHaveCSS("width", "260px");
@@ -247,7 +249,7 @@ test.describe("side navigation — behaviour", () => {
     await expect(navLink(page, "Projects")).toHaveText("Projects");
   });
 
-  test("NAV-B-03 the collapsed rail keeps its toggle reachable below the brand mark", async ({ page }) => {
+  test("NAV-B-03 the collapsed rail keeps its toggle reachable below the brand mark", { tag: '@tesbo.testId("TES-TC-715")' }, async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
 
@@ -266,7 +268,7 @@ test.describe("side navigation — behaviour", () => {
     await expect(sidebar(page)).toHaveCSS("width", "260px");
   });
 
-  test("NAV-B-04 the collapsed state is not remembered across a reload", async ({ page }) => {
+  test("NAV-B-04 the collapsed state is not remembered across a reload", { tag: '@tesbo.testId("TES-TC-716")' }, async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
     await expect(sidebar(page)).toHaveCSS("width", "60px");
@@ -277,16 +279,51 @@ test.describe("side navigation — behaviour", () => {
     await expect(sidebar(page)).toHaveCSS("width", "260px");
   });
 
-  test("NAV-B-05 the theme toggle and log out stay usable in the collapsed rail", async ({ page }) => {
+  test("NAV-B-05 the theme toggle and logout stay usable in the collapsed rail", { tag: '@tesbo.testId("TES-TC-717")' }, async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
 
     await expect(page.getByRole("button", { name: "Use dark theme" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Use light theme" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
-  test("NAV-B-06/09 logging out ends the session and Back cannot resurrect it", async ({ browser }) => {
+  test("NAV-B-05b clicking Logout opens a Yes/No confirmation instead of logging out immediately", { tag: '@tesbo.testId("TES-TC-1345")' }, async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+
+    // Modal.tsx renders without role="dialog" (see its own comment on this) — asserting on the
+    // title text and the Yes/No controls is the reliable signal that it's actually open.
+    await expect(page.getByRole("heading", { name: "Logout" })).toBeVisible();
+    await expect(page.getByText("Are you sure you want to logout?")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Yes" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "No" })).toBeVisible();
+    // No network call yet — confirming is a separate, deliberate step.
+    await expect(page).toHaveURL(/\/projects/);
+  });
+
+  test("NAV-B-05c No dismisses the confirmation and keeps the session", { tag: '@tesbo.testId("TES-TC-1346")' }, async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "No" }).click();
+
+    await expect(page.getByText("Are you sure you want to logout?")).toBeHidden();
+    await expect(page).toHaveURL(/\/projects/);
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
+  });
+
+  test("NAV-B-05d pressing Escape on the confirmation keeps the session, same as No", { tag: '@tesbo.testId("TES-TC-1347")' }, async ({ page }) => {
+    await page.goto("/projects");
+    await page.getByRole("button", { name: "Logout" }).click();
+    await expect(page.getByText("Are you sure you want to logout?")).toBeVisible();
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.getByText("Are you sure you want to logout?")).toBeHidden();
+    await expect(page).toHaveURL(/\/projects/);
+  });
+
+  test("NAV-B-06/09 confirming with Yes ends the session and Back cannot resurrect it", async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a disposable user to log out with");
     // Its own user: logout invalidates the session server-side, and the shared screens storage
     // state would be left holding a dead cookie for every other spec in the run.
@@ -295,7 +332,8 @@ test.describe("side navigation — behaviour", () => {
     const page = await context.newPage();
     try {
     await page.goto("/projects");
-    await page.getByRole("button", { name: "Log out" }).click();
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "Yes" }).click();
     // Generous: this test shares the stack with the rest of the suite, and the redirect waits on a
     // real round trip to the backend.
     await page.waitForURL("**/login", { timeout: 30_000 });
@@ -314,20 +352,23 @@ test.describe("side navigation — behaviour", () => {
     }
   });
 
-  test("NAV-B-07 a failed logout says so and leaves the button usable", async ({ page }) => {
+  test("NAV-B-07 a failed logout says so inside the confirmation and leaves Yes usable to retry", async ({ page }) => {
     await page.goto("/projects");
     // Matched by predicate, not glob: the frontend posts to the backend origin (:1021) while the
     // page sits on :1020, and a relative glob is resolved against baseURL, so it never matches.
     await page.route((url) => url.pathname === "/api/auth/logout", (route) => route.abort("failed"));
 
-    await page.getByRole("button", { name: "Log out" }).click();
+    await page.getByRole("button", { name: "Logout" }).click();
+    await page.getByRole("button", { name: "Yes" }).click();
 
+    // Left open on failure, not dismissed, so the user can retry without reopening the confirmation.
     await expect(page.getByText("Could not log out. Please try again.")).toBeVisible();
-    await expect(page.getByRole("button", { name: "Log out" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Yes" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "No" })).toBeEnabled();
     await expect(page).toHaveURL(/\/projects/);
   });
 
-  test("NAV-B-08 a double-click sends exactly one logout request", async ({ browser }) => {
+  test("NAV-B-08 a double-click on Yes sends exactly one logout request", async ({ browser }) => {
     test.skip(!dbControlAvailable(), "needs psql access to seed a disposable user to log out with");
     const member = await seedWorkspaceMember(tenant!.organizationId, "member");
     const context = await browser.newContext({ storageState: member.storageStatePath });
@@ -342,9 +383,10 @@ test.describe("side navigation — behaviour", () => {
       await route.continue();
     });
 
-    const logout = page.getByRole("button", { name: /Log out|Logging out/ });
-    await logout.click();
-    await logout.click({ force: true }).catch(() => undefined);
+    await page.getByRole("button", { name: "Logout" }).click();
+    const confirm = page.getByRole("button", { name: /^(Yes|Logging out…)$/ });
+    await confirm.click();
+    await confirm.click({ force: true }).catch(() => undefined);
     await page.waitForURL("**/login");
 
     expect(logoutCalls).toBe(1);
@@ -354,15 +396,15 @@ test.describe("side navigation — behaviour", () => {
     }
   });
 
-  test("NAV-B-10 the nav scrolls at a short viewport and the footer stays reachable", async ({ page }) => {
+  test("NAV-B-10 the nav scrolls at a short viewport and the footer stays reachable", { tag: '@tesbo.testId("TES-TC-721")' }, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 500 });
     await page.goto(`/projects/${tenant!.projectId}/dashboard`);
 
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
     await expect(navLink(page, "Project settings")).toBeVisible();
   });
 
-  test("NAV-B-11 every nav item is reachable and activatable from the keyboard", async ({ page }) => {
+  test("NAV-B-11 every nav item is reachable and activatable from the keyboard", { tag: '@tesbo.testId("TES-TC-722")' }, async ({ page }) => {
     await page.goto("/projects");
     const projects = navLink(page, "Projects");
     await projects.focus();
@@ -373,7 +415,7 @@ test.describe("side navigation — behaviour", () => {
     await page.waitForURL("**/dashboard");
   });
 
-  test("NAV-B-12 every icon-only control carries an accessible name", async ({ page }) => {
+  test("NAV-B-12 every icon-only control carries an accessible name", { tag: '@tesbo.testId("TES-TC-723")' }, async ({ page }) => {
     await page.goto("/projects");
     await page.getByRole("button", { name: "Collapse sidebar" }).click();
 
@@ -387,7 +429,7 @@ test.describe("side navigation — behaviour", () => {
     expect(unnamed).toEqual([]);
   });
 
-  test("NAV-P-16 the sidebar is absent from the unauthenticated screens", async ({ browser }) => {
+  test("NAV-P-16 the sidebar is absent from the unauthenticated screens", { tag: '@tesbo.testId("TES-TC-724")' }, async ({ browser }) => {
     const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     try {
       const anonymous = await context.newPage();
@@ -399,7 +441,7 @@ test.describe("side navigation — behaviour", () => {
       await context.close();
     }
   });
-  test("NAV-B-13 the workspace menu scrolls its own list and keeps Create new workspace reachable", async ({
+  test("NAV-B-13 the workspace menu scrolls its own list and keeps Create new workspace reachable", { tag: '@tesbo.testId("TES-TC-1039")' }, async ({
     page,
   }) => {
     /*
@@ -443,7 +485,7 @@ test.describe("side navigation — behaviour", () => {
     await create.click();
     await expect(page.getByRole("heading", { name: "Create workspace" })).toBeVisible();
   });
-  test("NAV-B-14 the signed-in user's avatar is the same colour on every screen", async ({ page }) => {
+  test("NAV-B-14 the signed-in user's avatar is the same colour on every screen", { tag: '@tesbo.testId("TES-TC-1040")' }, async ({ page }) => {
     /*
      * Basecamp 10198836413 — "[UI] Display picture initials show different colours across the website".
      *
@@ -490,5 +532,145 @@ test.describe("side navigation — behaviour", () => {
     ]) {
       expect(await avatarColourOn(path), `the avatar changes colour on ${path}`).toBe(first);
     }
+  });
+
+  test("NAV-B-15 the same person's avatar matches across different components, not just different pages", { tag: '@tesbo.testId("TES-TC-1348")' }, async ({
+    page,
+  }) => {
+    /*
+     * NAV-B-14 above only ever reads the top bar's own avatar on different routes — the same
+     * <TopBar/> instance every time — so it could never have caught this ticket's actual
+     * regression: PlanCard's OwnerAvatar and the workspace Activity feed's ActorAvatar each seeded
+     * avatarColor() with the person's *name* instead of their id, so the same person could land on
+     * a different palette swatch in a plan card or the activity feed than in the top bar, even
+     * though every one of them called avatarColor(). This reproduces the reported pairing (header
+     * vs. Activity section) by comparing the top bar's avatar against a plan card's owner avatar
+     * and an activity row for an action the signed-in user just performed.
+     */
+    const api = await screensApi();
+    let planId: string | undefined;
+    try {
+      await page.goto("/projects");
+      const topBarAvatar = page.locator("header span.rounded-full").first();
+      await expect(topBarAvatar).toBeVisible();
+      const topBarColour = await topBarAvatar.evaluate((el) => getComputedStyle(el).backgroundColor);
+
+      const plan = await createPlan(api, tenant!.projectId);
+      planId = plan.id;
+
+      await page.goto(`/projects/${tenant!.projectId}/plans`);
+      const card = page.locator(".group", { has: page.getByRole("link", { name: plan.name, exact: true }) }).first();
+      const cardAvatar = card.locator("span.rounded-full").first();
+      await expect(cardAvatar, "the plan card never shows an owner avatar").toBeVisible();
+      expect(
+        await cardAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the plan card's owner avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+
+      await page.goto("/activity");
+      await page.getByPlaceholder("Search activity…").fill(plan.name);
+      const row = page.locator("div.grid", { hasText: plan.name }).first();
+      const rowAvatar = row.locator("span.rounded-full").first();
+      await expect(rowAvatar, "no activity row found for the plan-created event").toBeVisible();
+      expect(
+        await rowAvatar.evaluate((el) => getComputedStyle(el).backgroundColor),
+        "the activity feed's actor avatar is a different colour than the top bar for the same person",
+      ).toBe(topBarColour);
+    } finally {
+      if (planId) await api.delete(`/api/plans/${planId}`, { failOnStatusCode: false }).catch(() => {});
+      await api.dispose();
+    }
+  });
+});
+
+test.describe("top bar — notifications", () => {
+  test.skip(!!skipReason, skipReason ?? "");
+
+  /*
+   * BetterBugs: "Notification Icon Does Not Respond When Clicked" — the bell in TopBar.tsx had no
+   * onClick at all. Fixed by wiring it to a dropdown panel backed by GET /api/notifications
+   * (notifications.spec.ts pins that route's own contract). The backend route is still a stub that
+   * always answers an empty list (see legacy.controller.ts's comment on it), so the primary path
+   * here is necessarily the empty state — these tests are about the panel's own behaviour
+   * (open/close, keyboard, error handling), not about real notification content.
+   */
+
+  const bell = (page: Page) => page.getByRole("button", { name: "Notifications" });
+  const panel = (page: Page) => page.getByRole("menu", { name: "Notifications" });
+
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/projects");
+  });
+
+  test("NOTIF-UI-01 clicking the bell opens the panel and shows the empty state", { tag: '@tesbo.testId("TES-TC-1349")' }, async ({ page }) => {
+    await expect(panel(page)).toBeHidden();
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await expect(panel(page).getByText("No notifications")).toBeVisible();
+    await expect(bell(page)).toHaveAttribute("aria-expanded", "true");
+  });
+
+  test("NOTIF-UI-02 clicking the bell again closes it", { tag: '@tesbo.testId("TES-TC-1350")' }, async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await bell(page).click();
+    await expect(panel(page)).toBeHidden();
+    await expect(bell(page)).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("NOTIF-UI-03 clicking outside the panel closes it", { tag: '@tesbo.testId("TES-TC-1351")' }, async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    // The top-bar avatar (same locator NAV-B-14 uses) — always present, has no click handler of its
+    // own, and sits outside notifBoxRef, so clicking it is an unambiguous "outside click".
+    await page.locator("header span.rounded-full").first().click();
+    await expect(panel(page)).toBeHidden();
+  });
+
+  test("NOTIF-UI-04 pressing Escape closes it", { tag: '@tesbo.testId("TES-TC-1352")' }, async ({ page }) => {
+    await bell(page).click();
+    await expect(panel(page)).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(panel(page)).toBeHidden();
+  });
+
+  test("NOTIF-UI-05 the bell is reachable and activatable from the keyboard", { tag: '@tesbo.testId("TES-TC-1353")' }, async ({ page }) => {
+    await bell(page).focus();
+    await expect(bell(page)).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(panel(page)).toBeVisible();
+  });
+
+  test("NOTIF-UI-06 a failed fetch shows an inline error instead of an empty panel or a crash", { tag: '@tesbo.testId("TES-TC-1354")' }, async ({
+    page,
+  }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    // Matched by pathname, not a glob against the page's own origin — the frontend calls the
+    // backend's origin, which the NAV-B-07 logout test already established a glob against baseURL
+    // won't match.
+    await page.route((url) => url.pathname === "/api/notifications", (route) => route.abort("failed"));
+
+    await bell(page).click();
+
+    await expect(panel(page).getByText("No notifications")).toBeHidden();
+    await expect(panel(page).getByRole("button", { name: "Try again" })).toBeVisible();
+    expect(pageErrors, "a failed notifications fetch raised a client-side error").toEqual([]);
+  });
+
+  test("NOTIF-UI-07 Try again recovers once the request succeeds", { tag: '@tesbo.testId("TES-TC-1355")' }, async ({ page }) => {
+    let attempt = 0;
+    await page.route((url) => url.pathname === "/api/notifications", (route) => {
+      attempt += 1;
+      if (attempt === 1) return route.abort("failed");
+      return route.continue();
+    });
+
+    await bell(page).click();
+    await expect(panel(page).getByRole("button", { name: "Try again" })).toBeVisible();
+
+    await panel(page).getByRole("button", { name: "Try again" }).click();
+
+    await expect(panel(page).getByText("No notifications")).toBeVisible();
   });
 });

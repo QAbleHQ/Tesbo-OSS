@@ -64,7 +64,7 @@ test.describe("test plans — the plan card", () => {
     await api?.dispose();
   });
 
-  test("PLN-U-01 a plan with runs but no plan items shows its runs and no case count", async ({ page }) => {
+  test("PLN-U-01 a plan with runs but no plan items shows its runs and no case count", { tag: '@tesbo.testId("TES-TC-1041")' }, async ({ page }) => {
     // The reported card: pass rate over two runs, and a "0 cases" chip beside them that nothing on
     // the screen could explain. The cases live on the cycles, not on the plan.
     const project = await createProject(api);
@@ -102,7 +102,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-02 a plan that does have items still shows no case count on the card", async ({ page }) => {
+  test("PLN-U-02 a plan that does have items still shows no case count on the card", { tag: '@tesbo.testId("TES-TC-1042")' }, async ({ page }) => {
     // Guards against the negative assertion passing merely because the count would have been 0.
     const project = await createProject(api);
     try {
@@ -129,7 +129,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-03 the surviving footer chips match the API for a never-run and a run plan", async ({ page }) => {
+  test("PLN-U-03 the surviving footer chips match the API for a never-run and a run plan", { tag: '@tesbo.testId("TES-TC-1043")' }, async ({ page }) => {
     const project = await createProject(api);
     let run: SeededRun | undefined;
     try {
@@ -161,7 +161,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-04 the list view renders the same card, also without a case count", async ({ page }) => {
+  test("PLN-U-04 the list view renders the same card, also without a case count", { tag: '@tesbo.testId("TES-TC-1044")' }, async ({ page }) => {
     const project = await createProject(api);
     let run: SeededRun | undefined;
     try {
@@ -184,7 +184,7 @@ test.describe("test plans — the plan card", () => {
     }
   });
 
-  test("PLN-U-05 the card opens the plan detail, which keeps its own test case stat", async ({ page }) => {
+  test("PLN-U-05 the card opens the plan detail, which keeps its own test case stat", { tag: '@tesbo.testId("TES-TC-1045")' }, async ({ page }) => {
     // The detail header shows the same caseCount next to the Items tab that lists exactly those
     // cases, so it stayed. This test is what fails if the removal is widened by accident.
     const project = await createProject(api);
@@ -216,7 +216,7 @@ test.describe("test plans — list, search and empty states", () => {
     await api?.dispose();
   });
 
-  test("PLN-U-06 a project with no plans shows the empty state and no case count", async ({ page }) => {
+  test("PLN-U-06 a project with no plans shows the empty state and no case count", { tag: '@tesbo.testId("TES-TC-1046")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/plans`);
@@ -228,7 +228,7 @@ test.describe("test plans — list, search and empty states", () => {
     }
   });
 
-  test("PLN-U-07 search narrows the cards and clears back to the full list", async ({ page }) => {
+  test("PLN-U-07 search narrows the cards and clears back to the full list", { tag: '@tesbo.testId("TES-TC-1047")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const wanted = await createPlan(api, project.id, { name: `E2E Searchable Plan ${uniqueSuffix()}` });
@@ -248,6 +248,40 @@ test.describe("test plans — list, search and empty states", () => {
       await expect(page.getByText("No test plans found")).toBeVisible();
 
       await page.getByRole("button", { name: "Clear filters" }).click();
+      await expect(planCard(page, wanted.name)).toBeVisible();
+      await expect(planCard(page, other.name)).toBeVisible();
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("PLN-U-08 the search box's inline clear button resets the query and only shows while it has text", async ({ page }) => {
+    const project = await createProject(api);
+    try {
+      const wanted = await createPlan(api, project.id, { name: `E2E Searchable Plan ${uniqueSuffix()}` });
+      const other = await createPlan(api, project.id, { name: `E2E Other Plan ${uniqueSuffix()}` });
+
+      await page.goto(`/projects/${project.id}/plans`);
+      const search = page.getByPlaceholder("Search plans...");
+      const clearButton = page.getByRole("button", { name: "Clear search" });
+
+      // Edge case: no text yet — the clear affordance must not render as an empty search reads as "no query".
+      await expect(clearButton).toHaveCount(0);
+
+      await search.fill("Searchable");
+      await expect(clearButton).toBeVisible();
+      await expect(planCard(page, other.name)).toHaveCount(0);
+
+      await clearButton.click();
+      await expect(search).toHaveValue("");
+      await expect(clearButton).toHaveCount(0);
+      await expect(planCard(page, wanted.name)).toBeVisible();
+      await expect(planCard(page, other.name)).toBeVisible();
+
+      // Edge case: whitespace-only input is not a real query — it should still match everything (the
+      // filter trims it) even though the clear button renders, since the box itself has content.
+      await search.fill("   ");
+      await expect(clearButton).toBeVisible();
       await expect(planCard(page, wanted.name)).toBeVisible();
       await expect(planCard(page, other.name)).toBeVisible();
     } finally {
@@ -306,7 +340,7 @@ test.describe("test plans — the plan detail progress panel", () => {
     await api?.dispose();
   });
 
-  test("PLN-U-08 a plan lists every run its progress header counts, including a Planning one", async ({
+  test("PLN-U-08 a plan lists every run its progress header counts, including a Planning one", { tag: '@tesbo.testId("TES-TC-1048")' }, async ({
     page,
   }) => {
     /*
@@ -352,7 +386,7 @@ test.describe("test plans — the plan detail progress panel", () => {
     }
   });
 
-  test("PLN-U-09 the progress tiles add up to Total when the plan also holds an empty run", async ({
+  test("PLN-U-09 the progress tiles add up to Total when the plan also holds an empty run", { tag: '@tesbo.testId("TES-TC-1049")' }, async ({
     page,
   }) => {
     /*
@@ -404,7 +438,7 @@ test.describe("test plans — the plan detail progress panel", () => {
       await deleteProjects(api, [project.id]);
     }
   });
-  test("PLN-U-10 untested is the same colour on the bar, its legend dot and its tile", async ({
+  test("PLN-U-10 untested is the same colour on the bar, its legend dot and its tile", { tag: '@tesbo.testId("TES-TC-1050")' }, async ({
     page,
   }) => {
     /*
@@ -485,7 +519,7 @@ test.describe("test plans — the plan detail progress panel", () => {
       await deleteProjects(api, [project.id]);
     }
   });
-  test("PLN-U-11 the progress header equals the sum of the runs listed beneath it", async ({ page }) => {
+  test("PLN-U-11 the progress header equals the sum of the runs listed beneath it", { tag: '@tesbo.testId("TES-TC-1051")' }, async ({ page }) => {
     /*
      * Basecamp 10213208002 — "Test plan: Overall progress percentage not matching", reported as the
      * header disagreeing with the run listed under it.
@@ -548,6 +582,83 @@ test.describe("test plans — the plan detail progress panel", () => {
       await cleanupRun(api, project.id, runB);
       await cleanupRun(api, project.id, runA);
       await deleteProjects(api, [project.id]);
+    }
+  });
+});
+
+/*
+ * The plan header, its Plan items tab and the inline edit form.
+ *
+ * Three cards from the same screen: 10221932189 ("Test cases shows incorrect count" — the header
+ * chip counted pinned plan_items while the panel below counted the cases in the plan's runs, so a
+ * plan running twelve cases announced "0 test cases"), 10221983132 ("Plan items shows 0 count and
+ * message 'no planed items'" — accurate, but reading as a bug next to those twelve), and 10221977100
+ * ("Edit test plan > field labels are missing").
+ */
+test.describe("test plans — header count, plan items and editing", () => {
+  test.skip(skipReason !== null, skipReason ?? "");
+
+  test("PLN-U-12 the header's test case count is the plan's actual cases, not its pinned items", { tag: '@tesbo.testId("TES-TC-1356")' }, async ({
+    page,
+  }) => {
+    const api = await screensApi();
+    const project = await createProject(api);
+    try {
+      const plan = await createPlan(api, project.id);
+      // Three cases, all of them arriving through a linked RUN and none pinned as plan items — the
+      // exact shape of the report: caseCount is 0 while the plan plainly covers three cases.
+      await seedRun(api, project.id, { statuses: ["Passed", "Failed", "Untested"], planId: plan.id });
+
+      await page.goto(`/projects/${project.id}/plans/${plan.id}`);
+
+      // Asserted against the fixture rather than by scraping the TOTAL tile: `page.locator("div")`
+      // matches every div on the screen, and filtering that set was slow enough to time the test out.
+      await expect(page.getByText(/3 test cases/)).toBeVisible();
+      await expect(page.getByText(/^0 test cases$/)).toHaveCount(0);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
+    }
+  });
+
+  test("PLN-U-13 the empty Plan items tab explains where the plan's cases come from", { tag: '@tesbo.testId("TES-TC-1357")' }, async ({ page }) => {
+    const api = await screensApi();
+    const project = await createProject(api);
+    try {
+      const plan = await createPlan(api, project.id);
+      await seedRun(api, project.id, { statuses: ["Passed", "Failed"], planId: plan.id });
+
+      await page.goto(`/projects/${project.id}/plans/${plan.id}`);
+      await page.getByRole("button", { name: /Plan items/ }).click();
+
+      // The count stays honest — nothing is pinned — but the copy names the other number so the two
+      // no longer read as a contradiction.
+      const empty = page.getByText(/Nothing is pinned to this plan/);
+      await expect(empty).toBeVisible();
+      await expect(empty).toContainText(/\d+ test cases? come from the linked test runs/);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
+    }
+  });
+
+  test("PLN-U-14 the inline edit form labels every field", { tag: '@tesbo.testId("TES-TC-1358")' }, async ({ page }) => {
+    const api = await screensApi();
+    const project = await createProject(api);
+    try {
+      const plan = await createPlan(api, project.id);
+      await page.goto(`/projects/${project.id}/plans/${plan.id}`);
+      await page.getByRole("button", { name: /^Edit$/ }).first().click();
+
+      // Labels, not placeholders: a placeholder disappears the moment the field has a value, which
+      // is exactly the state you are in when editing an existing plan.
+      for (const label of ["Plan name", "Description", "Target release"]) {
+        await expect(page.getByLabel(label)).toBeVisible();
+      }
+      await expect(page.getByLabel("Plan name")).toHaveValue(plan.name);
+    } finally {
+      await deleteProjects(api, [project.id]);
+      await api.dispose();
     }
   });
 });

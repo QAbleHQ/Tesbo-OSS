@@ -48,7 +48,7 @@ import {
   type TestRunListItem,
   type TestEnvironmentSetting,
 } from "@/lib/api";
-import { Button, StatusChip, StatusBadge, PriorityBadge, Input, Select, type TestStatus, type Priority } from "@/components/ui";
+import { Button, StatusChip, StatusBadge, PriorityBadge, Input, PageLoader, Select, Field, FieldLabel, type TestStatus, type Priority } from "@/components/ui";
 import Modal from "@/components/ui/Modal";
 import { useTopBarSlots } from "@/components/TopBarSlots";
 import { planStatus, formatLastRun, OwnerAvatar, PlanStatusBadge } from "@/components/testplans/PlanCard";
@@ -370,14 +370,7 @@ export default function PlanDetailPage() {
   }, [runs, progress]);
 
   if (loading || !plan) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-[var(--brand-primary)] border-t-transparent" />
-          <p className="text-sm text-[var(--muted)]">Loading plan…</p>
-        </div>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading plan…" />;
   }
 
   const total = derivedProgress?.totalCases || 0;
@@ -412,7 +405,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => router.push("/projects")}
-                    className="truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
+                    className="cursor-pointer truncate text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
                   >
                     {projectName}
                   </button>
@@ -422,7 +415,7 @@ export default function PlanDetailPage() {
               <button
                 type="button"
                 onClick={() => router.push(`/projects/${projectId}/plans`)}
-                className="shrink-0 text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
+                className="shrink-0 cursor-pointer text-[var(--muted-soft)] transition-colors hover:text-[var(--accent-light)]"
               >
                 Test plans
               </button>
@@ -439,7 +432,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => { setEditName(planName); setEditDesc(planDescription); setEditRelease(planTargetRelease); setEditing(true); }}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
+                    className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:bg-[var(--ink-100)]"
                   >
                     <IconPencil size={13} stroke={1.75} />
                     Edit
@@ -447,7 +440,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={handleDelete}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
+                    className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border border-[var(--ink-200)] bg-transparent px-3 text-[12px] font-medium text-[var(--ink-600)] transition-colors hover:border-[var(--error)] hover:text-[var(--error-foreground)]"
                   >
                     <IconTrash size={13} stroke={1.75} />
                     Delete
@@ -455,7 +448,7 @@ export default function PlanDetailPage() {
                   <button
                     type="button"
                     onClick={() => { setActiveTab("runs"); setShowCreateCycle(true); }}
-                    className="flex h-[30px] items-center gap-1.5 rounded-[6px] border-0 bg-[var(--cta-primary)] px-3.5 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-[var(--cta-hover)]"
+                    className="flex h-[30px] cursor-pointer items-center gap-1.5 rounded-[6px] border-0 bg-[var(--cta-primary)] px-3.5 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-[var(--cta-hover)]"
                   >
                     <IconPlus size={14} stroke={2} />
                     Create test run
@@ -469,10 +462,40 @@ export default function PlanDetailPage() {
         {/* Page header: title + status + meta */}
         <div className="mb-3 shrink-0 pl-4">
           {editing ? (
+            /*
+              * Basecamp 10221977100 ("Edit test plan > field labels are missing"). Three bare inputs:
+              * the name had nothing at all identifying it, and the other two leaned on placeholders,
+              * which disappear the moment there is a value — so editing an existing plan showed three
+              * unlabelled boxes of text. Field/FieldLabel is what every other form in the app uses.
+              */
             <div className="max-w-lg space-y-3">
-              <Input value={editName} onChange={(e) => setEditName(e.target.value)} className="text-[15px] font-semibold" />
-              <Input value={editDesc} onChange={(e) => setEditDesc(e.target.value)} placeholder="Description" />
-              <Input value={editRelease} onChange={(e) => setEditRelease(e.target.value)} placeholder="Target release" />
+              <Field>
+                <FieldLabel htmlFor="plan-edit-name">Plan name</FieldLabel>
+                <Input
+                  id="plan-edit-name"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="text-[15px] font-semibold"
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="plan-edit-description">Description</FieldLabel>
+                <Input
+                  id="plan-edit-description"
+                  value={editDesc}
+                  onChange={(e) => setEditDesc(e.target.value)}
+                  placeholder="What this plan covers"
+                />
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="plan-edit-release">Target release</FieldLabel>
+                <Input
+                  id="plan-edit-release"
+                  value={editRelease}
+                  onChange={(e) => setEditRelease(e.target.value)}
+                  placeholder="e.g. 2026.09"
+                />
+              </Field>
               <div className="flex gap-2">
                 <Button onClick={handleSaveEdit}>Save</Button>
                 <Button variant="secondary" onClick={() => setEditing(false)}>Cancel</Button>
@@ -501,9 +524,29 @@ export default function PlanDetailPage() {
                 </span>
                 <span className="flex items-center gap-1.5 text-[12px] text-[var(--muted)]">
                   <IconFileDescription size={13} stroke={1.75} className="text-[var(--muted-soft)]" />
-                  <span className="font-mono text-[var(--foreground)]">{currentPlanSummary?.caseCount ?? items.length}</span> test cases
+                  {/*
+                    * Basecamp 10221932189 ("Test cases shows incorrect count"). This chip read
+                    * `caseCount` — the plan_items rows, i.e. cases explicitly pinned to the plan's
+                    * scope — while the Overall progress panel three lines below counted the cases in
+                    * the plan's runs. A plan with two runs and twelve cases therefore announced "0
+                    * test cases" directly above a TOTAL of 12.
+                    *
+                    * The chip now reports the same number as TOTAL, because that is what a reader
+                    * means by "how many test cases are in this plan". The pinned scope still has its
+                    * own count on the Plan items tab, where the word "items" says what it is.
+                    */}
+                  <span className="font-mono text-[var(--foreground)]">
+                    {/*
+                      * `||`, not `??`. derivedProgress is never null — with no runs it returns the
+                      * plan-progress payload, whose totalCases is 0 — so `??` never fell through and
+                      * a plan with pinned items but no runs yet showed "0 test cases", which is the
+                      * same defect as 10221932189 pointing the other way. Caught by PLN-U-05, which
+                      * exists precisely to catch this chip being widened by accident.
+                      */}
+                    {derivedProgress?.totalCases || currentPlanSummary?.caseCount || items.length}
+                  </span> test cases
                 </span>
-                {ownerName && <OwnerAvatar name={ownerName} />}
+                {ownerName && <OwnerAvatar name={ownerName} seed={planOwnerId} />}
               </div>
             </>
           )}
@@ -529,7 +572,7 @@ export default function PlanDetailPage() {
                     type="button"
                     title="New test plan"
                     onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
+                    className="flex h-6 w-6 cursor-pointer items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--brand-soft)] hover:text-[var(--accent-light)]"
                   >
                     <IconPlus size={14} stroke={2.5} />
                   </button>
@@ -538,7 +581,7 @@ export default function PlanDetailPage() {
                   type="button"
                   title={planPanelOpen ? "Collapse plans" : "Show plans"}
                   onClick={togglePlanPanel}
-                  className="flex h-6 w-6 items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+                  className="flex h-6 w-6 cursor-pointer items-center justify-center rounded text-[var(--muted)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
                 >
                   {planPanelOpen ? <IconLayoutSidebarLeftCollapse size={14} stroke={1.75} /> : <IconLayoutSidebarLeftExpand size={14} stroke={1.75} />}
                 </button>
@@ -550,7 +593,7 @@ export default function PlanDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/plans`)}
-                  className="mb-1 flex h-8 w-full items-center justify-between rounded-[6px] px-2 text-left text-[13px] text-[var(--ink-600)] transition-colors hover:bg-[var(--surface-secondary)]"
+                  className="mb-1 flex h-8 w-full cursor-pointer items-center justify-between rounded-[6px] px-2 text-left text-[13px] text-[var(--ink-600)] transition-colors hover:bg-[var(--surface-secondary)]"
                 >
                   <span className="flex items-center gap-1.5"><IconList size={14} stroke={1.75} className="text-[var(--muted)]" />All plans</span>
                   <span className="font-mono text-[11px] text-[var(--muted)]">{allPlans.length}</span>
@@ -566,7 +609,7 @@ export default function PlanDetailPage() {
                       key={p.id}
                       type="button"
                       onClick={() => router.push(`/projects/${projectId}/plans/${p.id}`)}
-                      className={`mb-0.5 flex h-8 w-full items-center gap-2 rounded-[6px] px-2 text-left transition-colors ${isActive ? "bg-[var(--brand-soft)]" : "hover:bg-[var(--surface-secondary)]"}`}
+                      className={`mb-0.5 flex h-8 w-full cursor-pointer items-center gap-2 rounded-[6px] px-2 text-left transition-colors ${isActive ? "bg-[var(--brand-soft)]" : "hover:bg-[var(--surface-secondary)]"}`}
                     >
                       <StatusDot color={itemStatus === "active" ? "var(--status-pass-dot)" : "var(--muted-soft)"} />
                       <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isActive ? "font-medium text-[var(--accent-light)]" : "text-[var(--ink-600)]"}`}>
@@ -582,7 +625,7 @@ export default function PlanDetailPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/projects/${projectId}/plans?create=1`)}
-                  className="mt-2 flex h-8 w-full items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
+                  className="mt-2 flex h-8 w-full cursor-pointer items-center gap-1.5 rounded-[6px] border border-dashed border-[var(--border)] px-2 text-[12px] text-[var(--muted)] transition-colors hover:border-[var(--brand-primary)] hover:text-[var(--accent-light)]"
                 >
                   <IconPlus size={13} stroke={1.75} />
                   New test plan
@@ -597,7 +640,7 @@ export default function PlanDetailPage() {
             <div className="flex shrink-0 items-center gap-0 border-b border-[var(--border)] px-4">
               <button
                 onClick={() => setActiveTab("runs")}
-                className={`flex h-10 items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
+                className={`flex h-10 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
                   activeTab === "runs" ? "border-[var(--brand-primary)] text-[var(--accent-light)]" : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
                 }`}
               >
@@ -606,7 +649,7 @@ export default function PlanDetailPage() {
               </button>
               <button
                 onClick={() => setActiveTab("items")}
-                className={`flex h-10 items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
+                className={`flex h-10 cursor-pointer items-center gap-1.5 border-b-2 px-3 text-[13px] font-medium transition-colors ${
                   activeTab === "items" ? "border-[var(--brand-primary)] text-[var(--accent-light)]" : "border-transparent text-[var(--muted)] hover:text-[var(--foreground)]"
                 }`}
               >
@@ -758,7 +801,7 @@ export default function PlanDetailPage() {
                                 <button
                                   onClick={() => handleDissociate(run.id)}
                                   title="Unlink from plan"
-                                  className="rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error-foreground)]"
+                                  className="cursor-pointer rounded-lg p-1.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--status-fail-fill)] hover:text-[var(--error-foreground)]"
                                 >
                                   <IconX size={15} stroke={1.75} />
                                 </button>
@@ -791,7 +834,17 @@ export default function PlanDetailPage() {
                 <section>
                   {items.length === 0 ? (
                     <div className="rounded-[10px] border border-dashed border-[var(--border)] p-8 text-center">
-                      <p className="text-sm text-[var(--muted)]">No items in this plan. Items are suites or test cases that define the scope of the plan.</p>
+                      {/*
+                        * Basecamp 10221983132 ("Plan items shows 0 count and message 'no planed
+                        * items'"). The count was accurate — nothing was pinned — but it sat next to
+                        * a plan that was visibly running twelve cases, so it read as a bug. Naming
+                        * the other number is what removes the contradiction.
+                        */}
+                      <p className="text-sm text-[var(--muted)]">
+                        {total > 0
+                          ? `Nothing is pinned to this plan's scope yet. Its ${total} test case${total === 1 ? "" : "s"} come from the linked test runs — pin suites or cases here to say what the plan is meant to cover.`
+                          : "No items in this plan. Items are suites or test cases that define the scope of the plan."}
+                      </p>
                     </div>
                   ) : (
                     <div className="overflow-hidden rounded-[10px] border border-[var(--border)]">
@@ -825,7 +878,7 @@ export default function PlanDetailPage() {
                                     onClick={() => handleRemoveItem(item.id)}
                                     disabled={removingItemId === item.id}
                                     title="Remove from plan"
-                                    className="rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error-foreground)] disabled:opacity-50"
+                                    className="cursor-pointer rounded p-1 text-[var(--muted-soft)] transition-colors hover:text-[var(--error-foreground)] disabled:cursor-not-allowed disabled:opacity-50"
                                   >
                                     <IconX size={14} stroke={1.75} />
                                   </button>

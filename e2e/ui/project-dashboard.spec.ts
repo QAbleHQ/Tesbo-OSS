@@ -57,7 +57,7 @@ test.describe("project dashboard — header and actions", () => {
     await api?.dispose();
   });
 
-  test("DSH-U-01/02 the header names the project and breadcrumbs back to the list", async ({ page }) => {
+  test("DSH-U-01/02 the header names the project and breadcrumbs back to the list", { tag: '@tesbo.testId("TES-TC-725")' }, async ({ page }) => {
     const described = await createProject(api, { description: "Dashboard header description" });
     const bare = await createProject(api);
     try {
@@ -78,7 +78,7 @@ test.describe("project dashboard — header and actions", () => {
     }
   });
 
-  test("DSH-U-03 New run opens the create-run form on arrival", async ({ page }) => {
+  test("DSH-U-03 New run opens the create-run form on arrival", { tag: '@tesbo.testId("TES-TC-726")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/dashboard`);
@@ -92,7 +92,7 @@ test.describe("project dashboard — header and actions", () => {
     }
   });
 
-  test("DSH-U-04 New test plan opens the create-plan form on arrival", async ({ page }) => {
+  test("DSH-U-04 New test plan opens the create-plan form on arrival", { tag: '@tesbo.testId("TES-TC-727")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/dashboard`);
@@ -105,7 +105,7 @@ test.describe("project dashboard — header and actions", () => {
     }
   });
 
-  test("DSH-U-05/06 both actions are keyboard reachable and work on an empty project", async ({ page }) => {
+  test("DSH-U-05/06 both actions are keyboard reachable and work on an empty project", { tag: '@tesbo.testId("TES-TC-728")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/dashboard`);
@@ -136,7 +136,7 @@ test.describe("project dashboard — the stat cards", () => {
     await api?.dispose();
   });
 
-  test("DSH-U-07/08 the test case card counts what the API counts and flags this week's additions", async ({
+  test("DSH-U-07/08 the test case card counts what the API counts and flags this week's additions", { tag: '@tesbo.testId("TES-TC-729")' }, async ({
     page,
   }) => {
     const project = await createProject(api);
@@ -157,7 +157,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-09 the pass rate card shows a percentage and a proportional bar", async ({ page }) => {
+  test("DSH-U-09 the pass rate card shows a percentage and a proportional bar", { tag: '@tesbo.testId("TES-TC-730")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Passed", "Passed", "Passed", "Failed"], status: "Completed" });
@@ -175,7 +175,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-09 a project with nothing executed shows a dash and no bar", async ({ page }) => {
+  test("DSH-U-09 a project with nothing executed shows a dash and no bar", { tag: '@tesbo.testId("TES-TC-731")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Untested", "Untested"] });
@@ -188,7 +188,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-10 the trend chip is absent until both comparison windows have executions", async ({
+  test("DSH-U-10 the trend chip is absent until both comparison windows have executions", { tag: '@tesbo.testId("TES-TC-732")' }, async ({
     page,
   }) => {
     const project = await createProject(api);
@@ -204,7 +204,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-11 the open bugs card totals by severity and calls out criticals", async ({ page }) => {
+  test("DSH-U-11 the open bugs card totals by severity and calls out criticals", { tag: '@tesbo.testId("TES-TC-733")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await createBug(api, project.id, { severity: "Critical" });
@@ -223,7 +223,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-11 with no criticals the card carries no critical chip", async ({ page }) => {
+  test("DSH-U-11 with no criticals the card carries no critical chip", { tag: '@tesbo.testId("TES-TC-734")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await createBug(api, project.id, { severity: "Medium" });
@@ -237,7 +237,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-12 the coverage card explains itself when no requirements are linked", async ({ page }) => {
+  test("DSH-U-12 the coverage card explains itself when no requirements are linked", { tag: '@tesbo.testId("TES-TC-735")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/dashboard`);
@@ -254,7 +254,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-13 plans, suites and active runs match the API", async ({ page }) => {
+  test("DSH-U-13 plans, suites and active runs match the API", { tag: '@tesbo.testId("TES-TC-736")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await createSuite(api, project.id);
@@ -263,7 +263,7 @@ test.describe("project dashboard — the stat cards", () => {
       const summary = await getDashboard(api, project.id);
 
       await page.goto(`/projects/${project.id}/dashboard`);
-      expect(await statValue(statCard(page, "Plans"))).toBe(String(summary.plans));
+      expect(await statValue(statCard(page, "Test plans"))).toBe(String(summary.plans));
       expect(await statValue(statCard(page, "Suites"))).toBe(String(summary.suites));
 
       const activeRuns = statCard(page, "Active runs");
@@ -274,7 +274,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-13 the running chip is absent when no run is in progress", async ({ page }) => {
+  test("DSH-U-13 the running chip is absent when no run is in progress", { tag: '@tesbo.testId("TES-TC-737")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await seedRun(api, project.id, { statuses: ["Passed"], status: "Completed" });
@@ -288,7 +288,7 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-14 every stat card links to the screen behind it", async ({ page }) => {
+  test("DSH-U-14 every stat card links to the screen behind it", { tag: '@tesbo.testId("TES-TC-738")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/dashboard`);
@@ -298,7 +298,7 @@ test.describe("project dashboard — the stat cards", () => {
         ["Pass rate", "/reports"],
         ["Open bugs", "/bugs"],
         ["Test coverage", "/requirements"],
-        ["Plans", "/plans"],
+        ["Test plans", "/plans"],
         ["Suites", "/testcases"],
         ["Active runs", "/cycles"],
       ];
@@ -310,7 +310,90 @@ test.describe("project dashboard — the stat cards", () => {
     }
   });
 
-  test("DSH-U-16 a large count doesn't break the card layout", async ({ page }) => {
+  /*
+   * Basecamp 10226337869 — "[Project Home] Label should be 'Test Plans' not plans".
+   *
+   * The feature is called Test plans everywhere it is named — the sidebar entry, the /plans screen
+   * heading, the activity type filter — and only these two dashboard tiles called it "Plans". The
+   * assertion is on the tile's own <p>, exact: hasText matching is case-insensitive substring, so
+   * "Test plans" satisfies a filter written for "Plans" and a revert would otherwise pass here.
+   *
+   * Sentence case, matching the sidebar and the page heading, rather than the card's literal "Test
+   * Plans" — the tile sits between "Suites" and "Active runs" and Title Case would be the odd one.
+   */
+  test("DSH-U-15 the plans tile is labelled Test plans, exactly as the sidebar names it", async ({ page }) => {
+    const project = await createProject(api);
+    try {
+      await page.goto(`/projects/${project.id}/dashboard`);
+
+      const card = statCard(page, "Test plans");
+      await expect(card.locator("p", { hasText: /^Test plans$/ })).toHaveCount(1);
+      // No tile is left calling it just "Plans".
+      await expect(page.locator('a[href*="/projects/"] p', { hasText: /^Plans$/ })).toHaveCount(0);
+      // Same words as the navigation entry that leads to the same screen.
+      await expect(page.getByRole("link", { name: "Test plans" }).first()).toBeVisible();
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  /*
+   * The workspace dashboard at /dashboard carries the same count cards and had the same problem,
+   * reported separately as Basecamp 10226480729 ("[workspace Dashboard] need to update lables").
+   *
+   * The card asked for "Total Suites", "Test Plans" and "Test Runs", and it was right to: the
+   * projects list has used "Total Suites" all along, so that is the product's existing vocabulary
+   * and the inconsistency the reporter hit. An earlier pass here used "Test suites" for family
+   * consistency, which just moved the inconsistency somewhere else. "Cycles" was the real offender
+   * either way — internal vocabulary on screen, when every other surface calls them runs.
+   */
+  test("DSH-U-15 the workspace dashboard tiles match the vocabulary the rest of the app uses", async ({ page }) => {
+    await page.goto("/dashboard");
+    for (const label of ["Test cases", "Total Suites", "Test plans", "Test runs"]) {
+      await expect(page.getByText(label, { exact: true }).first()).toBeVisible();
+    }
+    // None of the pre-fix wording survives anywhere on the screen.
+    for (const stale of [/^Plans$/, /^Suites$/, /^Cycles$/]) {
+      await expect(page.getByText(stale)).toHaveCount(0);
+    }
+  });
+
+  /*
+   * Basecamp 10221720616 ("[Dashboard] Executaion progress bar colours are not visible").
+   *
+   * The workspace dashboard's execution breakdown painted each bar with the same class it used for
+   * the status badge — a hardcoded Tailwind 100-level pastel (bg-emerald-100 and friends) on a
+   * --surface-tertiary track. The bar was rendered; it simply could not be seen, and in dark mode
+   * the pastels did not follow the theme at all. The fill is the solid status dot colour now.
+   */
+  test("DSH-U-17 the workspace execution bars are painted in a visible status colour", async ({ page }) => {
+    const project = await createProject(api);
+    try {
+      await seedRun(api, project.id, { statuses: ["Passed", "Failed", "Blocked"], status: "Completed" });
+
+      await page.goto("/dashboard");
+      await expect(page.getByText("Execution status")).toBeVisible();
+
+      const fills = page.locator("div.h-2.overflow-hidden.rounded-full > div");
+      const count = await fills.count();
+      expect(count, "one bar per execution status").toBeGreaterThan(0);
+
+      for (let i = 0; i < count; i++) {
+        const background = await fills.nth(i).evaluate((el) => getComputedStyle(el).backgroundColor);
+        // A transparent or unset fill is the original defect; so is a bar that inherits the track.
+        expect(background, `bar ${i} has no colour of its own`).not.toBe("rgba(0, 0, 0, 0)");
+        expect(background).not.toBe("transparent");
+      }
+
+      // The four bars must not all be the same colour either — that was the other half of it.
+      const colors = await fills.evaluateAll((els) => els.map((el) => getComputedStyle(el).backgroundColor));
+      expect(new Set(colors).size, `every bar shares one colour: ${colors.join(", ")}`).toBeGreaterThan(1);
+    } finally {
+      await deleteProjects(api, [project.id]);
+    }
+  });
+
+  test("DSH-U-16 a large count doesn't break the card layout", { tag: '@tesbo.testId("TES-TC-739")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       // Not 10,000 real test cases — the layout question is about the rendered string's width.
@@ -341,7 +424,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     await api?.dispose();
   });
 
-  test("DSH-U-18/24/28 an untouched project says so in each panel rather than showing zeros", async ({
+  test("DSH-U-18/24/28 an untouched project says so in each panel rather than showing zeros", { tag: '@tesbo.testId("TES-TC-740")' }, async ({
     page,
   }) => {
     const project = await createProject(api);
@@ -361,7 +444,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-17 the runs panel shows at most four runs, newest first", async ({ page }) => {
+  test("DSH-U-17 the runs panel shows at most four runs, newest first", { tag: '@tesbo.testId("TES-TC-741")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const names: string[] = [];
@@ -382,7 +465,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-19/20 a run row reports its status, counts and progress", async ({ page }) => {
+  test("DSH-U-19/20 a run row reports its status, counts and progress", { tag: '@tesbo.testId("TES-TC-742")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const run = await seedRun(api, project.id, {
@@ -405,7 +488,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-21 a run with no test cases renders without NaN or a negative count", async ({ page }) => {
+  test("DSH-U-21 a run with no test cases renders without NaN or a negative count", { tag: '@tesbo.testId("TES-TC-743")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const run = await seedRun(api, project.id, { statuses: [] });
@@ -423,7 +506,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-22 a run row opens the run, and View all opens the list", async ({ page }) => {
+  test("DSH-U-22 a run row opens the run, and View all opens the list", { tag: '@tesbo.testId("TES-TC-744")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const run = await seedRun(api, project.id, { statuses: ["Passed"] });
@@ -440,7 +523,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-23 a long run name is truncated rather than breaking the row", async ({ page }) => {
+  test("DSH-U-23 a long run name is truncated rather than breaking the row", { tag: '@tesbo.testId("TES-TC-745")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const longName = `E2E Dash ${"Very Long Run Name ".repeat(8)}${uniqueSuffix()}`;
@@ -457,7 +540,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-25/26/27 the severity panel lists all four bands against the open total", async ({ page }) => {
+  test("DSH-U-25/26/27 the severity panel lists all four bands against the open total", { tag: '@tesbo.testId("TES-TC-746")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await createBug(api, project.id, { severity: "Critical" });
@@ -478,7 +561,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-29/30 the activity feed describes real events and counts what it shows", async ({ page }) => {
+  test("DSH-U-29/30 the activity feed describes real events and counts what it shows", { tag: '@tesbo.testId("TES-TC-747")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       const testcase = await createTestCase(api, project.id, { title: `E2E Dash Activity ${uniqueSuffix()}` });
@@ -497,7 +580,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-35 the activity feed scrolls inside its own panel", async ({ page }) => {
+  test("DSH-U-35 the activity feed scrolls inside its own panel", { tag: '@tesbo.testId("TES-TC-748")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       for (let i = 0; i < 12; i++) await createTestCase(api, project.id);
@@ -512,7 +595,7 @@ test.describe("project dashboard — runs, bugs and activity panels", () => {
     }
   });
 
-  test("DSH-U-36/45 the dashboard reflects work done elsewhere after a reload", async ({ page }) => {
+  test("DSH-U-36/45 the dashboard reflects work done elsewhere after a reload", { tag: '@tesbo.testId("TES-TC-749")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/dashboard`);
@@ -540,7 +623,7 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     await api?.dispose();
   });
 
-  test("DSH-U-37 the loading state is replaced by the dashboard", async ({ page }) => {
+  test("DSH-U-37 the loading state is replaced by the dashboard", { tag: '@tesbo.testId("TES-TC-750")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto(`/projects/${project.id}/dashboard`);
@@ -551,7 +634,7 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     }
   });
 
-  test("DSH-U-38 a project that can't be fetched sends the user back to the list", async ({ page }) => {
+  test("DSH-U-38 a project that can't be fetched sends the user back to the list", { tag: '@tesbo.testId("TES-TC-751")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.route(
@@ -566,7 +649,7 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     }
   });
 
-  test("DSH-U-39 an unauthenticated visitor is sent to login", async ({ browser }) => {
+  test("DSH-U-39 an unauthenticated visitor is sent to login", { tag: '@tesbo.testId("TES-TC-752")' }, async ({ browser }) => {
     const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     try {
       const anonymous = await context.newPage();
@@ -577,13 +660,13 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     }
   });
 
-  test("DSH-U-40 a project from another workspace leaks nothing", async ({ page }) => {
+  test("DSH-U-40 a project from another workspace leaks nothing", { tag: '@tesbo.testId("TES-TC-753")' }, async ({ page }) => {
     // Account A's smoke project, which this tenant has no access to.
     await page.goto("/projects/00000000-0000-0000-0000-000000000000/dashboard");
     await page.waitForURL("**/projects", { timeout: 15_000 });
   });
 
-  test("DSH-U-41/42 navigating between projects never shows the previous project's data", async ({
+  test("DSH-U-41/42 navigating between projects never shows the previous project's data", { tag: '@tesbo.testId("TES-TC-754")' }, async ({
     page,
   }) => {
     const first = await createProject(api);
@@ -609,7 +692,7 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     }
   });
 
-  test("DSH-U-43 going back from a project returns to the projects list", async ({ page }) => {
+  test("DSH-U-43 going back from a project returns to the projects list", { tag: '@tesbo.testId("TES-TC-755")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await page.goto("/projects");
@@ -624,7 +707,7 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     }
   });
 
-  test("DSH-U-44 reloading the dashboard renders the same thing", async ({ page }) => {
+  test("DSH-U-44 reloading the dashboard renders the same thing", { tag: '@tesbo.testId("TES-TC-756")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       await createTestCase(api, project.id);
@@ -639,7 +722,7 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     }
   });
 
-  test("DSH-U-05 the dashboard renders without client-side errors", async ({ page }) => {
+  test("DSH-U-05 the dashboard renders without client-side errors", { tag: '@tesbo.testId("TES-TC-757")' }, async ({ page }) => {
     const project = await createProject(api);
     const pageErrors: string[] = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -655,7 +738,7 @@ test.describe("project dashboard — loading, errors and navigation", () => {
     }
   });
 
-  test("DSH-U-15 the cards fit the viewport at common desktop widths", async ({ page }) => {
+  test("DSH-U-15 the cards fit the viewport at common desktop widths", { tag: '@tesbo.testId("TES-TC-758")' }, async ({ page }) => {
     const project = await createProject(api);
     try {
       for (const width of [1280, 1440, 1920]) {

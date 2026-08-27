@@ -180,7 +180,7 @@ test.describe("integrations — Jira and Linear", () => {
 
   // ─── Authorization: this is the wave's centre of gravity ──────────────────
 
-  test("INT-A-01 no project-scoped integration route answers a caller with no session", async () => {
+  test("INT-A-01 no project-scoped integration route answers a caller with no session", { tag: '@tesbo.testId("TES-TC-223")' }, async () => {
     // These routes read and write a third party's data with the workspace's stored OAuth token:
     // the ticket store mirrors issue summaries, keys and URLs, and jira/comment and linear/comment
     // post to the customer's real Jira or Linear as the connected account. None of it may be
@@ -199,7 +199,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-02 no project-scoped integration route answers a member of another project", async () => {
+  test("INT-A-02 no project-scoped integration route answers a member of another project", { tag: '@tesbo.testId("TES-TC-224")' }, async () => {
     const connectionId = seedConnection("jira");
     seedJiraTicket(connectionId, { key: "E2E-2", summary: "Not for the guest" });
 
@@ -214,7 +214,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-03 a project in another workspace is not reachable by id", async () => {
+  test("INT-A-03 a project in another workspace is not reachable by id", { tag: '@tesbo.testId("TES-TC-225")' }, async () => {
     // The second project belongs to the same workspace, so it shares the connection — the check
     // that matters is per-project membership, not per-workspace.
     const connectionId = seedConnection("jira");
@@ -226,7 +226,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-04 a malformed project id is refused without a 500", async () => {
+  test("INT-A-04 a malformed project id is refused without a 500", { tag: '@tesbo.testId("TES-TC-226")' }, async () => {
     for (const [what, attempt] of projectRoutes(asOwner, "not-a-uuid")) {
       const res = await attempt();
       expect(res.status(), `${what} answered ${res.status()} for a malformed project id: ${await res.text()}`)
@@ -234,7 +234,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-05 a project member reaches the read routes that need no upstream", async () => {
+  test("INT-A-05 a project member reaches the read routes that need no upstream", { tag: '@tesbo.testId("TES-TC-227")' }, async () => {
     // The mirror image of the tests above: the guard must not be so wide that it refuses the people
     // the feature exists for.
     for (const [who, api] of [
@@ -251,7 +251,7 @@ test.describe("integrations — Jira and Linear", () => {
 
   // ─── The not-connected state ──────────────────────────────────────────────
 
-  test("INT-A-06 status reports not-connected rather than erroring when no provider is linked", async () => {
+  test("INT-A-06 status reports not-connected rather than erroring when no provider is linked", { tag: '@tesbo.testId("TES-TC-228")' }, async () => {
     for (const provider of ["jira", "linear"]) {
       const res = await asOwner.get(url(`/${provider}/status`), { failOnStatusCode: false });
       expect(res.status()).toBe(200);
@@ -261,7 +261,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-07 the routes that need a live provider say it is not connected, without calling out", async () => {
+  test("INT-A-07 the routes that need a live provider say it is not connected, without calling out", { tag: '@tesbo.testId("TES-TC-229")' }, async () => {
     // With no connection row these return before any network call, which is what makes them
     // testable here at all. A 404 naming the provider is the contract the UI keys off.
     const cases: Array<[string, () => Promise<APIResponse>]> = [
@@ -304,7 +304,7 @@ test.describe("integrations — Jira and Linear", () => {
 
   // ─── The mirrored ticket store ────────────────────────────────────────────
 
-  test("INT-A-08 mirrored Jira tickets are listed with their fields and issue URL", async () => {
+  test("INT-A-08 mirrored Jira tickets are listed with their fields and issue URL", { tag: '@tesbo.testId("TES-TC-230")' }, async () => {
     const connectionId = seedConnection("jira");
     seedJiraTicket(connectionId, { key: "E2E-10", summary: "Login page rejects valid password", status: "In Progress" });
     seedJiraTicket(connectionId, { key: "E2E-11", summary: "Checkout total is wrong", priority: "High" });
@@ -324,7 +324,7 @@ test.describe("integrations — Jira and Linear", () => {
     expect(String(first.jiraUrl ?? first.url)).toContain("E2E-10");
   });
 
-  test("INT-A-09 the ticket list searches by key and by summary", async () => {
+  test("INT-A-09 the ticket list searches by key and by summary", { tag: '@tesbo.testId("TES-TC-231")' }, async () => {
     const connectionId = seedConnection("jira");
     seedJiraTicket(connectionId, { key: "E2E-20", summary: "Payment gateway timeout" });
     seedJiraTicket(connectionId, { key: "E2E-21", summary: "Unrelated cosmetic tweak" });
@@ -340,7 +340,7 @@ test.describe("integrations — Jira and Linear", () => {
     expect((none.list ?? none)).toEqual([]);
   });
 
-  test("INT-A-10 the ticket list paginates, and clamps a limit outside its bounds", async () => {
+  test("INT-A-10 the ticket list paginates, and clamps a limit outside its bounds", { tag: '@tesbo.testId("TES-TC-232")' }, async () => {
     const connectionId = seedConnection("jira");
     for (let i = 1; i <= 5; i++) seedJiraTicket(connectionId, { key: `E2E-3${i}`, summary: `Ticket ${i}` });
 
@@ -381,7 +381,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-11 a project's ticket list carries only its own project's tickets", async () => {
+  test("INT-A-11 a project's ticket list carries only its own project's tickets", { tag: '@tesbo.testId("TES-TC-233")' }, async () => {
     const connectionId = seedConnection("jira");
     seedJiraTicket(connectionId, { key: "E2E-40", summary: "Belongs to the main project" });
     seedJiraTicket(connectionId, { key: "E2E-41", summary: "Belongs to the second project" }, tenant!.secondProjectId);
@@ -392,7 +392,7 @@ test.describe("integrations — Jira and Linear", () => {
     expect(JSON.stringify(body)).not.toContain("Belongs to the second project");
   });
 
-  test("INT-A-12 mirrored Linear issues list on their own route with the same shape", async () => {
+  test("INT-A-12 mirrored Linear issues list on their own route with the same shape", { tag: '@tesbo.testId("TES-TC-234")' }, async () => {
     const connectionId = seedConnection("linear");
     seedLinearTicket(connectionId, { key: "LIN-1", summary: "Sidebar collapses on resize" });
     seedLinearTicket(connectionId, { key: "LIN-2", summary: "Second Linear issue", status: "Done" });
@@ -411,7 +411,7 @@ test.describe("integrations — Jira and Linear", () => {
 
   // ─── The Requirements page aggregates ─────────────────────────────────────
 
-  test("INT-A-13 the combined tickets list merges both providers", async () => {
+  test("INT-A-13 the combined tickets list merges both providers", { tag: '@tesbo.testId("TES-TC-235")' }, async () => {
     const jira = seedConnection("jira");
     const linear = seedConnection("linear");
     seedJiraTicket(jira, { key: "E2E-50", summary: "From Jira" });
@@ -427,7 +427,7 @@ test.describe("integrations — Jira and Linear", () => {
     expect(serialised).toContain("LIN-50");
   });
 
-  test("INT-A-14 the requirements summary counts what is mirrored, and is zero when nothing is", async () => {
+  test("INT-A-14 the requirements summary counts what is mirrored, and is zero when nothing is", { tag: '@tesbo.testId("TES-TC-236")' }, async () => {
     const empty = await asOwner.get(url("/tickets/summary"), { failOnStatusCode: false });
     expect(empty.status()).toBe(200);
     const emptyBody = JSON.stringify(await empty.json());
@@ -453,7 +453,7 @@ test.describe("integrations — Jira and Linear", () => {
 
   // ─── Sync history and status ──────────────────────────────────────────────
 
-  test("INT-A-15 sync history is empty for a project that has never synced, and is project-scoped", async () => {
+  test("INT-A-15 sync history is empty for a project that has never synced, and is project-scoped", { tag: '@tesbo.testId("TES-TC-237")' }, async () => {
     const res = await asOwner.get(url("/integrations/sync-history"), { failOnStatusCode: false });
     expect(res.status()).toBe(200);
     // The payload is `{ runs: [...] }` — the Requirements page polls it while a sync is in flight,
@@ -463,7 +463,7 @@ test.describe("integrations — Jira and Linear", () => {
     expect(body.runs).toEqual([]);
   });
 
-  test("INT-A-16 sync-status answers for a known provider and refuses an unknown one", async () => {
+  test("INT-A-16 sync-status answers for a known provider and refuses an unknown one", { tag: '@tesbo.testId("TES-TC-238")' }, async () => {
     for (const provider of ["jira", "linear"]) {
       const res = await asOwner.get(url(`/integrations/${provider}/sync-status`), { failOnStatusCode: false });
       expect(res.status(), `${provider} sync-status answered ${res.status()}: ${await res.text()}`).toBe(200);
@@ -477,7 +477,7 @@ test.describe("integrations — Jira and Linear", () => {
 
   // ─── Mapping validation ───────────────────────────────────────────────────
 
-  test("INT-A-17 connecting Jira projects validates its payload before touching the mapping table", async () => {
+  test("INT-A-17 connecting Jira projects validates its payload before touching the mapping table", { tag: '@tesbo.testId("TES-TC-239")' }, async () => {
     const connectionId = seedConnection("jira");
 
     // A malformed payload must not delete the existing mapping on its way to a refusal.
@@ -497,7 +497,7 @@ test.describe("integrations — Jira and Linear", () => {
     ).toBe(before);
   });
 
-  test("INT-A-18 a comment requires both an issue key and a body", async () => {
+  test("INT-A-18 a comment requires both an issue key and a body", { tag: '@tesbo.testId("TES-TC-240")' }, async () => {
     seedConnection("jira");
     seedConnection("linear");
 
@@ -517,7 +517,7 @@ test.describe("integrations — Jira and Linear", () => {
 
   // ─── Workspace-scoped connection routes ───────────────────────────────────
 
-  test("INT-A-19 the workspace connection routes refuse a caller with no session", async () => {
+  test("INT-A-19 the workspace connection routes refuse a caller with no session", { tag: '@tesbo.testId("TES-TC-241")' }, async () => {
     const routes: Array<[string, () => Promise<APIResponse>]> = [
       ["auth-url", () => anon.get("/api/workspace/integrations/jira/auth-url", { failOnStatusCode: false })],
       ["config", () => anon.get("/api/workspace/integrations/jira/config", { failOnStatusCode: false })],
@@ -538,7 +538,7 @@ test.describe("integrations — Jira and Linear", () => {
     for (const [what, attempt] of routes) await expectRefused(await attempt(), `workspace ${what}`);
   });
 
-  test("INT-A-20 connection status and config are readable by a member and report not-connected", async () => {
+  test("INT-A-20 connection status and config are readable by a member and report not-connected", { tag: '@tesbo.testId("TES-TC-242")' }, async () => {
     for (const provider of ["jira", "linear"]) {
       const status = await asOwner.get(`/api/workspace/integrations/${provider}/status`, { failOnStatusCode: false });
       expect(status.status(), `${provider} status — ${await status.text()}`).toBe(200);
@@ -552,7 +552,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-21 status reports connected once a connection exists, and disconnect removes it", async () => {
+  test("INT-A-21 status reports connected once a connection exists, and disconnect removes it", { tag: '@tesbo.testId("TES-TC-243")' }, async () => {
     seedConnection("jira", "https://e2e-site.invalid");
 
     const connected = await asOwner.get("/api/workspace/integrations/jira/status", { failOnStatusCode: false });
@@ -579,7 +579,7 @@ test.describe("integrations — Jira and Linear", () => {
     expect(again.status()).toBeLessThan(500);
   });
 
-  test("INT-A-22 disconnecting is not something a qa_engineer can do to the whole workspace", async () => {
+  test("INT-A-22 disconnecting is not something a qa_engineer can do to the whole workspace", { tag: '@tesbo.testId("TES-TC-244")' }, async () => {
     seedConnection("jira");
     const res = await asQa.delete("/api/workspace/integrations/jira/disconnect", { failOnStatusCode: false });
     // Connecting an app is a workspace-wide administrative action: one engineer disconnecting it
@@ -594,7 +594,7 @@ test.describe("integrations — Jira and Linear", () => {
     ).toBe("1");
   });
 
-  test("INT-A-23 an unknown provider is refused everywhere rather than silently accepted", async () => {
+  test("INT-A-23 an unknown provider is refused everywhere rather than silently accepted", { tag: '@tesbo.testId("TES-TC-245")' }, async () => {
     for (const suffix of ["auth-url", "config", "status"]) {
       const res = await asOwner.get(`/api/workspace/integrations/notaprovider/${suffix}`, {
         failOnStatusCode: false,
@@ -617,7 +617,7 @@ test.describe("integrations — Jira and Linear", () => {
     expect(disconnect.status()).toBeLessThan(500);
   });
 
-  test("INT-A-24 the OAuth callback refuses a request with no authorization code", async () => {
+  test("INT-A-24 the OAuth callback refuses a request with no authorization code", { tag: '@tesbo.testId("TES-TC-246")' }, async () => {
     for (const data of [{}, { code: "" }, { code: "   " }]) {
       const res = await asOwner.post("/api/workspace/integrations/jira/callback", { data, failOnStatusCode: false });
       // Refused before any token exchange is attempted, so this is reachable with no upstream.
@@ -630,7 +630,7 @@ test.describe("integrations — Jira and Linear", () => {
     }
   });
 
-  test("INT-A-25 the auth-url route reports a missing OAuth app rather than returning a broken link", async () => {
+  test("INT-A-25 the auth-url route reports a missing OAuth app rather than returning a broken link", { tag: '@tesbo.testId("TES-TC-247")' }, async () => {
     const res = await asOwner.get("/api/workspace/integrations/jira/auth-url", { failOnStatusCode: false });
     // Either the deployment has a Jira OAuth app configured, in which case a real authorize URL
     // comes back, or it does not, in which case the caller must be told — a 200 carrying a URL with

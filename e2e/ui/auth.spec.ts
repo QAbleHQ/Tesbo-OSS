@@ -7,17 +7,17 @@ test.describe("login", () => {
   // authenticated storage state, since this suite exercises the login form itself.
   test.use({ storageState: { cookies: [], origins: [] } });
 
-  test("a user can sign in with the seeded smoke-test account", async ({ page }) => {
+  test("a user can sign in with the seeded smoke-test account", { tag: '@tesbo.testId("TES-TC-625")' }, async ({ page }) => {
     await page.goto("/login");
     await page.getByLabel("Email", { exact: true }).fill(env.testEmail);
     await page.getByLabel("Password", { exact: true }).fill(env.testPassword);
     await page.getByRole("button", { name: "Sign in" }).click();
 
     await page.waitForURL(/\/projects/);
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
-  test("rejects an incorrect password", async ({ page }) => {
+  test("rejects an incorrect password", { tag: '@tesbo.testId("TES-TC-626")' }, async ({ page }) => {
     await page.goto("/login");
     await page.getByLabel("Email", { exact: true }).fill(env.testEmail);
     await page.getByLabel("Password", { exact: true }).fill("definitely-wrong-password");
@@ -27,7 +27,7 @@ test.describe("login", () => {
     await expect(page).toHaveURL(/\/login/);
   });
 
-  test("rejects an unregistered email", async ({ page }) => {
+  test("rejects an unregistered email", { tag: '@tesbo.testId("TES-TC-627")' }, async ({ page }) => {
     await page.goto("/login");
     await page.getByLabel("Email", { exact: true }).fill(disposableEmail("no-such-user"));
     await page.getByLabel("Password", { exact: true }).fill("whatever-password-123");
@@ -39,7 +39,7 @@ test.describe("login", () => {
     await expect(page).toHaveURL(/\/login/);
   });
 
-  test("requires an email before submitting", async ({ page }) => {
+  test("requires an email before submitting", { tag: '@tesbo.testId("TES-TC-628")' }, async ({ page }) => {
     await page.goto("/login");
     await page.getByLabel("Password", { exact: true }).fill(env.testPassword);
     await page.getByRole("button", { name: "Sign in" }).click();
@@ -48,7 +48,7 @@ test.describe("login", () => {
     await expect(page).toHaveURL(/\/login/);
   });
 
-  test("requires a password before submitting", async ({ page }) => {
+  test("requires a password before submitting", { tag: '@tesbo.testId("TES-TC-629")' }, async ({ page }) => {
     await page.goto("/login");
     await page.getByLabel("Email", { exact: true }).fill(env.testEmail);
     await page.getByRole("button", { name: "Sign in" }).click();
@@ -57,7 +57,7 @@ test.describe("login", () => {
     await expect(page).toHaveURL(/\/login/);
   });
 
-  test("switching to Email code mode hides the password field", async ({ page }) => {
+  test("switching to Email code mode hides the password field", { tag: '@tesbo.testId("TES-TC-630")' }, async ({ page }) => {
     await page.goto("/login");
     await expect(page.getByLabel("Password", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
@@ -97,7 +97,7 @@ test.describe("otp login", () => {
     }
   }
 
-  test("requesting a code shows the check-your-email screen", async ({ page }) => {
+  test("requesting a code shows the check-your-email screen", { tag: '@tesbo.testId("TES-TC-631")' }, async ({ page }) => {
     const email = disposableEmail("otp-request");
     await requestOtpCode(page, email);
 
@@ -105,7 +105,7 @@ test.describe("otp login", () => {
     await expect(page.getByRole("button", { name: "Verify and sign in" })).toBeVisible();
   });
 
-  test("rejects an incorrect code", async ({ page }) => {
+  test("rejects an incorrect code", { tag: '@tesbo.testId("TES-TC-632")' }, async ({ page }) => {
     const email = disposableEmail("otp-wrong");
     await requestOtpCode(page, email);
 
@@ -116,7 +116,7 @@ test.describe("otp login", () => {
     await expect(page).toHaveURL(/\/verify-otp/);
   });
 
-  test("rejects an expired code", async ({ page }) => {
+  test("rejects an expired code", { tag: '@tesbo.testId("TES-TC-633")' }, async ({ page }) => {
     const email = disposableEmail("otp-expired");
     await requestOtpCode(page, email);
     seedOtpCode(email, "111222", -5);
@@ -128,7 +128,7 @@ test.describe("otp login", () => {
     await expect(page).toHaveURL(/\/verify-otp/);
   });
 
-  test("signs in an existing user with a valid one-time code", async ({ page }) => {
+  test("signs in an existing user with a valid one-time code", { tag: '@tesbo.testId("TES-TC-634")' }, async ({ page }) => {
     // Unlike the disposable emails above, env.testEmail is reused across every run of
     // this suite, so its own rate-limit counter needs an explicit reset too.
     clearOtpRateLimit(env.testEmail);
@@ -139,10 +139,10 @@ test.describe("otp login", () => {
     await page.getByRole("button", { name: "Verify and sign in" }).click();
 
     await page.waitForURL(/\/projects/);
-    await expect(page.getByRole("button", { name: "Log out" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Logout" })).toBeVisible();
   });
 
-  test("auto-creates an account for a brand-new email", async ({ page }) => {
+  test("auto-creates an account for a brand-new email", { tag: '@tesbo.testId("TES-TC-635")' }, async ({ page }) => {
     const email = disposableEmail("otp-new-account");
     await requestOtpCode(page, email);
     seedOtpCode(email, "789789");
@@ -154,7 +154,7 @@ test.describe("otp login", () => {
     await expect(page.getByRole("heading", { name: "Create your workspace" })).toBeVisible();
   });
 
-  test("lets the user go back to a different email", async ({ page }) => {
+  test("lets the user go back to a different email", { tag: '@tesbo.testId("TES-TC-636")' }, async ({ page }) => {
     const email = disposableEmail("otp-back");
     await requestOtpCode(page, email);
 

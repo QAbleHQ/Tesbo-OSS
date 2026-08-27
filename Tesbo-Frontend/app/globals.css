@@ -252,9 +252,9 @@
   --status-draft-text: #C4B5FD;
   --status-draft-dot: #A78BFA;
   --status-draft-fill: rgba(124, 95, 204, 0.18);
-  --status-running-text: #D97C0A;
-  --status-running-dot: #D97C0A;
-  --status-running-fill: #2A1F10;
+  --status-running-text: #FB923C;
+  --status-running-dot: #F97316;
+  --status-running-fill: #2E1608;
   --status-notrun-text: #38BDF8;
   --status-notrun-dot: #1D7FA8;
   --status-notrun-fill: #102030;
@@ -440,6 +440,23 @@ button[class*="bg-[var(--surface-tertiary)]"] {
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-card);
   backdrop-filter: blur(18px) saturate(150%);
+}
+
+/*
+ * A clickable card's hover state, written as plain CSS rather than Tailwind's `hover:border-[...]`
+ * / `hover:shadow-[...]` arbitrary-value utilities: those two silently failed to generate any rule
+ * at all here (confirmed via the compiled stylesheet — no matching selector existed), while the
+ * identical `var(...)` arbitrary-value syntax works fine on `hover:bg-[...]` elsewhere. Whatever
+ * the cause, a plain rule targeting the wrapping `<a class="group">` sidesteps it entirely and is
+ * the same approach .tesbo-card-elevated already uses for its own box-shadow.
+ */
+a.group:hover > .tesbo-card {
+  /* Same --surface-secondary tint the list row uses on hover — the card's base
+     --glass-surface-strong is near-opaque white/black, so without this the card was the only
+     clickable surface in the two views whose background didn't actually change on hover. */
+  background: var(--surface-secondary);
+  border-color: var(--border-strong);
+  box-shadow: var(--glass-shadow);
 }
 
 .tesbo-card-elevated {
@@ -890,6 +907,19 @@ select:focus-visible,
 textarea:focus-visible {
   outline: 2px solid color-mix(in oklab, var(--brand-primary) 40%, transparent);
   outline-offset: 1px;
+}
+
+/* Tailwind's preflight resets `button { cursor: default }`; restore the pointer affordance for
+   every clickable control, including ARIA-only pseudo-buttons, and fall back to the disabled
+   cursor so callers don't have to repeat this per component. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
+button:disabled,
+[role="button"][aria-disabled="true"] {
+  cursor: not-allowed;
 }
 
 /* ── Zyra chat prose ─────────────────────────────────────────────────────── */

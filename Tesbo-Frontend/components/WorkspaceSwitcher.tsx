@@ -184,13 +184,17 @@ export default function WorkspaceSwitcher({ isCollapsed }: { isCollapsed: boolea
               id="newOrgName"
               type="text"
               value={orgName}
-              onChange={(e) => setOrgName(e.target.value)}
+              onChange={(e) => {
+                setOrgName(e.target.value);
+                if (createError) setCreateError("");
+              }}
               placeholder="My Team"
               disabled={creating}
               autoFocus
+              aria-invalid={Boolean(createError)}
             />
+            {createError && <FieldError>{createError}</FieldError>}
           </Field>
-          {createError && <FieldError>{createError}</FieldError>}
           <div className="flex justify-end gap-2">
             <Button type="button" variant="secondary" onClick={() => setIsCreateOpen(false)} disabled={creating}>
               Cancel

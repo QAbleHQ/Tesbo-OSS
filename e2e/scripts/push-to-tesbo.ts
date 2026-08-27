@@ -309,6 +309,19 @@ async function ensureSuite(
 /* ─────────────────────────────── mapping ─────────────────────────────── */
 
 /**
+ * Which Playwright project a spec belongs to, decided the same way playwright.config.ts decides it.
+ *
+ * The config's `testMatch` is /ui\/.*\.spec\.ts/ — unanchored, so it claims `regression/ui/...` for
+ * the `ui` project as well as `ui/...`. Testing the path prefix instead does NOT: that sent all 43
+ * regression/ui tests to the API root suite and tagged them `api`, and it also merged
+ * regression/api/tickets-reports with regression/ui/tickets-reports into one suite, since the two
+ * files share a basename and only their parent told them apart.
+ */
+function isUiSpec(file: string): boolean {
+  return /(^|\/)ui\//.test(file);
+}
+
+/**
  * "api/knowledge-base.spec.ts" → "Knowledge Base" — the spec file is the unit a suite maps to.
  *
  * Title Case to match the suites the project already has. `ensureSuite` folds case before comparing,
@@ -347,7 +360,7 @@ function caseTitle(spec: PlaywrightSpec): string {
 function caseBody(spec: PlaywrightSpec, suiteId: string, repo: string) {
   const testName = [...spec.suitePath, spec.title].join(" › ");
   const automationPath = `e2e/${spec.file}`;
-  const project = spec.file.startsWith("ui/") ? "ui" : "api";
+  const project = isUiSpec(spec.file) ? "ui" : "api";
 
   return {
     suiteId,
@@ -411,6 +424,10 @@ async function main(): Promise<void> {
   let created = 0;
   let skipped = 0;
   const failures: Array<{ title: string; error: string }> = [];
+  // What this run adds, kept so a dry run can show the work instead of only counting it. Reviewing
+  // the list is the check on the matching above: anything here that is not genuinely new to e2e/
+  // means `alreadyOnStage` failed to recognise a case the project already holds.
+  const plan: PlaywrightSpec[] = [];
 
   for (const spec of specs) {
     // Checked BEFORE the suite is touched, so a run that has nothing to add creates no suites either.
@@ -419,7 +436,7 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const projectName = spec.file.startsWith("ui/") ? "UI" : "API";
+    const projectName = isUiSpec(spec.file) ? "UI" : "API";
     if (!rootIds.has(projectName)) {
       rootIds.set(projectName, await ensureSuite(tree, projectName, null));
     }
@@ -429,6 +446,8 @@ async function main(): Promise<void> {
     for (const key of candidateKeys(spec)) seen.byText.add(key);
     const { id } = splitSpecId(spec.title);
     if (id) seen.byId.add(id);
+
+    plan.push(spec);
 
     if (DRY_RUN) {
       created++;
@@ -441,6 +460,21 @@ async function main(): Promise<void> {
     } catch (error) {
       failures.push({ title: spec.title, error: String(error).slice(0, 200) });
     }
+  }
+
+  if (plan.length) {
+    const byFile = new Map<string, PlaywrightSpec[]>();
+    for (const spec of plan) {
+      if (!byFile.has(spec.file)) byFile.set(spec.file, []);
+      byFile.get(spec.file)!.push(spec);
+    }
+    console.log(`${DRY_RUN ? "Would create" : "Creating"}, by spec file:\n`);
+    for (const [file, specs2] of [...byFile].sort()) {
+      const dest = `${isUiSpec(file) ? "UI" : "API"} › ${suiteNameFor(specs2[0])}`;
+      console.log(`  ${file}  (${specs2.length})  →  ${dest}`);
+      for (const spec of specs2) console.log(`      ${caseTitle(spec)}`);
+    }
+    console.log("");
   }
 
   console.log(`${DRY_RUN ? "Would create" : "Created"}: ${created}`);

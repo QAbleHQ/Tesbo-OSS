@@ -129,7 +129,7 @@ export default function AdminsTab() {
               type="button"
               onClick={handleAdd}
               disabled={adding || !email.trim()}
-              className="rounded-xl bg-[var(--brand-primary)] px-5 py-2.5 text-[14px] font-semibold text-white hover:bg-[var(--brand-hover)] transition-colors disabled:opacity-60 whitespace-nowrap"
+              className="cursor-pointer rounded-xl bg-[var(--brand-primary)] px-5 py-2.5 text-[14px] font-semibold text-white hover:bg-[var(--brand-hover)] transition-colors disabled:cursor-not-allowed disabled:opacity-60 whitespace-nowrap"
             >
               {adding ? "Adding..." : "Add Admin"}
             </button>
@@ -158,10 +158,11 @@ export default function AdminsTab() {
           >
             <div className="flex items-center gap-4">
               {/* Avatar */}
-              {/* Seeded like every other person avatar — part of Basecamp 10198836413. */}
+              {/* Seeded like every other person avatar — part of Basecamp 10198836413. Id first: it's
+                  the one field that can't be edited or changed, unlike email or name. */}
               <div
                 className="flex h-10 w-10 items-center justify-center rounded-full text-[14px] font-bold text-white"
-                style={{ backgroundColor: avatarColor(admin.email || admin.name || admin.id) }}
+                style={{ backgroundColor: avatarColor(admin.id || admin.email || admin.name || "") }}
               >
                 {admin.name
                   ? admin.name
@@ -214,7 +215,7 @@ export default function AdminsTab() {
                   type="button"
                   onClick={() => handleRemove(admin.id)}
                   disabled={removingId === admin.id}
-                  className="rounded-xl border border-[var(--error)]/30 px-3 py-1.5 text-[13px] font-semibold text-[var(--error-foreground)] hover:bg-[var(--error-soft)] transition-colors disabled:opacity-60"
+                  className="cursor-pointer rounded-xl border border-[var(--error)]/30 px-3 py-1.5 text-[13px] font-semibold text-[var(--error-foreground)] hover:bg-[var(--error-soft)] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {removingId === admin.id ? "Removing..." : "Remove"}
                 </button>

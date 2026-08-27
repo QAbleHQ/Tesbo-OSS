@@ -2,9 +2,11 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { IconBell, IconSearch } from "@tabler/icons-react";
-import { authMe, listProjects, type ProjectSummary } from "@/lib/api";
+import { IconBell, IconSearch, IconX } from "@tabler/icons-react";
+import type { AppNotification, ProjectSummary } from "@/lib/api";
+import { listNotifications } from "@/lib/api";
 import { useTopBarSlots } from "@/components/TopBarSlots";
+import { useAppData } from "@/components/app/AppDataProvider";
 
 const MAX_RESULTS = 8;
 
@@ -19,28 +21,26 @@ function getInitials(name: string): string {
 
 export default function TopBar() {
   const router = useRouter();
-  const [user, setUser] = useState<{ name: string | null; email: string | null } | null>(null);
+  const { currentUser: user, projects } = useAppData();
   const { bindStart, bindEnd, filled } = useTopBarSlots();
 
-  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const searchBoxRef = useRef<HTMLLabelElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => {
-    let active = true;
-    authMe().then((me) => {
-      if (active && me) setUser({ name: me.name, email: me.email });
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifItems, setNotifItems] = useState<AppNotification[]>([]);
+  const [notifLoading, setNotifLoading] = useState(false);
+  const [notifError, setNotifError] = useState<string | null>(null);
+  const notifBoxRef = useRef<HTMLDivElement>(null);
 
+  // Only used for the tooltip text on the search button — the ⌘K/Ctrl+K shortcut itself works on
+  // every platform regardless. Resolved after mount so SSR and the first client render still match.
+  const [isMac, setIsMac] = useState(false);
   useEffect(() => {
-    listProjects().then(setProjects).catch(() => undefined);
+    setIsMac(/Mac|iPhone|iPad|iPod/i.test(navigator.userAgent));
   }, []);
 
   // ⌘K / Ctrl+K focuses the search box from anywhere, matching the shortcut hint shown in it.
@@ -64,6 +64,41 @@ export default function TopBar() {
     return () => document.removeEventListener("mousedown", handleOutsideClick);
   }, [open]);
 
+  useEffect(() => {
+    if (!notifOpen) return;
+    function handleOutsideClick(e: MouseEvent) {
+      if (notifBoxRef.current && !notifBoxRef.current.contains(e.target as Node)) setNotifOpen(false);
+    }
+    function handleEscape(e: KeyboardEvent) {
+      if (e.key === "Escape") setNotifOpen(false);
+    }
+    document.addEventListener("mousedown", handleOutsideClick);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [notifOpen]);
+
+  async function loadNotifications() {
+    setNotifLoading(true);
+    setNotifError(null);
+    try {
+      const items = await listNotifications();
+      setNotifItems(items);
+    } catch (e) {
+      setNotifError(e instanceof Error ? e.message : "Could not load notifications.");
+    } finally {
+      setNotifLoading(false);
+    }
+  }
+
+  function toggleNotifications() {
+    const opening = !notifOpen;
+    setNotifOpen(opening);
+    if (opening) void loadNotifications();
+  }
+
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return [];
@@ -80,6 +115,12 @@ export default function TopBar() {
     setOpen(false);
     setQuery("");
     router.push(`/projects/${p.id}/dashboard`);
+  }
+
+  function clearQuery() {
+    setQuery("");
+    setOpen(false);
+    inputRef.current?.focus();
   }
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -101,9 +142,10 @@ export default function TopBar() {
   }
 
   const displayName = user?.name || user?.email || "";
-  // Seeded on the email: a display name can be edited or shared between two people, so it would move
-  // someone's colour or collide two of them. The email is the stable identity.
-  const avatarSeed = user?.email || user?.name || "";
+  // Seeded on the user id: a display name can be edited and an email can be changed, either of
+  // which would move someone's colour or collide two people. The id is the one field every other
+  // screen (team avatars, activity, admins) also has and never changes.
+  const avatarSeed = user?.userId || user?.email || user?.name || "";
 
   return (
     <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center gap-4 border-b border-[var(--border-subtle)] bg-[var(--surface)] px-8">
@@ -130,10 +172,28 @@ export default function TopBar() {
               placeholder="Search projects…"
               className="min-w-0 flex-1 bg-transparent text-[var(--foreground)] outline-none placeholder:text-[var(--muted-soft)]"
             />
-            {!query && (
-              <span className="shrink-0 rounded-[3px] bg-[var(--surface-secondary)] px-1 py-0.5 font-mono text-[11px] text-[var(--muted-soft)]">
-                ⌘K
-              </span>
+            {query ? (
+              <button
+                type="button"
+                aria-label="Clear search"
+                title="Clear search"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={clearQuery}
+                className="flex shrink-0 items-center justify-center rounded-[3px] p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+              >
+                <IconX size={14} stroke={1.75} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label="Search"
+                title={isMac ? "Search (⌘K)" : "Search (Ctrl+K)"}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => inputRef.current?.focus()}
+                className="flex shrink-0 items-center justify-center rounded-[3px] p-0.5 text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)] hover:text-[var(--foreground)]"
+              >
+                <IconSearch size={14} stroke={1.75} />
+              </button>
             )}
 
             {open && query.trim() && (
@@ -167,13 +227,50 @@ export default function TopBar() {
       <div className="flex items-center gap-2">
         {/* Page-provided end slot (e.g. page actions). Fills via a portal from the page. */}
         <div ref={bindEnd} className="flex items-center gap-2 empty:hidden" />
-        <button
-          type="button"
-          aria-label="Notifications"
-          className="flex h-8 w-8 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)]"
-        >
-          <IconBell size={16} stroke={1.75} />
-        </button>
+        <div ref={notifBoxRef} className="relative">
+          <button
+            type="button"
+            aria-label="Notifications"
+            aria-haspopup="true"
+            aria-expanded={notifOpen}
+            onClick={toggleNotifications}
+            className="flex h-8 w-8 items-center justify-center rounded-[6px] border border-[var(--border)] text-[var(--muted-soft)] transition-colors hover:bg-[var(--surface-secondary)]"
+          >
+            <IconBell size={16} stroke={1.75} />
+          </button>
+
+          {notifOpen && (
+            <div
+              role="menu"
+              aria-label="Notifications"
+              className="absolute right-0 top-full z-40 mt-1 w-[320px] max-w-[calc(100vw-2rem)] rounded-xl border border-[var(--border)] bg-[var(--surface)] py-1 shadow-[var(--shadow-elevated)]"
+            >
+              {notifLoading ? (
+                <p className="px-3 py-2 text-[13px] text-[var(--muted-soft)]">Loading…</p>
+              ) : notifError ? (
+                <div className="px-3 py-2">
+                  <p className="text-[13px] text-[var(--error-foreground)]">{notifError}</p>
+                  <button
+                    type="button"
+                    onClick={() => void loadNotifications()}
+                    className="mt-1 text-[13px] font-medium text-[var(--brand-primary)] hover:underline"
+                  >
+                    Try again
+                  </button>
+                </div>
+              ) : notifItems.length === 0 ? (
+                <p className="px-3 py-2 text-[13px] text-[var(--muted-soft)]">No notifications</p>
+              ) : (
+                notifItems.map((n) => (
+                  <div key={n.id} role="menuitem" className="px-3 py-2 text-left text-[13px]">
+                    <p className="font-medium text-[var(--foreground)]">{n.title}</p>
+                    {n.body && <p className="mt-0.5 text-[var(--muted-soft)]">{n.body}</p>}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
         <span
           title={displayName || undefined}
           /*

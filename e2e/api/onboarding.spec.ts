@@ -105,7 +105,7 @@ test.describe("onboarding — naming the first workspace", () => {
 
   // ─── The happy path ────────────────────────────────────────────────────────
 
-  test("ONB-A-01 a brand-new user names a workspace and becomes its owner", async () => {
+  test("ONB-A-01 a brand-new user names a workspace and becomes its owner", { tag: '@tesbo.testId("TES-TC-936")' }, async () => {
     const { email, api, userId } = await freshUser("happy");
     try {
       const name = `E2E Onboarding Org ${Date.now()}`;
@@ -131,7 +131,7 @@ test.describe("onboarding — naming the first workspace", () => {
     }
   });
 
-  test("ONB-A-02 the workspace is immediately readable through GET /api/workspace", async () => {
+  test("ONB-A-02 the workspace is immediately readable through GET /api/workspace", { tag: '@tesbo.testId("TES-TC-937")' }, async () => {
     const { api } = await freshUser("readback");
     try {
       const name = `E2E Onboarding Readback ${Date.now()}`;
@@ -148,7 +148,7 @@ test.describe("onboarding — naming the first workspace", () => {
     }
   });
 
-  test("ONB-A-03 two users may name their workspaces identically", async () => {
+  test("ONB-A-03 two users may name their workspaces identically", { tag: '@tesbo.testId("TES-TC-938")' }, async () => {
     const first = await freshUser("dup-a");
     const second = await freshUser("dup-b");
     try {
@@ -177,7 +177,7 @@ test.describe("onboarding — naming the first workspace", () => {
 
   // ─── Refusals: each must be a 4xx, never a 500 ─────────────────────────────
 
-  test("ONB-A-04 a name longer than the column is refused with a 400, not a 500", async () => {
+  test("ONB-A-04 a name longer than the column is refused with a 400, not a 500", { tag: '@tesbo.testId("TES-TC-939")' }, async () => {
     const { email, api } = await freshUser("toolong");
     try {
       // organizations.name is VARCHAR(255). createWorkspace does not check the length, so the
@@ -201,7 +201,7 @@ test.describe("onboarding — naming the first workspace", () => {
     }
   });
 
-  test("ONB-A-04b the org-and-project path bounds the workspace name too", async () => {
+  test("ONB-A-04b the org-and-project path bounds the workspace name too", { tag: '@tesbo.testId("TES-TC-1183")' }, async () => {
     /*
      * The same VARCHAR(255) column, reached through the other create route. Only the rename path
      * had ever checked the length, so both create paths — the two a new account actually goes
@@ -226,7 +226,7 @@ test.describe("onboarding — naming the first workspace", () => {
     }
   });
 
-  test("ONB-A-05 a missing, blank or whitespace-only name is refused and writes nothing", async () => {
+  test("ONB-A-05 a missing, blank or whitespace-only name is refused and writes nothing", { tag: '@tesbo.testId("TES-TC-940")' }, async () => {
     const { email, api } = await freshUser("blank");
     try {
       for (const orgName of [undefined, "", "   ", "\t\n"]) {
@@ -242,7 +242,7 @@ test.describe("onboarding — naming the first workspace", () => {
     }
   });
 
-  test("ONB-A-06 a name is trimmed rather than stored with its padding", async () => {
+  test("ONB-A-06 a name is trimmed rather than stored with its padding", { tag: '@tesbo.testId("TES-TC-941")' }, async () => {
     const { email, api } = await freshUser("trim");
     try {
       const name = `E2E Onboarding Trim ${Date.now()}`;
@@ -258,7 +258,7 @@ test.describe("onboarding — naming the first workspace", () => {
     }
   });
 
-  test("ONB-A-07 an anonymous caller cannot create a workspace", async () => {
+  test("ONB-A-07 an anonymous caller cannot create a workspace", { tag: '@tesbo.testId("TES-TC-942")' }, async () => {
     const before = Number(scalar("SELECT COUNT(*) FROM organizations;"));
 
     const res = await anon.post("/api/onboarding/workspace", {
@@ -270,7 +270,7 @@ test.describe("onboarding — naming the first workspace", () => {
     expect(Number(scalar("SELECT COUNT(*) FROM organizations;")), "nothing may be created").toBe(before);
   });
 
-  test("ONB-A-08 a malformed body is a 400, never an unhandled 500", async () => {
+  test("ONB-A-08 a malformed body is a 400, never an unhandled 500", { tag: '@tesbo.testId("TES-TC-943")' }, async () => {
     const { email, api } = await freshUser("malformed");
     try {
       const bodies: Record<string, unknown>[] = [

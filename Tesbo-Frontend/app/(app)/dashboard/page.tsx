@@ -4,18 +4,56 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { authMe, getWorkspaceAnalytics, getWorkspace, type WorkspaceAnalytics, type WorkspaceInfo } from "@/lib/api";
-import { Card } from "@/components/ui";
+import { Card, PageLoader } from "@/components/ui";
 import { PageHeader, StandardPageLayout } from "@/components/workflows";
 
-const STATUS_COLORS: Record<string, { bg: string; text: string; label: string }> = {
-  Passed: { bg: "bg-emerald-100", text: "text-emerald-800", label: "Passed" },
-  Failed: { bg: "bg-red-100", text: "text-red-800", label: "Failed" },
-  Blocked: { bg: "bg-amber-100", text: "text-amber-800", label: "Blocked" },
-  Untested: { bg: "bg-[var(--surface-secondary)]", text: "text-[var(--muted)]", label: "Untested" },
+/*
+ * Basecamp 10221720616 ("[Dashboard] Execution progress bar colours are not visible").
+ *
+ * Two problems in one table. The badge tints were hardcoded Tailwind palette values
+ * (bg-emerald-100 / text-emerald-800) rather than theme tokens, so they stayed pale-on-pale in dark
+ * mode; and the same tint class was reused as the FILL of the progress bar underneath, which put a
+ * 100-level pastel on a --surface-tertiary track — the bar was there, it just could not be seen.
+ *
+ * Split into two: `badge` keeps the soft tint (it sits behind text and has to stay readable), `fill`
+ * is the solid dot colour the rest of the app paints statuses with, so the bar reads at a glance.
+ */
+const STATUS_COLORS: Record<string, { badge: string; text: string; fill: string; label: string }> = {
+  Passed: {
+    badge: "bg-[var(--status-pass-fill)]",
+    text: "text-[var(--status-pass-text)]",
+    fill: "var(--status-pass-dot)",
+    label: "Passed",
+  },
+  Failed: {
+    badge: "bg-[var(--status-fail-fill)]",
+    text: "text-[var(--status-fail-text)]",
+    fill: "var(--status-fail-dot)",
+    label: "Failed",
+  },
+  Blocked: {
+    badge: "bg-[var(--status-blocked-fill)]",
+    text: "text-[var(--status-blocked-text)]",
+    fill: "var(--status-blocked-dot)",
+    label: "Blocked",
+  },
+  Untested: {
+    badge: "bg-[var(--status-notrun-fill)]",
+    text: "text-[var(--status-notrun-text)]",
+    fill: "var(--status-notrun-dot)",
+    label: "Untested",
+  },
 };
 
 function statusStyle(status: string) {
-  return STATUS_COLORS[status] ?? { bg: "bg-[var(--surface-secondary)]", text: "text-[var(--muted)]", label: status };
+  return (
+    STATUS_COLORS[status] ?? {
+      badge: "bg-[var(--surface-secondary)]",
+      text: "text-[var(--muted)]",
+      fill: "var(--muted)",
+      label: status,
+    }
+  );
 }
 
 export default function DashboardPage() {
@@ -44,19 +82,11 @@ export default function DashboardPage() {
   }, [router]);
 
   if (!auth) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" />;
   }
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <p className="text-[var(--muted)]">Loading analytics…</p>
-      </div>
-    );
+    return <PageLoader variant="screen" label="Loading analytics…" />;
   }
 
   if (error || !analytics) {
@@ -102,15 +132,15 @@ export default function DashboardPage() {
           </Card>
           <Card className="p-4">
             <p className="text-2xl font-semibold text-[var(--foreground)]">{analytics.suiteCount}</p>
-            <p className="text-sm text-[var(--muted)]">Suites</p>
+            <p className="text-sm text-[var(--muted)]">Total Suites</p>
           </Card>
           <Card className="p-4">
             <p className="text-2xl font-semibold text-[var(--foreground)]">{analytics.planCount}</p>
-            <p className="text-sm text-[var(--muted)]">Plans</p>
+            <p className="text-sm text-[var(--muted)]">Test plans</p>
           </Card>
           <Card className="p-4">
             <p className="text-2xl font-semibold text-[var(--foreground)]">{analytics.cycleCount}</p>
-            <p className="text-sm text-[var(--muted)]">Cycles</p>
+            <p className="text-sm text-[var(--muted)]">Test runs</p>
           </Card>
         </div>
       </section>
@@ -131,13 +161,13 @@ export default function DashboardPage() {
                   return (
                     <div key={status} className="flex flex-col gap-1">
                       <div className="flex items-center justify-between">
-                        <span className={`text-sm font-medium rounded-full px-2 py-0.5 ${style.bg} ${style.text}`}>
+                        <span className={`text-sm font-medium rounded-full px-2 py-0.5 ${style.badge} ${style.text}`}>
                           {style.label}
                         </span>
                         <span className="text-sm text-[var(--muted)]">{pct}%</span>
                       </div>
                       <div className="h-2 overflow-hidden rounded-full bg-[var(--surface-tertiary)]">
-                        <div className={`h-full rounded-full ${style.bg} ${style.text}`} style={{ width: `${pct}%` }} />
+                        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: style.fill }} />
                       </div>
                       <p className="text-xs text-[var(--muted)]">{count} of {totalExec}</p>
                     </div>
